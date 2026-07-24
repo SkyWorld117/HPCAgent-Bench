@@ -929,6 +929,48 @@ def _is_integer_expr(node: ast.AST, local_dtypes: Dict[str, str], array_names: S
     return False
 
 
+def _as_float64(node: ast.expr) -> ast.expr:
+    """Wrap ``node`` in ``np.float64(...)`` -- the cast both native emitters render
+    (``(double)(x)`` / ``REAL(x, kind=c_double)``). Same spelling lowering's
+    ``_TrueDivisionPromoter`` uses, so the two paths stay one convention."""
+    return ast.Call(func=ast.Attribute(value=_name("np"), attr="float64", ctx=ast.Load()), args=[node], keywords=[])
+
+
+def _provably_integer(node: ast.expr, local_dtypes: Dict[str, str]) -> bool:
+    """True when ``node``'s VALUE is certainly integer: an int Constant, or a Name /
+    element-of-Name tagged with an integer dtype.
+
+    Deliberately stricter than :func:`_is_integer_expr`, which reads an UNTAGGED
+    non-array Name as integer -- right when classifying size symbols, wrong here:
+    a ufunc operand that is merely untagged (an undeclared float scalar, a float
+    array) must not be taken for an integer, because that decides whether the
+    result dtype is integral."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int) and not isinstance(node.value, bool)
+    if isinstance(node, ast.Name):
+        dt = local_dtypes.get(node.id)
+        return dt is not None and dtypes.is_integer(dt)
+    if isinstance(node, ast.Subscript):
+        return _provably_integer(node.value, local_dtypes)
+    return False
+
+
+def _all_integer_operands(args: List[ast.expr], local_dtypes: Optional[Dict[str, str]]) -> bool:
+    """True when EVERY operand of a ufunc call is provably integer -- i.e. numpy would
+    promote the result to an integer dtype. An absent dtype table answers False."""
+    if not local_dtypes or not args:
+        return False
+    return all(_provably_integer(a, local_dtypes) for a in args)
+
+
+#: Elementwise ufuncs whose numpy result dtype is the PROMOTED OPERAND dtype, so an
+#: all-integer call returns an integer array. Their hoisted temp must be declared
+#: integer, not the double default: a double temp rounds every value above 2**53
+#: (``np.power(3, 39)`` came back 11 short). ``divide`` is NOT here -- it always
+#: returns float, and its cast is applied in :func:`expand_divide`.
+_INT_PRESERVING_ELEMENTWISE: Set[str] = {"add", "subtract", "multiply", "power", "maximum", "minimum"}
+
+
 def _broadcast_children(children: List[ast.expr], shape_table: Dict[str, Tuple[str,
                                                                                ...]]) -> Optional[Tuple[ast.expr, ...]]:
     """Fold every child's iter extent through numpy broadcasting, skipping
@@ -979,6 +1021,33 @@ def _advanced_index_rank(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]
     return None
 
 
+def _slice_start(ax: ast.Slice, axis_len: Optional[ast.expr], step: Optional[int]) -> Optional[ast.expr]:
+    """First SOURCE index a slice reads. ``lower`` when given (negative resolved
+    against ``axis_len``), else 0 -- except under a NEGATIVE step, where numpy
+    flips the default and starts at the last element ``axis_len - 1``
+    (``a[::-1]``). A reverse slice over an untracked axis cannot be indexed at
+    all; refuse loudly rather than emit the forward ``a[i]`` that would silently
+    drop the reversal (mirrors lowering's slice-assign rewriters)."""
+    if ax.lower is not None:
+        return _resolve_negative(ax.lower, axis_len)
+    if step is not None and step < 0:
+        if axis_len is None:
+            raise NotImplementedError("reverse slice needs a known axis length (shape untracked)")
+        return ast.BinOp(left=axis_len, op=ast.Sub(), right=_const(1))
+    return _const(0)
+
+
+def _strided_index(ivar: ast.expr, start: Optional[ast.expr], step: Optional[int]) -> ast.expr:
+    """Source index of result position ``ivar`` within a slice ``[start::step]``:
+    ``start + ivar * step``. Must stay in lockstep with :func:`_iter_extent_of`,
+    which counts ``ceil(extent / |step|)`` elements -- an index that ignored
+    ``step`` would walk a DIFFERENT (contiguous) run of the same length."""
+    pos: ast.expr = ivar if step in (None, 1) else ast.BinOp(left=ivar, op=ast.Mult(), right=_const(step))
+    if isinstance(start, ast.Constant) and start.value == 0:
+        return pos
+    return ast.BinOp(left=pos, op=ast.Add(), right=start)
+
+
 def _scalarize_at_iters(expr: ast.expr, iters: List[ast.expr], shape_table: Dict[str, Tuple[str, ...]]) -> ast.expr:
     """Render an array-valued expression at the given iter indices. Recursive
     structural lowering, independent of any one numpy op: ``Name(A)`` ->
@@ -1022,15 +1091,13 @@ def _scalarize_at_iters(expr: ast.expr, iters: List[ast.expr], shape_table: Dict
                 continue
             if isinstance(ax, ast.Slice):
                 axis_len = (_const_or_name(shape[src_axis]) if shape and src_axis < len(shape) else None)
-                lo = _resolve_negative(ax.lower, axis_len) if ax.lower is not None else _const(0)
+                step = _slice_step_const(ax)
+                lo = _slice_start(ax, axis_len, step)
                 if iter_idx >= len(iters):
                     return expr  # not enough iters supplied
                 ivar = iters[iter_idx]
                 iter_idx += 1
-                if isinstance(lo, ast.Constant) and lo.value == 0:
-                    new_axes.append(ivar)
-                else:
-                    new_axes.append(ast.BinOp(left=ivar, op=ast.Add(), right=lo))
+                new_axes.append(_strided_index(ivar, lo, step))
             elif isinstance(ax, ast.Name) and shape_table.get(ax.id):
                 # Fancy-index gather: ``arr[idx]`` -> ``arr[idx[k]]``. Multiple index
                 # arrays in one subscript form a numpy advanced-index GROUP that
@@ -2081,16 +2148,38 @@ def expand_multiply(t, a, s):
     return _expand_elementwise(t, a, s, lambda x, y: ast.BinOp(left=x, op=ast.Mult(), right=y))
 
 
-def expand_power(t, a, s):
-    return _expand_elementwise(t, a, s, lambda x, y: ast.Call(func=_name("pow"), args=[x, y], keywords=[]))
+def expand_power(t: ast.expr, a: List[ast.expr], s: Dict[str, Tuple[str, ...]]) -> List[ast.stmt]:
+    """``out = np.power(a, b)`` -> per-element ``a[i] ** b[i]``.
+
+    A ``**`` BinOp, NOT a bare ``pow(...)`` call: each backend's ``**`` routing already
+    dispatches on the operand type (C picks ``__npb_int_pow`` over libm's double ``pow``,
+    Fortran's ``**`` is exact on integers). A ``pow`` Name call bypassed that and rounded
+    every int64 result above 2**53 through a double."""
+    return _expand_elementwise(t, a, s, lambda x, y: ast.BinOp(left=x, op=ast.Pow(), right=y))
 
 
 def expand_subtract(t, a, s):
     return _expand_elementwise(t, a, s, lambda x, y: ast.BinOp(left=x, op=ast.Sub(), right=y))
 
 
-def expand_divide(t, a, s):
-    return _expand_elementwise(t, a, s, lambda x, y: ast.BinOp(left=x, op=ast.Div(), right=y))
+def expand_divide(target: ast.expr,
+                  args: List[ast.expr],
+                  shape_table: Dict[str, Tuple[str, ...]],
+                  local_dtypes: Optional[Dict[str, str]] = None) -> List[ast.stmt]:
+    """``out = np.divide(a, b)`` -> per-element TRUE division.
+
+    numpy ``divide`` / ``true_divide`` is always true division (int64 / int64 -> float64),
+    but this expander runs at libnode-expand -- AFTER lowering's ``_TrueDivisionPromoter``
+    phase, which never sees the ``Div`` synthesized here. So apply the promoter's own cast
+    directly: an all-integer pair gets its left operand wrapped in ``np.float64(...)``,
+    which both native emitters render as a floating divide. Anything not PROVABLY integer
+    is left alone (an unwarranted cast would force fp64 into an fp32 kernel)."""
+    int_div = _all_integer_operands(args, local_dtypes)
+
+    def op_fn(x: ast.expr, y: ast.expr) -> ast.expr:
+        return ast.BinOp(left=_as_float64(x) if int_div else x, op=ast.Div(), right=y)
+
+    return _expand_elementwise(target, args, shape_table, op_fn)
 
 
 def _cmp(op):
@@ -6788,6 +6877,12 @@ class _CallHoister(ast.NodeTransformer):
                     src_dt = self.local_dtypes.get(first.id)
                     if src_dt:
                         self.local_dtypes[temp] = src_dt
+            # An all-integer elementwise ufunc returns an INTEGER array in numpy --
+            # declare the temp int64 so an exact int64 result is not round-tripped
+            # through a double (which drops every bit above 2**53).
+            if (key[1] in _INT_PRESERVING_ELEMENTWISE and temp not in self.local_dtypes
+                    and _all_integer_operands(node.args, self.local_dtypes)):
+                self.local_dtypes[temp] = "int64"
         else:
             self.scalar_temps[temp] = True
             if self._infer_complex(node):

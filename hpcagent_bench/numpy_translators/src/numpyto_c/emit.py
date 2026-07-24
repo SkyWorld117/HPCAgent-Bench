@@ -477,12 +477,7 @@ class _CBodyEmitter(BaseEmitter):
                         return f"(({z})*({z}))"
                     return (f"cpow({self.emit_expr(node.left)}, "
                             f"{self.emit_expr(node.right)})")
-                # Integer-typed operands -> __npb_int_pow (int64 binary-exponentiation); falls back to double-precision pow.
-                if (self._is_int_operand(node.left) and self._is_int_operand(node.right)):
-                    return (f"__npb_int_pow({self.emit_expr(node.left)}, "
-                            f"{self.emit_expr(node.right)})")
-                return (f"{self._math_name('pow')}({self.emit_expr(node.left)}, "
-                        f"{self.emit_expr(node.right)})")
+                return self._emit_pow(node.left, node.right)
             # a // b and a % b ALWAYS go through the emitted helpers: neither C nor C++ has
             # numpy's floor-division or sign-of-divisor modulo natively, and the helpers pick
             # the integer vs floating form from the operand TYPE. Branching here on a dtype
@@ -662,6 +657,11 @@ class _CBodyEmitter(BaseEmitter):
                     return f"(({z})*({z}))"
                 z, w = (self.emit_expr(node.args[0]), self.emit_expr(node.args[1]))
                 return f"cpow({z}, {w})"
+            # Real pow(a, b): the SAME routing as the ``a ** b`` BinOp, so a pow call
+            # synthesized downstream of the promoter (np.power's expander) cannot slip
+            # past the integer helper into libm's double pow.
+            if fn == "pow" and len(node.args) == 2:
+                return self._emit_pow(node.args[0], node.args[1])
             # Python int(x) is a typecast to int64_t (a 32-bit cast would truncate past 2^31).
             if fn == "int" and len(node.args) == 1:
                 return f"(({_c_type('int')})({self.emit_expr(node.args[0])}))"
@@ -727,10 +727,33 @@ class _CBodyEmitter(BaseEmitter):
                 return f"{self._math_name('hypot')}({self.emit_expr(node.args[0])}, {self.emit_expr(node.args[1])})"
         raise NotImplementedError(f"call to {ast.unparse(node.func)} not supported")
 
+    def _emit_pow(self, left: ast.AST, right: ast.AST) -> str:
+        """The ONE real-valued exponentiation route: integer operands take the exact
+        int64 binary-exponentiation helper, everything else libm's ``pow``.
+
+        libm ``pow`` is double-precision, so an integer power whose result exceeds 2**53
+        is rounded to the nearest double and then saturates (not wraps) on the way back
+        to int64 -- silently wrong for exactly the large-integer kernels that use it.
+        Both spellings (``a ** b`` and a synthesized ``pow(a, b)`` call) come here."""
+        if self._is_int_operand(left) and self._is_int_operand(right):
+            return f"__npb_int_pow({self.emit_expr(left)}, {self.emit_expr(right)})"
+        return f"{self._math_name('pow')}({self.emit_expr(left)}, {self.emit_expr(right)})"
+
     def _is_int_operand(self, node: ast.AST) -> bool:
-        """Conservative int-typed operand detection: int Constant, an int-typed Name, or a BinOp/UnaryOp of only those."""
+        """Conservative int-typed operand detection: int Constant, an int-typed Name or
+        array element, or a BinOp/UnaryOp of only those."""
         if isinstance(node, ast.Constant):
             return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, ast.Subscript):
+            # An element of an int-typed array is int -- without this ``a[i] ** b[i]``
+            # on int64 arrays fell through to the double pow.
+            base = node.value
+            while isinstance(base, ast.Subscript):
+                base = base.value
+            if isinstance(base, ast.Name):
+                dt = self._dtype_for_name(base.id)
+                return dt is not None and dtypes.is_integer(dt)
+            return False
         if isinstance(node, ast.Name):
             n = node.id
             # Kernel symbols are always int.
@@ -768,6 +791,10 @@ class _CBodyEmitter(BaseEmitter):
                 out.add(s.name)
         # needs_int: any Name used as an array subscript / range arg / bitwise operand.
         out.update(_names_used_as_int(self.kir.tree))
+        # Locals the decl pass declares int64 because every assignment is integer
+        # arithmetic -- the two must agree, else ``h ** k`` on an ``int64_t h`` would
+        # still route through the double pow.
+        out.update(_integer_valued_locals(self.kir))
         self._int_locals_cache = out
         return out
 
@@ -935,6 +962,82 @@ def _c_shape_token(tok: str) -> str:
     return out
 
 
+#: Operators that keep an integer result when both operands are integer. ``Div`` is
+#: absent on purpose -- numpy ``/`` is true division and lowering already casts it.
+_INT_PRESERVING_BINOPS: Tuple[type, ...] = (ast.Add, ast.Sub, ast.Mult, ast.Mod, ast.FloorDiv, ast.Pow, ast.LShift,
+                                            ast.RShift, ast.BitAnd, ast.BitOr, ast.BitXor)
+
+
+def _integer_valued_locals(kir: KernelIR) -> Set[str]:
+    """Body-computed scalar locals that provably hold an INTEGER value.
+
+    Without this a local absent from every dtype table falls back to ``double``, and an
+    integer accumulator that grows past 2**53 (``h = 1`` then ``h = h * 3`` for 35 rounds)
+    is silently rounded -- no cast, no warning, just the wrong last digits.
+
+    Greatest fixpoint: every unpinned assigned local starts ASSUMED integer, then any local
+    with an assignment whose right-hand side is not provably integer under the current
+    assumption is dropped, until nothing changes. The optimistic start is what lets a
+    self-referential accumulator hold (``h = h * 3`` needs ``h`` integer to prove ``h``
+    integer); the drop rule is what keeps ``x = 0.5`` and reads of float arrays out. Names
+    whose dtype is already pinned (params, arrays, ``local_dtypes``) are never candidates --
+    they only feed the right-hand-side test."""
+    pinned: Dict[str, bool] = {a.name: dtypes.is_integer(a.dtype) for a in kir.arrays}
+    pinned.update({s.name: dtypes.is_integer(s.dtype) for s in kir.scalars})
+    pinned.update({n: dtypes.is_integer(dt) for n, dt in kir.local_dtypes.items()})
+    for name in kir.int_locals:
+        pinned[name] = True
+    for sym in kir.symbols:
+        pinned[sym.name] = True
+    # Assignments per candidate; a for-loop target is emitted as an int64 counter.
+    assigns: Dict[str, List[ast.expr]] = {}
+    for node in ast.walk(kir.tree):
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+            pinned[node.target.id] = True
+        elif isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    assigns.setdefault(tgt.id, []).append(node.value)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            assigns.setdefault(node.target.id, []).append(ast.BinOp(left=node.target, op=node.op, right=node.value))
+    candidates = {n for n in assigns if n not in pinned}
+    assumed = candidates | {n for n, is_int in pinned.items() if is_int}
+    array_dtypes = {a.name: a.dtype for a in kir.arrays}
+
+    def provable(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, ast.Name):
+            return node.id in assumed
+        if isinstance(node, ast.Subscript):
+            base = node.value
+            while isinstance(base, ast.Subscript):
+                base = base.value
+            if not isinstance(base, ast.Name):
+                return False
+            dt = kir.local_dtypes.get(base.id) or array_dtypes.get(base.id)
+            return dt is not None and dtypes.is_integer(dt)
+        if isinstance(node, ast.BinOp):
+            return (isinstance(node.op, _INT_PRESERVING_BINOPS) and provable(node.left) and provable(node.right))
+        if isinstance(node, ast.UnaryOp):
+            return isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)) and provable(node.operand)
+        if isinstance(node, ast.IfExp):
+            return provable(node.body) and provable(node.orelse)
+        # int(x) / len(x) are integer whatever the argument is.
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return node.func.id in ("int", "len")
+        return False
+
+    changed = True
+    while changed:
+        changed = False
+        for name in sorted(candidates & assumed):
+            if not all(provable(v) for v in assigns[name]):
+                assumed.discard(name)
+                changed = True
+    return candidates & assumed
+
+
 def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     """Return (name, c_type) pairs for implicit scalar locals needing a C decl, type inferred in priority order."""
     declared: Set[str] = set()
@@ -947,6 +1050,7 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     seen: Set[str] = set(declared)
     # Per-array element-dtype map for Name = Subscript(arr, scalar) inheritance (x = data[i] where data is uint8).
     array_dtypes = {a.name: a.dtype for a in kir.arrays}
+    int_valued = _integer_valued_locals(kir)
 
     def _ctype_for(name: str, value: Optional[ast.AST] = None) -> str:
         # Highest priority: explicit dtype from the lowering pipeline.
@@ -961,6 +1065,10 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
             src_dt = array_dtypes.get(value.value.id) or local_dtypes.get(value.value.id)
             if src_dt is not None:
                 return _c_type(src_dt)
+        # Provably integer-valued (every assignment is integer arithmetic): declaring it
+        # double loses exactness above 2**53, and unlike a bitwise/`%` use it is silent.
+        if name in int_valued:
+            return _c_type("int")
         return "double"
 
     for node in ast.walk(kir.tree):
