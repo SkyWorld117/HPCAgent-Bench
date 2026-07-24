@@ -100,9 +100,19 @@ def test_report_flags_never_name_a_missing_constant():
 
 
 def test_report_path_mirrors_the_benchmark_tree():
-    p = perf_reports.report_path("hpc/map_reduce/arc_distance", "arc_distance", "cc", "default", "opt_report")
+    p = perf_reports.report_path("hpc/map_reduce/arc_distance", "arc_distance", "cc", "default", "lowered_code")
     assert p.parent == perf_reports.REPORTS / "hpc/map_reduce/arc_distance"
-    assert p.name == "arc_distance.cc.default.opt-report.txt"
+    assert p.name == "arc_distance.cc.default.asm.txt"
+
+
+def test_opt_report_lands_under_its_own_root():
+    """The opt-report generation gets its own top-level .opt_reports/; the other dumps stay in perf_reports/."""
+    opt = perf_reports.report_path("hpc/map_reduce/arc_distance", "arc_distance", "cc", "default", "opt_report")
+    assert opt.parent == perf_reports.OPT_REPORTS / "hpc/map_reduce/arc_distance"
+    assert opt.name == "arc_distance.cc.default.opt-report.txt"
+    assert perf_reports.report_root("opt_report") == perf_reports.OPT_REPORTS
+    assert perf_reports.report_root("lowered_code") == perf_reports.REPORTS
+    assert perf_reports.report_root("generated_source") == perf_reports.REPORTS
 
 
 def test_write_none_means_not_supported_and_writes_nothing(tmp_path, monkeypatch):

@@ -307,10 +307,12 @@ the **default** for `hpcagent-bench run`, `run-benchmark`, `run-framework` and t
 
 ### Compiler reports & dumps
 
-Three optional diagnostics, each **off by default** and each a separate config/env knob, land under a
-gitignored `perf_reports/` tree that mirrors the kernel layout (`perf_reports/<relative_path>/<kernel>.<framework>.<impl>.<suffix>`).
-None perturbs a timed run -- the opt-report is a separate compile-only build; the disassembly and the
-generated-source dump only read what a timed run already made.
+Three optional diagnostics, each **off by default** and each a separate config/env knob, land in a
+gitignored tree that mirrors the kernel layout (`<root>/<relative_path>/<kernel>.<framework>.<impl>.<suffix>`).
+The opt-report generation gets its own top-level **`.opt_reports/`** root; the disassembly and
+generated-source dumps share **`perf_reports/`**. None perturbs a timed run -- the opt-report is a
+separate compile-only build; the disassembly and the generated-source dump only read what a timed run
+already made.
 
 | Knob (env) | What it dumps |
 | --- | --- |
