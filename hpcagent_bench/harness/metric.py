@@ -8,7 +8,8 @@ from typing import Dict, Optional, Sequence, Tuple
 
 from hpcagent_bench import config, fuzz
 from hpcagent_bench.harness import timing
-from hpcagent_bench.harness.grading import baseline_compiled, c_reference_available, resolve_baseline
+from hpcagent_bench.harness.grading import (VENDORED_BASELINE, baseline_compiled, c_reference_available,
+                                            resolve_baseline)
 from hpcagent_bench.harness.scoring import independent_verify, score_cells, score_distributed, score_scaling
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.harness.envelope import Submission
@@ -363,14 +364,17 @@ def score_task_fuzzed(submission: Submission,
     configs, constraints = fz.get("configs"), fz.get("constraints")
     params = spec.parameters
     mode = perf_mode if perf_mode is not None else fuzz.perf_mode()
-    # resolve the baseline against the kernel's track (None/"auto" -> per-track default)
+    # resolve the baseline: explicit choice > the kernel's own declared baseline > per-track default
     baseline = resolve_baseline(baseline, spec)
-    # pre-probe so a kernel that cannot emit a compiled reference asks for numpy directly
-    requested = "numpy" if (baseline_compiled(baseline) is not None and not c_reference_available(task)) else baseline
+    # pre-probe so a kernel that cannot emit a compiled reference asks for numpy directly. A VENDORED
+    # baseline ships its own source, so it does not depend on the emitter -- probing it would drop a
+    # committed parallel denominator for numpy on exactly the proxy-apps this feature exists for.
+    needs_emit = baseline_compiled(baseline, spec) is not None and baseline != VENDORED_BASELINE
+    requested = "numpy" if (needs_emit and not c_reference_available(task)) else baseline
     # Stage 1 grades against `oracle` (numpy: fast + authoritative); Stage 2's large timed cells grade
     # against the compiled C reference instead, since numpy is pathologically slow at large sizes and
     # score_cells builds it anyway for a compiled baseline (a free correctness guard at the timed size)
-    timed_oracle = "c" if baseline_compiled(requested) is not None else "numpy"
+    timed_oracle = "c" if baseline_compiled(requested, spec) is not None else "numpy"
 
     # --- Stage 1: correctness gate over configs x (edge u fuzzed) ---
     corr = score_cells(submission,

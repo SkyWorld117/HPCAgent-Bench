@@ -330,7 +330,7 @@ def measure_baselines(task: Task,
     out: Dict[str, int] = {}
     if baseline_uses_numpy(baseline):
         out["numpy"] = _time_numpy(spec, data, repeat, warmup=warmup)
-    compiled = baseline_compiled(baseline)  # None | (label, language, candidate compilers, mode)
+    compiled = baseline_compiled(baseline, spec)  # None | (label, language, candidate compilers, mode)
     if compiled is not None:
         label, lang, compilers, mode = compiled
         timeout = float(config.get("timeouts.kernel_s", 300))
@@ -351,6 +351,7 @@ def measure_baselines(task: Task,
                                                        language=lang,
                                                        mode=mode,
                                                        compiler=compiler or None,
+                                                       baseline=label,
                                                        warmup=warmup)
             except RuntimeError:
                 continue
@@ -500,7 +501,7 @@ def score(submission: Submission,
     # Compiled references: the single-core C oracle (correctness) and/or the compiled baseline
     # (timing). ``c`` share the single-core C build; a ``*-autopar`` baseline is a
     # SEPARATE multi-core build. ``compiled`` is (label, language, compiler, mode) or None.
-    plan: ReferencePlan = reference_plan(oracle, baseline)
+    plan: ReferencePlan = reference_plan(oracle, baseline, spec)
     if plan.oracle_wants_c or plan.bl_is_seq_c:
         try:
             c_public, c_ns, c_hidden, c_samples = _run_c_reference(spec,
@@ -529,11 +530,11 @@ def score(submission: Submission,
                 baselines["c"] = c_ns
                 baseline_samples["c"] = c_samples
 
-    # A ``*-autopar`` baseline: the auto-parallelized compiled reference (multi-core), timing only.
-    # Strongest baseline: time every AVAILABLE candidate compiler and keep the fastest sample set
-    # as the denominator. A missing compiler / a kernel that won't build under it is skipped; if
-    # none build, fall back to numpy.
-    if plan.bl_is_autopar:
+    # A baseline with its OWN build -- a ``*-autopar`` reference (multi-core, auto-parallelized) or
+    # the kernel's vendored native source -- timing only. Strongest baseline: time every AVAILABLE
+    # candidate compiler and keep the fastest sample set as the denominator. A missing compiler / a
+    # kernel that won't build under it is skipped; if none build, fall back to numpy.
+    if plan.bl_own_build:
         label, lang, compilers, bl_mode = plan.compiled
         best_samples = None
         for compiler in compilers:
@@ -548,6 +549,7 @@ def score(submission: Submission,
                                                                 language=lang,
                                                                 mode=bl_mode,
                                                                 compiler=compiler or None,
+                                                                baseline=label,
                                                                 warmup=timing.warmup_count())
             except RuntimeError:
                 continue
@@ -1120,7 +1122,7 @@ def score_cells(submission: Submission,
     # C build; a ``*-autopar`` kind is a SEPARATE multi-core build with a forced compiler. The
     # single-core C reference is also built whenever a compiled baseline is requested, so the
     # dual-oracle re-verify (and, for autopar timed cells, the fast C grading) still applies.
-    plan: ReferencePlan = reference_plan(oracle, baseline)
+    plan: ReferencePlan = reference_plan(oracle, baseline, spec)
 
     def _run(lib, lang, data, reps, workspace_bytes=None, warmup=0):
         # One child runs the cell's whole rep budget, but ``peak`` stays PER CALL: the child
@@ -1173,13 +1175,14 @@ def score_cells(submission: Submission,
                 c_ctx.__exit__(None, None, None)
                 c_ctx = None
 
-        # Build the ``*-autopar`` baseline reference(s) once (multi-core, forced compiler -> Polly /
-        # GCC autopar), kept open across cells. Strongest baseline: build EVERY available candidate
-        # compiler; each cell then times all of them and credits the fastest. A missing compiler / a
-        # candidate that won't build is skipped; none available -> numpy fallback per cell.
+        # Build the own-build baseline reference(s) once -- a ``*-autopar`` reference (multi-core,
+        # forced compiler -> Polly / GCC autopar) or the kernel's vendored native source -- kept open
+        # across cells. Strongest baseline: build EVERY available candidate compiler; each cell then
+        # times all of them and credits the fastest. A missing compiler / a candidate that won't build
+        # is skipped; none available -> numpy fallback per cell.
         bl_libs = []  # [(compiler, lib)] for the candidates that built
         bl_ctxs = []
-        if plan.bl_is_autopar:
+        if plan.bl_own_build:
             for compiler in plan.compiled[2]:
                 ctx = None
                 try:
@@ -1191,7 +1194,8 @@ def score_cells(submission: Submission,
                                                         binding,
                                                         language=plan.bl_lang,
                                                         mode=plan.compiled[3],
-                                                        compiler=(compiler or None))
+                                                        compiler=(compiler or None),
+                                                        baseline=plan.bl_label)
                 except Exception:  # noqa: BLE001 -- this candidate is unavailable / won't build
                     ok, lib = False, None
                 if ok and lib is not None:
@@ -1230,7 +1234,7 @@ def score_cells(submission: Submission,
                     baseline_samples["numpy"] = _time_numpy_samples(spec, data, reps, warmup=warmup)
                 c_outputs = None
                 c_peak = 0  # single-core-C peak RSS increment (0 unless the C reference actually ran)
-                bl_peak = 0  # *-autopar baseline peak RSS increment (0 unless it actually ran)
+                bl_peak = 0  # own-build baseline peak RSS increment (0 unless it actually ran)
                 if c_lib is not None:
                     # As the timed baseline (c) run it ``reps`` times; when it only grades an
                     # autopar cell, ONE run suffices (avoid a slow single-core C sweep at large shapes).
@@ -1247,7 +1251,7 @@ def score_cells(submission: Submission,
                             baseline_samples["c"] = c_samples
                     except RuntimeError:
                         c_outputs = None
-                if bl_libs:  # the *-autopar baseline reference(s) (timing only) -- credit the fastest
+                if bl_libs:  # the own-build baseline reference(s) (timing only) -- credit the fastest
                     best = None  # (min_ns, samples, peak) of the fastest candidate at this cell
                     for _compiler, lib in bl_libs:
                         try:
