@@ -295,19 +295,71 @@ def _resolve_sizes(fuzzed, initial, rng, distribution):
     return {name: resolved[name] for name in fuzzed}
 
 
+#: The two ways a ``fuzz.configs`` block may describe its config space (mutually exclusive).
+_CONFIG_COMPOSITIONS = ("valid", "sets")
+_CONFIG_KEYS = frozenset(_CONFIG_COMPOSITIONS) | {"rules"}
+
+
 def _resolve_config(configs, rng):
-    """Pick one VALID config tuple: an enumerated ``valid:`` list, or ``sets:``
-    sampled and filtered by python ``rules:``."""
-    valid = configs.get("valid")
-    if valid:
-        return dict(valid[int(rng.integers(len(valid)))])
-    sets = configs.get("sets") or {}
+    """Pick one config from the kernel's config space.
+
+    A ``fuzz.configs`` block describes that space in exactly ONE of two compositions:
+
+    1. **Enumerated** -- ``valid:`` is a list of dicts, each a complete, hand-curated config::
+
+           configs:
+             valid:
+             - {reflect_out: 0}
+             - {reflect_out: 1}
+
+       Use when the valid combinations are few, or curated (a baseline + one-hot + key combos)
+       rather than "the cartesian product minus the impossible ones".
+
+    2. **Generated + filtered** -- ``sets:`` gives the per-parameter choice sets and the optional
+       ``rules:`` are predicates every drawn config must satisfy::
+
+           configs:
+             sets:  {okvan: [false, true], okpaw: [false, true], negrp: [1, 2]}
+             rules: ["okpaw <= okvan", "negrp >= 1"]
+
+       Use when the space is a product with a few impossibility constraints -- the rules say
+       ``var OP const`` / ``var1 OP var2`` and compose with ``and`` / ``or``. Rules are evaluated by
+       :func:`_safe_eval` (AST-restricted, never Python ``eval``), so only arithmetic, comparisons,
+       boolean/ternary logic and the whitelisted numeric builtins are allowed.
+
+    The compositions are mutually exclusive, and every key is validated, because the failure mode of
+    a silent fallback here is a kernel graded on the WRONG config space (a typo'd ``valids:`` used to
+    resolve to the empty config, and a ``valid:`` list next to ``sets:`` used to silently ignore the
+    latter).
+
+    :param configs: The ``fuzz.configs`` block.
+    :param rng: Seeded generator (draw order is part of the fuzz contract).
+    :returns: One config as a ``{param: value}`` dict.
+    :raises ValueError: On an unknown / empty / mixed-composition block, or unsatisfiable rules.
+    """
+    unknown = sorted(set(configs) - _CONFIG_KEYS)
+    if unknown:
+        raise ValueError(f"unknown fuzz.configs key(s) {unknown}; expected one of {sorted(_CONFIG_KEYS)}")
+    present = [k for k in _CONFIG_COMPOSITIONS if configs.get(k)]
+    if len(present) != 1:
+        raise ValueError(f"fuzz.configs must use exactly one composition, {_CONFIG_COMPOSITIONS[0]!r} "
+                         f"(enumerated) or {_CONFIG_COMPOSITIONS[1]!r} (generated + filtered); got "
+                         f"{present or 'neither'}")
+
     rules = configs.get("rules") or []
+    if present[0] == "valid":
+        if rules:
+            raise ValueError("fuzz.configs.rules filters drawn configs and is meaningless next to an "
+                             "enumerated 'valid:' list -- drop the impossible entries instead")
+        valid = configs["valid"]
+        return dict(valid[int(rng.integers(len(valid)))])
+
+    sets = configs["sets"]
     for _ in range(_MAX_RESAMPLE):
         pick = {name: _sample_set(choices, rng) for name, choices in sets.items()}
         if all(_safe_eval(rule, pick) for rule in rules):
             return pick
-    raise ValueError(f"no config satisfies rules {rules}")
+    raise ValueError(f"no config over sets {sorted(sets)} satisfies rules {rules} in {_MAX_RESAMPLE} draws")
 
 
 def sample_params(parameters: Dict[str, Any],
