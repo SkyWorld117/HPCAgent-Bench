@@ -6,12 +6,26 @@ level: 2
 parameters:
   S:
     N: 8
+    lower: false
+  # lower is a config axis (which triangle of a/b scipy.linalg.eigh reads),
+  # drawn independently of N -- see fuzz.configs below. An EXPLICIT 'fuzzed'
+  # preset is required even though eigh_test has no M/L/XL to derive a size
+  # range from: without it, resolve_ranges falls back to the 'S' preset above
+  # (which also carries lower) and _resolve_sizes clobbers the config-drawn
+  # lower back to the S value on every iteration (same trap documented on
+  # crc16's reflect_out). N stays pinned at the S value -- no invented
+  # interval, since eigh_test is S-only.
+  fuzzed:
+    N: 8
+fuzz:
+  configs:
+    valid:
+    - {lower: false}
+    - {lower: true}
 init:
   input_args: [N]
-  output_args: [a, b, wout, vout, lower]
+  output_args: [a, b, wout, vout]
   func_name: initialize
-  scalars:
-    lower: false
   arrays:
     a: {shape: "(N, N)", dtype: complex128}
     b: {shape: "(N, N)", dtype: complex128}

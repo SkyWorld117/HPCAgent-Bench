@@ -39,7 +39,7 @@ def _run(lower_args):
     default."""
     initialize = _load("eigh_test").initialize
     eigh_test = _load("eigh_test_numpy").eigh_test
-    a, b, wout, vout, _lower_default = initialize(8, datatype=np.complex128)
+    a, b, wout, vout = initialize(8, datatype=np.complex128)
     eigh_test(a, b, wout, vout, *lower_args)
     return wout
 
