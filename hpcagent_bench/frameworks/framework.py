@@ -482,6 +482,15 @@ class Framework(object):
         shapes/dtypes."""
         return program
 
+    def build_with_cache(self, bench: Benchmark, tag: str, build: Callable[[], Any]) -> Any:
+        """Build a compiled artifact for ``bench``, reusing a persisted one when the framework caches it.
+
+        A uniform hook every framework carries; the base is a clean no-op that simply calls ``build``
+        (no framework-agnostic artifact to cache). Only :class:`~hpcagent_bench.frameworks.dace_framework.DaceFramework`
+        overrides it -- to load/save its parsed base SDFG in the kernel's ``.cache/``, picking the
+        cpu/gpu file by ``tag``. ``tag`` distinguishes device/precision variants of the same kernel."""
+        return build()
+
     def opt_report(self, program: Any, bench: Benchmark) -> Optional[str]:
         """The compiler's optimization report (which loops vectorized, and why not) or ``None`` if this
         framework has none to give. Called once after :meth:`measure`; must not rebuild the timed artifact."""

@@ -217,3 +217,11 @@ perf_reports/**
 !perf_reports/.gitkeep
 .opt_reports/**
 !.opt_reports/.gitkeep
+
+# Per-kernel framework-autogen + DaCe SDFG cache (hpcagent_bench.framework_cache) lives in each
+# kernel's `.cache/` and is already covered by the bare `.cache` rule near the top of this file --
+# deliberately, contents AND the .gitkeep. The tree is machine-generated and fingerprint-invalidated
+# (regenerated from <kernel>_numpy.py whenever it changes), and `kernel_cache_dir` mkdirs on demand,
+# so nothing has to be tracked to keep a directory alive. Re-including the .gitkeep instead would
+# put 356 empty files in the repo (one per kernel) and leave an untracked `.cache/` in `git status`
+# for every kernel ever run -- the same reason perf_reports/ is one root dir, not one per kernel.
