@@ -799,17 +799,36 @@ class _FortranBodyEmitter(BaseEmitter):
 
     def emit_expr(self, node: ast.AST) -> str:
         """Emit an expression, rounding a float BinOp result back to the fp8 grid when the kernel computes in fp8,
-        and re-wrapping a narrow-int +/-/* result back to its element width. The inner INT(x, narrow_kind)
-        two's-complement wraps (verified: INT(200, c_int8_t) == -56), matching numpy's wrap; the outer INT
-        re-widens to the int64 ABI kind the emitter computes narrow reads in, so the wrapped value still composes
-        with its int64 siblings (nussinov's ``max(table, a + b)`` mixes the two, and gfortran rejects mixed kinds)."""
+        and re-wrapping a narrow-int +/-/* result back to its element width -- see :meth:`_wrap_narrow` for how a
+        SIGNED width and an UNSIGNED width each reproduce numpy's wrap."""
         text = self._emit_expr_inner(node)
         if isinstance(node, ast.BinOp):
             text = self._fp8_round(node, text)
         wrap = narrow_int.wrap_dtype(node, self._wrap_name_dtype)
         if wrap is not None:
-            text = f"INT(INT(({text}), {self._int_kind_selector(self._int_tag(wrap))}), {self._int_kind_selector()})"
+            text = self._wrap_narrow(text, wrap)
         return text
+
+    def _wrap_narrow(self, text: str, wrap: str) -> str:
+        """Re-wrap a wide int64 expression back to its narrow element width, matching numpy's dtype wraparound.
+
+        A SIGNED width (int8/16/32): ``INT(x, narrow_kind)`` two's-complement wraps (verified: INT(200,
+        c_int8_t) == -56), matching numpy's signed wrap; the outer INT re-widens to the int64 ABI kind so
+        the wrapped value still composes with its int64 siblings (nussinov's ``max(table, a + b)`` mixes
+        the two, and gfortran rejects mixed kinds).
+
+        An UNSIGNED width (uint8/16/32) is NOT the same value: numpy wraps modulo 2**N, keeping a
+        NONNEGATIVE result (255 stays 255), while the signed form above reinterprets the same bit pattern
+        as negative (255 -> -1) -- invisible through a ring op (+/-/* compose the same either way) but
+        wrong the moment the wrapped value feeds a non-ring consumer like ``//`` (255 // 2 == 127 wide,
+        vs -1 // 2 == -1 floored). So an unsigned width instead masks the low N bits with IAND, kept
+        nonnegative in int64 -- exactly the promotion an unsigned array element already gets on READ
+        (see the ``iand`` in :meth:`_emit_subscript`'s narrow-read seam)."""
+        sel = self._int_kind_selector()
+        if wrap.startswith("uint"):
+            mask = (1 << (dtypes.itemsize(wrap) * 8)) - 1
+            return f"IAND(INT(({text}), {sel}), {mask}_{sel})"
+        return f"INT(INT(({text}), {self._int_kind_selector(self._int_tag(wrap))}), {sel})"
 
     def _wrap_name_dtype(self, name: str) -> Optional[str]:
         """Name -> numpy dtype for the narrow-int wrap oracle; a shape symbol is the wide int64."""

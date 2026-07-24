@@ -88,6 +88,34 @@ def test_uint8_subtraction_wraps_modulo():
     _assert_ok(_run(src, {"a": a, "b": b}, ["out"], {"a": "uint8", "b": "uint8", "out": "uint8"}, 3))
 
 
+def test_uint8_subtraction_wraps_before_floordiv():
+    # Same values as test_uint8_subtraction_wraps_modulo, but the wrapped result feeds a NON-RING
+    # consumer (// 2) so a missing (or signed-reinterpreted) wrap is load-bearing -- a store-only
+    # ring result cannot distinguish "wrapped" from "not wrapped" (see the module docstring); this
+    # is the uint8 fortran regression: the wrap used to reinterpret the modulo-256 bit pattern as
+    # SIGNED (255 -> -1), which floor-divides to -1, not numpy's unsigned 255 // 2 == 127.
+    src = ("import numpy as np\n"
+           "def f(a, b, out):\n"
+           "    for i in range(a.shape[0]):\n"
+           "        out[i] = (a[i] - b[i]) // 2\n")
+    a = np.array([0, 5, 255], dtype=np.uint8)
+    b = np.array([1, 10, 255], dtype=np.uint8)
+    assert np.array_equal((a - b) // 2, np.array([127, 125, 0], dtype=np.uint8))  # numpy anchor
+    _assert_ok(_run(src, {"a": a, "b": b}, ["out"], {"a": "uint8", "b": "uint8", "out": "uint8"}, 3))
+
+
+def test_uint16_subtraction_wraps_before_floordiv():
+    # Same defect at uint16 (255 -> -1 generalises to 65535 -> -1 at the wider width).
+    src = ("import numpy as np\n"
+           "def f(a, b, out):\n"
+           "    for i in range(a.shape[0]):\n"
+           "        out[i] = (a[i] - b[i]) // 2\n")
+    a = np.array([0, 5, 255], dtype=np.uint16)
+    b = np.array([1, 10, 255], dtype=np.uint16)
+    assert np.array_equal((a - b) // 2, np.array([32767, 32765, 0], dtype=np.uint16))  # numpy anchor
+    _assert_ok(_run(src, {"a": a, "b": b}, ["out"], {"a": "uint16", "b": "uint16", "out": "uint16"}, 3))
+
+
 def test_int32_accumulator_wraps():
     src = ("import numpy as np\n"
            "def f(x, out):\n"
