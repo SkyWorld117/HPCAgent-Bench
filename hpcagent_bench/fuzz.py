@@ -403,11 +403,16 @@ def iterations() -> int:
 # small set of shapes -- see docs/DESIGN_perf_protocol_configs_shapes.md).
 # --------------------------------------------------------------------------- #
 
+#: ``max_configs`` value meaning NO cap. The cap bounds how much we TIME; it must
+#: never bound what we GRADE -- a config that is never evaluated is a branch the
+#: kernel was never checked on, and the task still scores ``solved``.
+UNCAPPED = 0
+
 
 def enumerate_configs(configs: Dict[str, Any] = None, max_configs: int = None):
     """The VALID config tuples to evaluate, as a list of dicts, capped at
     ``max_configs`` (default ``perf.max_configs`` = 5) so the config space cannot
-    explode the evaluation.
+    explode the evaluation. Pass :data:`UNCAPPED` for the correctness gate.
 
     ``valid:`` is taken verbatim; a ``sets:`` + ``rules:`` space is expanded to its
     full cartesian product filtered by the rules (bounded by ``_MAX_RESAMPLE``

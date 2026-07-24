@@ -210,9 +210,13 @@ def scaling_score(kernel: str,
 
 
 def _correctness_cells(params, configs, constraints, k):
-    """The broad correctness set: every config x (edge u fuzzed) shape, as score_cells cell dicts."""
+    """The broad correctness set: every config x (edge u fuzzed) shape, as score_cells cell dicts.
+
+    Enumerated UNCAPPED. ``perf.max_configs`` bounds how many configs we TIME, and applying it here too
+    let a kernel score ``solved`` on branches nothing ever ran: vexx_k declares 11 valid configs, the cap
+    is 5, so 6 branch-witnesses were dropped from the correctness gate itself."""
     cells = []
-    for ci, cfg in enumerate(fuzz.enumerate_configs(configs)):
+    for ci, cfg in enumerate(fuzz.enumerate_configs(configs, max_configs=fuzz.UNCAPPED)):
         for kind, sample in fuzz.edge_shapes(params, cfg, constraints):
             cells.append({"label": f"cfg{ci}:edge:{kind}", "params": sample, "timed": False})
         for j in range(k):
