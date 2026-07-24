@@ -29,7 +29,7 @@ import json
 import os
 import pathlib
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from numpyto_common.ir import ArrayDesc, KernelIR, ScalarDesc, SparseArrayDesc, SymbolDesc
 from numpyto_common.lib_nodes import _iter_extent_of, _read_axis_keepdims
@@ -239,8 +239,10 @@ def parse_kernel(numpy_py: pathlib.Path,
     # Inline module-level numeric constants (``BET_M = 0.5`` in vadv); left as
     # free Names they'd emit as bogus kernel parameters the harness can't
     # resolve. Only top-level ``NAME = <number>`` assigns the kernel neither
-    # takes as a parameter nor reassigns locally are inlined.
-    _inline_module_constants(tree, fn, input_args)
+    # takes as a parameter nor reassigns locally are inlined. The folded names
+    # are accumulated across every round below: shape tokens and the shape-symbol
+    # promotion in lowering must both see that they are no longer free symbols.
+    inlined_consts: Dict[str, Any] = dict(_inline_module_constants(tree, fn, input_args))
     # Fold kernel params that carry a DEFAULT and aren't in input_args into
     # body constants -- the harness only passes input_args, so e.g. the sp_*
     # solvers' ``max_iter=100``/``tol=1e-6`` stay fixed, not runtime params.
@@ -312,7 +314,7 @@ def parse_kernel(numpy_py: pathlib.Path,
         _HoistMultiStmtHelpers(helpers, hcall_counter).visit(fn)
         _InlineHelpers(helpers, inl_counter).visit(fn)
         ast.fix_missing_locations(fn)
-        _inline_module_constants(tree, fn, input_args)
+        inlined_consts.update(_inline_module_constants(tree, fn, input_args))
         # Done when no call to a (still-inlinable) helper survives in the body.
         if not any(
                 isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in names for n in ast.walk(fn)):
@@ -526,6 +528,12 @@ def parse_kernel(numpy_py: pathlib.Path,
                 expanded_input.append(arg)
         input_args = expanded_input
 
+    # The manifest shape tokens were written against the SOURCE names, so an
+    # inlined module constant (cloudsc's ``nclv``) still spells the eliminated
+    # name; fold it to its literal here, before anything derives symbols from
+    # the shapes (helper params below, shape promotion in lowering).
+    _fold_consts_into_shapes(arrays, inlined_consts)
+
     short_name = info.get("short_name", func_name)
     kir = KernelIR(
         tree=fn,
@@ -537,6 +545,7 @@ def parse_kernel(numpy_py: pathlib.Path,
         scalars=scalars,
         source_path=str(numpy_py),
         sparse=sparse_descs,
+        inlined_consts=set(inlined_consts),
     )
     # Helpers that survived the inlining fixpoint as CALLS (an early ``return`` /
     # recursion blocks inlining) become their own native functions -- the early
@@ -805,7 +814,7 @@ def _find_function(tree: ast.Module, name: str) -> Optional[ast.FunctionDef]:
     return None
 
 
-def _inline_module_constants(tree: ast.Module, fn: ast.FunctionDef, input_args: List[str]) -> None:
+def _inline_module_constants(tree: ast.Module, fn: ast.FunctionDef, input_args: List[str]) -> Dict[str, Any]:
     """Substitute top-level numeric constants into the kernel body.
 
     A module-level ``NAME = <number>`` (vadv's ``BET_M = 0.5``) referenced
@@ -814,6 +823,11 @@ def _inline_module_constants(tree: ast.Module, fn: ast.FunctionDef, input_args: 
     kernel takes as a parameter or reassigns locally (those shadow the
     module value). Handles a plain number, a unary-signed number, OR a
     constant numeric EXPRESSION (PPM coefficients like ``C1 = -2.0 / 14.0``).
+
+    Returns the ``{name: value}`` numeric constants it folded, so the caller
+    can fold them into the manifest-derived shape tokens too (see
+    :func:`_fold_consts_into_shapes`) -- the body substitution alone leaves
+    ``init.shapes`` spelling the eliminated name.
     """
 
     def _const_value(v: ast.AST):
@@ -934,7 +948,7 @@ def _inline_module_constants(tree: ast.Module, fn: ast.FunctionDef, input_args: 
                 and v.attr in _DTYPE_ATTRS and stmt.targets[0].id not in shadowed):
             dtype_consts[stmt.targets[0].id] = v.attr
     if not consts and not dtype_consts and not seq_consts:
-        return
+        return {}
 
     class _Sub(ast.NodeTransformer):
 
@@ -953,6 +967,31 @@ def _inline_module_constants(tree: ast.Module, fn: ast.FunctionDef, input_args: 
 
     _Sub().visit(fn)
     ast.fix_missing_locations(fn)
+    return consts
+
+
+def _fold_consts_into_shapes(arrays: List[ArrayDesc], consts: Dict[str, Any]) -> None:
+    """Fold inlined module constants into the manifest-derived shape tokens.
+
+    :func:`_inline_module_constants` folds ``nclv = 5`` into the kernel BODY,
+    but ``init.shapes`` still spells the name (cloudsc's ``pclv: (nclv, nlev,
+    klon)``). Left standing, the shape token is a symbol nothing declares, so
+    ``_promote_shape_symbols_to_params`` re-adds the eliminated constant as a
+    C parameter the harness binding never passes -- every trailing scalar then
+    shifts one slot (silent miscompile). Integer constants only: a float
+    module constant is never a valid array extent.
+    """
+    int_consts = {n: v for n, v in consts.items() if isinstance(v, int) and not isinstance(v, bool)}
+    if not int_consts:
+        return
+
+    def _sub(tok: str) -> str:
+        return _IDENT_RE.sub(lambda m: str(int_consts.get(m.group(0), m.group(0))), tok)
+
+    for arr in arrays:
+        new_shape = tuple(_sub(str(tok)) for tok in arr.shape)
+        if new_shape != tuple(arr.shape):
+            arr.shape = new_shape
 
 
 _ARRAY_LITERAL_DTYPES = {
@@ -2102,7 +2141,9 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         hret_shape, hret_dtype = _helper_return_array_shape(lhs, arr_by, kernel_fn)
         hfn = copy.deepcopy(hdef)
         pnames = [a.arg for a in hfn.args.args]
-        _inline_module_constants(tree, hfn, pnames)
+        # The parent's folded names carry over: this helper's array params reuse the
+        # parent's (already folded) shapes, so neither set may be re-promoted.
+        hconsts = set(parent.inlined_consts) | set(_inline_module_constants(tree, hfn, pnames))
         # Same native-backend desugars the kernel body already ran (BUG-3: a helper
         # that survives inlining kept its ``np.newaxis`` / ufunc-``out=`` / roll-on-
         # slice / ``.real`` / ``.ndim``-guard forms). Runs before ``_mark_written_
@@ -2122,6 +2163,7 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
                          arrays=arrays,
                          scalars=scalars,
                          source_path=parent.source_path,
+                         inlined_consts=hconsts,
                          return_kind="scalar"))
             continue
 
@@ -2163,6 +2205,7 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
                      arrays=arrays,
                      scalars=scalars,
                      source_path=parent.source_path,
+                     inlined_consts=hconsts,
                      return_kind=hret))
         if assign is not None:
             param_info = {a.name: (a.shape, a.dtype) for a in arrays if a.name != hret}

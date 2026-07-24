@@ -9,7 +9,7 @@ NumpyToC consumes it for now.
 
 import ast
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 
@@ -156,6 +156,12 @@ class KernelIR:
     #: empty for dense kernels. Consumed by the matmul hoister to route
     #: ``A @ B`` through the sparse path.
     sparse: Dict[str, "SparseArrayDesc"] = field(default_factory=dict)
+    #: Module-level constants the frontend FOLDED into the body and the shape
+    #: tokens (cloudsc's ``nclv = 5``). They are compile-time literals, not
+    #: parameters: re-promoting one as a shape symbol would append a parameter
+    #: the harness binding never passes, shifting every trailing scalar by one
+    #: slot in the positional call.
+    inlined_consts: Set[str] = field(default_factory=set)
     #: One sub-:class:`KernelIR` per top-level helper called in the kernel body
     #: that couldn't be inlined (early ``return`` / recursion). Built by
     #: :func:`parse_kernel`, lowered by :func:`lower`; each emitter emits it as

@@ -6938,7 +6938,13 @@ def _promote_shape_symbols_to_params(kir: KernelIR) -> None:
         # (from ``N = b.shape[0]`` where ``b`` is ``(N,)``) is NOT a
         # definition -- it just re-states the real dimension param, so
         # such names stay promotable.
-        | _body_defined_locals(kir.tree))
+        | _body_defined_locals(kir.tree)
+        # A module-level constant the frontend already FOLDED into the body and
+        # the shape tokens (cloudsc's ``nclv = 5``) is a compile-time literal,
+        # not a runtime input. Promoting it would append a parameter the harness
+        # binding never passes, shifting every trailing scalar one slot in the
+        # positional call -- a silent miscompile, not a compile error.
+        | kir.inlined_consts)
     shape_syms: List[str] = []
     seen: Set[str] = set()
     for arr in kir.arrays:
