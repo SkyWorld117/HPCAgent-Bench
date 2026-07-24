@@ -1,7 +1,6 @@
 # Adapted from Piotr Skalski, ILearnDeepLearning.py (numpy_convolutional_neural_net / convolutional.py), MIT,
 #   https://github.com/SkalskiP/ILearnDeepLearning.py/blob/master/01_mysteries_of_neural_networks/06_numpy_convolutional_neural_net/src/layers/convolutional.py
-# via NPBench (github.com/spcl/npbench, BSD-3-Clause). Reimplemented in NumPy for
-# HPCAgent-Bench Reimplemented in NumPy as the HPCAgent-Bench correctness reference.
+# via NPBench (github.com/spcl/npbench, BSD-3-Clause). Reimplemented in NumPy as the HPCAgent-Bench correctness reference.
 
 import numpy as np
 

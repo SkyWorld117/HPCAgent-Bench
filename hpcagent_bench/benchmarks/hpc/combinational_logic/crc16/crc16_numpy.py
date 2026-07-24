@@ -1,7 +1,6 @@
 # Adapted from Øystein Sture ('oysstu'), CRC-16-CCITT gist
 # (gist.github.com/oysstu/68072c44c02879a2abf94ef350d1c7c6), license not stated upstream; reimplemented,
-# via NPBench (github.com/spcl/npbench, BSD-3-Clause). Reimplemented in NumPy for
-# HPCAgent-Bench Reimplemented in NumPy as the HPCAgent-Bench correctness reference.
+# via NPBench (github.com/spcl/npbench, BSD-3-Clause). Reimplemented in NumPy as the HPCAgent-Bench correctness reference.
 
 # Adapted from https://gist.github.com/oysstu/68072c44c02879a2abf94ef350d1c7c6
 def crc16(data, poly, crc, crc_init=0xFFFF, xorout=0xFFFF, reflect_out=1):
