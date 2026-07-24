@@ -52,6 +52,7 @@ REPORTS: pathlib.Path = paths.ROOT / "perf_reports"
 KINDS = {
     "opt_report": "opt-report.txt",
     "lowered_code": "asm.txt",
+    "generated_source": "generated-src.txt",
 }
 
 

@@ -305,6 +305,22 @@ A fifth preset, **`fuzzed`**, samples sizes in `[L, XL]` and cycles input distri
 the **default** for `hpcagent-bench run`, `run-benchmark`, `run-framework` and the judge
 (`service.preset`); pass `-p S` for a smoke-size run. `fuzzed:<seed>` pins the RNG.
 
+### Compiler reports & dumps
+
+Three optional diagnostics, each **off by default** and each a separate config/env knob, land under a
+gitignored `perf_reports/` tree that mirrors the kernel layout (`perf_reports/<relative_path>/<kernel>.<framework>.<impl>.<suffix>`).
+None perturbs a timed run -- the opt-report is a separate compile-only build; the disassembly and the
+generated-source dump only read what a timed run already made.
+
+| Knob (env) | What it dumps |
+| --- | --- |
+| `HPCAGENT_BENCH_PERF_REPORTS_OPT_REPORT=1` | the compiler's vectorization report -- what vectorized (and at what width), what it refused (and why) |
+| `HPCAGENT_BENCH_PERF_REPORTS_LOWERED_CODE=1` | the emitted machine code, `objdump`-disassembled |
+| `HPCAGENT_BENCH_PERF_REPORTS_GENERATED_SOURCE=1` | the auto-generated C/C++/Fortran that was compiled (the input a translator emitted from the numpy reference) |
+
+A framework with no such channel (e.g. NumPy) writes nothing rather than erroring, so a knob can be
+switched on across a mixed sweep and only the frameworks that have a report produce one.
+
 ---
 
 ## The optimizer loop & scoring

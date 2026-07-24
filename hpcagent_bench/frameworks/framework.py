@@ -492,6 +492,14 @@ class Framework(object):
         counterpart of :meth:`opt_report`; inspects the already-built artifact, never rebuilds it."""
         return None
 
+    def generated_source(self, program: Any, bench: Benchmark) -> Optional[str]:
+        """The auto-generated input this framework actually compiled -- the emitted C/C++/Fortran a
+        translator produced from the numpy reference (and, for a source-to-source backend like Pluto,
+        the polyhedrally-transformed code it handed the compiler). ``None`` when the framework consumes
+        the numpy source directly (numba) and generates no separate input. Reads a file already on disk;
+        never rebuilds the timed artifact."""
+        return None
+
     def create_timer(self, program: Any) -> "Timer":
         """Generate a timer for ``program``, once before the repeat loop (default: a bare host-side timer)."""
         return Timer(program)

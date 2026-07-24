@@ -1,9 +1,11 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The two optional diagnostics (``hpcagent_bench/perf_reports.py``): a vectorization report and a
-lowered-code dump. Both knobs default off, and even switched on the report is a SEPARATE compile that
-must leave the timed ``.so`` byte-identical. Native cases build a fabricated two-precision
-``cpp_backend`` with a pinned source, vectorizing in one loop and provably not in the other."""
+"""The three optional diagnostics (``hpcagent_bench/perf_reports.py``): a vectorization report, a
+lowered-code dump, and the auto-generated source that was compiled. Every knob defaults off, and even
+switched on a report never perturbs the timed ``.so`` (the opt-report is a SEPARATE compile that leaves
+it byte-identical; the disassembly and the generated-source dump only READ what a timed run made).
+Native cases build a fabricated two-precision ``cpp_backend`` with a pinned source, vectorizing in one
+loop and provably not in the other."""
 import hashlib
 import pathlib
 import subprocess
@@ -43,10 +45,11 @@ def _md5(path: pathlib.Path) -> str:
 # --- the knobs -------------------------------------------------------------
 
 
-def test_both_knobs_default_off():
+def test_all_knobs_default_off():
     """A default run must produce no reports at all."""
     assert perf_reports.enabled("opt_report") is False
     assert perf_reports.enabled("lowered_code") is False
+    assert perf_reports.enabled("generated_source") is False
 
 
 @pytest.mark.parametrize("kind", sorted(perf_reports.KINDS))
@@ -129,10 +132,11 @@ def test_two_implementations_do_not_overwrite_each_others_report(tmp_path, monke
 
 
 def test_frameworks_without_a_report_answer_not_supported():
-    """``None`` is the default for both hooks, so a knob can switch on across a mixed sweep."""
+    """``None`` is the default for every hook, so a knob can switch on across a mixed sweep."""
     numpy = generate_framework("numpy")
     assert numpy.opt_report(object(), None) is None
     assert numpy.lowered_code(object(), None) is None
+    assert numpy.generated_source(object(), None) is None
 
 
 # --- native: the real report -----------------------------------------------
@@ -214,6 +218,39 @@ def test_objdump_of_a_non_object_is_not_supported(tmp_path):
     junk = tmp_path / "junk.so"
     junk.write_text("not an ELF file")
     assert perf_reports.objdump(junk) is None
+
+
+# --- native: the auto-generated input --------------------------------------
+
+
+def test_generated_source_concatenates_both_precision_sources(backend):
+    """The dump must carry every TU that was compiled, each under its own banner, so the exact input
+    that was built and timed is recoverable."""
+    text = cpp_runtime.generated_source_text(backend, "probe", "cc")
+    assert text is not None
+    assert "==== probe_fp64.c ====" in text and "==== probe_fp32.c ====" in text
+    assert "void probe_fp64" in text and "void probe_fp32" in text
+
+
+def test_generated_source_is_none_when_sources_were_never_emitted(tmp_path):
+    empty = tmp_path / "cpp_backend"
+    empty.mkdir()
+    assert cpp_runtime.generated_source_text(empty, "probe", "cc") is None
+
+
+def test_generated_source_only_reads_never_builds(backend):
+    """Dumping the input is a pure read of files a timed run emitted; it must not compile a library."""
+    cpp_runtime.generated_source_text(backend, "probe", "cc")
+    assert list(backend.rglob("*.so")) == []
+
+
+def test_native_framework_generated_source_hook_dumps_the_input(backend, monkeypatch):
+    """The NativeFramework hook resolves its own cpp_backend + base and returns the emitted source."""
+    cc = generate_framework("cc")
+    monkeypatch.setattr(cc, "_cpp_backend", lambda bench: backend)
+    monkeypatch.setattr(cc, "_native_base", lambda bench: "probe")
+    text = cc.generated_source(object(), object())
+    assert text is not None and "void probe_fp64" in text
 
 
 # --- numba -----------------------------------------------------------------

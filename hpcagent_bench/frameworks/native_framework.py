@@ -81,6 +81,11 @@ class NativeFramework(Framework):
             return None
         return perf_reports.objdump(so)
 
+    def generated_source(self, program: Any, bench: Benchmark) -> Optional[str]:
+        """The auto-generated per-precision C/C++/Fortran this backend compiled (Pluto's transformed
+        source lands here too); ``None`` if the sources were never emitted."""
+        return cpp_runtime.generated_source_text(self._cpp_backend(bench), self._native_base(bench), self.fname)
+
     def _abi_order(self, bench: Benchmark) -> Optional[List[str]]:
         """The C-ABI argument names in canonical order (Sec. 4: sorted pointers, then sorted scalars),
         derived from the manifest via :func:`binding_from_spec`; ``None`` if unresolvable (legacy wrapper

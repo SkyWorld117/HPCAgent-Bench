@@ -55,7 +55,11 @@ class Test(object):
         ``impl_name`` keys the report since a framework's implementations are separate compiled
         artifacts. A report failure never sinks the measurement already in hand."""
         info = self.bench.info
-        hooks = {"opt_report": frmwrk.opt_report, "lowered_code": frmwrk.lowered_code}
+        hooks = {
+            "opt_report": frmwrk.opt_report,
+            "lowered_code": frmwrk.lowered_code,
+            "generated_source": frmwrk.generated_source,
+        }
         for kind, hook in hooks.items():
             if not perf_reports.enabled(kind):
                 continue

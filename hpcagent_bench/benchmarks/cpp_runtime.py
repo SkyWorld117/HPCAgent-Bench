@@ -151,6 +151,19 @@ def built_so(cpp_backend: pathlib.Path, short: str, framework: str) -> Optional[
     return so if so.is_file() else None
 
 
+def generated_source_text(cpp_backend: pathlib.Path, short: str, framework: str) -> Optional[str]:
+    """The auto-generated per-precision sources this framework compiled, concatenated with a per-file
+    banner, or ``None`` when none are on disk. These are the ``<short>_fpNN.<ext>`` files a translator
+    emitted from the numpy reference (source-to-source backends land their transformed code here too),
+    so dumping them shows the exact input that was built and timed."""
+    lang = FRAMEWORK_LANG[framework]
+    parts: List[str] = []
+    for src in _native_sources(cpp_backend, short, lang):
+        if src.exists():
+            parts.append(f"// ==== {src.name} ====\n{src.read_text()}")
+    return "\n\n".join(parts) if parts else None
+
+
 def load_backend_so(wrapper_file: str, short: str, framework: str) -> ctypes.CDLL:
     """Build + dlopen the kernel's ``lib<short>_<framework>.so``."""
     cpp_backend = pathlib.Path(wrapper_file).with_name("cpp_backend")
