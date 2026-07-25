@@ -31,7 +31,10 @@ def _has(tool: str) -> bool:
 
 
 def _has_polly() -> bool:
-    """True only when this clang's LLVM was actually built with Polly (rc alone false-positives)."""
+    """True when this clang ACCEPTS the Polly options, which is what the polly column needs to
+    build and validate. Acceptance is NOT evidence that Polly transforms anything: Ubuntu clang
+    21.1.8 takes ``-mllvm -polly -mllvm -polly-parallel`` and still outlines no parallel loop.
+    See the measured note on ``flags.POLLY_PAR`` for the check that answers THAT question."""
     clang = shutil.which("clang")
     if not clang:
         return False
