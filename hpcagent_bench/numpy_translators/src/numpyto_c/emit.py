@@ -212,7 +212,13 @@ class _CBodyEmitter(BaseEmitter):
                 op, acc = red
                 omp_prefix = f"{indent}#pragma omp parallel for reduction({op}:{acc})\n"
             elif parallelism.loop_is_parallel_safe(node):
-                omp_prefix = f"{indent}#pragma omp parallel for\n"
+                # A perfectly-nested, rectangular run of inner loops that are EACH independently
+                # safe on their own index can share this pragma via collapse(k) -- see
+                # collapsible_depth for the soundness criteria. Left at 1 (no clause) the moment
+                # any of that fails, e.g. conv2d_bias's inner reduction or an accumulator init.
+                depth = parallelism.collapsible_depth(node)
+                clause = f" collapse({depth})" if depth > 1 else ""
+                omp_prefix = f"{indent}#pragma omp parallel for{clause}\n"
         entered_parallel = bool(omp_prefix)
         if entered_parallel:
             self.parallel_active = True
