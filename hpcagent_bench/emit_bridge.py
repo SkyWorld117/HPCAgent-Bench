@@ -241,6 +241,12 @@ def emit_kernel(spec: BenchSpec,
     callers also use ``target="c"``. Each emitted source is named canonically
     (``<short>[_<sparse>]_<fptype>``); there is no symbol suffix. Returns the
     driver exit code.
+
+    ``<short>`` there is ``naming.short_for(kernel_py)`` -- the numpy reference's
+    STEM, not ``spec.short_name`` and not the registry key the spec was loaded by.
+    A caller that has to find what this wrote must go through that function; naming
+    the artifact from the key instead is what made the sparse oracle open a
+    ``bicg_solvers_..._binding.json`` that no emit ever wrote.
     """
     with bench_info_tempfile(spec, config=config) as bi:
         cmd = [
