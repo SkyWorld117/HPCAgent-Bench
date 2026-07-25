@@ -425,6 +425,17 @@ def handle_lulesh(specs: List[BenchSpec], roots: Roots) -> FamilyResult:
     return res
 
 
+def in_foundation(spec: BenchSpec) -> bool:
+    """Whether ``spec`` is a foundation-track kernel.
+
+    Both C++ families select on the path, not the taxonomy, because they resolve a
+    VectraArtifacts microkernel by ``module_name``. It is a PREFIX test: d6cfa413 moved every
+    kernel into its own subfolder, so ``relative_path`` became ``foundation/<stem>`` -- an
+    equality test against ``"foundation"`` silently matched nothing from that commit on.
+    """
+    return spec.relative_path == "foundation" or spec.relative_path.startswith("foundation/")
+
+
 def is_classic_stem(stem: str) -> bool:
     """A classic TSVC-family foundation kernel (``tsvc_2_<label>``) vs an extended one."""
     return stem.startswith("tsvc_2_")
@@ -775,14 +786,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     # tsvc_cpp is an ADDITIONAL C++ provenance pass over every foundation kernel; it does
     # not go through classify() (which hands each kernel to a single .c/.f90/.py family),
     # so its bucket is filled directly and its .cpp coexists with the tsvc .c original.
-    buckets["tsvc_cpp"] = [s for s in specs_by_key.values() if s.relative_path == "foundation"]
+    buckets["tsvc_cpp"] = [s for s in specs_by_key.values() if in_foundation(s)]
 
     # tsvc_cpp_emitted is the complement of tsvc_cpp within foundation: a foundation kernel
     # with NO C++ microkernel gets a C++ BASELINE emitted from NumpyToX instead. It carries
     # (registry_key, spec) pairs so the key reaches Task(); filled directly like tsvc_cpp.
     emitted_items: List[Tuple[str, BenchSpec]] = [
         (key, spec) for key, spec in specs_by_key.items()
-        if spec.relative_path == "foundation" and not vectra_microkernel_src(spec.module_name, roots)[0].exists()
+        if in_foundation(spec) and not vectra_microkernel_src(spec.module_name, roots)[0].exists()
     ]
 
     # PolyBench needs an upstream checkout (best-effort fetch).
