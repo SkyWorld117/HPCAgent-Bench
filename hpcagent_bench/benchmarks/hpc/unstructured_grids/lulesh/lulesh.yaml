@@ -73,11 +73,15 @@ init:
   # these arrays' shape literally as ``(numNode,)`` bypasses the substitution
   # entirely (a manifest-declared shape is used as-is, never re-expanded via
   # initialize()'s own locals), which is exactly why x/y/z above already need
-  # the same override. symmX/Y/Z (below) are node-INDEX sets, shorter than
-  # numNode but never actually sized from this declaration -- the real buffer
-  # always comes from running initialize() -- so ``(numNode,)`` here is
-  # purely an upper-bound annotation to keep the promotion pass from
-  # inventing a new phantom parameter, not a size guarantee.
+  # the same override. symmX/Y/Z (below) are node-INDEX sets of length
+  # edgeNodes**2, so they get their OWN symbol: ``numSymm`` is a bare
+  # identifier, which the harness resolves by measuring the buffer
+  # initialize() actually returns (the same path that gives numNode its
+  # value) -- unlike ``edgeElems``, which no array carries and which is
+  # therefore the only token that would become a phantom parameter.
+  # Declaring them ``(numNode,)`` was not a harmless upper bound: it is the
+  # loop extent the scatter ``xdd[symmX[k]] = 0`` is emitted with, so the
+  # native backends read edgeNodes**3 - edgeNodes**2 entries past the end.
   shapes:
     x: (numNode,)
     y: (numNode,)
@@ -92,9 +96,9 @@ init:
     fy: (numNode,)
     fz: (numNode,)
     nodalMass: (numNode,)
-    symmX: (numNode,)
-    symmY: (numNode,)
-    symmZ: (numNode,)
+    symmX: (numSymm,)
+    symmY: (numSymm,)
+    symmZ: (numSymm,)
   input_args:
   - numElem
   - nsteps
@@ -147,9 +151,11 @@ init:
   - nodelist
   - numElem
   - numNode
+  - numSymm
   - nsteps
   dtypes:
     numNode: int64
+    numSymm: int64
     # Connectivity/index arrays: initialize() builds all of these with
     # dtype=np.int64 (lulesh.py); contract.py::_dense_dtype defaults an
     # undeclared array to float64, which made the harness allocate a
@@ -215,6 +221,7 @@ input_args:
 - nodelist
 - numElem
 - numNode
+- numSymm
 - nsteps
 array_args:
 - e
