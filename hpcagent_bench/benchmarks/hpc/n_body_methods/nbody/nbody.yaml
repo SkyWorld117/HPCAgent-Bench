@@ -42,13 +42,14 @@ init:
   - tEnd
   - dt
   - total_mass
+  # KE/PE are RETURN values of the numpy kernel, not buffers initialize() fills. Listing them
+  # here made them init-provided, which drops them from the oracle's promoted-return mapping
+  # and grades the untouched zeros. The native path allocates them instead (native_call).
   output_args:
   - mass
   - pos
   - vel
   - Nt
-  - KE
-  - PE
   arrays:
     mass: (N, 1)
     pos: (N, 3)

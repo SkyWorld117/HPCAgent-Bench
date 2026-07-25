@@ -46,6 +46,10 @@ parameters:
     batch: 524288
     order: 7
     nb: 84
+# nb is DERIVED, not an independent size: initialize() computes it as the modal basis
+# count for `order`. Pinned here so a preset that moves one without the other fails at load.
+constraints:
+- nb == order * (order + 1) * (order + 2) // 6
 init:
   func_name: initialize
   input_args:
