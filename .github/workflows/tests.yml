@@ -156,11 +156,14 @@ jobs:
       - name: Phase 6 -- integration-marked tests (build/run real artifacts)
         if: ${{ !cancelled() }}
         # -m integration auto-collects EVERY @pytest.mark.integration test (present and
-        # future), so a new one is covered the moment it is marked -- no CI edit needed.
+        # future) UNDER THE PATHS LISTED HERE, so a new one is covered the moment it is
+        # marked -- but only if it lives in one of them. Both suites are listed because the
+        # translators tree has its own conftest and is otherwise never scanned by this job.
         # `make test` excludes this marker for a fast local loop; CI is where they must run.
         timeout-minutes: 25
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=900 -m integration tests/
+          python -m pytest -q -p no:cacheprovider --timeout=900 -m integration \
+            tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: Phase 7 -- export (+ publish on a main push) the HuggingFace dataset
         # Gated on success() (NOT !cancelled()): never build/publish a dataset from a run where

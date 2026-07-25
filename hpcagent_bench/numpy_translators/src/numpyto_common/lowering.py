@@ -6775,6 +6775,26 @@ def _promote_free_names_to_params(kir: KernelIR) -> None:
         elif isinstance(node, ast.For):
             for nm in _names_in_target(node.target):
                 declared.add(nm)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # Comprehension loop vars are locals scoped to the comprehension,
+            # never free params (``[f(v) for v in ...]`` must not leak ``v``).
+            for gen in node.generators:
+                for nm in _names_in_target(gen.target):
+                    declared.add(nm)
+        elif isinstance(node, ast.Lambda):
+            args = node.args
+            for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                declared.add(arg.arg)
+            if args.vararg is not None:
+                declared.add(args.vararg.arg)
+            if args.kwarg is not None:
+                declared.add(args.kwarg.arg)
+        elif isinstance(node, ast.NamedExpr):
+            for nm in _names_in_target(node.target):
+                declared.add(nm)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name is not None:
+                declared.add(node.name)
 
     free: List[str] = []
     seen: Set[str] = set()

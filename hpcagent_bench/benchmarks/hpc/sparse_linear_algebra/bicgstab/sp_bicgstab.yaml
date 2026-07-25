@@ -25,10 +25,6 @@ init:
   - x
   - b
   func_name: initialize
-input_args:
-- A
-- b
-- x
 array_args:
 - x
 - b

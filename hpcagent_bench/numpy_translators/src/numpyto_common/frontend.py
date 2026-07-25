@@ -1557,8 +1557,8 @@ def _resolve_shape_attr_tokens(tokens: Tuple[str, ...], parsed_seed: Dict[str, T
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 
 
-def _collect_inlined_scalar_defs(fn: ast.FunctionDef) -> Dict[str, str]:
-    """Map each inliner-introduced SCALAR-dimension local to its RHS.
+def _collect_inlined_scalar_defs(fn: ast.FunctionDef, prefix: Optional[str] = "__inl") -> Dict[str, str]:
+    """Map each SCALAR-dimension local under ``fn`` to its RHS.
 
     Helper inlining (:class:`_InlineHelpers`) lifts a helper's body locals
     into the kernel under an ``__inl<k>_`` prefix. The scalar ones are
@@ -1567,6 +1567,12 @@ def _collect_inlined_scalar_defs(fn: ast.FunctionDef) -> Dict[str, str]:
     unresolved they're un-bindable shape symbols. Substituting them away
     (:func:`_substitute_inlined_scalar_defs`) makes the shape a pure function
     of real kernel parameters again.
+
+    ``prefix`` restricts collection to names starting with it (the default,
+    the inliner's own ``__inl`` prefix); pass ``None`` to collect every
+    single-assignment scalar-dim local regardless of name -- used to harvest
+    a legacy ``initialize()`` companion module's own derived locals (conv2d's
+    ``H_out = H - K + 1``, lulesh's ``NE = numElem``).
 
     Only scalar-expression RHS (Name/Constant/BinOp/``arr.shape[i]``/etc.) is
     collected -- an array-valued RHS is the inlined local array itself, not
@@ -1598,7 +1604,9 @@ def _collect_inlined_scalar_defs(fn: ast.FunctionDef) -> Dict[str, str]:
         if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
             continue
         name = stmt.targets[0].id
-        if not name.startswith("__inl") or name in defs:
+        if name in defs:
+            continue
+        if prefix is not None and not name.startswith(prefix):
             continue
         if rebind_counts.get(name, 0) > 1:
             continue
@@ -3019,6 +3027,19 @@ def _shapes_from_initialize(numpy_py: pathlib.Path, info: Dict) -> Dict[str, str
             break
     if init_fn is None:
         return {}
+    # Fold the INITIALIZER module's own top-level numeric constants (cfd's
+    # ``NFACES = 4``, seissol's ``NQ = 9`` / ``NDIM = 3``) into its body first,
+    # same treatment the kernel module gets from ``_inline_module_constants``.
+    # Otherwise the constant's NAME survives into the harvested shape text
+    # below, is found in no scope by ``_promote_shape_symbols_to_params``, and
+    # gets promoted as a phantom C-ABI parameter the harness never passes.
+    _inline_module_constants(tree, init_fn, [])
+    # Then collect the init function's own single-assignment scalar-dim
+    # locals (conv2d's ``H_out = H - K + 1``, lulesh's alias ``NE = numElem``
+    # and derived ``enq = edgeNodes * edgeNodes``) so they substitute into the
+    # harvested shape text below, to a fixpoint, the same way an inlined
+    # helper's ``__inl<k>_`` scalar locals already do for the kernel body.
+    init_scalar_defs = _collect_inlined_scalar_defs(init_fn, prefix=None)
     # First pass: collect list literals (e.g. ``mlp_sizes = [S0, S1, S2]``)
     # so subscripts ``mlp_sizes[0]`` resolve to ``S0`` in a second-pass
     # shape-literal substitution.
@@ -3045,6 +3066,8 @@ def _shapes_from_initialize(numpy_py: pathlib.Path, info: Dict) -> Dict[str, str
             for lst_name, elts in list_locals.items():
                 for i, elt in enumerate(elts):
                     shape = shape.replace(f"{lst_name}[{i}]", elt)
+            if init_scalar_defs:
+                shape = _substitute_inlined_scalar_defs((shape, ), init_scalar_defs)[0]
             shapes[name] = shape
     # Map positional returns to kernel ``input_args`` so a kernel like
     # ``def go_fast(a):`` paired with ``def initialize(...): return x``
