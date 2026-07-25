@@ -125,6 +125,21 @@ PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {_ARCH_NATIVE} {_FP_RELAX}"
 FLANG_BASELINE = f"-O3 {_ARCH_NATIVE} -fopenmp -fPIC"
 
 # ---------------------------------------------------------------------------
+# Warnings -- a diagnostic axis, not an optimization one, so it is a separate
+# constant appended after the baseline (``warnings_ref`` in compilers.yaml,
+# resolved by languages._resolve_baseline the same way autopar is) rather than
+# folded into CPU_BASELINE_*.
+# ---------------------------------------------------------------------------
+
+#: -Wall -Wextra. One constant, not one per compiler: gcc, g++, clang, clang++ and
+#: gfortran all accept the identical spelling (gfortran lists both under these exact
+#: names in ``gfortran --help=warnings``, so there is no separate "Fortran spelling"
+#: to fork this into). Deliberately NOT ``-Werror`` -- turning warnings into a hard
+#: failure here would break every currently-warning kernel in the corpus at once;
+#: tests/test_warnings_ratchet.py tracks the count instead and only allows it down.
+WARNINGS_BASIC = "-Wall -Wextra"
+
+# ---------------------------------------------------------------------------
 # Multi-core autopar deltas. Each is appended on top of the CPU baseline.
 # ``GCC_AUTOPAR`` and similar carry a ``{n}`` placeholder that
 # :func:`compose_autopar` substitutes with the resolved core count.
