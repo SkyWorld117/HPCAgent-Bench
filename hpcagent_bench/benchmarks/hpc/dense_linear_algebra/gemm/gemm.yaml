@@ -42,3 +42,5 @@ taxonomy:
   subtrack: polybench
   dwarf: dense_linear_algebra
   domain: LinAlg
+  tags:
+  - npbench

@@ -47,6 +47,14 @@ init:
   - pos
   - vel
   - Nt
+  - KE
+  - PE
+  arrays:
+    mass: (N, 1)
+    pos: (N, 3)
+    vel: (N, 3)
+    KE: (Nt + 1,)
+    PE: (Nt + 1,)
   func_name: initialize
   dtypes:
     Nt: int64
@@ -64,3 +72,5 @@ taxonomy:
   subtrack: nbody
   dwarf: n_body_methods
   domain: Physics
+  tags:
+  - npbench

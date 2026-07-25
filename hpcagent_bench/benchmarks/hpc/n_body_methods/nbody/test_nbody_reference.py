@@ -39,7 +39,7 @@ def _run(extra_init_args, N=25, tEnd=0.1, dt=0.05, softening=0.1, G=1.0):
     the default."""
     initialize = _load("nbody").initialize
     nbody = _load("nbody_numpy").nbody
-    mass, pos, vel, Nt = initialize(N, tEnd, dt, *extra_init_args, datatype=np.float64)
+    mass, pos, vel, Nt, _, _ = initialize(N, tEnd, dt, *extra_init_args, datatype=np.float64)
     return nbody(mass, pos, vel, N, Nt, dt, G, softening)
 
 
@@ -81,7 +81,7 @@ def test_numpy_matches_upstream_reference() -> None:
     numpy_nbody = _load("nbody_numpy").nbody
     initialize = _load("nbody").initialize
     N, tEnd, dt, softening, G = 25, 0.1, 0.05, 0.1, 1.0
-    mass, pos, vel, Nt = initialize(N, tEnd, dt, datatype=np.float64)
+    mass, pos, vel, Nt, _, _ = initialize(N, tEnd, dt, datatype=np.float64)
     numpy_KE, numpy_PE = numpy_nbody(mass.copy(), pos.copy(), vel.copy(), N, Nt, dt, G, softening)
     reference_KE, reference_PE = reference_nbody(mass.copy(), pos.copy(), vel.copy(), N, Nt, dt, G, softening)
     assert np.array_equal(numpy_KE, reference_KE)

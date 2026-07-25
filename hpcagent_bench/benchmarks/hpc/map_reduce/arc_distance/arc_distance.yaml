@@ -35,3 +35,5 @@ taxonomy:
   subtrack: pythran
   dwarf: map_reduce
   domain: kernels
+  tags:
+  - npbench

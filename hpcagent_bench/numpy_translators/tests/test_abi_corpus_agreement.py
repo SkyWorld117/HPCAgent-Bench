@@ -21,7 +21,8 @@ Two distinct failure modes, asserted separately because they need different fixe
 
 Both lists below are ratchets, asserted in BOTH directions: a kernel that starts
 disagreeing fails, and a kernel that is fixed but left in the list also fails. Neither can
-rot silently. 330 of the 356 kernels agree exactly; every entry below is a tracked bug.
+rot silently. **All 356 kernels now agree exactly, so both lists are EMPTY** -- any entry
+appearing here again is a regression, not a backlog.
 
 Marked ``integration``: it lowers the whole registry, far too slow for the default suite.
 """
@@ -39,58 +40,13 @@ from hpcagent_bench.support.bindings import binding_from_spec
 #: emitted side reports them as this, matching ``contract.DEFAULT_SYMBOL_DTYPE``.
 SYMBOL_DTYPE = "int64"
 
-#: Emitted vs called ARGUMENT NAMES still disagree -> the positional call is shifted. Every
-#: one of these is a real defect with a known cause; fix one and delete its entry.
-KNOWN_NAME_DISAGREEMENTS: Dict[str, str] = {
-    # `nb = order*(order+1)*(order+2)//6` is evaluated inside initialize() and is not affine in
-    # `order`, so it cannot be constant-folded the way NQ/NDIM now are. It has to become a real
-    # ABI symbol (or gain a derived-symbol resolution path) -- open decision.
-    "hpc/dense_linear_algebra/seissol_batched_gemm/seissol_batched_gemm": "nb emitted, order called",
-    "hpc/dense_linear_algebra/seissol_tensor_contraction/seissol_tensor_contraction": "nb emitted, order called",
-    # Manifest declares shape tokens (`n_cj`, `n_shifts`) that are data-derived counts: they are
-    # in no `parameters` block and no `input_args`, so nothing can ever pass them. Needs the
-    # spec.py load-time gate that rejects an unresolvable init.shapes identifier.
-    "hpc/n_body_methods/gromacs/nbnxm/gromacs_nbnxm": "undeclared shape tokens n_cj / n_shifts",
-    "hpc/sparse_linear_algebra/banded_mmt/banded_mmt": "undeclared shape tokens AW / BW",
-    # array_args names KE/PE but initialize() never produces them and there is no init.arrays
-    # block, so the harness cannot materialise them; tEnd/total_mass are init-only knobs.
-    "hpc/n_body_methods/nbody/nbody": "KE/PE unmaterialised; tEnd/total_mass called, not emitted",
-    # Legacy `variants:`+`format:` sparse model: the emitter expands the logical `A` into CSR
-    # buffers while the binding still passes a dense `A`, and a stray `shape` leaks in. These 6
-    # duplicate 5 already-migrated `sparse_layouts:` siblings; retiring them is the real fix.
-    "hpc/sparse_linear_algebra/bicg/bicg_solvers": "logical A expanded by emitter, dense A called",
-    "hpc/sparse_linear_algebra/bicg/sp_bicg": "legacy sparse dual-model; stray `shape` param",
-    "hpc/sparse_linear_algebra/bicgstab/sp_bicgstab": "legacy sparse dual-model; stray `shape` param",
-    "hpc/sparse_linear_algebra/cg/sp_cg": "legacy sparse dual-model; stray `shape` param",
-    "hpc/sparse_linear_algebra/gmres/sp_gmres": "legacy sparse dual-model; stray `shape` param",
-    "hpc/sparse_linear_algebra/minres/sp_minres": "legacy sparse dual-model; stray `shape` param",
-    # Emits A_data/A_indices/A_indptr TWICE -- a duplicate name silently drops one value.
-    "hpc/sparse_linear_algebra/spmv/spmv": "CSR buffers emitted twice (duplicate params)",
-    # `edgeElems` survives as an emitted param the manifest binding does not pass.
-    "hpc/unstructured_grids/lulesh/lulesh": "edgeElems emitted, not called",
-}
+#: Emitted vs called ARGUMENT NAMES still disagree -> the positional call is shifted. EMPTY: a
+#: name here means a kernel regressed and its positional call is now wrong.
+KNOWN_NAME_DISAGREEMENTS: Dict[str, str] = {}
 
-#: Names line up but a slot's DTYPE disagrees. Two sub-causes, both real: an array whose
-#: manifest omits `init.dtypes` defaults to float64 in the binding while the emitter infers the
-#: true integer type; and the IR's scalar dtype vocabulary ("int", "bool") is not the binding's
-#: ("int64"), which needs one shared normalisation rather than per-site guessing.
-KNOWN_DTYPE_DISAGREEMENTS: Dict[str, str] = {
-    "hpc/dense_linear_algebra/eigh_test/eigh_test": "bool vs int64",
-    "hpc/dynamic_programming/needleman_wunsch/needleman_wunsch": "H int32, binding defaults float64",
-    "hpc/dynamic_programming/smith_waterman/smith_waterman": "H int32, binding defaults float64",
-    "hpc/finite_state_machine/dfa/dfa": "counts/symbols/trans int64, binding defaults float64",
-    "hpc/map_reduce/compute/compute": "array_1/array_2/out int64, binding defaults float64",
-    "hpc/map_reduce/histogram_equalization/histogram_equalization": "img uint8, binding defaults float64",
-    "hpc/spectral_methods/vexx/vexx_k": "23 scalars: int/bool vs float64/int64",
-    "hpc/structured_grids/cloudsc/cloudsc": "kfdia int vs int64",
-    # Declared in NEITHER parameters nor init.scalars, so the binding falls through to float64
-    # while the emitter makes them integer shape symbols. This one is on the SCORING path.
-    "hpc/structured_grids/srad/srad": "c1/c2/r1/r2 int vs float64",
-    "hpc/unstructured_grids/cfd/cfd": "neigh int64, binding defaults float64",
-    "hpc/unstructured_grids/edge_laplacian/edge_laplacian": "dst/src int64, binding defaults float64",
-    "hpc/unstructured_grids/velocity_tendencies/velocity_tendencies": "3 scalars int vs int64",
-    "ml/lenet/lenet": "C_before_fc1 int vs int64",
-}
+#: Names line up but a slot's DTYPE disagrees -- just as fatal, since SysV/AAPCS64 allocate INTEGER
+#: and SSE arguments from independent register sequences. EMPTY: an entry here is a regression.
+KNOWN_DTYPE_DISAGREEMENTS: Dict[str, str] = {}
 
 
 def emitted_abi(kir) -> List[Tuple[str, str]]:
@@ -161,8 +117,7 @@ def test_param_order_is_references_then_scalars_corpus_wide() -> None:
 
 @pytest.mark.integration
 def test_no_duplicate_or_empty_abi_names() -> None:
-    """A repeated name silently drops one argument's value; an empty one is unaddressable.
-    spmv is the live offender and is waived via the name list until its CSR expansion is fixed."""
+    """A repeated name silently drops one argument's value; an empty one is unaddressable."""
     bad: List[str] = []
     for short in sorted(KERNELS):
         if short in KNOWN_NAME_DISAGREEMENTS:

@@ -31,3 +31,5 @@ taxonomy:
   subtrack: polybench
   dwarf: structured_grids
   domain: Solver
+  tags:
+  - npbench

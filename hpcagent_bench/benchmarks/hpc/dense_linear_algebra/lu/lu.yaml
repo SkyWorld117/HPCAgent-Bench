@@ -26,3 +26,5 @@ taxonomy:
   subtrack: polybench
   dwarf: dense_linear_algebra
   domain: Solver
+  tags:
+  - npbench

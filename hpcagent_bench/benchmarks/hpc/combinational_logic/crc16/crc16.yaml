@@ -60,3 +60,5 @@ taxonomy:
   subtrack: crc16
   dwarf: combinational_logic
   domain: Other
+  tags:
+  - npbench

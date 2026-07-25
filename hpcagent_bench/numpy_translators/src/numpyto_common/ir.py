@@ -103,6 +103,15 @@ class ScalarDesc:
     dtype: str
     is_output: bool = False
 
+    def __post_init__(self) -> None:
+        # Honour the storage contract :func:`dtypes.canonical` documents: the frontend records
+        # aliases (a plain ``int`` for anything integral, ``double`` from a precision remap), and
+        # an alias reaching the ABI reads as a DISAGREEMENT against the binding's canonical
+        # ``int64`` even though both lower to the same ``int64_t``. Normalising at the one place
+        # a scalar dtype is stored keeps every consumer -- signature, binding JSON, ABI gate --
+        # on a single spelling.
+        self.dtype = dtypes.canonical(self.dtype)
+
 
 @dataclass
 class SparseArrayDesc:

@@ -42,3 +42,5 @@ taxonomy:
   subtrack: weather_stencils
   dwarf: structured_grids
   domain: Weather
+  tags:
+  - npbench

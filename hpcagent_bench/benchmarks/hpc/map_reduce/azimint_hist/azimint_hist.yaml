@@ -41,3 +41,5 @@ taxonomy:
   subtrack: azimint_hist
   dwarf: map_reduce
   domain: Physics
+  tags:
+  - npbench

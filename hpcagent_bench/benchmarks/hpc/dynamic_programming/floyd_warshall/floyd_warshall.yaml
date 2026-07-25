@@ -27,3 +27,5 @@ taxonomy:
   subtrack: polybench
   dwarf: dynamic_programming
   domain: Graphs
+  tags:
+  - npbench

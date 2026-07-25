@@ -51,3 +51,5 @@ taxonomy:
   subtrack: polybench
   dwarf: structured_grids
   domain: Physics
+  tags:
+  - npbench

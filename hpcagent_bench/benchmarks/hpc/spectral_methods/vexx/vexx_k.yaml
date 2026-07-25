@@ -287,6 +287,28 @@ init:
     eps_occ: 1.0e-08
   dtypes:
     ngm: int64
+    n: int64
+    n1: int64
+    n2: int64
+    n3: int64
+    npwx: int64
+    npol: int64
+    nrxxs: int64
+    nqs: int64
+    nat: int64
+    nh: int64
+    nkb: int64
+    max_pairs: int64
+    jblock: int64
+    iexx_start: int64
+    my_egrp_id: int64
+    current_k: int64
+    current_ik: int64
+    okvan: bool
+    okpaw: bool
+    noncolin: bool
+    tqr: bool
+    gamma_only: bool
 input_args:
 - psi
 - hpsi

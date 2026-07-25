@@ -26,6 +26,11 @@ init:
   - w
   - x
   - Lx
+  # src/dst are the int64 edge-endpoint index arrays (initialize() fills them
+  # np.int64); the fp64 default would silently rebind them as float64 buffers.
+  dtypes:
+    src: int64
+    dst: int64
   func_name: initialize
 array_args:
 - src

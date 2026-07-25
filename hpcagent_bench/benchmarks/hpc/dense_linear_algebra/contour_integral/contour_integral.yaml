@@ -63,3 +63,5 @@ taxonomy:
   subtrack: contour_integral
   dwarf: dense_linear_algebra
   domain: Physics
+  tags:
+  - npbench

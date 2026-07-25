@@ -73,3 +73,5 @@ taxonomy:
   subtrack: mandelbrot2
   dwarf: map_reduce
   domain: Other
+  tags:
+  - npbench

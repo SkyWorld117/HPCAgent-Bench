@@ -57,3 +57,5 @@ taxonomy:
   subtrack: channel_flow
   dwarf: structured_grids
   domain: Physics
+  tags:
+  - npbench

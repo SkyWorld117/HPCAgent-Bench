@@ -181,12 +181,32 @@ def legacy_bench_info_dict(spec: BenchSpec, config: Optional[str] = None) -> Dic
 def bench_info_tempfile(spec: BenchSpec, config: Optional[str] = None) -> Iterator[pathlib.Path]:
     """Write ``spec`` as a legacy bench_info JSON to a temp file (unlinked on
     exit). The emitter's ``--bench-info <path>`` contract is honoured exactly.
-    ``config`` flattens a buffer-style sparse kernel to that layout (native)."""
+    ``config`` flattens a buffer-style sparse kernel to that layout (native).
+
+    Unlike a bare :func:`legacy_bench_info_dict` call, this ALWAYS resolves a
+    config for a sparse kernel when the caller left it unspecified -- this
+    function's only purpose is to feed the (untouchable) emitter (``emit_kernel``,
+    every ``numpyto_common.frontend.parse_kernel`` caller), which does its own
+    sparse expansion from ``sparse_layouts``. Leaving ``config`` as ``None``
+    would keep BOTH the un-flattened ``sparse_layouts`` block AND, for a
+    buffer-style kernel (the numpy reference already takes the unpacked
+    buffers -- spmv), the physical buffer names already sitting in
+    ``input_args``; the emitter would then declare each buffer twice. Picking
+    the SAME default the harness binding uses (``contract.binding_from_spec``:
+    the first declared configuration) keeps the two sides aligned.
+
+    ``legacy_bench_info_dict`` itself keeps its historic ``config=None`` =
+    "leave sparse_layouts intact" behaviour for its OTHER callers (the sparse
+    oracle's ``full_bench_info``, ``Benchmark.__init__``, ``pluto_survey``),
+    which need the full declarative block, not an emitter-ready one."""
+    resolved_config = config
+    if resolved_config is None and spec.configurations:
+        resolved_config = next(iter(spec.configurations))
     fd, path = tempfile.mkstemp(suffix=".json", prefix=f"{spec.short_name}_bi_")
     p = pathlib.Path(path)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(legacy_bench_info_dict(spec, config=config), f)
+            json.dump(legacy_bench_info_dict(spec, config=resolved_config), f)
         yield p
     finally:
         p.unlink(missing_ok=True)

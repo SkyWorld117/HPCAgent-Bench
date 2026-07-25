@@ -37,3 +37,5 @@ taxonomy:
   track: ml
   subtrack: deep_learning
   domain: Learning
+  tags:
+  - npbench

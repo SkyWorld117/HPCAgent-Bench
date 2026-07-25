@@ -43,3 +43,5 @@ taxonomy:
   subtrack: stockham_fft
   dwarf: spectral_methods
   domain: Other
+  tags:
+  - npbench
