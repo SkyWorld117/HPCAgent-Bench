@@ -158,3 +158,48 @@ def test_satisfied_constraint_loads() -> None:
     spec = BenchSpec.from_dict(raw, source="<test>")
     assert spec.constraints == ("lvn <= nproma", )
     assert spec.parameters == {"S": {"nproma": 64, "lvn": 32}}
+
+
+def test_a_knob_in_both_a_preset_and_init_scalars_is_rejected() -> None:
+    """The preset copy wins (numerical_oracle's ``syms.setdefault``), so the init.scalars value is
+    dead -- and the preset copy is then handed to the e2e size down-scaler as if it were a
+    dimension. Both effects are silent, so the loader refuses the manifest instead."""
+    raw = _raw(
+        input_args=["x", "N", "max_iter"],
+        parameters={
+            "S": {
+                "N": 16,
+                "max_iter": 50
+            },
+            "M": {
+                "N": 32,
+                "max_iter": 200
+            }
+        },
+        init={"scalars": {
+            "max_iter": 100
+        }},
+    )
+    with pytest.raises(ValueError, match="max_iter"):
+        BenchSpec.from_dict(raw, source="<test>")
+
+
+def test_a_knob_only_in_init_scalars_loads() -> None:
+    """The same manifest with the preset copies dropped: 'parameters' is dimensions-only."""
+    raw = _raw(
+        input_args=["x", "N", "max_iter"],
+        parameters={
+            "S": {
+                "N": 16
+            },
+            "M": {
+                "N": 32
+            }
+        },
+        init={"scalars": {
+            "max_iter": 100
+        }},
+    )
+    spec = BenchSpec.from_dict(raw, source="<test>")
+    assert spec.init.scalars == {"max_iter": 100}
+    assert spec.parameters == {"S": {"N": 16}, "M": {"N": 32}}

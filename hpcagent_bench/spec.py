@@ -1075,6 +1075,17 @@ class BenchSpec:
                                  f"input must be an array (give it a shape in init.arrays), a scalar value "
                                  f"(init.scalars), or a size symbol (parameters). If {unknown} are arrays, add "
                                  f"them to init.arrays.")
+        # A name in BOTH a size preset and init.scalars resolves to the preset (numerical_oracle's
+        # ``syms.setdefault``), so the scalar's declared value never applies -- and the preset copy
+        # is then fed to the e2e size down-scaler as if it were a dimension. That is how the solvers
+        # ended up running max_iter 50/100/200/200 by size class and getting 200 scaled to 10.
+        shadowed = sorted(set(init_spec.scalars) & param_syms) if init_spec else []
+        if shadowed:
+            raise ValueError(f"{source}: {shadowed} are declared in both a 'parameters' preset and "
+                             f"'init.scalars'. 'parameters' holds DIMENSIONS only; an algorithm knob "
+                             f"belongs in 'init.scalars', where it is preset-independent and exempt "
+                             f"from e2e size down-scaling. Drop the preset copies.")
+
         # ``output_args`` is required (see the ``required`` tuple above): the
         # contributor states the graded / written-in-place buffers explicitly.
         output_args = tuple(bench["output_args"])
