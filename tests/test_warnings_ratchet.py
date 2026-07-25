@@ -25,11 +25,15 @@ from hpcagent_bench.languages import build_kernel_lib_commands
 #: (cpp_backend dir relative to paths.BENCHMARKS, short name) for foundation kernels that
 #: already have generated fp64/fp32 sources on disk -- no codegen step, so the sample
 #: builds fast. The same 10 kernels the ratchet count below was measured against.
+#: Every kernel keeps its sources under its OWN ``<kernel>/cpp_backend/``. The shared
+#: ``foundation/cpp_backend/`` still holds leftovers from the pre-flatten layout that no
+#: emit refreshes, so pointing at it measures whatever was last written there -- which is
+#: how the first count for this ratchet came out too high.
 _KERNELS: Tuple[Tuple[str, str], ...] = (
-    ("foundation/cpp_backend", "disjoint_halves_gather"),
-    ("foundation/cpp_backend", "halo_broadcast"),
-    ("foundation/cpp_backend", "safety_column_stencil"),
-    ("foundation/cpp_backend", "wf_north_west"),
+    ("foundation/disjoint_halves_gather/cpp_backend", "disjoint_halves_gather"),
+    ("foundation/halo_broadcast/cpp_backend", "halo_broadcast"),
+    ("foundation/safety_column_stencil/cpp_backend", "safety_column_stencil"),
+    ("foundation/wf_north_west/cpp_backend", "wf_north_west"),
     ("foundation/cond_reduce_sum/cpp_backend", "cond_reduce_sum"),
     ("foundation/ext_gather_load/cpp_backend", "ext_gather_load"),
     ("foundation/fuse_diamond/cpp_backend", "fuse_diamond"),
@@ -48,15 +52,17 @@ _FLAVORS: Tuple[Tuple[str, str, str, Optional[str]], ...] = (
     ("fortran", "fortran", "f90", None),
 )
 
-#: KNOWN-BAD COUNT -- measured 2026-07-25 on this dev box (Ubuntu 15.2.0 gcc, 21.1.8
-#: clang, .local gfortran) with:
+#: KNOWN-BAD COUNT -- measured 2026-07-25 on this dev box (gcc 15.2.0, clang 21.1.8,
+#: gfortran) with:
 #:   OMP_NUM_THREADS=1 OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader,tcp PMIX_MCA_gds=hash \
 #:   UCX_VFS_ENABLE=n HWLOC_COMPONENTS=-gl python3 -m pytest tests/test_warnings_ratchet.py
-#: All 40 are clang++'s -Wunused-const-variable on the generated file-scope M_PI/M_E
-#: constexprs (2 per source x 2 precisions x 10 kernels); gcc (cc) and gfortran are clean
-#: (0) on this sample. MAY ONLY BE LOWERED: a change that needs a higher number here is a
-#: regression to fix, never a ratchet bump.
-_KNOWN_BAD_COUNT = 40
+#: ZERO, and it starts at zero deliberately -- the first measurement was 40, every one of
+#: them clang++'s -Wunused-const-variable on the C++ prelude's file-scope M_PI/M_E, which
+#: numpyto_c/emit.py now marks [[maybe_unused]]. Starting a ratchet at a number that a
+#: one-line emitter fix removes would have frozen that warning in as acceptable.
+#: MAY ONLY BE LOWERED: a change needing a higher number is a regression to fix, never a
+#: ratchet bump.
+_KNOWN_BAD_COUNT = 0
 
 #: Below this many successful (kernel, flavor) builds the sample itself is broken (missing
 #: sources / no compiler) rather than clean, and the assertion above would pass vacuously.
