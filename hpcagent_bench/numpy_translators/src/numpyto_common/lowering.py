@@ -5801,6 +5801,11 @@ class LoweringContext:
         self.kir = lowered
         #: Shortcut to the function-body AST every pass rewrites in place.
         self.tree = lowered.tree
+        #: Boolean-array names, harvested HERE because the producer of a mask
+        #: (``I = np.less(...)``) is itself lowered to an explicit loop by an
+        #: earlier phase than the mask consumers -- collecting later sees only
+        #: ``I[i] = ...`` and cannot prove ``I`` boolean (mandelbrot1).
+        self.bool_names: Set[str] = _collect_bool_names(lowered.tree, lowered.arrays)
         # Shape / dtype tables built up across phases and consumed downstream.
         self.arrays_shapes: Dict[str, List[str]] = {}
         self.lib_shape_table: Dict[str, object] = {}
@@ -5937,7 +5942,7 @@ def _lp_pre_libnode_normalize(ctx: LoweringContext) -> None:
     # masked iteration so we avoid materialising the dynamic-length compacted view
     # from boolean fancy indexing. Seeded with the kernel-array shapes so the loop
     # bound is the right symbol.
-    _BooleanMaskReductionRewriter(ctx.arrays_shapes, _collect_bool_names(tree, ctx.kir.arrays)).visit(tree)
+    _BooleanMaskReductionRewriter(ctx.arrays_shapes, ctx.bool_names).visit(tree)
     ast.fix_missing_locations(tree)
 
 
@@ -6249,7 +6254,7 @@ def _lp_whole_array_and_zeros(ctx: LoweringContext) -> None:
     # Boolean masking: ``arr[mask_expr] = value`` -> per-element loop with an ``if
     # mask_expr[i]:`` guard. Runs before the whole-array rewriter so the LHS is a
     # plain scalar subscript downstream.
-    _BooleanMaskRewriter(ctx.lib_shape_table, _collect_bool_names(tree, ctx.kir.arrays)).visit(tree)
+    _BooleanMaskRewriter(ctx.lib_shape_table, ctx.bool_names).visit(tree)
     ctx.wa_rewriter = _WholeArrayAssignRewriter(ctx.lib_shape_table, real_arrays, local_dtypes=ctx.local_dtypes)
     ctx.wa_rewriter.visit(tree)
     # Fold the shapes the whole-array pass inferred for genuinely-new locals

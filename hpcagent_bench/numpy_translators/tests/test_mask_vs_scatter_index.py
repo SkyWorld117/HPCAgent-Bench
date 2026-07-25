@@ -75,3 +75,17 @@ def test_a_real_boolean_mask_still_lowers_to_a_guard():
     ``if``, which is the whole reason _BooleanMaskRewriter exists."""
     c = _emit_c(_SRC, ["out", "idx"], {"out": "(N,)", "idx": "(N,)"}, {"N": 8}, {"idx": "bool"})
     assert "if (idx[" in c, f"boolean mask no longer lowers to a per-position guard:\n{c}"
+
+
+def test_a_mask_computed_in_the_kernel_is_still_a_mask():
+    """The mask PRODUCER is lowered to an explicit loop before the mask CONSUMERS run, so a set
+    collected at the consumer sees only ``m[i] = ...`` and cannot prove ``m`` boolean. Harvest
+    once, off the source-shaped tree (LoweringContext), or mandelbrot1's ``N[I] = n`` survives as
+    a raw array subscript and the C will not compile."""
+    src = ("import numpy as np\n"
+           "def f(out, src, horizon):\n"
+           " m = np.less(src, horizon)\n"
+           " out[m] = 0.0\n")
+    c = _emit_c(src, ["out", "src", "horizon"], {"out": "(N,)", "src": "(N,)"}, {"N": 8}, {})
+    assert "if (m[" in c, f"a kernel-computed np.less mask did not lower to a guard:\n{c}"
+    assert "out[m]" not in c, f"mask left as a raw array subscript (will not compile):\n{c}"
