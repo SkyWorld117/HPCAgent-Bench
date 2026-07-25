@@ -84,8 +84,11 @@ static int validate_inputs(const int *box_offsets, const int *neighbor_counts, c
   return LAVAMD_SUCCESS;
 }
 
-int lavamd_ref(double alpha, const int *box_offsets, const int *neighbor_counts, const int *neighbor_list,
-               const double *rv, const double *qv, double *fv, int n_boxes, int max_neighbors) {
+// Named for the file, which the reference-naming guard pins to <module>_reference: the loader in
+// test_lavamd.py resolves this exact symbol out of liblavamd_reference.so, and the leftover
+// _ref spelling made every collection of that module an "undefined symbol: lavamd_reference".
+int lavamd_reference(double alpha, const int *box_offsets, const int *neighbor_counts, const int *neighbor_list,
+                     const double *rv, const double *qv, double *fv, int n_boxes, int max_neighbors) {
   const int status = validate_inputs(box_offsets, neighbor_counts, neighbor_list, rv, qv, fv, n_boxes, max_neighbors);
   if (status != LAVAMD_SUCCESS) {
     return status;
