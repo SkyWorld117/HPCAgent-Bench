@@ -193,11 +193,26 @@ Same split as [above](#high-level-design), over HTTP:
 and all frameworks. Pick the file for your accelerator:
 
 ```sh
-python -m pip install -r requirements/cpu.txt      # CPU: dace/numba/pythran + jax/tvm/torch
+python -m pip install -r requirements/cpu.txt      # CPU: numba/pythran + jax/tvm/torch
 python -m pip install -r requirements/nvidia.txt   # + cupy + jax[cuda] + triton (NVIDIA)
 python -m pip install -r requirements/amd.txt      # + ROCm wheels (AMD)
 python -m pip install .                             # the hpcagent_bench package itself
 ```
+
+**DaCe is the one framework `pip` cannot supply**, so it is its own step. The `dace` on PyPI is an
+old release that imports the numpy-2-removed `np.int`; HPCAgent-Bench develops against the
+`extended` branch of the fork, and the `dace_cpu` column's `autoopt` pipeline is that branch's
+`canonicalize` pass pipeline, which no other release has. Same clone the images and CI use:
+
+```sh
+git clone --depth 1 --recurse-submodules --shallow-submodules \
+    --branch extended https://github.com/spcl/dace.git ../dace
+python -m pip install -e ../dace
+export DACE_compiler_build_mode=native    # compile each SDFG directly, no per-SDFG cmake configure
+```
+
+`--recurse-submodules` is not optional: dace vendors its runtime headers as submodules, and without
+them the first SDFG build dies on a missing `blockingconcurrentqueue.h`.
 
 No per-language or per-framework sub-installs. To drive the loop with a model backend, add one
 opt-in file on top (`requirements/agent-anthropic.txt`, `...-aider.txt`, `...-local.txt`). Inside a

@@ -1,6 +1,6 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""DaCe framework adapter: optimizes a kernel through 3 SDFG pipelines (canonicalize/parallel/autoopt),
+"""DaCe framework adapter: optimizes a kernel through 3 SDFG pipelines (strict/parallel/autoopt),
 verifies + scores each, and returns the fastest correct one as a compiled SDFG (see DaceFramework.optimize)."""
 import copy
 import importlib
@@ -21,6 +21,12 @@ import dace.transformation.auto.auto_optimize as dace_auto_opt
 from dace.sdfg import propagation
 from dace.transformation.dataflow import MapCollapse, MapFusion
 from dace.transformation.interstate import LoopToMap
+# The canonicalize pipeline exists only on spcl/dace@extended, the branch HPCAgent-Bench develops
+# against (containers/, .github/actions/setup/, requirements/*.txt all clone that branch). Importing
+# it here is the PIN: a stock PyPI dace fails loudly at import instead of quietly grading the CPU
+# column against the weaker auto_optimize pipeline and reporting it under the same framework name.
+from dace.transformation.passes.canonicalize.finalize import finalize_for_target
+from dace.transformation.passes.canonicalize.pipeline import canonicalize
 
 from hpcagent_bench import languages
 from hpcagent_bench.frameworks import Benchmark, Framework
@@ -85,21 +91,39 @@ def _pipeline_parallel(sdfg: Any, ctx: Dict[str, Any]) -> None:
 
 
 def _pipeline_auto_opt(sdfg: Any, ctx: Dict[str, Any]) -> None:
-    """Phase 4 -- full ``auto_optimize`` (LICM, fusion, vectorize, GPU storage)."""
+    """Phase 4 -- the strongest whole-SDFG optimization the installed DaCe offers for the target.
+
+    On CPU that is the fork's ``canonicalize`` pipeline, not ``auto_optimize``: loop fission and
+    fusion, tiling, wavefront skew, scatter privatization and the semantic lifts are what the
+    foundation track is built to exercise, and none of them are reachable from ``auto_optimize``'s
+    LICM + MapFusion + vectorize set. ``canonicalize`` deliberately leaves library nodes
+    un-expanded (one shape per computation), which codegens to the NAIVE expansion, so the
+    ``finalize_for_target`` tail that selects the fast implementation is not optional here -- the
+    documented perf path is the pair, and it is what corresponds to a single ``auto_optimize``.
+
+    GPU keeps ``auto_optimize``: the GPU counterpart needs an explicit ``offload_to_gpu`` between
+    the two calls, and no GPU is available to verify that against the numpy reference.
+    """
+    if ctx["device"] is dace_dtypes.DeviceType.CPU:
+        # validate_all re-validates after EVERY stage -- a bisect aid, not something a scored run
+        # should pay for; the final validate still rejects an invalid graph.
+        canonicalize(sdfg, target="cpu", validate_all=False)
+        finalize_for_target(sdfg, target="cpu")
+        return
     opt = ctx["opt"]
     opt.auto_optimize(sdfg, ctx["device"], symbols=ctx.get("symbols", {}), use_gpu_storage=True)
 
 
 DACE_PIPELINES: Tuple[SdfgPipeline, ...] = (
-    SdfgPipeline("canonicalize", parent=None, transform=_pipeline_strict),
-    SdfgPipeline("fusion", parent="canonicalize", transform=_pipeline_fusion),
+    SdfgPipeline("strict", parent=None, transform=_pipeline_strict),
+    SdfgPipeline("fusion", parent="strict", transform=_pipeline_fusion),
     SdfgPipeline("parallel", parent="fusion", transform=_pipeline_parallel),
-    SdfgPipeline("autoopt", parent="canonicalize", transform=_pipeline_auto_opt),
+    SdfgPipeline("autoopt", parent="strict", transform=_pipeline_auto_opt),
 )
 
 #: The three end-state pipelines optimize() compiles, verifies and scores (``fusion`` is
 #: only ``parallel``'s intermediate and is not scored on its own).
-SCORED_VARIANTS: Tuple[str, ...] = ("canonicalize", "parallel", "autoopt")
+SCORED_VARIANTS: Tuple[str, ...] = ("strict", "parallel", "autoopt")
 
 #: Repeats used by :meth:`DaceFramework.score` for a stable median without dominating optimize.
 SCORE_REPEAT: int = 5
@@ -245,7 +269,7 @@ class DaceFramework(Framework):
         opt = ctx["opt"]
         MapFusion = ctx["MapFusion"]
         device = ctx["device"]
-        if sdfg._name in ("canonicalize", "fusion", "parallel"):
+        if sdfg._name in ("strict", "fusion", "parallel"):
             opt.apply_gpu_storage(sdfg)
             sdfg.apply_gpu_transformations()
             sdfg.simplify()
