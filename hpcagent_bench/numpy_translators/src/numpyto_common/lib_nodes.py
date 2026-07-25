@@ -6482,8 +6482,9 @@ class _MatmulHoister(ast.NodeTransformer):
         # CSR buffers are exactly A.T's CSC buffers (and vice versa), and COO
         # transposes by swapping row/col roles -- so a transpose reuses the
         # same physical buffers under the dual format, no extra data.
-        td = self._transpose_sparse_desc(node.left)
-        if td is not None and isinstance(node.right, ast.Name) and node.right.id not in self.sparse:
+        tr = self._transpose_sparse_desc(node.left)
+        if tr is not None and isinstance(node.right, ast.Name) and node.right.id not in self.sparse:
+            td, transposed = tr
             dense_shape = self.shape_table.get(node.right.id)
             if dense_shape and len(dense_shape) == 1:
                 self.temp_counter[0] += 1
@@ -6491,7 +6492,7 @@ class _MatmulHoister(ast.NodeTransformer):
                 n_rows = td.logical_shape[0] if td.logical_shape else "0"
                 self.temp_arrays[temp] = (n_rows, )
                 self.shape_table[temp] = (n_rows, )
-                return temp, pre + self._sparse_matvec(td, node.right.id, temp)
+                return temp, pre + self._sparse_matvec(td, node.right.id, temp, transposed=transposed)
         l_sparse = (isinstance(node.left, ast.Name) and node.left.id in self.sparse)
         r_sparse = (isinstance(node.right, ast.Name) and node.right.id in self.sparse)
         if not (l_sparse or r_sparse):
@@ -6607,11 +6608,22 @@ class _MatmulHoister(ast.NodeTransformer):
         return temp, stmts
 
     def _transpose_sparse_desc(self, operand):
-        """If ``operand`` is ``A.T`` for a sparse ``A``, return a SparseArrayDesc
-        for the transpose -- same physical buffers under the dual format (CSR
-        <-> CSC) or with row/col roles swapped (COO) -- so the matvec dispatcher
-        emits ``A.T @ x`` directly. Returns ``None`` otherwise (incl. dia/bcsr
-        transpose, which is left to fail loudly)."""
+        """If ``operand`` is ``A.T`` for a sparse ``A``, return ``(desc, transposed)`` describing
+        ``A.T`` so the matvec dispatcher emits ``A.T @ x`` directly; ``None`` otherwise.
+
+        Two kinds of transpose, and the flag says which:
+
+        * **relabelled** (``transposed=False``) -- CSR's buffers ARE its transpose's CSC buffers
+          (and vice versa), and COO transposes by swapping the row/col roles. The descriptor alone
+          carries the transpose, so the forward per-format matvec is correct as-is.
+        * **access-transposed** (``transposed=True``) -- DIA and BCSR have no dual descriptor over
+          the same buffers (negating DIA's offsets re-keys its data columns; BCSR would need
+          indptr/indices rebuilt over block columns AND every block transposed). The format stays
+          put and the ``*_t`` matvec transposes the ACCESS instead.
+
+        ``logical_shape`` is reversed either way, so the caller sizes the result temp off the
+        transpose's own row count without knowing which kind it got.
+        """
         if not (isinstance(operand, ast.Attribute) and operand.attr == "T" and isinstance(operand.value, ast.Name)
                 and operand.value.id in self.sparse):
             return None
@@ -6621,20 +6633,27 @@ class _MatmulHoister(ast.NodeTransformer):
         swapped = tuple(reversed(ls)) if len(ls) >= 2 else tuple(ls)
         dual = {"csr": "csc", "csc": "csr"}.get(d.format)
         if dual is not None:
-            return SparseArrayDesc(name=d.name, format=dual, logical_shape=swapped, buffers=dict(d.buffers))
+            return SparseArrayDesc(name=d.name, format=dual, logical_shape=swapped, buffers=dict(d.buffers)), False
         if d.format == "coo":
             b = dict(d.buffers)
             if "row" in b and "col" in b:
                 b["row"], b["col"] = d.buffers["col"], d.buffers["row"]
-            return SparseArrayDesc(name=d.name, format="coo", logical_shape=swapped, buffers=b)
+            return SparseArrayDesc(name=d.name, format="coo", logical_shape=swapped, buffers=b), False
+        if d.format in ("dia", "bcsr"):
+            return SparseArrayDesc(name=d.name, format=d.format, logical_shape=swapped, buffers=dict(d.buffers)), True
         return None
 
-    def _sparse_matvec(self, sp_desc, dense_name: str, temp: str):
+    def _sparse_matvec(self, sp_desc, dense_name: str, temp: str, transposed: bool = False):
         """Build the per-format matvec loop nest filling 1-D ``temp``.
 
         Derives each format's extra size symbols from the sparse
         descriptor's logical shape + physical buffer shapes, then calls
         the matching dispatcher in ``sparse_emit``.
+
+        ``transposed`` marks the DIA/BCSR ``A.T @ x`` case, where the descriptor is A's own
+        (only its logical shape is reversed) and the ``*_t`` dispatcher transposes the access --
+        see :meth:`_transpose_sparse_desc`. Every other format arrives already relabelled, so a
+        forward matvec on the dual descriptor is the transpose.
         """
         from numpyto_common import sparse_emit as _se
         fmt = sp_desc.format
@@ -6662,6 +6681,11 @@ class _MatmulHoister(ast.NodeTransformer):
             return _se.expand_matmul_coo_dense_vec(tgt, bufs, dense_name, n_rows, nnz)
         if fmt == "dia":
             ndiag = _buf_shape("data", 0) or "0"
+            # Transposed: the descriptor's shape is reversed, so A's own (rows, cols) are
+            # (n_cols, n_rows) here -- the expanders take A's dims, not A.T's, to stay
+            # readable side by side.
+            if transposed:
+                return _se.expand_matmul_dia_t_dense_vec(tgt, bufs, dense_name, n_cols, n_rows, ndiag)
             return _se.expand_matmul_dia_dense_vec(tgt, bufs, dense_name, n_rows, n_cols, ndiag)
         if fmt == "ell":
             maxnz = _buf_shape("data", 1) or "0"
@@ -6684,6 +6708,10 @@ class _MatmulHoister(ast.NodeTransformer):
             nbr = f"({iplen}) - 1" if iplen else "0"
             R = _buf_shape("data", 1) or "1"
             C = _buf_shape("data", 2) or "1"
+            if transposed:
+                # ``n_rows`` is A.T's row count, i.e. A's COLUMN count -- exactly the length
+                # the transposed matvec writes.
+                return _se.expand_matmul_bcsr_t_dense_vec(tgt, bufs, dense_name, nbr, R, C, n_rows)
             return _se.expand_matmul_bcsr_dense_vec(tgt, bufs, dense_name, nbr, R, C, n_rows)
         if fmt == "bcoo":
             # block-COO: row[k]/col[k] hold block coords, data is
