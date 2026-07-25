@@ -435,8 +435,11 @@ def run_kernel(k: SparseKernel,
     ctx = tempfile.TemporaryDirectory()
     out = workdir or pathlib.Path(ctx.name)
     _emit_c(k.short, k.numpy_py, out, config_name=config_name)
-    from numpyto_common.naming import native_base
-    base = native_base(k.short, sparse=config_name)  # <short>_<config>_fp64
+    from numpyto_common.naming import native_base, short_for
+    # Name the artifact off the numpy reference, the way the emitter does. ``k.short`` is a
+    # REGISTRY key: ``bicg_solvers`` and ``sp_bicg`` are two keys over one ``bicg_numpy.py``, so
+    # deriving the base from the key opened a file no emit ever wrote.
+    base = native_base(short_for(k.numpy_py), sparse=config_name)  # <short>_<config>_fp64
     binding = json.loads((out / f"{base}_binding.json").read_text())
     csrc = out / f"{base}.c"
     so = out / f"lib{base}.so"
