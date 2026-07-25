@@ -591,7 +591,11 @@ class _FortranBodyEmitter(BaseEmitter):
             return True
         int_scalars = vars(self).get("_int_scalar_names")
         if int_scalars is None:
-            int_scalars = {
+            # Symbols too, not just scalars: a ``parameters:`` preset entry becomes a SymbolDesc
+            # (frontend.py), so a 0/1 config toggle declared there (crc16's ``reflect_out``) is an
+            # integer param that never appears in ``kir.scalars``.
+            int_scalars = {s.name for s in self.kir.symbols}
+            int_scalars |= {
                 s.name
                 for s in self.kir.scalars
                 if s.dtype in ("int", "int64", "int32", "int16", "int8", "uint64", "uint32", "uint16", "uint8")

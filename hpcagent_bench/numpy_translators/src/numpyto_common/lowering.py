@@ -3184,8 +3184,14 @@ class _BooleanMaskRewriter(ast.NodeTransformer):
     ``for i: if I[i]: Z[i] = Z[i]**2 + C[i]``).
     """
 
-    def __init__(self, shape_table):
+    def __init__(self, shape_table, bool_names):
         self.shape_table = shape_table
+        #: Names :func:`_collect_bool_names` proved boolean. A bare ``Name`` index is a mask ONLY
+        #: if it is in here: shape equality alone cannot tell ``arr[mask]`` from ``arr[int_idx]``,
+        #: and an index array whose declared shape happens to match the target then lowers to
+        #: ``if (idx[i])`` -- reading values as truth at the wrong positions, and off the end of
+        #: the buffer whenever the declared shape is an upper bound (lulesh's symmX/Y/Z).
+        self.bool_names = bool_names
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         self.generic_visit(node)
@@ -3258,10 +3264,10 @@ class _BooleanMaskRewriter(ast.NodeTransformer):
             return (self._is_mask_expr(expr.left, lhs_shape, lhs_name)
                     and self._is_mask_expr(expr.right, lhs_shape, lhs_name))
         if isinstance(expr, ast.Name):
+            if expr.id not in self.bool_names:
+                return False
             shape = self.shape_table.get(expr.id)
-            if shape and tuple(shape) == tuple(lhs_shape):
-                return True
-            return False
+            return bool(shape) and tuple(shape) == tuple(lhs_shape)
         return False
 
 
@@ -6243,7 +6249,7 @@ def _lp_whole_array_and_zeros(ctx: LoweringContext) -> None:
     # Boolean masking: ``arr[mask_expr] = value`` -> per-element loop with an ``if
     # mask_expr[i]:`` guard. Runs before the whole-array rewriter so the LHS is a
     # plain scalar subscript downstream.
-    _BooleanMaskRewriter(ctx.lib_shape_table).visit(tree)
+    _BooleanMaskRewriter(ctx.lib_shape_table, _collect_bool_names(tree, ctx.kir.arrays)).visit(tree)
     ctx.wa_rewriter = _WholeArrayAssignRewriter(ctx.lib_shape_table, real_arrays, local_dtypes=ctx.local_dtypes)
     ctx.wa_rewriter.visit(tree)
     # Fold the shapes the whole-array pass inferred for genuinely-new locals
@@ -6714,7 +6720,12 @@ def _detect_output_and_index_arrays(kir: KernelIR) -> None:
         # original ``dace.int32`` annotation). Only auto-promote arrays
         # still at a float default, so the heuristic stays a safety net
         # for undeclared kernels without overriding a declared width.
-        if dtypes.is_integer(str(vars(a).get("dtype") or "")):
+        dt = str(vars(a).get("dtype") or "")
+        # A declared bool array subscripting another is a MASK, not an index set. Retyping it to
+        # int64 loses that (``_collect_bool_names`` reads the array dtype, so the mask rewriter
+        # would then lower ``arr[mask] = v`` as a scatter through 0/1) and contradicts the
+        # binding, which still says bool -- a 1-byte buffer read back as int64_t*.
+        if dtypes.is_integer(dt) or dt in ("bool", "bool_"):
             continue
         a.dtype = "int64"  # type: ignore[misc]
 
