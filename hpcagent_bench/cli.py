@@ -711,8 +711,23 @@ def cmd_run_benchmark(args) -> int:
     return 0
 
 
+def parse_shard(spec: str) -> Tuple[int, int]:
+    """Parse a ``"i/n"`` ``--shard`` token into ``(index, count)``."""
+    index_str, total_str = spec.split("/")
+    return int(index_str), int(total_str)
+
+
 def cmd_run_framework(args) -> int:
-    """Run a kernel selection under one framework, forking EACH kernel (writes hpcagent_bench.db)."""
+    """Run a kernel selection under one framework, forking EACH kernel (writes hpcagent_bench.db).
+
+    ``--summarize`` short-circuits into reading back ``--csv`` files from earlier shards instead of
+    running anything (mirrors ``tests/corpus/measure_parallelization.py --summarize`` on the DaCe
+    side): a batch job's per-rank invocations write disjoint CSVs, then one final invocation merges
+    them and reports the combined exit status.
+    """
+    if args.summarize:
+        from hpcagent_bench.support.collect.sweep import summarize_csv
+        return 1 if summarize_csv(args.summarize) else 0
     from hpcagent_bench.support.collect.sweep import run_framework_sweep
     preset = resolve_preset(args.preset)
     run_framework_sweep(args.benchmark,
@@ -726,7 +741,9 @@ def cmd_run_framework(args) -> int:
                         args.load_strict_sdfg,
                         args.datatype,
                         variant=args.variant,
-                        skip_existing=args.skip_existing_benchmarks)
+                        skip_existing=args.skip_existing_benchmarks,
+                        shard=parse_shard(args.shard),
+                        csv_path=args.csv)
     return 0
 
 
@@ -1091,6 +1108,17 @@ def build_parser() -> argparse.ArgumentParser:
                     default=False,
                     help="skip kernels already fully recorded in hpcagent_bench.db")
     rf.add_argument("-V", "--variant", default=None, help="sparse variant name (see bench_info.json)")
+    rf.add_argument("--shard",
+                    default="0/1",
+                    help="\"i/n\": round-robin shard the selection -- run only every n-th kernel "
+                    "starting at i (default 0/1, the whole selection)")
+    rf.add_argument("--csv", default=None, help="append one row per (kernel, framework, impl) to this CSV")
+    rf.add_argument("--summarize",
+                    nargs="+",
+                    default=None,
+                    metavar="CSV",
+                    help="report on existing --csv files instead of running anything; "
+                    "exit status is the number of crashed/miscompiled rows")
     rf.set_defaults(func=cmd_run_framework)
 
     rs = sub.add_parser("run-sparse", help="sweep every (sparse kernel, storage/distribution variant), forked")
