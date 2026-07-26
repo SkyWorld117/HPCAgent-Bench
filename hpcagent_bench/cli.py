@@ -512,6 +512,7 @@ def cmd_launch(args) -> int:
     return cluster_launch.launch(inference_endpoints=args.inference_endpoints,
                                  nodes_per_vllm=args.nodes_per_vllm,
                                  judge_nodes=args.judge_nodes,
+                                 optimizer_nodes=args.optimizer_nodes,
                                  model=args.model,
                                  run_driver=run_driver,
                                  vllm_port=args.vllm_port,
@@ -906,7 +907,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="one SLURM job: MPI partitions the allocation into vLLM + judge "
                         "nodes and drives the static pipeline (run under srun --mpi=pmix)")
     lc.add_argument("agent", help="agent name (openai for a vLLM endpoint; stub / claude / ...)")
-    lc.add_argument("--model", required=True, help="model id for `vllm serve` on the inference nodes")
+    lc.add_argument("--model",
+                    default="",
+                    help="model id for `vllm serve` on the inference nodes "
+                    "(unused, and not required, when --inference-endpoints 0 selects the traditional track)")
+    lc.add_argument("--optimizer-nodes",
+                    type=int,
+                    default=0,
+                    help="TRADITIONAL track only (--inference-endpoints 0): nodes that run the "
+                    "deterministic optimizer itself instead of serving a model. Allocation size is "
+                    "then optimizer-nodes + judge-nodes, and no vLLM is started")
     lc.add_argument("--inference-endpoints",
                     type=int,
                     default=1,
