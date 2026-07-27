@@ -18,7 +18,8 @@ class Benchmark(object):
 
         # The manifest is the source of truth; this reconstructs the legacy dict shape.
         try:
-            self.info = legacy_bench_info_dict(BenchSpec.load(bname))["benchmark"]
+            self.spec = BenchSpec.load(bname)
+            self.info = legacy_bench_info_dict(self.spec)["benchmark"]
         except Exception as e:
             print("Benchmark manifest for {b} could not be loaded.".format(b=bname))
             raise (e)
@@ -49,7 +50,8 @@ class Benchmark(object):
                                             fuzz_iteration or 0,
                                             configs=fz.get("configs"),
                                             constraints=fz.get("constraints"),
-                                            size_cap=fuzz.correctness_size_cap() or None)
+                                            size_cap=fuzz.correctness_size_cap() or None,
+                                            config_names=frozenset(self.spec.config))
         else:
             if preset not in self.info["parameters"].keys():
                 raise NotImplementedError("{b} doesn't have a {p} preset.".format(b=self.bname, p=preset))

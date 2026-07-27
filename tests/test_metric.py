@@ -510,11 +510,11 @@ def test_correctness_gate_grades_every_declared_config():
     declared = configs.get("valid") or []
     assert len(declared) > int(config.get("perf.max_configs", 5))  # the kernel this bug was found on
 
-    cells = M._correctness_cells(spec.parameters, configs, spec.constraints, k=1)
+    cells = M._correctness_cells(spec.parameters, configs, spec.constraints, 1, frozenset(spec.config))
     graded = {c["label"].split(":", 1)[0] for c in cells}
     assert len(graded) == len(declared)  # every declared config reaches the correctness gate
 
-    timed = M._timed_cells(spec.parameters, configs, spec.constraints, "throughput")
+    timed = M._timed_cells(spec.parameters, configs, spec.constraints, "throughput", frozenset(spec.config))
     assert len({c["label"].split(":", 1)[0] for c in timed}) <= int(config.get("perf.max_configs", 5))
 
 

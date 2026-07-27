@@ -544,7 +544,7 @@ def perf_sampling(spec) -> dict:
     """
     from hpcagent_bench import fuzz
     params = spec.parameters or {}
-    fuzzed = fuzz.resolve_ranges(params) if params else {}
+    fuzzed = fuzz.resolve_ranges(params, config_names=frozenset(spec.config)) if params else {}
     ranges = []
     for name, value in sorted(fuzzed.items()):
         if fuzz.is_range(value):
