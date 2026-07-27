@@ -69,12 +69,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -220,12 +225,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -291,12 +301,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -406,12 +421,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -492,12 +512,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -645,12 +670,17 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # The CPU baselines compile -march=native and ccache hashes that flag literally,
+          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
+          # the cache on the ISA the compiler would actually select.
+          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
