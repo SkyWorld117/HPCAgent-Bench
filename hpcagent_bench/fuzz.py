@@ -75,12 +75,6 @@ def is_construct(value: Any) -> bool:
     return isinstance(value, dict) and "construct" in value
 
 
-def is_cascade(value: Any) -> bool:
-    """``True`` for a cascaded bound ``{in: [lo, hi]}`` where lo/hi may name an
-    already-resolved param (ordering, e.g. ``ivend: {in: [1, "nvec"]}``)."""
-    return isinstance(value, dict) and "in" in value
-
-
 def _sample_set(choices, rng):
     """Pick one element of a discrete set uniformly at random."""
     return choices[int(rng.integers(len(choices)))]
@@ -90,9 +84,7 @@ def _sample_one(lo: float, hi: float, rng, distribution: str) -> int:
     lo, hi = int(lo), int(hi)
     if hi <= lo:
         return lo
-    # log_uniform is only defined on a strictly positive interval; a non-positive
-    # lower bound (e.g. a cascade ``{in: [0, n]}``) would feed log(0)/log(<0) =
-    # -inf/nan into the draw, so fall back to a plain uniform draw there.
+    # log_uniform needs lo > 0 (log(0)/log(<0) = -inf/nan); fall back to uniform otherwise.
     if distribution == "log_uniform" and lo > 0:
         val = float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
     else:  # uniform (or non-positive interval)
@@ -304,20 +296,12 @@ def _try_resolve(spec, resolved, rng, distribution):
             return _safe_eval(spec["construct"], {**resolved, **local})
         except NameError:
             return _UNRESOLVED
-    if is_cascade(spec):
-        lo, hi = spec["in"]
-        try:
-            lo = _safe_eval(lo, resolved) if isinstance(lo, str) else lo
-            hi = _safe_eval(hi, resolved) if isinstance(hi, str) else hi
-        except NameError:
-            return _UNRESOLVED
-        return _sample_one(lo, hi, rng, distribution)
     return _sample_leaf(spec, rng, distribution)
 
 
 def _resolve_sizes(fuzzed, initial, rng, distribution):
     """Topologically resolve size params: sample leaves, then evaluate
-    derive/construct/in to a fixpoint (a cyclic reference raises)."""
+    derive/construct to a fixpoint (a cyclic reference raises)."""
     resolved = dict(initial)
     pending = dict(fuzzed)
     progress = True
@@ -334,71 +318,18 @@ def _resolve_sizes(fuzzed, initial, rng, distribution):
     return {name: resolved[name] for name in fuzzed}
 
 
-#: The two ways a ``fuzz.configs`` block may describe its config space (mutually exclusive).
-_CONFIG_COMPOSITIONS = ("valid", "sets")
-_CONFIG_KEYS = frozenset(_CONFIG_COMPOSITIONS) | {"rules"}
+_CONFIG_KEYS = frozenset({"valid"})
 
 
-def _resolve_config(configs, rng):
-    """Pick one config from the kernel's config space.
-
-    A ``fuzz.configs`` block describes that space in exactly ONE of two compositions:
-
-    1. **Enumerated** -- ``valid:`` is a list of dicts, each a complete, hand-curated config::
-
-           configs:
-             valid:
-             - {reflect_out: 0}
-             - {reflect_out: 1}
-
-       Use when the valid combinations are few, or curated (a baseline + one-hot + key combos)
-       rather than "the cartesian product minus the impossible ones".
-
-    2. **Generated + filtered** -- ``sets:`` gives the per-parameter choice sets and the optional
-       ``rules:`` are predicates every drawn config must satisfy::
-
-           configs:
-             sets:  {okvan: [false, true], okpaw: [false, true], negrp: [1, 2]}
-             rules: ["okpaw <= okvan", "negrp >= 1"]
-
-       Use when the space is a product with a few impossibility constraints -- the rules say
-       ``var OP const`` / ``var1 OP var2`` and compose with ``and`` / ``or``. Rules are evaluated by
-       :func:`_safe_eval` (AST-restricted, never Python ``eval``), so only arithmetic, comparisons,
-       boolean/ternary logic and the whitelisted numeric builtins are allowed.
-
-    The compositions are mutually exclusive, and every key is validated, because the failure mode of
-    a silent fallback here is a kernel graded on the WRONG config space (a typo'd ``valids:`` used to
-    resolve to the empty config, and a ``valid:`` list next to ``sets:`` used to silently ignore the
-    latter).
-
-    :param configs: The ``fuzz.configs`` block.
-    :param rng: Seeded generator (draw order is part of the fuzz contract).
-    :returns: One config as a ``{param: value}`` dict.
-    :raises ValueError: On an unknown / empty / mixed-composition block, or unsatisfiable rules.
-    """
+def _resolve_config(configs: Dict[str, Any], rng) -> Dict[str, Any]:
+    """Pick one config from ``fuzz.configs.valid`` (a list of complete, hand-curated dicts)."""
     unknown = sorted(set(configs) - _CONFIG_KEYS)
     if unknown:
-        raise ValueError(f"unknown fuzz.configs key(s) {unknown}; expected one of {sorted(_CONFIG_KEYS)}")
-    present = [k for k in _CONFIG_COMPOSITIONS if configs.get(k)]
-    if len(present) != 1:
-        raise ValueError(f"fuzz.configs must use exactly one composition, {_CONFIG_COMPOSITIONS[0]!r} "
-                         f"(enumerated) or {_CONFIG_COMPOSITIONS[1]!r} (generated + filtered); got "
-                         f"{present or 'neither'}")
-
-    rules = configs.get("rules") or []
-    if present[0] == "valid":
-        if rules:
-            raise ValueError("fuzz.configs.rules filters drawn configs and is meaningless next to an "
-                             "enumerated 'valid:' list -- drop the impossible entries instead")
-        valid = configs["valid"]
-        return dict(valid[int(rng.integers(len(valid)))])
-
-    sets = configs["sets"]
-    for _ in range(_MAX_RESAMPLE):
-        pick = {name: _sample_set(choices, rng) for name, choices in sets.items()}
-        if all(_safe_eval(rule, pick) for rule in rules):
-            return pick
-    raise ValueError(f"no config over sets {sorted(sets)} satisfies rules {rules} in {_MAX_RESAMPLE} draws")
+        raise ValueError(f"unknown fuzz.configs key(s) {unknown}; expected 'valid'")
+    valid = configs.get("valid")
+    if not valid:
+        raise ValueError("fuzz.configs must declare a non-empty 'valid' list")
+    return dict(valid[int(rng.integers(len(valid)))])
 
 
 def sample_params(parameters: Dict[str, Any],
@@ -413,7 +344,7 @@ def sample_params(parameters: Dict[str, Any],
     before (all inputs valid, single pass, identical draw order). Microapps may add
     ``configs`` (a valid config space, see :func:`_resolve_config`) and/or
     ``constraints`` (python predicates over the resolved params); size params may
-    use ``{derive}`` / ``{construct}`` / ``{in}`` forms resolved against the
+    use ``{derive}`` / ``{construct}`` forms resolved against the
     config + other sizes. Resamples (bounded) until the constraints hold.
     ``size_cap`` forwards to :func:`resolve_ranges`; the correctness data path passes
     :func:`correctness_size_cap` so a correct-but-slow reference is not drawn a
@@ -456,29 +387,17 @@ def enumerate_configs(configs: Dict[str, Any] = None, max_configs: int = None):
     ``max_configs`` (default ``perf.max_configs`` = 5) so the config space cannot
     explode the evaluation. Pass :data:`UNCAPPED` for the correctness gate.
 
-    ``valid:`` is taken verbatim; a ``sets:`` + ``rules:`` space is expanded to its
-    full cartesian product filtered by the rules (bounded by ``_MAX_RESAMPLE``
-    product size). When the valid set exceeds the cap, a deterministic seeded subset
-    of ``max_configs`` is kept and the drop is logged (never silently truncated). A
-    kernel with no config space yields ``[{}]`` -- a single empty config, so callers
-    can always iterate ``for cfg in enumerate_configs(...)``.
+    ``valid:`` is taken verbatim. When it exceeds the cap, a deterministic seeded
+    subset of ``max_configs`` is kept and the drop is logged (never silently
+    truncated). A kernel with no config space yields ``[{}]`` -- a single empty
+    config, so callers can always iterate ``for cfg in enumerate_configs(...)``.
     """
     if not configs:
         return [{}]
     valid = configs.get("valid")
-    if valid:
-        out = [dict(v) for v in valid]
-    else:
-        sets = configs.get("sets") or {}
-        rules = configs.get("rules") or []
-        if not sets:
-            return [{}]
-        combos = [{}]
-        for name in list(sets):
-            combos = [{**c, name: v} for c in combos for v in sets[name]]
-            if len(combos) > _MAX_RESAMPLE:
-                raise ValueError(f"config space too large to enumerate ({len(combos)} > {_MAX_RESAMPLE})")
-        out = [c for c in combos if all(_safe_eval(rule, c) for rule in rules)]
+    if not valid:
+        return [{}]
+    out = [dict(v) for v in valid]
     cap = int(max_configs if max_configs is not None else config.get("perf.max_configs", 5))
     if cap > 0 and len(out) > cap:
         rng = np.random.default_rng(int(config.get("seeds.fuzz", 42)))
@@ -553,7 +472,7 @@ def edge_shapes(parameters: Dict[str, Any],
 
     Returns a list of ``(label, sample)`` where each ``sample`` sets every free
     integer size root to a small structural edge value (:data:`EDGE_VALUES`),
-    capped at that root's declared maximum, with derive/construct/cascade resolved
+    capped at that root's declared maximum, with derive/construct resolved
     and ``config`` merged in. Edge sizes are small and independent of the fuzz
     range (see :data:`EDGE_KINDS`). A category whose resolved sample violates
     ``constraints`` is skipped (caller may log); duplicate resolved samples are

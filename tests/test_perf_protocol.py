@@ -29,15 +29,6 @@ def test_enumerate_configs_valid_list_verbatim():
     assert fuzz.enumerate_configs(configs) == [{"mode": "a"}, {"mode": "b"}]
 
 
-def test_enumerate_configs_sets_and_rules_cartesian_filtered():
-    configs = {"sets": {"x": [1, 2], "y": [10, 20]}, "rules": ["x == 1 or y == 10"]}
-    got = fuzz.enumerate_configs(configs, max_configs=10)
-    # full product is 4; the rule drops {x:2, y:20}
-    assert {"x": 2, "y": 20} not in got
-    assert len(got) == 3
-    assert all(c["x"] == 1 or c["y"] == 10 for c in got)
-
-
 def test_enumerate_configs_caps_at_max(caplog):
     # a valid list of 12 configs is capped to a deterministic seeded subset of 5
     configs = {"valid": [{"i": i} for i in range(12)]}

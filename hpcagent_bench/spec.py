@@ -409,12 +409,8 @@ def _parse_config_knob(raw: Any, kernel: str, sym: str, source: str) -> ConfigKn
 
 def _validate_constraints(constraints: Tuple[str, ...], parameters_view: Dict[str, Dict[str, Any]], kernel: str,
                           source: str) -> None:
-    """Evaluate every ``constraints:`` expression against every preset's merged {dimension value,
-    config representative} names, raising at LOAD if any is false or names an undeclared symbol.
-    Reuses :func:`hpcagent_bench.fuzz._safe_eval` (AST-restricted, never Python ``eval``) -- the same
-    sandboxed evaluator ``fuzz.configs.rules`` already runs, so constraint expressions follow the same
-    grammar (arithmetic, comparisons, boolean/ternary logic, whitelisted numeric builtins).
-    """
+    """Reject at LOAD any ``constraints:`` expression that is false, or names an undeclared symbol,
+    at any preset. Evaluated by ``fuzz._safe_eval`` -- AST-restricted, never Python ``eval``."""
     for preset, names in parameters_view.items():
         for expr in constraints:
             try:

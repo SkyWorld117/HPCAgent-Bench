@@ -3,7 +3,7 @@
 """Resolution of the config/shape forms in :func:`hpcagent_bench.fuzz.sample_params`.
 
 Microkernels (intervals/sets/scalars only) resolve exactly as before; microapps
-add derive/construct/in size forms + a valid config space + residual constraints.
+add derive/construct size forms + a valid config space + residual constraints.
 """
 import pytest
 
@@ -41,32 +41,12 @@ def test_construct_satisfies_divisibility_by_construction():
         assert out["N"] % out["R"] == 0
 
 
-def test_cascade_respects_ordering():
-    p = _fuzzed(nvec=[10, 40], ivend={"in": [1, "nvec"]})
-    for it in range(20):
-        out = fuzz.sample_params(p, iteration=it)
-        assert 1 <= out["ivend"] <= out["nvec"]
-
-
 def test_config_valid_picks_an_enumerated_tuple():
     cfg = {"valid": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]}
     seen = {(fuzz.sample_params({"fuzzed": {}}, it,
                                 configs=cfg)["a"], fuzz.sample_params({"fuzzed": {}}, it, configs=cfg)["b"])
             for it in range(30)}
     assert seen <= {(1, 2), (3, 4)} and len(seen) >= 1
-
-
-def test_config_sets_respect_rules():
-    cfg = {
-        "sets": {
-            "okvan": [False, True],
-            "okpaw": [False, True]
-        },
-        "rules": ["okvan or not okpaw"]
-    }  # okpaw implies okvan
-    for it in range(40):
-        out = fuzz.sample_params({"fuzzed": {}}, it, configs=cfg)
-        assert not (out["okpaw"] and not out["okvan"])
 
 
 def test_config_flag_is_visible_to_derive():
