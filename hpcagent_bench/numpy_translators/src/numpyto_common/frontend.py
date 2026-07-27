@@ -3298,6 +3298,10 @@ def pure_int_arith(n: ast.AST) -> bool:
     return False
 
 
+#: Int-in/int-out calls, so int context flows backward through them.
+INT_TRANSPARENT = frozenset({"min", "max", "abs"})
+
+
 def _names_used_as_int(tree: ast.AST) -> Set[str]:
     """Return the set of ``Name`` ids that flow into an integer-only
     position (array subscript, ``range()`` argument). The implicit-
@@ -3327,10 +3331,11 @@ def _names_used_as_int(tree: ast.AST) -> Set[str]:
             elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
             for e in elts:
                 collect(e)
-        elif isinstance(node, ast.Call):
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in INT_TRANSPARENT:
+            # int(x)/floor(x) CONVERT, so the argument is the float converted FROM, not an int.
             for arg in node.args:
                 collect(arg)
-        # Constants pass through.
+        # Constants and every other call pass through.
 
     BITWISE_OPS = (ast.BitOr, ast.BitAnd, ast.BitXor, ast.LShift, ast.RShift)
     for node in ast.walk(tree):
