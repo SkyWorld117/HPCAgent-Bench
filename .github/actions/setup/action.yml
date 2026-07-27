@@ -55,15 +55,7 @@ runs:
       shell: bash
       run: |
         # Turn a silently-skipped test into a loud setup error so a provisioning regression
-        # cannot masquerade as a green run. (Apptainer/polycc are verified in their own jobs;
-        # icpx/Intel oneAPI is deliberately not installed here, so it is not checked.)
-        missing=0
-        for t in make gcc g++ gfortran clang flang pkg-config; do
-          if command -v "$t" >/dev/null 2>&1; then
-            printf '  ok    %-12s %s\n' "$t" "$(command -v "$t")"
-          else
-            printf '  MISS  %s\n' "$t"; missing=1
-          fi
-        done
-        pkg-config --exists openblas || { echo '  MISS  openblas (pkg-config)'; missing=1; }
-        [ "$missing" = 0 ] || { echo 'Toolchain incomplete -- see MISS lines above'; exit 1; }
+        # cannot masquerade as a green run. The script resolves compiler drivers the way the
+        # HARNESS does, not with `command -v`: apt's `flang` is a metapackage whose only driver
+        # is flang-new-18, and a bare lookup called that a miss while every test used it fine.
+        python scripts/verify_toolchain.py
