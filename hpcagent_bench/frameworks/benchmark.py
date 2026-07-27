@@ -44,14 +44,13 @@ class Benchmark(object):
         if params_override is not None:
             parameters = dict(params_override)
         elif preset == fuzz.FUZZED_PRESET:
-            # Thread the manifest's fuzz config/constraints so the draw spans configs x shapes.
             fz = self.info.get("fuzz") or {}
             parameters = fuzz.sample_params(self.info["parameters"],
                                             fuzz_iteration or 0,
-                                            configs=fz.get("configs"),
-                                            constraints=fz.get("constraints"),
+                                            configs=self.spec.config_space,
+                                            constraints=tuple(fz.get("constraints") or ()) + self.spec.constraints,
                                             size_cap=fuzz.correctness_size_cap() or None,
-                                            config_names=frozenset(self.spec.config))
+                                            config_names=self.spec.config_names)
         else:
             if preset not in self.info["parameters"].keys():
                 raise NotImplementedError("{b} doesn't have a {p} preset.".format(b=self.bname, p=preset))

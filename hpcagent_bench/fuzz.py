@@ -303,7 +303,9 @@ def _resolve_sizes(fuzzed, initial, rng, distribution):
     """Topologically resolve size params: sample leaves, then evaluate
     derive/construct to a fixpoint (a cyclic reference raises)."""
     resolved = dict(initial)
-    pending = dict(fuzzed)
+    # A name the caller already bound (the chosen config) is NOT re-drawn: BenchSpec.parameters is the
+    # merged view, so every preset carries the config knobs and they would otherwise clobber the draw.
+    pending = {name: spec for name, spec in fuzzed.items() if name not in initial}
     progress = True
     while pending and progress:
         progress = False
@@ -315,21 +317,14 @@ def _resolve_sizes(fuzzed, initial, rng, distribution):
                 progress = True
     if pending:
         raise ValueError(f"cyclic or unresolvable params: {sorted(pending)}")
-    return {name: resolved[name] for name in fuzzed}
+    return {name: resolved[name] for name in fuzzed if name not in initial}
 
 
-_CONFIG_KEYS = frozenset({"valid"})
-
-
-def _resolve_config(configs: Dict[str, Any], rng) -> Dict[str, Any]:
-    """Pick one config from ``fuzz.configs.valid`` (a list of complete, hand-curated dicts)."""
-    unknown = sorted(set(configs) - _CONFIG_KEYS)
-    if unknown:
-        raise ValueError(f"unknown fuzz.configs key(s) {unknown}; expected 'valid'")
-    valid = configs.get("valid")
-    if not valid:
-        raise ValueError("fuzz.configs must declare a non-empty 'valid' list")
-    return dict(valid[int(rng.integers(len(valid)))])
+def _resolve_config(configs, rng) -> Dict[str, Any]:
+    """Pick one complete config from an enumerated config space (``BenchSpec.config_space``)."""
+    if not configs:
+        raise ValueError("config space is empty; a kernel with no config knobs must pass None")
+    return dict(configs[int(rng.integers(len(configs)))])
 
 
 def sample_params(parameters: Dict[str, Any],
@@ -382,28 +377,30 @@ def iterations() -> int:
 UNCAPPED = 0
 
 
-def enumerate_configs(configs: Dict[str, Any] = None, max_configs: int = None):
-    """The VALID config tuples to evaluate, as a list of dicts, capped at
-    ``max_configs`` (default ``perf.max_configs`` = 5) so the config space cannot
-    explode the evaluation. Pass :data:`UNCAPPED` for the correctness gate.
+def enumerate_configs(configs=None, max_configs: int = None):
+    """The complete configs to evaluate, as a list of dicts, capped at ``max_configs``
+    (default ``perf.max_configs`` = 5) so the config space cannot explode the evaluation.
+    Pass :data:`UNCAPPED` for the correctness gate.
 
-    ``valid:`` is taken verbatim. When it exceeds the cap, a deterministic seeded
-    subset of ``max_configs`` is kept and the drop is logged (never silently
-    truncated). A kernel with no config space yields ``[{}]`` -- a single empty
-    config, so callers can always iterate ``for cfg in enumerate_configs(...)``.
+    ``configs`` is an already-enumerated space (``BenchSpec.config_space``) -- the curated list, or
+    the mapping composition's constraint-filtered product. It is taken verbatim; when it exceeds the
+    cap, an X-of-Y subset is kept and the drop is logged (never silently truncated). A kernel with no
+    config space yields ``[{}]`` -- a single empty config, so callers can always iterate
+    ``for cfg in enumerate_configs(...)``.
+
+    The subset is drawn off the JUDGE-ONLY :func:`secret_shape_seed`, not ``seeds.fuzz``: which
+    configs get timed is a grading decision, and seeding it from the seed the agent can reproduce
+    would let a submission be tuned for exactly the branches that will be measured.
     """
     if not configs:
         return [{}]
-    valid = configs.get("valid")
-    if not valid:
-        return [{}]
-    out = [dict(v) for v in valid]
+    out = [dict(v) for v in configs]
     cap = int(max_configs if max_configs is not None else config.get("perf.max_configs", 5))
     if cap > 0 and len(out) > cap:
-        rng = np.random.default_rng(int(config.get("seeds.fuzz", 42)))
+        rng = np.random.default_rng(secret_shape_seed())
         keep = sorted(int(i) for i in rng.choice(len(out), size=cap, replace=False))
         logging.getLogger(__name__).warning(
-            "config space has %d valid configs > cap %d; evaluating a seeded "
+            "config space has %d configs > cap %d; evaluating a seeded "
             "subset of %d (set perf.max_configs to change)", len(out), cap, cap)
         out = [out[i] for i in keep]
     return out

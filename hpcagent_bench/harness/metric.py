@@ -373,7 +373,10 @@ def score_task_fuzzed(submission: Submission,
     spec = BenchSpec.load(task.kernel)
     dwarf = spec.dwarf or _UNCLASSIFIED
     fz = spec.fuzz or {}
-    configs, constraints = fz.get("configs"), fz.get("constraints")
+    configs = spec.config_space
+    # fuzz.constraints are the size-draw predicates; spec.constraints the cross-symbol invariants.
+    constraints = tuple(fz.get("constraints") or ()) + spec.constraints
+    config_names = spec.config_names
     params = spec.parameters
     mode = perf_mode if perf_mode is not None else fuzz.perf_mode()
     # resolve the baseline: explicit choice > the kernel's own declared baseline > per-track default
@@ -391,7 +394,7 @@ def score_task_fuzzed(submission: Submission,
     # --- Stage 1: correctness gate over configs x (edge u fuzzed) ---
     corr = score_cells(submission,
                        task,
-                       _correctness_cells(params, configs, constraints, k, frozenset(spec.config)),
+                       _correctness_cells(params, configs, constraints, k, config_names),
                        datatype=datatype,
                        repeat=1,
                        oracle=oracle,
@@ -408,7 +411,7 @@ def score_task_fuzzed(submission: Submission,
         timing.validate_repeat(repeat)  # fail loudly rather than silently flooring every cell to 1.0
         timed = score_cells(submission,
                             task,
-                            _timed_cells(params, configs, constraints, mode, frozenset(spec.config)),
+                            _timed_cells(params, configs, constraints, mode, config_names),
                             datatype=datatype,
                             repeat=repeat,
                             oracle=timed_oracle,
