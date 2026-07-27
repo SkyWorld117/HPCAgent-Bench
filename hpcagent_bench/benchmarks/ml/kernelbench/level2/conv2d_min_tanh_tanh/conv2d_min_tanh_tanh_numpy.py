@@ -6,11 +6,11 @@ def _as_tuple(value, dims):
     return tuple((value for _ in range(dims)))
 
 def _conv2d(x, weight, bias, stride, padding, dilation, groups):
-    if isinstance(stride, int):
+    if isinstance(stride, (int, np.integer)):
         stride = (stride, stride)
-    if isinstance(padding, int):
+    if isinstance(padding, (int, np.integer)):
         padding = (padding, padding)
-    if isinstance(dilation, int):
+    if isinstance(dilation, (int, np.integer)):
         dilation = (dilation, dilation)
     n, c_in, h, w = x.shape
     c_out, c_per_group, kh, kw = weight.shape

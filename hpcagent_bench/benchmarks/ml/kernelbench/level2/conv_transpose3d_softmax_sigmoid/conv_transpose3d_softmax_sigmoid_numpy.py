@@ -8,10 +8,10 @@ def _as_tuple(value, dims):
 
 
 def _conv_transpose3d(x, weight, bias, stride, padding, output_padding, dilation, groups):
-    if isinstance(stride, int): stride = (stride, stride, stride)
-    if isinstance(padding, int): padding = (padding, padding, padding)
-    if isinstance(output_padding, int): output_padding = (output_padding, output_padding, output_padding)
-    if isinstance(dilation, int): dilation = (dilation, dilation, dilation)
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride, stride)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding, padding)
+    if isinstance(output_padding, (int, np.integer)): output_padding = (output_padding, output_padding, output_padding)
+    if isinstance(dilation, (int, np.integer)): dilation = (dilation, dilation, dilation)
     n, c_in, d, h, w = x.shape
     _, c_out_per_group, kd, kh, kw = weight.shape
     c_out = c_out_per_group * groups

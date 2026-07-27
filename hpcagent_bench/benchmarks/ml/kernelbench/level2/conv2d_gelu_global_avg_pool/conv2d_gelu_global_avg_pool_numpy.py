@@ -2,7 +2,7 @@ import numpy as np
 
 
 def _adaptive_avg_pool2d(x, output_size):
-    if isinstance(output_size, int): output_size = (output_size, output_size)
+    if isinstance(output_size, (int, np.integer)): output_size = (output_size, output_size)
     n, c, h, w = x.shape
     out = np.zeros((n, c, output_size[0], output_size[1]), dtype=x.dtype)
     for oy in range(output_size[0]):
@@ -22,9 +22,9 @@ def _as_tuple(value, dims):
 
 
 def _conv2d(x, weight, bias, stride, padding, dilation, groups):
-    if isinstance(stride, int): stride = (stride, stride)
-    if isinstance(padding, int): padding = (padding, padding)
-    if isinstance(dilation, int): dilation = (dilation, dilation)
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding)
+    if isinstance(dilation, (int, np.integer)): dilation = (dilation, dilation)
     n, c_in, h, w = x.shape
     c_out, c_per_group, kh, kw = weight.shape
     oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // stride[0] + 1

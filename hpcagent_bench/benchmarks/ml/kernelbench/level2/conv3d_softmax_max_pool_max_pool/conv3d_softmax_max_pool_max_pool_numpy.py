@@ -8,9 +8,9 @@ def _as_tuple(value, dims):
 
 
 def _conv3d(x, weight, bias, stride, padding, dilation, groups):
-    if isinstance(stride, int): stride = (stride, stride, stride)
-    if isinstance(padding, int): padding = (padding, padding, padding)
-    if isinstance(dilation, int): dilation = (dilation, dilation, dilation)
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride, stride)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding, padding)
+    if isinstance(dilation, (int, np.integer)): dilation = (dilation, dilation, dilation)
     n, c_in, d, h, w = x.shape
     c_out, c_per_group, kd, kh, kw = weight.shape
     od = (d + 2 * padding[0] - dilation[0] * (kd - 1) - 1) // stride[0] + 1
@@ -41,10 +41,10 @@ def _conv3d(x, weight, bias, stride, padding, dilation, groups):
     return out
 
 def _maxpool3d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, int): kernel_size = (kernel_size, kernel_size, kernel_size,)
+    if isinstance(kernel_size, (int, np.integer)): kernel_size = (kernel_size, kernel_size, kernel_size,)
     if stride is None: stride = kernel_size
-    if isinstance(stride, int): stride = (stride, stride, stride,)
-    if isinstance(padding, int): padding = (padding, padding, padding,)
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride, stride,)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding, padding,)
     padded_shape = (x.shape[0], x.shape[1]) + tuple(x.shape[i + 2] + 2 * padding[i] for i in range(3))
     fill = -np.inf if "max" == "max" else 0.0
     padded = np.full(padded_shape, fill, dtype=x.dtype)

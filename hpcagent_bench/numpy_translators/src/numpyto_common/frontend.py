@@ -36,6 +36,7 @@ from numpyto_common.lib_nodes import _iter_extent_of, _read_axis_keepdims
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive,
                                           _UfuncOutInline, _UfuncReduceToReducer, _eigh_alias_names, rewrite_curve_fit)
+from numpyto_common.tuple_desugar import desugar_tuples
 
 
 def native_desugar(fn: ast.FunctionDef) -> None:
@@ -72,6 +73,18 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     _DropValidationGuards().visit(fn)
     _FoldStaticNoneBranches().visit(fn)
     ast.fix_missing_locations(fn)
+
+
+def _declared_ranks(shapes_raw: Dict[str, Any]) -> Dict[str, int]:
+    """``init.shapes`` -> ``{array: rank}``, counting top-level commas so ``(N, M * K)`` is rank 2."""
+    ranks: Dict[str, int] = {}
+    for name, shape in (shapes_raw or {}).items():
+        try:
+            parsed = ast.parse(str(shape).strip(), mode="eval").body
+        except SyntaxError:
+            continue
+        ranks[name] = len(parsed.elts) if isinstance(parsed, (ast.Tuple, ast.List)) else 1
+    return ranks
 
 
 def _is_scalar_leaf(node: ast.expr) -> bool:
@@ -355,6 +368,16 @@ def parse_kernel(numpy_py: pathlib.Path,
     # AND, identically, to every non-inlined helper in ``_build_helper_kirs`` so a
     # helper that survives inlining is not left with un-emittable constructs.
     native_desugar(fn)
+
+    # Scalarize compile-time tuples AFTER inlining, so a tuple a helper built from its own
+    # parameters (every KernelBench conv/pool port normalises a knob to ``(s, s)``) is folded
+    # against the values the call site actually passed.
+    _scalar_names = frozenset(input_args) - frozenset(array_args)
+    desugar_tuples(fn,
+                   int_scalars=_scalar_names - frozenset(_float_preset_names),
+                   float_scalars=frozenset(_float_preset_names) & _scalar_names,
+                   arrays=frozenset(array_args),
+                   ranks=_declared_ranks(shapes_raw))
 
     # Inline tuple-valued shape locals and fold tuple concatenation AFTER
     # inlining so references inside inlined helper bodies (vexx's invfft/fwfft

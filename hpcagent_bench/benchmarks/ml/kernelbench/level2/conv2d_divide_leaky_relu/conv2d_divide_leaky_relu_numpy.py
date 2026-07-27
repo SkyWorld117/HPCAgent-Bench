@@ -8,9 +8,9 @@ def _as_tuple(value, dims):
 
 
 def _conv2d(x, weight, bias, stride, padding, dilation, groups):
-    if isinstance(stride, int): stride = (stride, stride)
-    if isinstance(padding, int): padding = (padding, padding)
-    if isinstance(dilation, int): dilation = (dilation, dilation)
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding)
+    if isinstance(dilation, (int, np.integer)): dilation = (dilation, dilation)
     n, c_in, h, w = x.shape
     c_out, c_per_group, kh, kw = weight.shape
     oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // stride[0] + 1

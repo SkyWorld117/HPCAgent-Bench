@@ -2,10 +2,10 @@ import numpy as np
 
 
 def _avgpool1d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, int): kernel_size = (kernel_size,)
+    if isinstance(kernel_size, (int, np.integer)): kernel_size = (kernel_size,)
     if stride is None: stride = kernel_size
-    if isinstance(stride, int): stride = (stride,)
-    if isinstance(padding, int): padding = (padding,)
+    if isinstance(stride, (int, np.integer)): stride = (stride,)
+    if isinstance(padding, (int, np.integer)): padding = (padding,)
     padded_shape = (x.shape[0], x.shape[1]) + tuple(x.shape[i + 2] + 2 * padding[i] for i in range(1))
     fill = -np.inf if "mean" == "max" else 0.0
     padded = np.full(padded_shape, fill, dtype=x.dtype)

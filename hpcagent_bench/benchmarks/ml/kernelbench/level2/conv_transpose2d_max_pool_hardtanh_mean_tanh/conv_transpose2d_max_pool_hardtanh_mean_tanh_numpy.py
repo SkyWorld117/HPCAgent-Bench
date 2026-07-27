@@ -6,13 +6,13 @@ def _as_tuple(value, dims):
     return tuple((value for _ in range(dims)))
 
 def _conv_transpose2d(x, weight, bias, stride, padding, output_padding, dilation, groups):
-    if isinstance(stride, int):
+    if isinstance(stride, (int, np.integer)):
         stride = (stride, stride)
-    if isinstance(padding, int):
+    if isinstance(padding, (int, np.integer)):
         padding = (padding, padding)
-    if isinstance(output_padding, int):
+    if isinstance(output_padding, (int, np.integer)):
         output_padding = (output_padding, output_padding)
-    if isinstance(dilation, int):
+    if isinstance(dilation, (int, np.integer)):
         dilation = (dilation, dilation)
     n, c_in, h, w = x.shape
     _, c_out_per_group, kh, kw = weight.shape
@@ -38,13 +38,13 @@ def _conv_transpose2d(x, weight, bias, stride, padding, output_padding, dilation
     return out
 
 def _maxpool2d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, int):
+    if isinstance(kernel_size, (int, np.integer)):
         kernel_size = (kernel_size, kernel_size)
     if stride is None:
         stride = kernel_size
-    if isinstance(stride, int):
+    if isinstance(stride, (int, np.integer)):
         stride = (stride, stride)
-    if isinstance(padding, int):
+    if isinstance(padding, (int, np.integer)):
         padding = (padding, padding)
     padded_shape = (x.shape[0], x.shape[1]) + tuple((x.shape[i + 2] + 2 * padding[i] for i in range(2)))
     fill = -np.inf if 'max' == 'max' else 0.0
