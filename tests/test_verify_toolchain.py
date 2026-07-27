@@ -11,6 +11,7 @@ import stat
 
 import pytest
 
+from hpcagent_bench import languages
 from hpcagent_bench.languages import resolve_compiler
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -35,11 +36,13 @@ def write_executable(path: pathlib.Path, body: str) -> None:
 
 @pytest.fixture
 def fake_toolchain(tmp_path, monkeypatch):
-    """A PATH holding nothing but the entries above plus a pkg-config that says yes."""
+    """A PATH holding nothing but the entries above, plus a pkg-config and a link probe that
+    both say yes -- the link rows have their own test below."""
     for name in FAKE_PATH_ENTRIES:
         write_executable(tmp_path / name, "#!/bin/sh\nexit 0\n")
     write_executable(tmp_path / "pkg-config", "#!/bin/sh\necho -lopenblas\n")
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(languages, "library_linkable", lambda soname: True)
     # resolve_compiler is lru_cached on the name, so a stale entry would survive the new PATH.
     resolve_compiler.cache_clear()
     yield tmp_path
@@ -70,3 +73,12 @@ def test_a_missing_library_fails_loudly(fake_toolchain, capsys):
     write_executable(fake_toolchain / "pkg-config", "#!/bin/sh\nexit 1\n")
     assert load_script().main() == 1
     assert "MISS  pkg-config:openblas" in capsys.readouterr().out
+
+
+def test_an_unlinkable_runtime_fails_loudly(fake_toolchain, monkeypatch, capsys):
+    """libomp is a HARD requirement, not an extra: libgomp deadlocks across fork() and libomp
+    recovers, so a runner with only libgomp cannot tell the fix from the forgiving runtime.
+    apt's libomp-dev is a metapackage, so `installed` and `linkable` are different questions."""
+    monkeypatch.setattr(languages, "library_linkable", lambda soname: soname != "omp")
+    assert load_script().main() == 1
+    assert "MISS  -lomp" in capsys.readouterr().out

@@ -20,11 +20,12 @@ import pathlib
 import select
 import shutil
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pytest
 
+from hpcagent_bench import languages
 from hpcagent_bench.frameworks.forked import forked_failure_reason, run_forked
 from hpcagent_bench.isolation import OMP_PAUSE_MODES, OMP_PAUSE_SOFT, OMP_RUNTIME_SONAMES, pause_openmp_pools
 
@@ -61,34 +62,11 @@ def thread_count() -> int:
     return len(os.listdir("/proc/self/task"))
 
 
-def driver_lib_path(soname: str) -> Optional[pathlib.Path]:
-    """Where gcc's own search path resolves ``lib<soname>.so``, or ``None`` if it doesn't know
-    one. ``-print-file-name`` echoes the bare name back when it can't resolve it."""
-    resolved = subprocess.run(["gcc", f"-print-file-name=lib{soname}.so"], capture_output=True,
-                              text=True).stdout.strip()
-    if not resolved or resolved == f"lib{soname}.so":
-        return None
-    path = pathlib.Path(os.path.normpath(resolved))
-    return path if path.exists() else None
-
-
-def runtime_dir(soname: str) -> Optional[str]:
-    """Extra ``-L``/``-rpath`` directory gcc needs to link ``lib<soname>``, or ``None`` if its
-    own search path already covers it. ``ldconfig``'s cache is the fallback for a runtime off
-    gcc's default path (e.g. libomp under ``/usr/lib/llvm-*/lib``)."""
-    if driver_lib_path(soname) is not None:
-        return None
-    cache = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True).stdout
-    for line in cache.splitlines():
-        if f"lib{soname}.so" in line and "=> " in line:
-            return str(pathlib.Path(line.rsplit("=> ", 1)[1].strip()).parent)
-    return None
-
-
-def lib_linkable(soname: str) -> bool:
-    """True if gcc can link ``-l<soname>`` at all -- either its own search path resolves it, or
-    an ``ldconfig``-derived ``-L`` directory does."""
-    return driver_lib_path(soname) is not None or runtime_dir(soname) is not None
+# The runtime lookup lives in hpcagent_bench.languages so this test and the CI provisioning gate
+# ask the SAME question -- a gate that probes differently from the code it guards is how `flang`
+# came up MISS while every test used it fine.
+runtime_dir = languages.resolve_library_dir
+lib_linkable = languages.library_linkable
 
 
 # gcc and both OpenMP runtimes are hard requirements of this file, not optional extras: gcc is
