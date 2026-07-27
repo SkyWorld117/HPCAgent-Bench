@@ -1,15 +1,17 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The HPCAgent-Bench Score (hpcagent_bench.harness.metric): pure aggregation, plus the seeded fuzz sweep."""
+import inspect
 import shutil
 
 import pytest
 
+from hpcagent_bench import config, fuzz
 from hpcagent_bench.harness import metric as M
+from hpcagent_bench.harness import scoring
 from hpcagent_bench.harness.scoring import _data_seeded
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.harness.envelope import Submission
-from hpcagent_bench import config, fuzz
 from hpcagent_bench.spec import BenchSpec
 
 _FUZZ_KERNEL = "tsvc_2_s212"  # real, fuzzable LEN_1D, O(N) -> cheap C reference
@@ -178,16 +180,27 @@ def _mpi_submission():
     return Submission(language="c", source="mpi", distribution={"grid": [4], "arrays": {"a": {"replicated": True}}})
 
 
-def _run_distributed(monkeypatch, *, node_counts, anchor="serial", runs=None, mode="strong"):
-    """Mock config + the two runners so _score_task_distributed runs without a cluster; returns TaskScore."""
+def _run_distributed(monkeypatch,
+                     *,
+                     node_counts,
+                     anchor="serial",
+                     runs=None,
+                     mode="strong",
+                     speedup=4.0,
+                     suspect_above=None):
+    """Mock config + the two runners so _score_task_distributed runs without a cluster; returns TaskScore.
+
+    ``suspect_above`` overrides ``record.speedup_suspect_above`` (else the real config default applies)."""
     import types
     from hpcagent_bench.harness.scoring import Score, ScalingRuns
     overrides = {"mpi.mode": mode, "mpi.ranks": 4, "mpi.leaderboard_preset": "M", "mpi.node_counts": node_counts}
+    if suspect_above is not None:
+        overrides["record.speedup_suspect_above"] = suspect_above
     real_get = M.config.get
     monkeypatch.setattr(M.config, "get", lambda key, default=None: overrides.get(key, real_get(key, default)))
     monkeypatch.setattr(
         M, "score_distributed",
-        lambda *a, **k: Score(True, 0.0, 1000, True, "", baseline_ns=4000, speedup=4.0, baseline="numpy"))
+        lambda *a, **k: Score(True, 0.0, 1000, True, "", baseline_ns=4000, speedup=speedup, baseline="numpy"))
     monkeypatch.setattr(M, "independent_verify", lambda *a, **k: types.SimpleNamespace(ok=True, reason=""))
     runs = runs if runs is not None else ScalingRuns(
         measured_ns={
@@ -239,6 +252,41 @@ def test_distributed_no_sweep_leaves_scaling_none(monkeypatch):
     """An empty node_counts (the default) leaves the curve off; only the scalar S_i is produced."""
     ts = _run_distributed(monkeypatch, node_counts=[])
     assert ts.scaling is None
+
+
+# --- suspect flag reads record.speedup_suspect_above instead of a bare 1000.0 literal ---
+
+
+def test_distributed_suspect_default_threshold_unchanged(monkeypatch):
+    """No override: the config default (1000.0) still flags a speedup no real kernel reaches,
+    same as the old hardcoded compare."""
+    ts = _run_distributed(monkeypatch, node_counts=[], speedup=5000.0)
+    assert ts.suspect_count == 1
+    assert ts.iterations[0].suspect is True
+
+
+def test_distributed_suspect_lowered_threshold_flags_previously_ok_speedup(monkeypatch):
+    """A speedup that clears the default 1000.0 bound (4.0x) gets flagged once the config
+    threshold is lowered below it -- proves the compare reads the config value, not a constant."""
+    ts = _run_distributed(monkeypatch, node_counts=[], speedup=4.0, suspect_above=2.0)
+    assert ts.suspect_count == 1
+    assert ts.iterations[0].suspect is True
+
+
+def test_distributed_suspect_raised_threshold_stops_flagging(monkeypatch):
+    """A speedup flagged at the default 1000.0 bound (5000x) clears once the config threshold is
+    raised above it -- the high side must also read config, not just short-circuit past it."""
+    ts = _run_distributed(monkeypatch, node_counts=[], speedup=5000.0, suspect_above=10000.0)
+    assert ts.suspect_count == 0
+    assert ts.iterations[0].suspect is False
+
+
+def test_distributed_suspect_nonfinite_ignores_threshold(monkeypatch):
+    """A non-finite speedup stays suspect even under an enormous configured threshold -- the
+    isfinite check must keep short-circuiting ahead of the config-sourced compare."""
+    ts = _run_distributed(monkeypatch, node_counts=[], speedup=float("inf"), suspect_above=1e18)
+    assert ts.suspect_count == 1
+    assert ts.iterations[0].suspect is True
 
 
 def test_grade_surfaces_scaling_dict(monkeypatch):
@@ -468,3 +516,24 @@ def test_correctness_gate_grades_every_declared_config():
 
     timed = M._timed_cells(spec.parameters, configs, spec.constraints, "throughput")
     assert len({c["label"].split(":", 1)[0] for c in timed}) <= int(config.get("perf.max_configs", 5))
+
+
+def test_suspect_threshold_follows_config_at_call_time(monkeypatch):
+    """The key must be read when scoring runs, not when the module is imported."""
+    monkeypatch.setattr(config,
+                        "get",
+                        lambda key, default=None: 7.5 if key == "record.speedup_suspect_above" else default)
+    assert scoring.suspect_threshold() == 7.5
+    assert scoring.suspect_threshold(42.0) == 42.0, "an explicit override must still win over config"
+
+
+@pytest.mark.parametrize("fn", [scoring.independent_verify, scoring.score_cells])
+def test_scoring_entry_points_defer_the_threshold_to_config(fn):
+    """``suspect_above`` must default to None, never to a literal.
+
+    A float default is evaluated once at import, so it would pin the threshold to whatever the
+    config held then -- setting ``record.speedup_suspect_above`` would appear to work and silently
+    do nothing on these two paths, which is exactly the bug this pins.
+    """
+    default = inspect.signature(fn).parameters["suspect_above"].default
+    assert default is None, f"{fn.__name__} hardcodes suspect_above={default!r} instead of deferring to config"

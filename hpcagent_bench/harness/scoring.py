@@ -181,6 +181,18 @@ def _verify_triad(spec, o1, o2, np_public, re_out, np_re, c_public, rtol, atol, 
     return determinism_ok, reverify_ok, True, False
 
 
+def suspect_threshold(override: Optional[float] = None) -> float:
+    """The speedup above which a result is flagged implausible: ``override``, else the configured
+    ``record.speedup_suspect_above``.
+
+    Resolved per call, not as a default argument: a default evaluates once at import and would
+    freeze whatever the config held then, so setting the key would silently do nothing.
+    """
+    if override is not None:
+        return float(override)
+    return float(config.get("record.speedup_suspect_above", 1000.0))
+
+
 def implausible_speedup(speedup: float, above: float) -> bool:
     """A speedup no real kernel reaches (over ``above``, or non-finite) -- the flag that sends a
     result to the harder verify path. The float compare runs first: it rejects the common case
@@ -197,7 +209,7 @@ def independent_verify(submission: Submission,
                        repeat: int = 3,
                        reverify_seed: int = 777,
                        dual_oracle: bool = True,
-                       suspect_above: float = 1000.0,
+                       suspect_above: Optional[float] = None,
                        fuzz_iteration: Optional[int] = None,
                        params_override: Optional[Dict] = None,
                        rtol: Optional[float] = None,
@@ -217,7 +229,7 @@ def independent_verify(submission: Submission,
     device = task.residency == "device"
     timeout = float(config.get("timeouts.kernel_s", 300))
     memory_gb = float(config.get("limits.kernel_memory_gb", 10))
-    suspect = implausible_speedup(score_result.speedup, suspect_above)
+    suspect = implausible_speedup(score_result.speedup, suspect_threshold(suspect_above))
 
     # Distributed submissions re-verify through their own MPI path, which sizes at the scored
     # (weak-grown) base preset rather than this single-node verify preset (see _verify_distributed).
@@ -1093,7 +1105,7 @@ def score_cells(submission: Submission,
                 mode: Mode = Mode.SINGLE_CORE,
                 verify: bool = True,
                 reverify_seed: int = 777,
-                suspect_above: float = 1000.0,
+                suspect_above: Optional[float] = None,
                 rtol: Optional[float] = None,
                 atol: Optional[float] = None) -> List[CellScore]:
     """Evaluate many ``(config, shape)`` cells on a SINGLE build.
@@ -1337,7 +1349,7 @@ def score_cells(submission: Submission,
                 speedup, suspect = 0.0, False
                 if timed and correct and native_samples and base_samples:
                     speedup = timing.reduce(native_samples, base_samples).speedup
-                    suspect = implausible_speedup(speedup, suspect_above)
+                    suspect = implausible_speedup(speedup, suspect_threshold(suspect_above))
                 results.append(
                     CellScore(label,
                               timed,
