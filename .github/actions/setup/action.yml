@@ -12,10 +12,13 @@ runs:
       run: |
         # build-essential: make + gcc + g++ (C/C++ backends). gfortran/clang: Fortran backend
         # + judge. flang: the LLVM Fortran backend (tests/test_compile_flags.py's flang case).
+        # libomp-dev: the SECOND OpenMP runtime. tests/test_fork_openmp_safety.py asserts on it
+        # rather than skipping -- libgomp deadlocks across fork() and libomp recovers, so a
+        # suite that only ever sees libgomp cannot tell the fix from the forgiving runtime.
         # pkg-config + libopenblas-dev: the BLAS optimizer links cblas_*. libfftw3-dev:
         # the vexx port oracle links -lfftw3.
         sudo apt-get update
-        sudo apt-get install -y build-essential gfortran clang flang pkg-config libopenblas-dev libfftw3-dev
+        sudo apt-get install -y build-essential gfortran clang flang libomp-dev pkg-config libopenblas-dev libfftw3-dev
 
     - name: Base Python deps (translators + the frameworks every phase shares)
       shell: bash
