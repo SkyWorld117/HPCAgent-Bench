@@ -19,27 +19,26 @@ from typing import List, Optional, Tuple
 import pytest
 
 from hpcagent_bench import paths
+from hpcagent_bench.autogen import ensure_native
 from hpcagent_bench.flags import Mode
 from hpcagent_bench.languages import build_kernel_lib_commands
+from hpcagent_bench.spec import BenchSpec
 
-#: (cpp_backend dir relative to paths.BENCHMARKS, short name) for foundation kernels that
-#: already have generated fp64/fp32 sources on disk -- no codegen step, so the sample
-#: builds fast. The same 10 kernels the ratchet count below was measured against.
-#: Every kernel keeps its sources under its OWN ``<kernel>/cpp_backend/``. The shared
-#: ``foundation/cpp_backend/`` still holds leftovers from the pre-flatten layout that no
-#: emit refreshes, so pointing at it measures whatever was last written there -- which is
-#: how the first count for this ratchet came out too high.
-_KERNELS: Tuple[Tuple[str, str], ...] = (
-    ("foundation/disjoint_halves_gather/cpp_backend", "disjoint_halves_gather"),
-    ("foundation/halo_broadcast/cpp_backend", "halo_broadcast"),
-    ("foundation/safety_column_stencil/cpp_backend", "safety_column_stencil"),
-    ("foundation/wf_north_west/cpp_backend", "wf_north_west"),
-    ("foundation/cond_reduce_sum/cpp_backend", "cond_reduce_sum"),
-    ("foundation/ext_gather_load/cpp_backend", "ext_gather_load"),
-    ("foundation/fuse_diamond/cpp_backend", "fuse_diamond"),
-    ("foundation/iv_additive/cpp_backend", "iv_additive"),
-    ("foundation/jacobi2d_tiled_sym/cpp_backend", "jacobi2d_tiled_sym"),
-    ("foundation/wavefront_2d/cpp_backend", "wavefront_2d"),
+#: REGISTRY keys of the 10 small foundation kernels the ratchet count below was measured
+#: against. Keys, not paths: ``BenchSpec`` owns both the kernel directory and the artifact
+#: stem, so the sample cannot drift onto the pre-flatten ``foundation/cpp_backend/``
+#: leftovers that no emit refreshes -- which is how the first count came out too high.
+_KERNELS: Tuple[str, ...] = (
+    "disjoint_halves_gather",
+    "halo_broadcast",
+    "safety_column_stencil",
+    "wf_north_west",
+    "cond_reduce_sum",
+    "ext_gather_load",
+    "fuse_diamond",
+    "iv_additive",
+    "jacobi2d_tiled_sym",
+    "wavefront_2d",
 )
 
 #: (framework, lang, source ext, forced compilers.yaml block) mirroring
@@ -96,8 +95,13 @@ def test_warnings_ratchet(tmp_path: pathlib.Path) -> None:
 
     total_warnings = 0
     total_builds = 0
-    for backend_rel, short in _KERNELS:
-        backend = paths.BENCHMARKS / backend_rel
+    for key in _KERNELS:
+        spec = BenchSpec.load(key)
+        backend = paths.BENCHMARKS / spec.relative_path / "cpp_backend"
+        short = spec.native_base("dense")
+        # Generated sources are gitignored, so a fresh checkout has none -- without this the
+        # sample builds nothing and only the non-vacuity floor below reports it.
+        ensure_native(key)
         for framework, lang, ext, compiler in _FLAVORS:
             sources = [(lang, p) for p in (backend / f"{short}_fp64.{ext}", backend / f"{short}_fp32.{ext}")
                        if p.exists()]
