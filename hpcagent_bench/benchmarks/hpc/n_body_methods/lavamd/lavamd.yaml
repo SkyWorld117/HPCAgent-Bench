@@ -8,26 +8,26 @@ parameters:
     n_boxes: 4
     max_neighbors: 26
     particles_per_box: 100
-    seed: 7
     alpha: 0.5
   M:
     n_boxes: 16
     max_neighbors: 26
     particles_per_box: 100
-    seed: 7
     alpha: 0.5
   L:
     n_boxes: 64
     max_neighbors: 26
     particles_per_box: 100
-    seed: 7
     alpha: 0.5
   XL:
     n_boxes: 512
     max_neighbors: 26
     particles_per_box: 100
-    seed: 7
     alpha: 0.5
+config:
+  seed:
+    value: 7
+    selects: seed
 init:
   shapes:
     box_offsets: (n_boxes,)
