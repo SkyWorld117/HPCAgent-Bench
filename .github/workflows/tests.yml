@@ -72,8 +72,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
@@ -228,8 +231,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
@@ -304,8 +310,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
@@ -424,8 +433,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
@@ -515,8 +527,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
@@ -673,8 +688,11 @@ jobs:
           # The CPU baselines compile -march=native and ccache hashes that flag literally,
           # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
           # the cache on the ISA the compiler would actually select.
-          echo "CPU_KEY=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          # An empty key would silently restore the old cross-runner behaviour.
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
