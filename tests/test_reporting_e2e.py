@@ -49,7 +49,17 @@ def _native_env(cwd: pathlib.Path) -> dict:
         OMPI_MCA_btl="^openib",
         MPICH_NO_LOCAL="1",
         PMIX_MCA_gds="hash",
+        # The results DB is anchored to the REPO, not the CWD; point it at this test's work dir so a
+        # sweep does not write into the working tree.
+        HPCAGENT_BENCH_RECORD_DB_PATH=str(cwd / "hpcagent_bench.db"),
+        # tmp_path is tmpfs on many hosts and base_db_path refuses memory-backed storage outright.
+        # Without this the child dies before writing a row and the sweep silently reports "no native
+        # toolchain" instead of a failure.
+        HPCAGENT_BENCH_RECORD_ALLOW_MEMORY_DB="1",
     )
+    # Shard 0 rather than an inherited rank, so the assertions know which file to aggregate.
+    for rank_var in ("HPCAGENT_BENCH_DB_SHARD", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK", "PMI_RANK"):
+        env.pop(rank_var, None)
     return env
 
 
@@ -63,9 +73,11 @@ def _capped(argv: List[str]) -> List[str]:
 
 def _db_has_validated(db: pathlib.Path, frameworks: List[str]) -> bool:
     """True iff ``db`` holds >= 1 validated preset-S row for every named framework."""
-    if not db.exists():
+    from hpcagent_bench.harness import recording
+    # The sweep filled its own shard; the base file is the aggregate built on read.
+    if not recording.shard_paths(str(db)) and not db.exists():
         return False
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(recording.ensure_aggregated(str(db)))
     try:
         for fw in frameworks:
             n = con.execute("SELECT COUNT(*) FROM results WHERE framework=? AND validated=1 AND preset='S'",

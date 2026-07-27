@@ -118,7 +118,7 @@ srun --mpi=pmix --ntasks=$SLURM_JOB_NUM_NODES --ntasks-per-node=1 \
 provision vLLM. For a model too big for one node, set `--nodes-per-vllm K > 1`: each endpoint
 becomes a `K`-node ray cluster (tensor-parallel over each node's 4 GPUs, pipeline-parallel across
 the `K` nodes) behind one URL, and the allocation grows to `I*K + J`. A ready-to-edit batch script
-is [scripts/launch.sbatch](../scripts/launch.sbatch).
+is [scripts/submit_launch.sbatch](../scripts/submit_launch.sbatch).
 
 ## CSCS Alps (aarch64 GH200)
 

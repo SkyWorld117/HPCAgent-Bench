@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hpcagent_bench.frameworks import Benchmark, generate_framework, Test
 from hpcagent_bench.frameworks.forked import forked_failure_reason, run_forked, RunResult
+from hpcagent_bench.harness import recording
 from hpcagent_bench.spec import BenchSpec, KERNELS
 
 
@@ -85,7 +86,9 @@ def filter_out_completed_benchmarks(
     """Drop benchmarks already fully recorded in ``hpcagent_bench.db``: "complete" means some single
     run (grouped by timestamp) recorded >= ``repeat`` rows for the requested precision -- partial runs
     (e.g. timeout-killed at 5/10 reps) don't count and are re-executed."""
-    db_path = pathlib.Path("hpcagent_bench.db")
+    # This rank's OWN shard: skip-existing asks "did I already record this?", and a sibling rank's
+    # rows are about the kernels it was given, not these.
+    db_path = pathlib.Path(recording.db_path())
 
     if not db_path.exists():
         print("Database does not exist, running all benchmarks")

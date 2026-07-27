@@ -3,7 +3,7 @@
 """Render the two report figures from the results DB: a speedup heatmap and a per-kernel
 distribution grid.
 
-Both read the ``results`` table from the SQLite results DB (``hpcagent_bench.db`` by default,
+Both read the ``results`` table from the SQLite results DB (``results/hpcagent_bench.db`` by default,
 written by the collection sweeps in :mod:`hpcagent_bench.support.collect`), share the one
 selector / filter path (:func:`load_results`), and lay their rows out with the one ordering
 scheme (:mod:`hpcagent_bench.reporting_order`): HPC grouped by dwarf, then foundation, then ML.
@@ -22,6 +22,7 @@ time); the DB is read through the stdlib ``sqlite3`` so reporting never pulls in
 stack.
 """
 import math
+import pathlib
 import sqlite3
 from typing import List, Optional, Sequence, Tuple
 
@@ -35,6 +36,8 @@ import matplotlib.pyplot as plt  # noqa: E402 -- must follow the backend setup
 from scipy.stats.mstats import gmean  # noqa: E402
 
 from hpcagent_bench import stats  # noqa: E402
+from hpcagent_bench.harness import recording  # noqa: E402
+from hpcagent_bench.paths import PLOTS_DIR  # noqa: E402
 from hpcagent_bench.reporting_order import BY_DWARF, GroupSpan, order_rows, row_meta_for  # noqa: E402
 from hpcagent_bench.spec import select_short_names  # noqa: E402
 
@@ -93,7 +96,15 @@ def my_runtime_abbr(x):
     return str(my_round(x, 2)) + " ms"
 
 
-def load_results(db: str,
+def save_figure(output: str, fig) -> str:
+    """Write ``fig`` to ``output``, creating its directory."""
+    pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    return output
+
+
+def load_results(db: Optional[str],
                  benchmark: str = "all",
                  preset: str = "S",
                  datatype: str = "float64",
@@ -106,7 +117,9 @@ def load_results(db: str,
     the ``benchmark`` name (``benchmark/variant``). One row per timed sample survives, with
     columns ``benchmark``, ``domain``, ``framework``, ``time``.
     """
-    conn = sqlite3.connect(db)
+    # A distributed run leaves one DB per rank and no merged file until something asks for it; this
+    # is that ask, so plotting a sharded run needs no separate aggregation step.
+    conn = sqlite3.connect(recording.ensure_aggregated(db or recording.base_db_path()))
     data = pd.read_sql_query("SELECT * FROM results", conn)
     conn.close()
 
@@ -176,8 +189,8 @@ def plot_heatmap(benchmark="all",
                  datatype="float64",
                  variant=None,
                  order: str = BY_DWARF,
-                 db="hpcagent_bench.db",
-                 output="heatmap.pdf",
+                 db=None,
+                 output=PLOTS_DIR + "/heatmap.pdf",
                  usetex: bool = True) -> str:
     """Read ``db`` and emit the speedup heatmap to ``output`` (a PDF).
 
@@ -189,8 +202,8 @@ def plot_heatmap(benchmark="all",
         (benchmark, variant) as its own ``benchmark/variant`` row.
     :param order: row ordering, ``by_dwarf`` (default) or ``by_level`` (see
         :mod:`hpcagent_bench.reporting_order`).
-    :param db: SQLite results DB path (default ``hpcagent_bench.db`` in the cwd).
-    :param output: PDF path to write (default ``heatmap.pdf`` in the cwd).
+    :param db: SQLite results DB path; ``None`` uses the configured ``record.db_path``.
+    :param output: PDF path to write (default under ``results/plots``).
     :param usetex: render text with LaTeX (default); ``False`` for a LaTeX-free box.
     """
     set_usetex(usetex)
@@ -295,9 +308,7 @@ def plot_heatmap(benchmark="all",
     ax1.set_ylabel("Benchmarks", labelpad=0)
 
     plt.tight_layout()
-    plt.savefig(output, dpi=600, bbox_inches='tight')
-    plt.close(fig)
-    return output
+    return save_figure(output, fig)
 
 
 def _grid_shape(n: int) -> Tuple[int, int]:
@@ -325,8 +336,8 @@ def plot_distribution_grid(benchmark="all",
                            framework: Optional[str] = None,
                            kind: str = "violin",
                            order: str = BY_DWARF,
-                           db="hpcagent_bench.db",
-                           output="distribution.pdf",
+                           db=None,
+                           output=PLOTS_DIR + "/distribution.pdf",
                            col_width_in: float = 3.4,
                            usetex: bool = True) -> str:
     """Emit a grid of per-kernel sample distributions (violin or box) to ``output`` (a PDF).
@@ -420,6 +431,4 @@ def plot_distribution_grid(benchmark="all",
                frameon=False)
 
     plt.tight_layout()
-    plt.savefig(output, dpi=600, bbox_inches='tight')
-    plt.close(fig)
-    return output
+    return save_figure(output, fig)

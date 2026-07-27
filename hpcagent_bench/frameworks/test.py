@@ -10,6 +10,7 @@ from hpcagent_bench import config, perf_reports
 from hpcagent_bench.frameworks import (Benchmark, Framework, timeout_decorator as tout, utilities as util)
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
 from hpcagent_bench.frameworks.schema import Result, results_engine
+from hpcagent_bench.harness import recording
 from hpcagent_bench.precision import Precision, TOLERANCE_MATRIX, numpy_dtype, precision_from_datatype, tolerance_band
 from typing import Any, Callable, Dict, Sequence, Tuple, Optional
 
@@ -263,7 +264,11 @@ class Test(object):
         timestamp = int(time.time())
         # native vs container -- a containerized collector sets HPCAGENT_BENCH_RECORD_EXECUTION.
         execution = str(config.get("record.execution", "native"))
-        engine = results_engine("hpcagent_bench.db")
+        # recording.db_path, not a bare relative name: it anchors to the repo directory instead of
+        # whatever the job happened to cd into, refuses memory-backed storage, and under a
+        # distributed launch hands this rank its OWN shard (WAL needs a -shm mapping that Lustre and
+        # NFS do not provide, so one shared file across ranks is not an option).
+        engine = results_engine(recording.db_path())
         with Session(engine) as session:
             for d in bvalues:
                 session.add(

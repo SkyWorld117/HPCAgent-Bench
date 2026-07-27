@@ -188,7 +188,7 @@ Each preset runs in a **fresh subprocess**, so the thread env is honoured from p
 start (a BLAS pool sized once at import cannot be shrunk later in the same process).
 
 **Optional Slurm (never submitted).** `--emit-sbatch` prints a ready-to-`sbatch` script for
-the full-node presets, derived from `scripts/launch.sbatch`'s header (one `--exclusive`
+the full-node presets, derived from `scripts/submit_launch.sbatch`'s header (one `--exclusive`
 node so "full node" is a real allocation). Review it, then submit it yourself:
 
 ```bash

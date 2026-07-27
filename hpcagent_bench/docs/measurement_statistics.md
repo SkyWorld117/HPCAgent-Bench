@@ -123,10 +123,11 @@ has no group.
 
 ```
 hpcagent-bench plot       [-b SELECTOR] [-p PRESET] [-d DATATYPE] [--order by_dwarf|by_level] \
-                          [--no-usetex] [--db DB] [--output heatmap.pdf]
+                          [--no-usetex] [--db DB] [--output results/plots/heatmap.pdf]
 hpcagent-bench plot-dist  [-b SELECTOR] [-p PRESET] [-d DATATYPE] [-k violin|box] [-f FRAMEWORK] \
-                          [--order by_dwarf|by_level] [--no-usetex] [--db DB] [--output distribution.pdf]
+                          [--order by_dwarf|by_level] [--no-usetex] [--db DB] [--output results/plots/distribution.pdf]
 ```
 
 `-b` accepts the full selector grammar (kernel / track / dwarf / `@lvl<n>`); `--no-usetex` renders
-without a LaTeX install.
+without a LaTeX install. `--db` defaults to the configured `record.db_path`
+(`results/hpcagent_bench.db`), and figures land under `results/plots` -- never the repo root.

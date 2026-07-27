@@ -106,7 +106,6 @@ pip-delete-this-directory.txt
 pip-log.txt
 pip-wheel-metadata/
 profile_default/
-results/
 sdfg.sdfg
 sdist/
 share/python-wheels/
@@ -183,6 +182,14 @@ scripts/cscs/env.toml
 # Native (no-container) run scratch -- keep the folder, ignore its contents.
 hpcagent_bench/native_runs/*
 !hpcagent_bench/native_runs/.gitkeep
+
+# Run outputs -- results DB + its per-rank shards, JSONL logs, job stdout, figures. Both folders are
+# kept so a fresh clone can be written to without a mkdir; everything IN them is machine-generated.
+results/*
+!results/.gitkeep
+!results/plots/
+results/plots/*
+!results/plots/.gitkeep
 
 # --- Build / cache artifacts (machine-generated; never committed) -------------
 # GT4Py kernel cache, compiled Fortran modules, ruff cache.
