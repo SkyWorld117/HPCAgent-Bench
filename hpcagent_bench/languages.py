@@ -196,6 +196,69 @@ def _render_argv(tokens: List[str], subst: Dict[str, str], *, cacheable_lang: Op
     return out
 
 
+#: Distinct historical spellings of the same driver, tried as alternate exact names before
+#: falling back to a versioned suffix. LLVM's Fortran driver was called ``flang-new`` while
+#: experimental and renamed to ``flang`` at graduation (LLVM 16); either spelling may be what
+#: a given distro snapshot shipped.
+COMPILER_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "flang": ("flang-new", ),
+    "flang-new": ("flang", ),
+}
+
+
+@functools.lru_cache(maxsize=None, typed=True)
+def resolve_compiler(name: str) -> Optional[str]:
+    """Absolute path for compiler driver ``name``, tolerating a distro's versioned spelling.
+
+    Debian/Ubuntu package an LLVM/GCC release as ``<name>-<major>`` (``clang-21``,
+    ``flang-22``, ``gcc-15``, ...) alongside -- or, on some images, INSTEAD OF -- an
+    unversioned symlink; ``shutil.which(name)`` alone then reports an installed toolchain
+    as absent. Resolution order:
+
+    1. ``name`` exactly, and its alternate historical spelling in :data:`COMPILER_ALIASES`
+       (``flang`` <-> ``flang-new``) -- an unversioned driver on PATH always wins, whichever
+       of the two spellings it is.
+    2. every ``<candidate>-<major>`` on PATH for ``name`` and its alias; the HIGHEST
+       ``major`` wins, compared NUMERICALLY (``flang-9`` must not beat ``flang-21`` -- a
+       string sort gets this wrong).
+
+    Returns ``None`` when genuinely absent, so a caller can still tell "not installed" apart
+    from "installed under a versioned name" instead of collapsing both into one boolean.
+    ``@lru_cache`` -- this walks every PATH directory, and the driver table is fixed for the
+    life of the process.
+    """
+    candidates = (name, ) + COMPILER_ALIASES.get(name, ())
+    for cand in candidates:
+        exe = shutil.which(cand)
+        if exe is not None:
+            return exe
+
+    best_version = -1
+    best_path: Optional[str] = None
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    for cand in candidates:
+        prefix = f"{cand}-"
+        for directory in path_dirs:
+            try:
+                entries = os.listdir(directory)
+            except OSError:  # PATH entry does not exist / not a directory
+                continue
+            for entry in entries:
+                if not entry.startswith(prefix):
+                    continue
+                suffix = entry[len(prefix):]
+                if not suffix.isdigit():
+                    continue
+                path = os.path.join(directory, entry)
+                if not os.access(path, os.X_OK):
+                    continue
+                version = int(suffix)
+                if version > best_version:
+                    best_version = version
+                    best_path = path
+    return best_path
+
+
 def subst_map(cc: str,
               *,
               baseline: str = "",
@@ -206,9 +269,18 @@ def subst_map(cc: str,
               exe: str = "") -> Dict[str, str]:
     """The token map a compile/link template renders against. Every key is always present:
     :func:`_render_argv` does a plain ``str.format``, so a template naming ``{exe}`` on a
-    path that has none must still get an (empty) value rather than a ``KeyError``."""
+    path that has none must still get an (empty) value rather than a ``KeyError``.
+
+    ``cc`` runs through :func:`resolve_compiler` first (the ONE point every ``{cc}``-bearing
+    template renders through: :func:`compile_variant`, :func:`build_kernel_lib_commands`,
+    :func:`build_mpi_executable_commands`, :func:`build_shared_lib_commands`), so a driver
+    installed only under a versioned name resolves here instead of at each call site. Falls
+    back to the literal ``cc`` when unresolved, so a genuinely absent compiler still fails at
+    the same spawn ``OSError`` it always did -- this never turns an absent compiler into a
+    silently different one."""
+    resolved = resolve_compiler(cc)
     return {
-        "cc": cc,
+        "cc": resolved if resolved is not None else cc,
         "baseline": baseline,
         "src": str(src),
         "obj": str(obj),
