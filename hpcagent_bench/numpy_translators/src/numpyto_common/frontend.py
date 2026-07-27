@@ -492,7 +492,9 @@ def parse_kernel(numpy_py: pathlib.Path,
             # Plain scalar input (e.g. ``alpha`` in gemm): dtype comes from
             # ``init.scalars`` when present (int default -> int param, float
             # default -> double); otherwise falls back to double.
-            inferred_dt = _infer_scalar_dtype(scalar_defaults.get(arg))
+            # init.dtypes is authoritative for a scalar too, not only an array: srad's ROI
+            # bounds have no init.scalars default to infer from.
+            inferred_dt = dtypes_raw.get(arg) or _infer_scalar_dtype(scalar_defaults.get(arg))
             # Promote to int when the kernel uses the scalar in an integer-only
             # context (``range(arg)`` / subscript / shape -- mirrors the C emit's
             # ``needs_int`` check), so e.g. nbody's ``Nt`` and lenet's
