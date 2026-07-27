@@ -54,6 +54,9 @@ jobs:
         with:
           # Full history so format's merge-base diff against the target branch resolves.
           fetch-depth: 0
+          # The KernelBench originals are a submodule; without this the provenance test can only
+          # skip, which is indistinguishable from a mapping that stopped resolving.
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -125,7 +128,9 @@ jobs:
             tests/test_sparse_init_precision.py \
             tests/test_forkserver_preload.py \
             tests/test_firewall.py \
-            tests/test_hf_export.py
+            tests/test_hf_export.py \
+            tests/test_kernelbench_references.py \
+            tests/test_verify_toolchain.py
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
