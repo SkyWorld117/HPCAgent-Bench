@@ -345,9 +345,6 @@ def parse_baseline(raw: Any, relative_path: str, source: str = "<spec>") -> Base
 #: at load time instead of letting it pass through silently.
 CONFIG_SELECTS = frozenset({"branch", "tile", "iteration", "tolerance", "seed", "physical"})
 
-#: Fuzz-coverage strategies a manifest's ``coverage:`` block may request over the config space.
-COVERAGE_MODES = frozenset({"all", "pairwise", "one-hot"})
-
 #: Keys a single ``config:`` entry may declare (see :func:`_parse_config_knob`).
 _CONFIG_KNOB_KEYS = frozenset({"domain", "value", "selects"})
 
@@ -408,21 +405,6 @@ def _parse_config_knob(raw: Any, kernel: str, sym: str, source: str) -> ConfigKn
     return ConfigKnob(domain=tuple(domain_raw) if has_domain else None,
                       value=raw["value"] if has_value else None,
                       selects=selects)
-
-
-def _parse_coverage(raw: Any, kernel: str, source: str) -> Dict[str, Any]:
-    """Parse + validate the ``coverage:`` block (``{require: all|pairwise|one-hot}``), resolving the
-    default (``all``) so a manifest that omits the block and one that spells it out load identically."""
-    if not isinstance(raw, dict):
-        raise ValueError(f"{source}: {kernel}: 'coverage' must be a mapping (got {type(raw).__name__})")
-    unknown = sorted(set(raw) - {"require"})
-    if unknown:
-        raise ValueError(f"{source}: {kernel}: coverage has unknown key(s) {unknown}; allowed: ['require']")
-    require = raw.get("require", "all")
-    if require not in COVERAGE_MODES:
-        raise ValueError(f"{source}: {kernel}: coverage.require {require!r} is not one of "
-                         f"{sorted(COVERAGE_MODES)}")
-    return {"require": require}
 
 
 def _validate_constraints(constraints: Tuple[str, ...], parameters_view: Dict[str, Dict[str, Any]], kernel: str,
@@ -532,7 +514,6 @@ KNOWN_MANIFEST_KEYS = frozenset({
     "dimensions",
     "config",
     "constraints",
-    "coverage",
     "input_args",
     "array_args",
     "output_args",
@@ -896,8 +877,6 @@ class BenchSpec:
     #: Cross-dimension/config invariants (e.g. ``"lvn <= nproma"``), validated at LOAD for every
     #: preset via :func:`_validate_constraints` (reuses ``fuzz._safe_eval``).
     constraints: Tuple[str, ...] = ()
-    #: Fuzz-coverage requirement over the config space (``{"require": "all"|"pairwise"|"one-hot"}``).
-    coverage: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any], source: str = "<dict>") -> "BenchSpec":
@@ -1047,7 +1026,6 @@ class BenchSpec:
         config_reps = {sym: knob.representative for sym, knob in config_knobs.items()}
         parameters_view = {preset: {**values, **config_reps} for preset, values in dimensions_map.items()}
         constraints = tuple(bench.get("constraints") or ())
-        coverage = _parse_coverage(bench.get("coverage") or {}, bench["short_name"], source)
         if constraints:
             _validate_constraints(constraints, parameters_view, bench["short_name"], source)
         # Union of every size symbol across all parameter tuples; used both to
@@ -1197,7 +1175,6 @@ class BenchSpec:
             dimensions=dimensions_map,
             config=config_knobs,
             constraints=constraints,
-            coverage=coverage,
         )
 
     @classmethod

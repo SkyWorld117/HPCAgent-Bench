@@ -41,7 +41,6 @@ def test_old_style_manifest_still_loads_and_exposes_parameters() -> None:
     assert spec.dimensions == {"S": {"N": 16}, "M": {"N": 32}}
     assert spec.config == {}
     assert spec.constraints == ()
-    assert spec.coverage == {"require": "all"}
 
 
 def test_new_style_separates_dimensions_and_config() -> None:
