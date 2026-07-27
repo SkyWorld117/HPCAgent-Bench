@@ -208,25 +208,10 @@ COMPILER_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 @functools.lru_cache(maxsize=None, typed=True)
 def resolve_compiler(name: str) -> Optional[str]:
-    """Absolute path for compiler driver ``name``, tolerating a distro's versioned spelling.
+    """Path to driver ``name``, else its highest ``<name>-<major>`` on PATH, else ``None``.
 
-    Debian/Ubuntu package an LLVM/GCC release as ``<name>-<major>`` (``clang-21``,
-    ``flang-22``, ``gcc-15``, ...) alongside -- or, on some images, INSTEAD OF -- an
-    unversioned symlink; ``shutil.which(name)`` alone then reports an installed toolchain
-    as absent. Resolution order:
-
-    1. ``name`` exactly, and its alternate historical spelling in :data:`COMPILER_ALIASES`
-       (``flang`` <-> ``flang-new``) -- an unversioned driver on PATH always wins, whichever
-       of the two spellings it is.
-    2. every ``<candidate>-<major>`` on PATH for ``name`` and its alias; the HIGHEST
-       ``major`` wins, compared NUMERICALLY (``flang-9`` must not beat ``flang-21`` -- a
-       string sort gets this wrong).
-
-    Returns ``None`` when genuinely absent, so a caller can still tell "not installed" apart
-    from "installed under a versioned name" instead of collapsing both into one boolean.
-    ``@lru_cache`` -- this walks every PATH directory, and the driver table is fixed for the
-    life of the process.
-    """
+    Distros ship LLVM/GCC as ``<name>-<major>`` and only sometimes add the unversioned symlink.
+    Versions compare NUMERICALLY -- a string sort ranks ``flang-9`` above ``flang-21``."""
     candidates = (name, ) + COMPILER_ALIASES.get(name, ())
     for cand in candidates:
         exe = shutil.which(cand)

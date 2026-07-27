@@ -158,7 +158,7 @@ def make_fake_driver(directory: pathlib.Path, name: str) -> None:
 
 @pytest.fixture
 def fake_path(tmp_path, monkeypatch):
-    """A PATH holding only ``tmp_path``, so a real toolchain cannot mask what is being asserted."""
+    """PATH holding only ``tmp_path``, so a real toolchain cannot mask the assertion."""
     monkeypatch.setenv("PATH", str(tmp_path))
     languages.resolve_compiler.cache_clear()
     yield tmp_path
@@ -166,29 +166,25 @@ def fake_path(tmp_path, monkeypatch):
 
 
 def test_resolve_compiler_prefers_the_highest_version_numerically(fake_path):
-    """``zzc-9`` must not beat ``zzc-21``. A lexical sort picks ``9`` and silently pins the whole
-    suite to an ancient toolchain, with every test still green."""
+    """A lexical sort picks ``zzc-9`` and silently pins the suite to an ancient toolchain."""
     for name in ("zzc-9", "zzc-14", "zzc-21"):
         make_fake_driver(fake_path, name)
     assert languages.resolve_compiler("zzc") == str(fake_path / "zzc-21")
 
 
 def test_resolve_compiler_prefers_the_unversioned_driver(fake_path):
-    """An unversioned driver is the distro's own choice of default; a versioned sibling with a
-    higher number must not override it."""
+    """The unversioned driver is the distro's chosen default; a higher sibling must not win."""
     make_fake_driver(fake_path, "zzc")
     make_fake_driver(fake_path, "zzc-21")
     assert languages.resolve_compiler("zzc") == str(fake_path / "zzc")
 
 
 def test_resolve_compiler_follows_the_flang_rename(fake_path):
-    """LLVM shipped the Fortran driver as ``flang-new`` before renaming it to ``flang``; asking for
-    either spelling must find whichever one the distro snapshot actually installed."""
+    """LLVM renamed ``flang-new`` to ``flang``; either spelling must find what is installed."""
     make_fake_driver(fake_path, "flang-new-18")
     assert languages.resolve_compiler("flang") == str(fake_path / "flang-new-18")
 
 
 def test_resolve_compiler_reports_a_genuinely_absent_driver(fake_path):
-    """None, not a guess: callers distinguish "not installed" from "installed under a versioned
-    name", and a fabricated path would turn a clean skip into a confusing exec failure."""
+    """None, not a guess -- a fabricated path turns a clean skip into a confusing exec failure."""
     assert languages.resolve_compiler("zzc") is None

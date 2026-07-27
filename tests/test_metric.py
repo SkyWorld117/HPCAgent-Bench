@@ -529,11 +529,6 @@ def test_suspect_threshold_follows_config_at_call_time(monkeypatch):
 
 @pytest.mark.parametrize("fn", [scoring.independent_verify, scoring.score_cells])
 def test_scoring_entry_points_defer_the_threshold_to_config(fn):
-    """``suspect_above`` must default to None, never to a literal.
-
-    A float default is evaluated once at import, so it would pin the threshold to whatever the
-    config held then -- setting ``record.speedup_suspect_above`` would appear to work and silently
-    do nothing on these two paths, which is exactly the bug this pins.
-    """
+    """Must default to None: a float default freezes the config value at import."""
     default = inspect.signature(fn).parameters["suspect_above"].default
     assert default is None, f"{fn.__name__} hardcodes suspect_above={default!r} instead of deferring to config"

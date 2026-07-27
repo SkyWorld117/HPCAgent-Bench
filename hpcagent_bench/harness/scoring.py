@@ -182,12 +182,9 @@ def _verify_triad(spec, o1, o2, np_public, re_out, np_re, c_public, rtol, atol, 
 
 
 def suspect_threshold(override: Optional[float] = None) -> float:
-    """The speedup above which a result is flagged implausible: ``override``, else the configured
-    ``record.speedup_suspect_above``.
+    """``override``, else the configured ``record.speedup_suspect_above``.
 
-    Resolved per call, not as a default argument: a default evaluates once at import and would
-    freeze whatever the config held then, so setting the key would silently do nothing.
-    """
+    Per call, not a default argument: a default freezes the config value at import."""
     if override is not None:
         return float(override)
     return float(config.get("record.speedup_suspect_above", 1000.0))
