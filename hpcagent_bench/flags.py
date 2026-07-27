@@ -26,8 +26,11 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
-from typing import Dict, Optional, Set
+import tempfile
+from functools import lru_cache
+from typing import Dict, List, NamedTuple, Optional, Set
 
 from hpcagent_bench import osinfo, paths
 
@@ -167,7 +170,11 @@ WARNINGS_BASIC = "-Wall -Wextra"
 #:
 #: ``scripts/submit_deterministic.sbatch`` runs exactly that before an autopar column and prints
 #: the verdict into the job log, so a serial-in-disguise result is visible in the run that
-#: produced it rather than inferred from the numbers months later.
+#: produced it rather than inferred from the numbers months later. That check is now also code,
+#: not just a job-log recipe: :func:`polly_capability` runs it once per process (``@lru_cache``)
+#: and returns a 3-way :class:`AutoparVerdict`, and
+#: ``hpcagent_bench.benchmarks.cpp_runtime._assert_autopar_capable`` gates the ``polly`` framework
+#: on it (VACUOUS -> ``NotSupportedByFramework``, never a silently-serial number).
 POLLY_PAR = f"-mllvm -polly -mllvm -polly-parallel {_OPENMP_CLANG}"
 
 #: GCC autopar + Graphite, the gcc counterpart of POLLY_PAR.
@@ -210,6 +217,138 @@ PLUTO_PAR = _OPENMP_CLANG
 
 #: NVHPC pure-source CPU auto-parallelization (analogue of GCC ``-ftree-parallelize-loops``).
 NVHPC_CONCUR = "-Mconcur"
+
+# ---------------------------------------------------------------------------
+# Autopar capability probe -- the measured check :data:`POLLY_PAR` points to above, promoted
+# to code so it runs once per process instead of being copy-pasted into a job log by hand.
+#
+# An autopar flag set being ACCEPTED (compiles, links, runs) is not evidence it parallelizes
+# anything: a clang whose Polly ``cl::opt``s are registered takes ``-mllvm -polly-parallel``
+# and silently does nothing with it (measured on Ubuntu clang 21.1.8 -- see POLLY_PAR above).
+# The only thing this module trusts is ``nm`` on a compiled object: an undefined ``GOMP_*``
+# reference (a real call into the OpenMP runtime) or a defined symbol matching the compiler's
+# outline-body naming (Polly's ``*_polly_subfn``, GCC Graphite's ``*_loopfn``/``*._omp_fn``).
+# ---------------------------------------------------------------------------
+
+
+class AutoparVerdict(enum.Enum):
+    """Three states, not a bool -- "accepted but useless" needs its own name, since that is
+    exactly the failure mode this probe exists to catch (a bool cannot say it)."""
+    REJECTED = "rejected"  #: the compiler/toolchain does not accept these flags at all.
+    VACUOUS = "vacuous"  #: flags accepted, object built, but nothing was outlined.
+    OK = "ok"  #: a parallel loop body was genuinely outlined.
+
+
+class AutoparProbe(NamedTuple):
+    """One probe result: the verdict plus the ``nm`` evidence (or compiler error) behind it,
+    so a caller reporting "unavailable" can name the cause instead of just the verdict."""
+    verdict: AutoparVerdict
+    detail: str
+
+
+#: A tiny, self-contained SCoP (Static Control Part): a restrict-qualified, pointer-based matmul
+#: triple-nest. This is the ONLY thing the probe compiles -- real evidence for an autopar flag
+#: set is whether the compiler outlines THIS loop, not whether a real benchmark kernel happens
+#: to validate. Always C: Polly/Graphite both operate on the middle-end IR, so the frontend
+#: (C vs C++) is not part of what is being measured, and plain C sidesteps ``restrict`` being a
+#: C++ extension rather than a keyword.
+_AUTOPAR_PROBE_SOURCE = """\
+void mm(double *restrict C, const double *restrict A, const double *restrict B, int n) {
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < n; j++) {
+      double s = 0.0;
+      for (int k = 0; k < n; k++) s += A[i * n + k] * B[k * n + j];
+      C[i * n + j] = s;
+    }
+}
+"""
+
+#: Polly's outlined parallel body, e.g. ``mm_polly_subfn.0``.
+POLLY_OUTLINE_PATTERN = r"polly_subfn"
+
+#: GCC Graphite / ``-ftree-parallelize-loops``'s outlined body, e.g. ``mm._loopfn.0`` or
+#: ``mm._omp_fn.0`` (naming has varied across gcc versions; both are matched).
+GCC_AUTOPAR_OUTLINE_PATTERN = r"_loopfn|\._omp_fn"
+
+
+def _nm(nm_exe: str, args: List[str], obj: pathlib.Path) -> Optional[str]:
+    """``nm``'s stdout, or ``None`` if the invocation itself failed (unsupported flag, exotic
+    object format, ...) -- distinguished from "ran and found nothing" so the caller can fail
+    closed rather than misread a broken invocation as a clean zero count."""
+    try:
+        proc = subprocess.run([nm_exe, *args, str(obj)], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+@lru_cache(typed=True)
+def probe_autopar(compiler: str, flags: str, outline_pattern: str) -> AutoparProbe:
+    """Does ``compiler flags`` genuinely outline a parallel loop, or merely accept the flags?
+
+    Compiles :data:`_AUTOPAR_PROBE_SOURCE` to an object in a fresh temp dir with ``compiler``
+    and ``flags`` (the column's REAL flags -- baseline + autopar delta, e.g. from
+    :func:`compose_autopar`), then inspects the object with ``nm``. Nothing else counts as
+    evidence: not the compiler's exit code beyond compiling, not whether a benchmark kernel
+    later validates. ``outline_pattern`` is a regex matched against ``nm``'s defined-symbol
+    output (:data:`POLLY_OUTLINE_PATTERN` / :data:`GCC_AUTOPAR_OUTLINE_PATTERN`); an undefined
+    ``GOMP_*`` reference (either compiler's call into the OpenMP runtime) is independently
+    sufficient, since a compiler could name its outlined body anything.
+
+    Parameterised by ``(compiler, flags, outline_pattern)`` rather than hardcoded per column,
+    so a future autopar backend (Pluto, NVHPC ``-Mconcur``, ...) reuses this function instead
+    of a bespoke check. ``@lru_cache(typed=True)`` -- this shells out to a compiler and must
+    run once per process, not once per kernel.
+
+    Degrades honestly where ``nm`` differs or is absent (macOS ships a BSD ``nm`` with a
+    different flag surface; a stripped-down PATH may have none at all): with no ``nm`` to
+    produce positive evidence, the verdict is :attr:`AutoparVerdict.VACUOUS` (fail CLOSED --
+    "cannot confirm parallelism happened" must never read as "it did").
+    """
+    exe = shutil.which(compiler)
+    if exe is None:
+        return AutoparProbe(AutoparVerdict.REJECTED, f"{compiler!r} not found on PATH")
+    with tempfile.TemporaryDirectory(prefix="hpcagent_bench_autopar_probe_") as tmp:
+        src = pathlib.Path(tmp) / "probe.c"
+        obj = pathlib.Path(tmp) / "probe.o"
+        src.write_text(_AUTOPAR_PROBE_SOURCE)
+        argv = [exe, *shlex.split(flags), "-c", str(src), "-o", str(obj)]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            return AutoparProbe(AutoparVerdict.REJECTED, f"failed to run {compiler}: {e}")
+        if proc.returncode != 0 or not obj.is_file():
+            return AutoparProbe(AutoparVerdict.REJECTED, f"compile rejected: {proc.stderr.strip()[-500:]}")
+
+        nm = shutil.which("nm")
+        if nm is None:
+            return AutoparProbe(AutoparVerdict.VACUOUS, "nm unavailable on this host -- cannot confirm outlining")
+        undefined = _nm(nm, ["-u"], obj)
+        defined = _nm(nm, [], obj)
+        if undefined is None or defined is None:
+            return AutoparProbe(AutoparVerdict.VACUOUS, "nm invocation failed on this host -- cannot confirm outlining")
+
+        gomp = sum(1 for line in undefined.splitlines() if "GOMP" in line)
+        outlined = sum(1 for line in defined.splitlines() if re.search(outline_pattern, line))
+        detail = f"GOMP={gomp} outlined={outlined}"
+        if gomp > 0 or outlined > 0:
+            return AutoparProbe(AutoparVerdict.OK, detail)
+        return AutoparProbe(AutoparVerdict.VACUOUS, f"flags accepted, nothing outlined ({detail})")
+
+
+def polly_capability() -> AutoparProbe:
+    """The measured :class:`AutoparProbe` for THIS host's clang + :data:`POLLY_PAR`, at the
+    real column's baseline+autopar flags (:func:`compose_autopar`)."""
+    composed = compose_autopar(CPU_BASELINE_CLANG, POLLY_PAR, Mode.MULTI_CORE)
+    return probe_autopar("clang", composed, POLLY_OUTLINE_PATTERN)
+
+
+def gcc_autopar_capability() -> AutoparProbe:
+    """The measured :class:`AutoparProbe` for THIS host's gcc + :data:`GCC_AUTOPAR`, at the
+    real column's baseline+autopar flags (:func:`compose_autopar`)."""
+    composed = compose_autopar(CPU_BASELINE_GCC, GCC_AUTOPAR, Mode.MULTI_CORE)
+    return probe_autopar("gcc", composed, GCC_AUTOPAR_OUTLINE_PATTERN)
+
 
 # ---------------------------------------------------------------------------
 # Optimization-report flags -- what the vectorizer DID and did NOT do, to stderr.
