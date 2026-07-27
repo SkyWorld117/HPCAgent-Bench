@@ -2281,6 +2281,21 @@ def _iter_var_name(axis: int) -> str:
     return f"si{axis}"
 
 
+#: Spellings an elementwise ufunc has ALREADY been lowered to by the time the slice-to-scalar
+#: rewriter runs -- ``np.maximum`` becomes a bare ``fmax`` well before this pass.
+_LOWERED_ELEMENTWISE: Set[str] = {"fmax", "fmin", "max", "min"}
+
+
+def _np_func_name(func: ast.AST) -> Optional[str]:
+    """The elementwise function a call names, either spelling: ``np.maximum`` before lowering,
+    a bare ``fmax`` after it. ``None`` when the callee is neither."""
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in ("np", "numpy"):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
 def _const(value: int) -> ast.Constant:
     return ast.Constant(value=value)
 
@@ -2785,6 +2800,17 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         # subscriptified too -- otherwise it stays a whole-array operand inside
         # the per-element store (ICON ddt_vn_cor's ``clin * (-ft_e)``).
         node.operand = self._maybe_subscriptify(self.visit(node.operand))
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        # Same rule as BinOp/UnaryOp for the ARGUMENTS of an elementwise ufunc:
+        # ``out[:] = np.maximum(y, 0)`` on a whole-array ``y`` emitted
+        # ``__npb_fmax(y, 0)`` -- the array POINTER where the element belongs, which
+        # then picked the integer overload and failed to compile. Only elementwise
+        # names: a reduction (``np.sum(y)``) legitimately takes the whole array.
+        self.generic_visit(node)
+        if _np_func_name(node.func) in (_NP_ELEMENTWISE | _LOWERED_ELEMENTWISE):
+            node.args = [self._maybe_subscriptify(a) for a in node.args]
         return node
 
     def _maybe_subscriptify(self, node: ast.AST) -> ast.AST:

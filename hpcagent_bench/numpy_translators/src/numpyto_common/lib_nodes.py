@@ -7475,13 +7475,6 @@ class LibNodeRewriter(ast.NodeTransformer):
                 and isinstance(node.targets[0].value, ast.Name) and _is_full_slice_subscript(node.targets[0])
                 and isinstance(node.value, ast.Call) and self._lookup(node.value) in NP_CALL_EXPANDERS):
             node.targets[0] = ast.Name(id=node.targets[0].value.id, ctx=ast.Store())
-        # Per-statement shape-table update for reassigned locals: when the LHS
-        # is a bare Name and the RHS has a derivable broadcast extent (BinOp,
-        # np.maximum, etc.), refresh shape_table[target] before hoisting so the
-        # hoister sees the current shape (lenet's ``x = relu(conv2d(x))`` chain
-        # needs each reassignment visible at the next call site).
-        if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
-            self._update_shape_for_assign(node.targets[0].id, node.value)
         # ``y = np.linalg.lstsq(A, b, rcond=...)[0]`` canonicalisation: strip
         # the trailing ``[0]`` subscript on a tuple-returning call so the
         # registered call expander fires on the bare call. Only lstsq/histogram
@@ -7495,6 +7488,13 @@ class LibNodeRewriter(ast.NodeTransformer):
         node.value, prelude = self._hoist_value(node.value)
         # Lower any prelude assigns that are themselves registered calls.
         prelude = self._lower_prelude_calls(prelude)
+        # Reassigned local (lenet's ``x = relu(conv2d(x))`` chain): refresh shape_table[target] so
+        # the NEXT statement sees the new shape. Strictly AFTER hoisting this RHS -- Python evaluates
+        # the RHS against the OLD binding, and refreshing first made ``x = x @ w.T + b`` contract over
+        # the RESULT's extent: out_features instead of in_features, silently dropping terms when
+        # in > out and reading past the row when in < out.
+        if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+            self._update_shape_for_assign(node.targets[0].id, node.value)
         # Whole-array alias propagation: ``x = <Name>`` where the RHS is a Name
         # with a known shape gives ``x`` the same shape, so downstream visits
         # see ``x`` as an array. Also propagate ``local_dtypes``, else a
