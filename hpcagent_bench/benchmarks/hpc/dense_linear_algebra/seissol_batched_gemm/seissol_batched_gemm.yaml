@@ -18,32 +18,32 @@ name: SeisSol ADER-DG batched star GEMM
 short_name: seissol_batched_gemm
 kind: microkernel
 level: 1
-# nb = order*(order+1)*(order+2)//6 (initialize()'s _nb_for_order): the modal
-# basis count, NOT affine in order, so it cannot be constant-folded into the
-# emitted shape the way NQ is. It is a real ABI symbol -- the C body's own
-# loop bound/stride -- so it is declared here per preset. order is pinned to 7
-# (hence nb is the same 84 literal) in every size class below -- nb follows
-# order exactly like nnz follows M/N in spmv, the same way every other size
-# symbol in this file is a curated literal.
 parameters:
   S:
     batch: 1024
-    order: 7
-    nb: 84
   M:
     batch: 16384
-    order: 7
-    nb: 84
   L:
     batch: 131072
-    order: 7
-    nb: 84
   XL:
     batch: 524288
-    order: 7
-    nb: 84
-# nb is DERIVED, not an independent size: initialize() computes it as the modal basis
-# count for `order`. Pinned here so a preset that moves one without the other fails at load.
+# order and nb are a locked physical pair, never scaled by a preset (see the file
+# header): nb = order*(order+1)*(order+2)//6 (initialize()'s _nb_for_order) is the
+# modal basis count, NOT affine in order, so it cannot be constant-folded into the
+# emitted shape the way NQ is -- it is a real ABI symbol (the C body's own loop
+# bound/stride) merged into the parameters view below for shape derivation. Both
+# are declared here, not in `parameters:`, because nb has ZERO degrees of freedom
+# independent of order: fuzz.edge_shapes probing them as free ints (pre-fix)
+# violates the constraint below on 4 of 5 structural edge categories (odd/prime/
+# nonpow2/nonaligned), silently dropping that correctness coverage; pinning both
+# keeps the pair physically consistent while `batch` is free to vary/fuzz.
+config:
+  order:
+    value: 7
+    selects: physical
+  nb:
+    value: 84
+    selects: physical
 constraints:
 - nb == order * (order + 1) * (order + 2) // 6
 init:
@@ -55,10 +55,6 @@ init:
   - Q
   - I
   - star
-  # Declared purely so contract.py's ABI derivation sees which parameters are
-  # real kernel symbols (batch, nb) vs an initialize()-only knob (order,
-  # consumed only to compute nb -- never reaches the kernel body or its C
-  # signature).
   shapes:
     I: (batch, nb, 9)
     Q: (batch, nb, 9)
