@@ -427,8 +427,9 @@ def handle_kernelbench(specs: List[BenchSpec], roots: Roots) -> FamilyResult:
     if not roots.kernelbench.is_dir():
         for spec in specs:
             res.skips.append(
-                SkipItem("kernelbench", spec.module_name, f"submodule not checked out at {roots.kernelbench}; "
-                         f"run: git submodule update --init --recursive"))
+                SkipItem(
+                    "kernelbench", spec.module_name, f"submodule not checked out at {roots.kernelbench}; "
+                    f"run: git submodule update --init --recursive"))
         return res
     sources = kernelbench_sources(roots.kernelbench)
     for spec in specs:

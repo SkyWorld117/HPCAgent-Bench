@@ -73,5 +73,5 @@ def test_the_port_key_folds_the_renames_the_tree_actually_applied(collector):
         "Standard_matrix_multiplication_")
     assert collector.kernelbench_port_key("four_d_tensor_matrix_multiplication")[0] == collector.kernelbench_key(
         "4D_tensor_matrix_multiplication")
-    assert collector.kernelbench_port_key("gemm_scale_batch_norm_variant_b") == (collector.kernelbench_key(
-        "Gemm_Scale_BatchNorm"), True)
+    assert collector.kernelbench_port_key("gemm_scale_batch_norm_variant_b") == (
+        collector.kernelbench_key("Gemm_Scale_BatchNorm"), True)
