@@ -1,13 +1,13 @@
 import numpy as np
 
 def _avgpool3d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, int):
+    if isinstance(kernel_size, (int, np.integer)):
         kernel_size = (kernel_size, kernel_size, kernel_size)
     if stride is None:
         stride = kernel_size
-    if isinstance(stride, int):
+    if isinstance(stride, (int, np.integer)):
         stride = (stride, stride, stride)
-    if isinstance(padding, int):
+    if isinstance(padding, (int, np.integer)):
         padding = (padding, padding, padding)
     padded_shape = (x.shape[0], x.shape[1]) + tuple((x.shape[i + 2] + 2 * padding[i] for i in range(3)))
     fill = -np.inf if 'mean' == 'max' else 0.0

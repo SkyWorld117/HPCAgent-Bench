@@ -381,6 +381,9 @@ LEADING_DIGIT_WORDS: Dict[str, str] = {"one": "1", "two": "2", "three": "3", "fo
 #: tree kept the lower-numbered one under the bare name and suffixed the other, so this suffix
 #: means "the second file sharing this name", not "a different kernel".
 VARIANT_SUFFIX = "_variant_b"
+#: Appended when a port's natural name collides with a non-KernelBench kernel (BenchSpec.load is
+#: keyed on the stem, so the two would be ambiguous). Stripped before matching upstream.
+DISAMBIGUATOR_SUFFIX = "_kernelbench"
 
 #: ``100_HingeLoss.py`` -> index 100, name ``HingeLoss``.
 UPSTREAM_INDEX = re.compile(r"^(\d+)_(.+)$")
@@ -412,6 +415,8 @@ def kernelbench_port_key(stem: str) -> Tuple[str, bool]:
     variant = stem.endswith(VARIANT_SUFFIX)
     if variant:
         stem = stem[:-len(VARIANT_SUFFIX)]
+    if stem.endswith(DISAMBIGUATOR_SUFFIX):
+        stem = stem[:-len(DISAMBIGUATOR_SUFFIX)]
     for word, digit in LEADING_DIGIT_WORDS.items():
         if stem.startswith(f"{word}_"):
             stem = digit + stem[len(word):]
