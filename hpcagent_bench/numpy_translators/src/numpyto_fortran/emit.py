@@ -5,7 +5,7 @@ import copy
 import dataclasses
 import math
 import re
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
@@ -1146,45 +1146,18 @@ class _FortranBodyEmitter(BaseEmitter):
         if isinstance(node, ast.Call):
             return self._emit_call(node)
         if isinstance(node, ast.IfExp):
-            # merge() is strict on TYPE *and* KIND: an integer-literal branch
-            # defaults to int32 while a paired int64 partner is int64. Suffix a
-            # literal branch with its integer partner's kind so they kind-match.
-            return (f"merge({self._emit_merge_branch(node.body, node.orelse)}, "
-                    f"{self._emit_merge_branch(node.orelse, node.body)}, "
-                    f"{self.emit_expr(node.test)})")
+            # Never reached: _hoist_ifexp_stmts (emit_fortran / _rename_helper_to_fortran_safe)
+            # lowers every IfExp to an if/else-over-a-temp before the body emitter ever walks the
+            # tree. merge(a, b, mask) is an ordinary Fortran function call -- it evaluates BOTH a
+            # and b before selecting one, so emitting it here for a guard that exists specifically
+            # to skip a division-by-zero / out-of-bounds branch would divide by zero or read
+            # garbage on the excluded value. A live IfExp at this point means the hoist was
+            # bypassed -- fail loudly rather than silently emit the eager form.
+            raise NotImplementedError(f"unhoisted IfExp reached emit (line {vars(node).get('lineno', '?')}): "
+                                      f"{ast.unparse(node)[:120]}")
         # A bare z.real/z.imag never reaches emit: native_desugar rewrites it to
         # np.real(z)/np.imag(z) at parse time, handled by that canonical call form.
         raise NotImplementedError(f"expression {type(node).__name__} (line {vars(node).get('lineno', '?')})")
-
-    def _emit_merge_branch(self, branch: ast.AST, partner: ast.AST) -> str:
-        """Emit one merge branch, suffixing an integer literal with its integer partner's KIND."""
-        litval = _int_literal_value(branch)
-        if litval is not None:
-            ktag = None
-            if isinstance(partner, ast.Name):
-                ktag = self._name_int_kind(partner.id)
-            elif _int_literal_value(partner) is not None:
-                ktag = "int64"
-            if ktag:
-                lit = f"{litval}_{self._int_kind_selector(ktag)}"
-                return f"({lit})" if litval < 0 else lit
-            # The partner branch is REAL: merge() is strict on TYPE, so an integer
-            # literal beside a real branch must be emitted as a real of the kernel
-            # float kind. C's ternary promotes silently; Fortran does not.
-            if not self._expr_is_integer(partner):
-                lit = f"{litval}.0_{self._rk}"
-                return f"({lit})" if litval < 0 else lit
-        # The same TYPE strictness for an integer branch the literal path cannot spell
-        # (a name/subscript/arithmetic): numpy promotes the integer operand to the real
-        # result dtype, so convert it the same way. The partner must be PROVABLY real,
-        # not merely "not provably integer" -- that would wrongly promote an int/int pair.
-        if self._expr_is_integer(branch) and self._expr_is_real(partner):
-            return f"real({self.emit_expr(branch)}, {self._rk})"
-        # merge() is equally strict on COMPLEX: promote the non-complex branch to
-        # complex of the kernel kind, mirroring the int->real promotion above.
-        if not self._operand_is_complex(branch) and self._operand_is_complex(partner):
-            return f"cmplx({self.emit_expr(branch)}, 0.0_{self._rk}, {self._rk})"
-        return self.emit_expr(branch)
 
     def _expr_is_real(self, e: ast.AST) -> bool:
         """True only when e is PROVABLY real-typed; deliberately not the complement of _expr_is_integer."""
@@ -1218,7 +1191,7 @@ class _FortranBodyEmitter(BaseEmitter):
         return f"real({text}, {self._rk})" if self._expr_is_integer(node) else text
 
     def _expr_is_integer(self, e: ast.AST) -> bool:
-        """True if e is an integer-typed Fortran expression (so a merge() partner literal should be int-kinded)."""
+        """True if e is an integer-typed Fortran expression (so a paired literal should be int-kinded)."""
         if isinstance(e, ast.Constant):
             return isinstance(e.value, int) and not isinstance(e.value, bool)
         if isinstance(e, ast.Name):
@@ -1951,6 +1924,157 @@ def _fortran_safe_token(tok: str) -> str:
     return _FORTRAN_TOKEN_RE.sub(lambda m: _fortran_safe(m.group(0)), tok)
 
 
+class _HoistIfExpVisitor(ast.NodeTransformer):
+    """Expression-level: replace an ``IfExp`` with a fresh temp Name, appending an ``if/else``
+    that assigns it to :attr:`pre` (drained per-statement by :func:`_hoist_ifexp_stmts`)."""
+
+    def __init__(self) -> None:
+        self.pre: List[ast.stmt] = []
+        self.counter = 0
+        #: temp name -> its (body, orelse) branch expressions, in creation order (a NESTED temp
+        #: lands before the temp that consumes it). :func:`_record_ifexp_temp_dtypes` types the
+        #: temps from these, so the declaration carries the join ``merge()`` used to force at the
+        #: call site.
+        self.temps: Dict[str, Tuple[ast.expr, ast.expr]] = {}
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.Name:
+        self.generic_visit(node)  # hoist a NESTED IfExp (in test/body/orelse) before this one
+        name = f"__ifexp{self.counter}"
+        self.counter += 1
+        store, load = ast.Name(id=name, ctx=ast.Store()), ast.Name(id=name, ctx=ast.Load())
+        branch = ast.If(test=node.test,
+                        body=[ast.copy_location(ast.Assign(targets=[store], value=node.body), node)],
+                        orelse=[ast.copy_location(ast.Assign(targets=[copy.deepcopy(store)], value=node.orelse), node)])
+        self.pre.append(ast.copy_location(branch, node))
+        self.temps[name] = (node.body, node.orelse)
+        return ast.copy_location(load, node)
+
+
+def _hoist_ifexp_stmts(stmts: List[ast.stmt], hoister: _HoistIfExpVisitor) -> List[ast.stmt]:
+    """Lower every ``IfExp`` in ``stmts`` to an explicit ``if/else`` over a fresh temp, so only the
+    TAKEN branch ever executes.
+
+    Fortran has no ternary expression; ``merge(a, b, mask)`` is an ordinary function call, so a
+    Fortran-emitted ``IfExp`` evaluated BOTH ``a`` and ``b`` before selecting one -- exactly
+    backwards for the guard an IfExp is usually written for (``y = a / x if x != 0 else 0.0``
+    divides by zero on the excluded branch; a guarded out-of-bounds subscript reads garbage the
+    same way). C's ``?:`` already short-circuits correctly, so this runs on the FORTRAN-only tree
+    copy only (see its two call sites in this module), never on the shared ``KernelIR.tree``.
+
+    Recurses into nested blocks FIRST: an ``IfExp`` inside a loop body must be re-hoisted INSIDE
+    that body (re-evaluated every iteration), not lifted out of the loop.
+
+    A ``while``'s own TEST is a special case: it re-runs every iteration, but hoisting only PRIMES
+    it once before the loop leaves every later check reading a stale temp. The primer block is
+    therefore also appended (a fresh copy) to the end of the loop body, so it is recomputed just
+    before the next test -- the standard "prime, then re-prime at the tail" while-condition shape,
+    plus a copy before every ``continue`` that would jump PAST the tail (see
+    :func:`_reprime_before_continue`).
+    """
+    out: List[ast.stmt] = []
+    for stmt in stmts:
+        for field in ("body", "orelse"):
+            value = vars(stmt).get(field)
+            if isinstance(value, list):
+                setattr(stmt, field, _hoist_ifexp_stmts(value, hoister))
+        if isinstance(stmt, ast.While):
+            stmt.test = hoister.visit(stmt.test)
+            primer, hoister.pre = hoister.pre, []
+            if primer:
+                out.extend(primer)
+                stmt.body = (_reprime_before_continue(stmt.body, primer) + [copy.deepcopy(s) for s in primer])
+            out.append(stmt)
+            continue
+        for field, value in ast.iter_fields(stmt):
+            if isinstance(value, ast.expr):
+                setattr(stmt, field, hoister.visit(value))
+            elif isinstance(value, list) and value and isinstance(value[0], ast.expr):
+                setattr(stmt, field, [hoister.visit(v) for v in value])
+        out.extend(hoister.pre)
+        hoister.pre = []
+        out.append(stmt)
+    return out
+
+
+def _reprime_before_continue(stmts: List[ast.stmt], primer: List[ast.stmt]) -> List[ast.stmt]:
+    """Insert a fresh copy of a while-test primer before every ``continue`` belonging to THIS loop.
+
+    ``continue`` emits as Fortran ``cycle``, which jumps straight back to the loop test -- past the
+    re-prime :func:`_hoist_ifexp_stmts` appends at the body tail. Without a copy here the next test
+    reads the temp the PREVIOUS iteration left behind. A nested loop's ``continue`` belongs to that
+    loop, so nested loops are not descended into.
+    """
+    out: List[ast.stmt] = []
+    for stmt in stmts:
+        if isinstance(stmt, (ast.For, ast.While)):
+            out.append(stmt)
+            continue
+        for field in ("body", "orelse"):
+            value = vars(stmt).get(field)
+            if isinstance(value, list):
+                setattr(stmt, field, _reprime_before_continue(value, primer))
+        if isinstance(stmt, ast.Continue):
+            out.extend(copy.deepcopy(s) for s in primer)
+        out.append(stmt)
+    return out
+
+
+def _hoist_ifexp(body: List[ast.stmt]) -> Tuple[List[ast.stmt], Dict[str, Tuple[ast.expr, ast.expr]]]:
+    """Hoisted statements, plus each fresh temp's two branch expressions for :func:`_record_ifexp_temp_dtypes`."""
+    hoister = _HoistIfExpVisitor()
+    return _hoist_ifexp_stmts(body, hoister), hoister.temps
+
+
+def _complex_tag_for(real_tag: str) -> str:
+    """The registry's complex dtype whose components are ``real_tag`` -- its itemsize is exactly twice."""
+    want = dtypes.itemsize(real_tag) * 2
+    return next(t for t in dtypes.REGISTRY if t.startswith("complex") and dtypes.itemsize(t) == want)
+
+
+def _record_ifexp_temp_dtypes(emitter: "_FortranBodyEmitter", temps: Dict[str, Tuple[ast.expr, ast.expr]],
+                              rename: Callable[[str], str]) -> None:
+    """Record each hoisted ``IfExp`` temp's dtype in ``emitter.kir.local_dtypes``, in place.
+
+    ``merge(a, b, mask)`` forced both branches onto ONE Fortran type at the call site, and the
+    deleted ``_emit_merge_branch`` spelled that join out per branch. An ``if/else`` over a temp
+    moves the join onto the temp's DECLARATION instead -- and a Fortran assignment converts
+    silently, so a wrong declaration is a silent miscompile, not a compile error: a complex branch
+    assigned to a real temp drops the imaginary part, a real one assigned to an integer temp
+    truncates. Same join, new home:
+
+    * either branch COMPLEX -> complex (a real temp would truncate the imaginary part);
+    * both branches INTEGER -> the numpy integer promotion of the two kinds, so an ``int32``
+      literal beside an ``int64`` partner is declared ``int64`` rather than wrapping;
+    * one integer beside a PROVABLY real partner -> real of the kernel float kind.
+
+    Anything else records nothing, leaving :func:`_collect_implicit_locals`' own inference (a
+    logical-valued RHS, a read of a real array element, an integer subscript use) to type the temp
+    -- that is what types every other implicit local. MUST run before the
+    :func:`_collect_implicit_locals` call whose result emits the declarations; its recorded-dtype
+    lookup is the consumer. Temps are typed in creation order, so a nested temp's recorded dtype is
+    already visible when the temp consuming it is typed.
+    """
+    real_tag = dtypes.compute_dtype(emitter.kir.float_precision or "float64")
+    local_dtypes = emitter.kir.local_dtypes
+    for name, (body, orelse) in temps.items():
+        if emitter._operand_is_complex(body) or emitter._operand_is_complex(orelse):
+            dtype = _complex_tag_for(real_tag)
+        elif emitter._expr_is_integer(body) and emitter._expr_is_integer(orelse):
+            typed = [k for k in (emitter._infer_int_kind(body), emitter._infer_int_kind(orelse)) if k is not None]
+            # Neither side names a typed integer (literal beside literal): the ABI integer, which
+            # is what a bare integer literal is everywhere else in the emitted Fortran.
+            if not typed:
+                dtype = _SYMBOL_INT_TAG
+            else:
+                dtype = typed[0] if len(typed) == 1 else dtypes.promote_integers(typed[0], typed[1])
+        elif ((emitter._expr_is_integer(body) and emitter._expr_is_real(orelse))
+              or (emitter._expr_is_integer(orelse) and emitter._expr_is_real(body))):
+            dtype = real_tag
+        else:
+            continue
+        local_dtypes[rename(name)] = dtype
+
+
 class _FortranRenameTemps(ast.NodeTransformer):
     """Rewrite every leading-underscore Name/For-target to a Fortran-safe form, and case-insensitive collisions to f_<name>."""
 
@@ -2073,6 +2197,9 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
                               scalars=renamed_kir_scalars,
                               input_args=renamed_input_args)
     kir_tree = copy.deepcopy(kir.tree)
+    # Fortran-only: lower every IfExp to an if/else-over-a-temp BEFORE the rename pass, so a fresh
+    # ``__ifexp<N>`` temp gets the SAME leading-underscore-strip every other compiler temp gets.
+    kir_tree.body, ifexp_temps = _hoist_ifexp(kir_tree.body)
     _FortranRenameTemps(case_map=case_map).visit(kir_tree)
     ast.fix_missing_locations(kir_tree)
 
@@ -2156,6 +2283,11 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
         elif ft.startswith("integer(c_int32"):
             _pre_int_kinds[nm] = "int32"
     body_emitter._int_kinds = _pre_int_kinds
+    # Type the hoisted IfExp temps into local_dtypes -- the dict body_emitter shares, and the
+    # authoritative input to the SECOND _collect_implicit_locals below, which emits the decls.
+    # After _pre_int_kinds, so a branch naming an implicit integer local (``c = int(idx[i])``)
+    # reads as INTEGER; typed before that pass it would look untyped and widen the temp to real.
+    _record_ifexp_temp_dtypes(body_emitter, ifexp_temps, _safe_full)
     # Pre-compute logical_array_locals so _emit_subscript can detect arr[mask]
     # boolean-indexing and emit PACK(arr, mask).
     _pre_logical_arr_locals: Set[str] = set(_assigned_bool_literal(kir.tree))
@@ -2664,6 +2796,8 @@ def _helper_returns_int(hkir: KernelIR) -> bool:
 def _rename_helper_to_fortran_safe(hkir: KernelIR) -> KernelIR:
     """Fortran-safe rename of a captured helper KIR, mirroring the kernel-level rename so body and decl names match."""
     htree = copy.deepcopy(hkir.tree)
+    # Fortran-only IfExp->if/else hoist (see _hoist_ifexp_stmts), same as the top-level kernel tree.
+    htree.body, ifexp_temps = _hoist_ifexp(htree.body)
     _FortranRenameTemps().visit(htree)
     ast.fix_missing_locations(htree)
     r_arrays = [
@@ -2675,29 +2809,33 @@ def _rename_helper_to_fortran_safe(hkir: KernelIR) -> KernelIR:
     r_return = (_fortran_safe(hkir.return_kind) if hkir.return_kind not in (None, "scalar") else hkir.return_kind)
     # The harvested side-tables are typed KernelIR fields; rename their keys and
     # embedded __name shape tokens the same way and carry them on the replace.
-    return dataclasses.replace(hkir,
-                               tree=htree,
-                               arrays=r_arrays,
-                               scalars=r_scalars,
-                               symbols=r_symbols,
-                               input_args=[_fortran_safe(p) for p in hkir.input_args],
-                               return_kind=r_return,
-                               zeros_locals={
-                                   _fortran_safe(k): tuple(_fortran_safe_token(t) for t in v) if v else v
-                                   for k, v in hkir.zeros_locals.items()
-                               },
-                               zeros_fills={
-                                   _fortran_safe(k): v
-                                   for k, v in hkir.zeros_fills.items()
-                               },
-                               reassign_shapes={
-                                   _fortran_safe(k): [tuple(_fortran_safe_token(t) for t in sh) for sh in v]
-                                   for k, v in hkir.reassign_shapes.items()
-                               },
-                               local_dtypes={
-                                   _fortran_safe(k): v
-                                   for k, v in hkir.local_dtypes.items()
-                               })
+    renamed = dataclasses.replace(hkir,
+                                  tree=htree,
+                                  arrays=r_arrays,
+                                  scalars=r_scalars,
+                                  symbols=r_symbols,
+                                  input_args=[_fortran_safe(p) for p in hkir.input_args],
+                                  return_kind=r_return,
+                                  zeros_locals={
+                                      _fortran_safe(k): tuple(_fortran_safe_token(t) for t in v) if v else v
+                                      for k, v in hkir.zeros_locals.items()
+                                  },
+                                  zeros_fills={
+                                      _fortran_safe(k): v
+                                      for k, v in hkir.zeros_fills.items()
+                                  },
+                                  reassign_shapes={
+                                      _fortran_safe(k): [tuple(_fortran_safe_token(t) for t in sh) for sh in v]
+                                      for k, v in hkir.reassign_shapes.items()
+                                  },
+                                  local_dtypes={
+                                      _fortran_safe(k): v
+                                      for k, v in hkir.local_dtypes.items()
+                                  })
+    # Same branch-type join as the kernel tree, on the helper's own (fresh) local_dtypes dict --
+    # _emit_fortran_helper calls _collect_implicit_locals on this KernelIR to declare its locals.
+    _record_ifexp_temp_dtypes(_FortranBodyEmitter(renamed), ifexp_temps, _fortran_safe)
+    return renamed
 
 
 def _emit_fortran_helper(hkir: KernelIR) -> str:
