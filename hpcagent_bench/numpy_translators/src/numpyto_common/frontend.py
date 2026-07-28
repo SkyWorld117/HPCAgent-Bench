@@ -2084,26 +2084,45 @@ def _local_array_def(fn: ast.FunctionDef, name: str):
     return None
 
 
-def _resolve_local_array_arg(fn: ast.FunctionDef, name: str, arr_by):
-    """A helper call arg that is a kernel-LOCAL array (``xkq = xkq_collect[:, k]``
-    or a bare alias of a param) -- resolve its ``(shape, dtype)`` from the local's
-    FIRST definition, so the helper param is typed as an array rather than
-    defaulted to a scalar double. Only a slice/alias of a KNOWN array is resolved
-    (vexx_k's ``_g2_convolution`` ``xkq`` / ``xk`` (3,) q-vector args)."""
-    for node in ast.walk(fn):
-        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == name):
-            continue
-        rhs = node.value
-        if isinstance(rhs, ast.Name) and rhs.id in arr_by:
-            a = arr_by[rhs.id]
-            return a.shape, a.dtype
-        if (isinstance(rhs, ast.Subscript) and isinstance(rhs.value, ast.Name) and rhs.value.id in arr_by):
-            a = arr_by[rhs.value.id]
-            kept = _apply_subscript_axes(list(a.shape), rhs.slice)
-            if kept:
-                return tuple(kept), a.dtype
-        return None  # first def is not a resolvable array-derived local
+def _resolve_array_ref(fn: ast.FunctionDef,
+                       node: ast.expr,
+                       arr_by: Dict[str, ArrayDesc],
+                       seen: Optional[Set[str]] = None) -> Optional[Tuple[Tuple[str, ...], str]]:
+    """``(shape, dtype)`` of an array-VALUED expression, or ``None`` when it is not resolvable.
+
+    Handles a declared param (``arr_by`` hit), a kernel-local ``np.zeros/empty/ones`` allocation
+    (:func:`_local_array_def`), a bare alias of either -- chased through the WHOLE alias chain, not
+    just one hop -- and a slice of any of those (``arr[:, k]``). A helper call's array arg or an
+    array-returning helper's assignment target can be ANY of these: helper inlining rebinds a
+    surviving helper's array arg through its own renamed local (``__rb_x = __inl1_out`` where
+    ``__inl1_out = np.zeros(...)`` is itself the inlined callee's renamed return buffer), so a
+    single-hop check stops one alias short and mistypes the arg/target as a scalar.
+    """
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        base = _resolve_array_ref(fn, node.value, arr_by, seen)
+        if base is None:
+            return None
+        shape, dtype = base
+        kept = _apply_subscript_axes(list(shape), node.slice)
+        return (tuple(kept), dtype) if kept else None
+    if not isinstance(node, ast.Name):
+        return None
+    name = node.id
+    if name in arr_by:
+        a = arr_by[name]
+        return a.shape, a.dtype
+    seen = set(seen) if seen else set()
+    if name in seen:
+        return None  # alias cycle -- cannot happen from real source, just a guard
+    seen.add(name)
+    loc = _local_array_def(fn, name)  # a kernel-local array (np.zeros(...))
+    if loc is not None:
+        dims, dtype = loc
+        return tuple(ast.unparse(d) for d in dims), dtype
+    for stmt in ast.walk(fn):  # a bare alias (``__rb_x = __inl1_out``) -- chase its FIRST definition
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == name):
+            return _resolve_array_ref(fn, stmt.value, arr_by, seen)
     return None
 
 
@@ -2119,18 +2138,20 @@ def _infer_param_desc(arg: ast.AST, pname: str, arr_by, sca_by, sym_by, fn=None)
         if arg.id in sym_by:
             return ("symbol", SymbolDesc(name=pname))
         if fn is not None:
-            res = _resolve_local_array_arg(fn, arg.id, arr_by)
+            res = _resolve_array_ref(fn, arg, arr_by)
             if res is not None:
                 shape, dtype = res
                 return ("array", ArrayDesc(name=pname, dtype=dtype, shape=shape, is_output=False))
-    if (isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name) and arg.value.id in arr_by):
-        a = arr_by[arg.value.id]
-        # ``arr[:, k]`` -- a slice-bearing read is a (sub-shaped) array param;
-        # ``arr[i]`` / ``arr[i, j]`` -- a fully-indexed read is a scalar element.
-        kept = _apply_subscript_axes(list(a.shape), arg.slice)
-        if kept:
-            return ("array", ArrayDesc(name=pname, dtype=a.dtype, shape=tuple(kept), is_output=False))
-        return ("scalar", ScalarDesc(name=pname, dtype=a.dtype))
+    if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name):
+        res = _resolve_array_ref(fn, arg, arr_by) if fn is not None else None
+        if res is not None:
+            shape, dtype = res
+            return ("array", ArrayDesc(name=pname, dtype=dtype, shape=shape, is_output=False))
+        if arg.value.id in arr_by:
+            # A fully-indexed read (``arr[i]`` / ``arr[i, j]``) drops every axis -- a scalar element,
+            # not an unresolvable array (``_resolve_array_ref`` returning ``None`` for a subscript
+            # with no KEPT axis is exactly that case, not a failure to resolve).
+            return ("scalar", ScalarDesc(name=pname, dtype=arr_by[arg.value.id].dtype))
     if isinstance(arg, ast.Constant):
         if isinstance(arg.value, bool):
             return ("scalar", ScalarDesc(name=pname, dtype="bool"))
@@ -2145,23 +2166,17 @@ def _helper_return_array_shape(lhs, arr_by, fn):
     """When a captured helper's result is stored into an ARRAY target
     (``X = h(...)`` with X an array, or ``X[:, j] = h(...)``), return the returned
     array's ``(shape_strings, dtype)`` -- so the helper emits an out-param of that
-    shape. A scalar / non-array target returns ``(None, None)`` (by-value path)."""
-    if isinstance(lhs, ast.Name) and lhs.id in arr_by:
-        a = arr_by[lhs.id]
-        return list(a.shape), a.dtype
-    if isinstance(lhs, ast.Subscript) and isinstance(lhs.value, ast.Name):
-        base = lhs.value.id
-        if base in arr_by:
-            a = arr_by[base]
-            kept = _apply_subscript_axes(list(a.shape), lhs.slice)
-            return (kept, a.dtype) if kept else (None, None)
-        loc = _local_array_def(fn, base)  # a kernel-local array (np.zeros(...))
-        if loc is not None:
-            dims, dtype = loc
-            kept = _apply_subscript_axes(dims, lhs.slice)
-            if kept:
-                return [ast.unparse(e) for e in kept], dtype
-    return None, None
+    shape. A scalar / non-array target returns ``(None, None)`` (by-value path).
+
+    Delegates to :func:`_resolve_array_ref`, which chases the WHOLE alias chain -- a bare
+    ``X`` target is not always a declared param or a direct ``np.zeros`` local: inlining a
+    Form-3 helper rebinds its tail return through a renamed local (``X = __inl1_out`` where
+    ``__inl1_out = np.zeros(...)``), and a single-hop check stops one alias short, misreading
+    an array-returning helper's target as a scalar."""
+    if not isinstance(lhs, (ast.Name, ast.Subscript)):
+        return None, None
+    res = _resolve_array_ref(fn, lhs, arr_by)
+    return (list(res[0]), res[1]) if res is not None else (None, None)
 
 
 def _infer_helper_params(pnames, args, arr_by, sca_by, sym_by, fn=None):
@@ -2203,6 +2218,31 @@ def _substitute_names(node: ast.AST, consts: Dict[str, ast.expr]) -> None:
             return n
 
     _Sub().visit(node)
+
+
+def _drop_unreachable_after_return(stmts: List[ast.stmt]) -> List[ast.stmt]:
+    """Truncate ``stmts`` right after its first unconditional ``return``, recursing into every
+    nested block (``If``/``For``/``While`` body + orelse) so the same trim applies there too.
+
+    ``_FoldStaticNoneBranches`` replaces a statically-true ``if None is None: return y`` with
+    just its body (``[return y]``) -- but that only swaps the ``If`` NODE for its branch; the
+    ORIGINAL SIBLINGS after it (``conv2d_instance_norm_divide``'s ``shape = ...; return
+    y * None.reshape(shape) + None.reshape(shape)``, dead now that the guard is gone) are
+    untouched and still reach the emitter, which has no lowering for a call on a substituted
+    ``None``. A `return` appearing directly in a statement list is reached unconditionally
+    whenever that list runs, so anything after it there can never execute -- safe to drop
+    regardless of what runs before it.
+    """
+    out: List[ast.stmt] = []
+    for stmt in stmts:
+        for field in ("body", "orelse"):
+            value = vars(stmt).get(field)
+            if isinstance(value, list):
+                setattr(stmt, field, _drop_unreachable_after_return(value))
+        out.append(stmt)
+        if isinstance(stmt, ast.Return):
+            break
+    return out
 
 
 def _rewrite_returns_to_outparam(hfn: ast.FunctionDef, hret: str) -> None:
@@ -2299,6 +2339,22 @@ class _ReplaceStmts(ast.NodeTransformer):
         return repl
 
 
+def _desugar_helper_tuples(hfn: ast.FunctionDef, arrays: List[ArrayDesc], scalars: List[ScalarDesc]) -> None:
+    """Run :func:`desugar_tuples` on a helper that survived inlining, against ITS OWN param ranks.
+
+    The kernel body gets this pass once, inside ``parse_kernel`` (ranks from its declared array
+    args). A helper built here by :func:`_build_helper_kirs` is a second, separate ``KernelIR`` --
+    without its own call, ``axes = tuple(range(2, x.ndim))`` (the instance-norm idiom) never folds
+    and reaches the structural-axis guard below as a runtime ``Call``, not a literal tuple.
+    """
+    ranks = {a.name: len(a.shape) for a in arrays}
+    # ScalarDesc.dtype is already canonicalized (see ScalarDesc.__post_init__), so a plain name-shape
+    # check is exact here -- same split the emitters use, not a guess.
+    int_scalars = frozenset(s.name for s in scalars if dtypes.is_integer(s.dtype))
+    float_scalars = frozenset(s.name for s in scalars if s.dtype.startswith("float"))
+    desugar_tuples(hfn, int_scalars=int_scalars, float_scalars=float_scalars, arrays=frozenset(ranks), ranks=ranks)
+
+
 def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: KernelIR) -> List[KernelIR]:
     """One :class:`KernelIR` per non-inlinable called helper (see
     :func:`_collect_called_helper_defs`). Each helper param's type/shape is read
@@ -2349,16 +2405,23 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         # slice / ``.real`` / ``.ndim``-guard forms). Runs before ``_mark_written_
         # outputs`` so a ufunc-out / roll rewrite is seen as a write to its target.
         native_desugar(hfn)
-        # A helper that survives inlining is emitted as its OWN kernel and lowered through the same
-        # expanders, so it needs the same structural guards the kernel body gets. Without them a
-        # symbolic axis inside a helper reached lowering and was read as "no axis" -- the
-        # instance-norm helpers reduced over EVERY axis instead of the spatial ones.
-        _reject_symbolic_axis(hfn)
-        _reject_unsupported_slices(hfn)
 
         if hret_shape is None:
             # SCALAR (by-value) return -- params inferred straight from the call.
             arrays, scalars, symbols = _infer_helper_params(pnames, call.args, arr_by, sca_by, sym_by, kernel_fn)
+            # Fold this helper's OWN compile-time tuples (``tuple(range(2, x.ndim))`` and the
+            # rest of tuple_desugar.py) against ITS param ranks, same as the kernel body got at
+            # ``parse_kernel``'s own ``desugar_tuples`` call -- a surviving helper is its own
+            # KernelIR and never went through that call. Must run BEFORE the structural-axis
+            # guards below: an unfolded ``axes = tuple(range(2, x.ndim))`` is still a runtime
+            # Call at that point, which is exactly the "symbolic axis" the guard exists to catch.
+            _desugar_helper_tuples(hfn, arrays, scalars)
+            # A helper that survives inlining is emitted as its OWN kernel and lowered through the
+            # same expanders, so it needs the same structural guards the kernel body gets. Without
+            # them a symbolic axis inside a helper reached lowering and was read as "no axis" --
+            # the instance-norm helpers reduced over EVERY axis instead of the spatial ones.
+            _reject_symbolic_axis(hfn)
+            _reject_unsupported_slices(hfn)
             _mark_written_outputs(hfn, arrays)
             out.append(
                 KernelIR(tree=hfn,
@@ -2383,6 +2446,13 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         if call_consts:
             _substitute_names(hfn, call_consts)
             _FoldStaticNoneBranches().visit(hfn)
+            # The fold above only swaps a statically-true ``if None is None: return y`` for its
+            # branch; its ORIGINAL siblings (conv2d_instance_norm_divide's dead
+            # ``shape = ...; return y * None.reshape(...) + ...``) are still in the body and
+            # still reference the substituted-away ``None`` -- prune them before anything reads
+            # ``hfn`` further (``used`` right below would otherwise still count ``weight``/``bias``
+            # as read here, keeping dead params alive).
+            hfn.body = _drop_unreachable_after_return(hfn.body)
             ast.fix_missing_locations(hfn)
         used = {n.id for n in ast.walk(hfn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         keep = [(pn, a) for pn, a in zip(pnames, call.args) if pn in used]
@@ -2391,6 +2461,12 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         hfn.args.args = [a for a in hfn.args.args if a.arg in used]
         hfn.args.defaults = []
         arrays, scalars, symbols = _infer_helper_params(pnames, kept_args, arr_by, sca_by, sym_by, kernel_fn)
+        # See the scalar-return branch above: fold this helper's own compile-time tuples against
+        # its param ranks BEFORE the structural-axis guards, and before ``hret`` (not yet a real
+        # body reference) is appended to ``arrays`` below.
+        _desugar_helper_tuples(hfn, arrays, scalars)
+        _reject_symbolic_axis(hfn)
+        _reject_unsupported_slices(hfn)
         _mark_written_outputs(hfn, arrays)
         # The returned array becomes a trailing out-param the body writes into.
         hret = f"__hret_{hidx}"
