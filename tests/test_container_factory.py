@@ -20,24 +20,27 @@ def clean_backend_env(monkeypatch):
 
 
 def test_load_backends_lists_every_backend():
-    """Two OCI runtimes that consume the shipped image directly, the SIF conversion target, and
-    the Alps container engine."""
+    """Two OCI implementations that consume the shipped image directly, the SIF conversion
+    target, the Alps container engine, and the no-container path."""
     spellings, passthrough = containers.load_backends()
-    assert set(spellings) == {"podman", "docker", "apptainer", "ce"}
+    assert set(spellings) == {"docker", "podman", "apptainer", "ce", "native"}
     assert "ANTHROPIC_API_KEY" in passthrough
     assert spellings["apptainer"].verb == ("exec", )
     assert spellings["podman"].verb == ("run", "--rm", "--network", "host")
     assert spellings["docker"].verb == ("run", "--rm", "--network", "host")
 
 
-def test_the_supported_thing_is_a_family_not_a_program():
-    """podman and docker are two flavours of ONE interface: same verb, same bind/workdir/env
-    flags, same image form. Only the NVIDIA flag and the rootless property differ, which is why
-    they are one family rather than two backends that happen to look alike."""
+def test_oci_is_a_standard_not_a_program():
+    """docker and podman are two IMPLEMENTATIONS of one standard: same verb, same
+    bind/workdir/env flags, same image form. Only the NVIDIA flag and the rootless property
+    differ, which is why `oci` is an alias over both rather than a runtime of its own. Nothing is
+    ever launched as `oci` -- selecting it always resolves to a program."""
     spellings, _ = containers.load_backends()
-    assert containers.family_members("oci") == ("podman", "docker")
+    assert "oci" not in spellings  # a standard has no row: it is not a thing you exec
+    assert containers.family_members("oci") == ("docker", "podman")
     assert containers.family_members("sif") == ("apptainer", )
     assert containers.family_members("ce") == ("ce", )
+    assert containers.family_members("native") == ("native", )
     podman, docker = spellings["podman"], spellings["docker"]
     assert podman.verb == docker.verb
     assert (podman.bind_flag, podman.workdir_flag, podman.env_flag) == (docker.bind_flag, docker.workdir_flag,
@@ -52,9 +55,11 @@ def test_a_family_name_resolves_to_whichever_flavour_is_installed(monkeypatch):
     monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/bin/" + name if name == "docker" else None)
     assert containers.resolve_backend("oci") == "docker"
     monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/bin/" + name)
-    assert containers.resolve_backend("oci") == "podman"  # both present -> the rootless one
+    assert containers.resolve_backend("oci") == "docker"  # both present -> the one most users have
+    monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/bin/" + name if name == "podman" else None)
+    assert containers.resolve_backend("oci") == "podman"  # docker absent -> the other implementation
     monkeypatch.setattr(containers.shutil, "which", lambda name: None)
-    assert containers.resolve_backend("oci") == "podman"  # none present -> deterministic fallback
+    assert containers.resolve_backend("oci") == "docker"  # none present -> deterministic fallback
     assert containers.resolve_backend("sif") == "apptainer"
     assert containers.resolve_backend("ce") == "ce"
 
@@ -85,6 +90,29 @@ def test_ce_is_a_different_shape_of_backend_not_just_different_flags():
     assert spellings["ce"].verb == () and spellings["ce"].bind_flag == ""
     assert containers.local_run_command(["hpcagent-bench", "run"], backend="ce") == ["hpcagent-bench", "run"]
     assert all(spellings[name].kind == "exec" for name in containers.EXEC_BACKENDS)
+
+
+def test_native_is_a_supported_backend_not_a_missing_one():
+    """A site with no container runtime still has to run. Saying so as a backend keeps that path
+    on the same seam as the others; it consumes no image, so asking it for one is an error."""
+    spellings, _ = containers.load_backends()
+    assert spellings["native"].kind == "none"
+    assert spellings["native"].image_form == ""
+    assert containers.local_run_command(["hpcagent-bench", "run"], backend="native") == ["hpcagent-bench", "run"]
+    assert containers.srun_container_flags("native") == []
+    with pytest.raises(ValueError, match="consumes no image"):
+        containers.default_image("native")
+
+
+def test_a_sif_is_never_the_distributed_artifact():
+    """An OCI image converts INTO a SIF or a SquashFS and neither converts back, so shipping a
+    converted form would strand every user of the other runtimes. Exactly one backend family
+    consumes the shipped image unconverted, and the shipped image is OCI."""
+    spellings, _ = containers.load_backends()
+    unconverted = {name for name, s in spellings.items() if s.image_form == "tag"}
+    assert unconverted == {"docker", "podman"}
+    assert spellings["apptainer"].image_form == "sif"
+    assert spellings["ce"].image_form == "edf"
 
 
 def test_ce_contributes_an_srun_flag_and_refuses_to_be_silent_without_one():
@@ -121,15 +149,15 @@ def test_resolve_backend_precedence(monkeypatch):
     monkeypatch.setenv("HPCAGENT_BENCH_RUNTIME_BACKEND", "docker")
     assert containers.resolve_backend() == "docker"  # canonical env next
     monkeypatch.delenv("HPCAGENT_BENCH_RUNTIME_BACKEND")
-    # config ships the FAMILY `oci`, which resolves to the rootless flavour when both exist
-    assert containers.resolve_backend() == "podman"
+    # config ships the STANDARD `oci`, which resolves to docker when both are installed
+    assert containers.resolve_backend() == "docker"
 
 
 def test_resolve_backend_ignores_the_legacy_bash_var(monkeypatch):
     # $HPCAGENT_BENCH_CONTAINER_RUNTIME is the shell launcher's own knob; only $HPCAGENT_BENCH_RUNTIME_BACKEND is shared.
     monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/bin/" + name)
-    monkeypatch.setenv("HPCAGENT_BENCH_CONTAINER_RUNTIME", "docker")
-    assert containers.resolve_backend() == "podman"
+    monkeypatch.setenv("HPCAGENT_BENCH_CONTAINER_RUNTIME", "apptainer")
+    assert containers.resolve_backend() == "docker"  # config's `oci`, not the bash-only var
 
 
 def test_resolve_backend_rejects_unknown():
@@ -330,7 +358,7 @@ def test_ce_stays_its_own_family_even_though_it_is_podman_underneath():
     backend with no local launch form, which fails without an EDF and only inside an allocation.
     The runtime is shared; the launch contract is not."""
     spellings, _ = containers.load_backends()
-    assert containers.family_members("oci") == ("podman", "docker")
+    assert containers.family_members("oci") == ("docker", "podman")
     assert containers.family_members("ce") == ("ce", )
     assert spellings["ce"].kind == "srun_env"
     assert all(spellings[name].kind == "exec" for name in containers.family_members("oci"))

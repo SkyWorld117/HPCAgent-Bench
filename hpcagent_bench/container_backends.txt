@@ -5,37 +5,56 @@
 # (a .properties/.env shape -- deliberately NOT JSON/YAML so bash can read it with a
 # three-line `while IFS='=' read` loop). Blank lines and `#` comments are ignored.
 #
-# There is ONE image and it is OCI. Every backend here consumes that same image: podman and
-# docker run the OCI tag directly, apptainer builds a SIF from it, and the CSCS Alps container
-# engine imports it to SquashFS. That is the point of shipping OCI -- a laptop, a cloud VM and
-# an HPC site all start from the same artifact, and only the sites whose engine wants another
-# layer format convert.
+# OCI IS A STANDARD, NOT A RUNTIME. Docker and podman are both implementations of it; neither
+# one IS it. So `oci` below is an ALIAS a caller may select to mean "any OCI-compliant runtime
+# this machine has", and it resolves to a concrete implementation. It is not a runtime itself
+# and nothing is ever launched as `oci`.
 #
-# PODMAN LEADS, not docker. Docker needs a running daemon and membership of a root-equivalent
-# group, which no HPC login node grants; podman is the OCI runtime that is rootless and
-# daemonless, so it is the one that actually runs in both places. docker stays fully supported
-# for the laptop and cloud-VM case where it is already what people have.
+# There is ONE distributed image and it is OCI. That choice is forced by the direction of the
+# conversions, not by taste: an OCI image converts INTO SquashFS (Alps' engine) or a SIF
+# (apptainer), and neither converts back. Ship a SIF and a docker user has nothing to run; ship
+# OCI and every site can convert to whatever its engine loads fastest. HPC sites do convert --
+# pulling an OCI image over a parallel filesystem is slow, which is the whole reason SquashFS
+# and SIF exist.
 #
-# Each row declares a FAMILY and a KIND. The family is what the benchmark actually supports;
-# the row is one implementation of it.
+# NATIVE is a first-class member, not the absence of one. A site with no container runtime at
+# all still has to be able to run the benchmark, and saying so as a backend keeps that path on
+# the same launch seam as the others instead of in a special case at every call site.
 #
-#   family=oci  -- runs the shipped OCI image directly. podman and docker are two flavours of
-#                  ONE interface: same verb, same bind/workdir/env flags, same tag. They differ
-#                  in exactly two ways, both recorded below -- the NVIDIA flag spelling, and
-#                  whether a daemon plus a root-equivalent group is required.
-#   family=sif  -- a SIF built from that same OCI image (apptainer).
-#   family=ce   -- CSCS Alps' container engine. Under the hood this IS podman, with a SquashFS
-#                  layer format and pre-defined OCI hooks that give Cray-native fabric and GPU
-#                  performance, so it is nearly the `oci` family. It is kept SEPARATE on purpose:
-#                  selecting `oci` must never silently resolve to the one backend that cannot be
-#                  launched locally and that fails without an EDF. Same runtime, different
-#                  contract -- and the contract is what a caller has to get right.
+# Docker leads within the `oci` alias, because it is the implementation most users have. But the
+# LAST-RESORT fallback, when nothing at all is detected on PATH, stays podman: a fallback has to
+# membership, which no HPC login node grants. Podman is the OCI implementation that is rootless
+# and daemonless, so it is the one that actually runs in both places.
+#
+# Each row declares a FAMILY and a KIND. The family is the image form and contract; the row is
+# one IMPLEMENTATION of it.
+#
+#   family=oci     -- consumes the shipped OCI image unconverted. docker and podman are two
+#                     implementations of one standard: same verb, same bind/workdir/env flags,
+#                     same tag. They differ in exactly two ways, both recorded below -- the
+#                     NVIDIA flag spelling, and whether a daemon plus a root-equivalent group
+#                     is required.
+#   family=sif     -- a SIF converted from that same OCI image (apptainer). One-way: a SIF
+#                     cannot be handed back to docker, which is why it is never the artifact
+#                     we distribute.
+#   family=ce      -- CSCS Alps' container engine. Podman underneath, with a SquashFS layer
+#                     format (converted from the OCI image, again one-way) and pre-defined Cray
+#                     OCI hooks that are what actually give the container correct, fast access
+#                     to the GPU and the NIC. Kept SEPARATE from `oci` on purpose: selecting an
+#                     OCI runtime must never silently resolve to the one implementation that
+#                     cannot be launched locally and that fails without an EDF. Same runtime,
+#                     different contract -- and the contract is what a caller has to get right.
+#   family=native  -- no container. The command runs on the host as-is. For a site with no
+#                     runtime installed, and for a developer who wants the harness on bare
+#                     metal; it consumes no image and converts nothing.
 #
 #   kind=exec      -- the backend WRAPS the command:  <backend> <verb> ... <image> <cmd...>
 #   kind=srun_env  -- the backend is selected by a SLURM FLAG and there is no wrapper at all:
 #                     `srun --environment=<edf.toml> <cmd...>`. The EDF file declares the image,
 #                     the mounts, the workdir and the env, so every flag field below is empty
 #                     for such a row and reading one would be a category error.
+#   kind=none      -- no wrapper and no flag: the command is already the launch. Same empty
+#                     flag fields, same reason.
 #
 # `rootless=1` marks a runtime an unprivileged user can invoke with no daemon and no
 # root-equivalent group membership. That is the property that decides what may be a DEFAULT,
@@ -108,3 +127,13 @@ ce.kind=srun_env
 ce.srun_flag=--environment
 ce.image_form=edf
 ce.harbor_env=
+
+# No container. Not a degraded mode -- a supported one: a site with no runtime installed still
+# has to be able to run the benchmark, and a developer on bare metal is the common local case.
+# It consumes no image, so image_form is empty and asking it for one is an error, exactly as it
+# is for ce.
+native.family=native
+native.rootless=1
+native.kind=none
+native.image_form=
+native.harbor_env=
