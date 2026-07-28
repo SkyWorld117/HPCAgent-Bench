@@ -221,7 +221,7 @@ def _run_distributed(monkeypatch,
                                      rtol=1e-6,
                                      atol=1e-9,
                                      c_max=100.0,
-                                     single_node_anchor=Submission(language="c", source=anchor) if anchor else None)
+                                     single_rank_anchor=Submission(language="c", source=anchor) if anchor else None)
 
 
 def test_distributed_attaches_scaling_curve(monkeypatch):
@@ -316,7 +316,7 @@ def test_grade_surfaces_scaling_dict(monkeypatch):
                    "c",
                    source="mpi",
                    residency="distributed",
-                   single_node_anchor=Submission(language="c", source="serial"))
+                   single_rank_anchor=Submission(language="c", source="serial"))
     assert "scaling" in out
     assert out["scaling"]["mode"] == "strong"
     assert out["scaling"]["mean_efficiency"] == 1.0
@@ -332,7 +332,7 @@ def test_grade_items_delivers_harness_anchor_source(monkeypatch, tmp_path):
     captured = {}
 
     def _capture(submission, task, **kw):
-        captured["anchor"] = kw.get("single_node_anchor")
+        captured["anchor"] = kw.get("single_rank_anchor")
         return M.TaskScore(kernel=task.kernel, dwarf="d", iterations=(), solved=True, s_i=1.0, suspect_count=0)
 
     monkeypatch.setattr(HG, "score_task_fuzzed", _capture)
@@ -354,7 +354,7 @@ def test_grade_items_anchor_library_and_absent(monkeypatch, tmp_path):
     seen = []
 
     def _capture(submission, task, **kw):
-        seen.append(kw.get("single_node_anchor"))
+        seen.append(kw.get("single_rank_anchor"))
         return M.TaskScore(kernel=task.kernel, dwarf="d", iterations=(), solved=True, s_i=1.0, suspect_count=0)
 
     monkeypatch.setattr(HG, "score_task_fuzzed", _capture)
@@ -376,7 +376,7 @@ def test_grade_items_anchor_ignored_on_host_residency(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(
         HG, "score_task_fuzzed", lambda submission, task, **kw:
-        (seen.append(kw.get("single_node_anchor")) or M.TaskScore(
+        (seen.append(kw.get("single_rank_anchor")) or M.TaskScore(
             kernel=task.kernel, dwarf="d", iterations=(), solved=True, s_i=1.0, suspect_count=0)))
     out = HG.grade_items(["scaled_add"], [None],
                          language="c",
