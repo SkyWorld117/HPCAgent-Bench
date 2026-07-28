@@ -10,20 +10,20 @@ parameters:
     m: 4
     n: 5
   M:
-    batch_size: 8
-    k: 12
-    m: 8
-    n: 10
+    batch_size: 128
+    k: 384
+    m: 128
+    n: 384
   L:
-    batch_size: 16
-    k: 24
-    m: 16
-    n: 20
+    batch_size: 338
+    k: 586
+    m: 338
+    n: 586
   XL:
-    batch_size: 32
-    k: 48
-    m: 32
-    n: 40
+    batch_size: 894
+    k: 894
+    m: 894
+    n: 894
 init:
   arrays:
     A: (batch_size, m, k)

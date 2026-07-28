@@ -14,31 +14,31 @@ parameters:
     sequence_length: 8
     stride: 1
   M:
-    batch_size: 8
+    batch_size: 128
     dilation: 1
-    features: 8
+    features: 512
     kernel_size: 3
     padding: 1
     return_indices: false
-    sequence_length: 16
+    sequence_length: 2048
     stride: 1
   L:
-    batch_size: 16
+    batch_size: 256
     dilation: 1
-    features: 16
+    features: 512
     kernel_size: 3
     padding: 1
     return_indices: false
-    sequence_length: 32
+    sequence_length: 2048
     stride: 1
   XL:
-    batch_size: 32
+    batch_size: 1024
     dilation: 1
-    features: 32
+    features: 512
     kernel_size: 3
     padding: 1
     return_indices: false
-    sequence_length: 64
+    sequence_length: 2048
     stride: 1
 init:
   arrays:

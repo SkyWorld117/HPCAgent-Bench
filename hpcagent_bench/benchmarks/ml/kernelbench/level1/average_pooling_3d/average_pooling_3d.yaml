@@ -15,31 +15,31 @@ parameters:
     width: 8
   M:
     batch_size: 8
-    channels: 8
-    depth: 12
-    height: 16
-    kernel_size: 3
-    padding: 1
-    stride: 1
-    width: 16
-  L:
-    batch_size: 16
-    channels: 16
-    depth: 24
-    height: 32
-    kernel_size: 3
-    padding: 1
-    stride: 1
-    width: 32
-  XL:
-    batch_size: 32
-    channels: 32
-    depth: 48
+    channels: 64
+    depth: 64
     height: 64
     kernel_size: 3
     padding: 1
     stride: 1
     width: 64
+  L:
+    batch_size: 10
+    channels: 60
+    depth: 85
+    height: 85
+    kernel_size: 2
+    padding: 1
+    stride: 1
+    width: 85
+  XL:
+    batch_size: 13
+    channels: 56
+    depth: 112
+    height: 112
+    kernel_size: 1
+    padding: 1
+    stride: 1
+    width: 112
 init:
   arrays:
     x: (batch_size, channels, depth, height, width)

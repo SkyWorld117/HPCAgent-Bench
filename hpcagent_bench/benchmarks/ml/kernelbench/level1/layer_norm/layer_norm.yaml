@@ -10,20 +10,20 @@ parameters:
     dim2: 5
     features: 4
   M:
-    batch_size: 8
-    dim1: 8
-    dim2: 10
-    features: 8
-  L:
-    batch_size: 16
-    dim1: 16
-    dim2: 20
-    features: 16
-  XL:
     batch_size: 32
-    dim1: 32
-    dim2: 40
-    features: 32
+    dim1: 256
+    dim2: 256
+    features: 64
+  L:
+    batch_size: 90
+    dim1: 255
+    dim2: 255
+    features: 63
+  XL:
+    batch_size: 255
+    dim1: 255
+    dim2: 255
+    features: 63
 init:
   arrays:
     x: (batch_size, features, dim1, dim2)

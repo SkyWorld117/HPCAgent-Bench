@@ -17,13 +17,13 @@ parameters:
     return_indices: false
     stride: 1
   M:
-    batch_size: 8
+    batch_size: 4
     ceil_mode: false
-    channels: 8
+    channels: 32
     dilation: 1
-    dim1: 8
-    dim2: 10
-    dim3: 6
+    dim1: 128
+    dim2: 128
+    dim3: 64
     kernel_size: 3
     padding: 1
     return_indices: false
@@ -31,11 +31,11 @@ parameters:
   L:
     batch_size: 16
     ceil_mode: false
-    channels: 16
+    channels: 32
     dilation: 1
-    dim1: 16
-    dim2: 20
-    dim3: 12
+    dim1: 128
+    dim2: 128
+    dim3: 64
     kernel_size: 3
     padding: 1
     return_indices: false
@@ -45,9 +45,9 @@ parameters:
     ceil_mode: false
     channels: 32
     dilation: 1
-    dim1: 32
-    dim2: 40
-    dim3: 24
+    dim1: 128
+    dim2: 128
+    dim3: 64
     kernel_size: 3
     padding: 1
     return_indices: false

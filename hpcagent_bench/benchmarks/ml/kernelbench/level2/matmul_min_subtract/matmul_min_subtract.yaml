@@ -10,20 +10,20 @@ parameters:
     in_features: 6
     out_features: 8
   M:
-    batch_size: 8
+    batch_size: 4096
     constant: 2.0
-    in_features: 12
-    out_features: 16
+    in_features: 1024
+    out_features: 1024
   L:
-    batch_size: 16
+    batch_size: 13695
     constant: 2.0
-    in_features: 24
-    out_features: 32
+    in_features: 2421
+    out_features: 2421
   XL:
-    batch_size: 32
+    batch_size: 45789
     constant: 2.0
-    in_features: 48
-    out_features: 64
+    in_features: 5723
+    out_features: 5723
 init:
   arrays:
     x: (batch_size, in_features)

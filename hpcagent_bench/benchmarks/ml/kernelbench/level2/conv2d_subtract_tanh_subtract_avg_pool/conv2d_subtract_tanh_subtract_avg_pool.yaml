@@ -15,32 +15,32 @@ parameters:
     subtract1_value: 0.5
     subtract2_value: 0.2
   M:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 8
+    batch_size: 8
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 12
-    width: 12
+    height: 56
+    width: 56
     kernel_size_pool: 2
     subtract1_value: 0.5
     subtract2_value: 0.2
   L:
-    batch_size: 8
-    in_channels: 16
-    out_channels: 16
+    batch_size: 32
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 24
-    width: 24
+    height: 112
+    width: 112
     kernel_size_pool: 2
     subtract1_value: 0.5
     subtract2_value: 0.2
   XL:
-    batch_size: 16
-    in_channels: 32
-    out_channels: 32
+    batch_size: 128
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 48
-    width: 48
+    height: 224
+    width: 224
     kernel_size_pool: 2
     subtract1_value: 0.5
     subtract2_value: 0.2

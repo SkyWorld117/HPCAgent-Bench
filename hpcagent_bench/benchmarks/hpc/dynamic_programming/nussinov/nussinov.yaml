@@ -7,11 +7,11 @@ parameters:
   S:
     N: 40
   M:
-    N: 90
+    N: 2600
   L:
-    N: 500
+    N: 7211
   XL:
-    N: 8000
+    N: 20000
 init:
   input_args:
   - N
@@ -23,6 +23,8 @@ init:
   scalars:
     complement_sum: 3
     pair_bonus: 1
+    seq: 0
+    table: 0
   dtypes:
     seq: int32
     table: int32

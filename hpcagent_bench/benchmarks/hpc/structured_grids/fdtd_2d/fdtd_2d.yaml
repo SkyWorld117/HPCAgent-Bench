@@ -8,17 +8,17 @@ parameters:
     NX: 200
     NY: 220
   M:
-    TMAX: 60
-    NX: 400
-    NY: 450
+    TMAX: 100
+    NX: 2000
+    NY: 2400
   L:
-    TMAX: 500
-    NX: 1000
-    NY: 1200
+    TMAX: 122
+    NX: 6928
+    NY: 8198
   XL:
-    TMAX: 6106
-    NX: 12212
-    NY: 14655
+    TMAX: 150
+    NX: 24000
+    NY: 28000
 init:
   input_args:
   - TMAX

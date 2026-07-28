@@ -48,12 +48,9 @@ init:
   - Z_out
   - N_out
   func_name: initialize
-  shapes:
-    Z_out: (yn, xn)
-    N_out: (yn, xn)
-  dtypes:
-    Z_out: complex128
-    N_out: int64
+  arrays:
+    Z_out: {shape: "(yn, xn)", dtype: complex128}
+    N_out: {shape: "(yn, xn)", dtype: int64}
 input_args:
 - xmin
 - xmax

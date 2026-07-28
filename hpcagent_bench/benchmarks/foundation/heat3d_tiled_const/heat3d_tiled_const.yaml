@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_3D: 16
   M:
-    LEN_3D: 32
+    LEN_3D: 448
   L:
-    LEN_3D: 64
+    LEN_3D: 542
   XL:
-    LEN_3D: 646
+    LEN_3D: 655
 init:
   arrays:
     a: (LEN_3D,LEN_3D,LEN_3D)

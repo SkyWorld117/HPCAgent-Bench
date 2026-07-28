@@ -22,11 +22,11 @@ parameters:
   S:
     batch: 1024
   M:
-    batch: 16384
-  L:
     batch: 131072
+  L:
+    batch: 431463
   XL:
-    batch: 524288
+    batch: 1420293
 # order and nb are a locked physical pair, never scaled by a preset (see the file
 # header): nb = order*(order+1)*(order+2)//6 (initialize()'s _nb_for_order) is the
 # modal basis count, NOT affine in order, so it cannot be constant-folded into the
@@ -55,10 +55,10 @@ init:
   - Q
   - I
   - star
-  shapes:
-    I: (batch, nb, 9)
-    Q: (batch, nb, 9)
-    star: (9, 9)
+  arrays:
+    I: "(batch, nb, 9)"
+    Q: "(batch, nb, 9)"
+    star: "(9, 9)"
 array_args:
 - Q
 - I

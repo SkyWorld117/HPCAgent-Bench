@@ -9,16 +9,16 @@ parameters:
     dim1: 8
     margin: 1.0
   M:
-    batch_size: 8
-    dim1: 16
+    batch_size: 131072
+    dim1: 1024
     margin: 1.0
   L:
-    batch_size: 16
-    dim1: 32
+    batch_size: 334990
+    dim1: 925
     margin: 1.0
   XL:
-    batch_size: 32
-    dim1: 64
+    batch_size: 856158
+    dim1: 836
     margin: 1.0
 init:
   arrays:

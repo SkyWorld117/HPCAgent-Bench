@@ -8,14 +8,14 @@ parameters:
     M: 5
     N: 4
   M:
-    M: 10
-    N: 8
+    M: 16384
+    N: 8192
   L:
-    M: 20
-    N: 16
+    M: 23170
+    N: 16384
   XL:
-    M: 40
-    N: 32
+    M: 32767
+    N: 32767
 init:
   arrays:
     A: (N,)

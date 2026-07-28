@@ -17,12 +17,12 @@ parameters:
     max_pool1_kernel_size: 2
     max_pool2_kernel_size: 3
   M:
-    batch_size: 2
-    in_channels: 6
-    out_channels: 6
-    D: 8
-    H: 8
-    W: 8
+    batch_size: 4
+    in_channels: 32
+    out_channels: 32
+    D: 32
+    H: 32
+    W: 32
     kernel_size: 3
     stride: 1
     padding: 1
@@ -30,23 +30,23 @@ parameters:
     max_pool2_kernel_size: 3
   L:
     batch_size: 4
-    in_channels: 8
-    out_channels: 8
-    D: 12
-    H: 12
-    W: 12
+    in_channels: 64
+    out_channels: 64
+    D: 64
+    H: 64
+    W: 64
     kernel_size: 3
     stride: 1
     padding: 1
     max_pool1_kernel_size: 2
     max_pool2_kernel_size: 3
   XL:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 10
-    D: 16
-    H: 16
-    W: 16
+    batch_size: 8
+    in_channels: 64
+    out_channels: 64
+    D: 128
+    H: 128
+    W: 128
     kernel_size: 3
     stride: 1
     padding: 1

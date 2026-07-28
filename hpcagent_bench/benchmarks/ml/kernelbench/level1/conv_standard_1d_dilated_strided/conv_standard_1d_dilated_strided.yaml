@@ -14,31 +14,31 @@ parameters:
     out_channels: 8
     stride: 1
   M:
-    batch_size: 8
+    batch_size: 4096
     bias: false
     dilation: 1
-    in_channels: 8
+    in_channels: 4096
     kernel_size: 3
-    length: 16
-    out_channels: 16
+    length: 8
+    out_channels: 8
     stride: 1
   L:
-    batch_size: 16
+    batch_size: 8191
     bias: false
     dilation: 1
-    in_channels: 16
-    kernel_size: 3
-    length: 32
-    out_channels: 32
+    in_channels: 8191
+    kernel_size: 2
+    length: 7
+    out_channels: 7
     stride: 1
   XL:
-    batch_size: 32
+    batch_size: 16382
     bias: false
     dilation: 1
-    in_channels: 32
-    kernel_size: 3
-    length: 64
-    out_channels: 64
+    in_channels: 16382
+    kernel_size: 2
+    length: 7
+    out_channels: 7
     stride: 1
 init:
   arrays:

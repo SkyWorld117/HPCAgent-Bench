@@ -14,27 +14,27 @@ parameters:
     pool_kernel_size: 2
   M:
     batch_size: 8
-    in_channels: 8
-    out_channels: 8
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 16
-    width: 16
+    height: 56
+    width: 56
     pool_kernel_size: 2
   L:
-    batch_size: 16
-    in_channels: 16
-    out_channels: 16
+    batch_size: 32
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 32
-    width: 32
+    height: 112
+    width: 112
     pool_kernel_size: 2
   XL:
-    batch_size: 32
-    in_channels: 32
-    out_channels: 32
+    batch_size: 128
+    in_channels: 128
+    out_channels: 128
     kernel_size: 3
-    height: 48
-    width: 48
+    height: 224
+    width: 224
     pool_kernel_size: 2
 init:
   arrays:

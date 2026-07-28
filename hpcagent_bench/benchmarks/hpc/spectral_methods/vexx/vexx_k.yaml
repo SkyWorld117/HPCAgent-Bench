@@ -35,13 +35,17 @@ parameters:
     nbnd: 4
     m: 4
   M:
-    ngrid: 12
-    nbnd: 6
-    m: 6
+    ngrid: 48
+    nbnd: 16
+    m: 16
   L:
-    ngrid: 16
-    nbnd: 8
-    m: 8
+    ngrid: 78
+    nbnd: 36
+    m: 36
+  XL:
+    ngrid: 128
+    nbnd: 80
+    m: 80
   fuzzed:
     ngrid: [6, 16]
     nbnd: [2, 8]
@@ -249,30 +253,48 @@ init:
     erfc_scrlen: 0.0
     yukawa: 0.0
     eps_occ: 1.0e-08
+    current_ik: 0
+    current_k: 0
+    iexx_start: 0
+    jblock: 0
+    max_pairs: 0
+    my_egrp_id: 0
+    n: 0
+    n1: 0
+    n2: 0
+    n3: 0
+    nat: 0
+    ngm: 0
+    nh: 0
+    nkb: 0
+    npol: 0
+    npwx: 0
+    nqs: 0
+    nrxxs: 0
   dtypes:
-    ngm: int64
+    current_ik: int64
+    current_k: int64
+    gamma_only: bool
+    iexx_start: int64
+    jblock: int64
+    max_pairs: int64
+    my_egrp_id: int64
     n: int64
     n1: int64
     n2: int64
     n3: int64
-    npwx: int64
-    npol: int64
-    nrxxs: int64
-    nqs: int64
     nat: int64
+    ngm: int64
     nh: int64
     nkb: int64
-    max_pairs: int64
-    jblock: int64
-    iexx_start: int64
-    my_egrp_id: int64
-    current_k: int64
-    current_ik: int64
-    okvan: bool
-    okpaw: bool
     noncolin: bool
+    npol: int64
+    npwx: int64
+    nqs: int64
+    nrxxs: int64
+    okpaw: bool
+    okvan: bool
     tqr: bool
-    gamma_only: bool
 input_args:
 - psi
 - hpsi

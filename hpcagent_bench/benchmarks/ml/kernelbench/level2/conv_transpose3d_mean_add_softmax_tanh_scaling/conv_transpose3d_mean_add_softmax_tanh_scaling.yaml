@@ -17,29 +17,29 @@ parameters:
     width: 8
   M:
     batch_size: 8
-    depth: 12
-    height: 16
-    in_channels: 8
-    kernel_size: 3
-    out_channels: 16
-    padding: 1
-    scaling_factor: 2.0
-    stride: 1
-    width: 16
-  L:
-    batch_size: 16
-    depth: 24
+    depth: 64
     height: 32
-    in_channels: 16
+    in_channels: 8
     kernel_size: 3
     out_channels: 32
     padding: 1
     scaling_factor: 2.0
     stride: 1
     width: 32
+  L:
+    batch_size: 16
+    depth: 64
+    height: 64
+    in_channels: 16
+    kernel_size: 3
+    out_channels: 64
+    padding: 1
+    scaling_factor: 2.0
+    stride: 1
+    width: 64
   XL:
     batch_size: 32
-    depth: 48
+    depth: 128
     height: 64
     in_channels: 32
     kernel_size: 3

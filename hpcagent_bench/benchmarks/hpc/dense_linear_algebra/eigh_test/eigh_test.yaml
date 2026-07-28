@@ -6,9 +6,12 @@ level: 2
 parameters:
   S:
     N: 8
-  # eigh_test is S-only, so pin N rather than let resolve_ranges invent a range.
-  fuzzed:
-    N: 8
+  M:
+    N: 1400
+  L:
+    N: 2898
+  XL:
+    N: 6000
 # Which triangle of a/b scipy.linalg.eigh reads -- an axis, drawn independently of N.
 config:
   lower:

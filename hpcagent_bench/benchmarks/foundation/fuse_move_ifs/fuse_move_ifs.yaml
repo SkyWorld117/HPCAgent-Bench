@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 256
+    LEN_2D: 9216
   L:
-    LEN_2D: 512
-  XL:
     LEN_2D: 13377
+  XL:
+    LEN_2D: 19417
 config:
   K:
     domain: [1, -1]

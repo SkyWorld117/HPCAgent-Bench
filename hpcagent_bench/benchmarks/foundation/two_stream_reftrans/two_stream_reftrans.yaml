@@ -6,11 +6,11 @@ parameters:
   S:
     NG: 16
   M:
-    NG: 64
+    NG: 39280640
   L:
-    NG: 256
+    NG: 129888053
   XL:
-    NG: 107374183
+    NG: 429496729
 init:
   arrays:
     od: (NG,)

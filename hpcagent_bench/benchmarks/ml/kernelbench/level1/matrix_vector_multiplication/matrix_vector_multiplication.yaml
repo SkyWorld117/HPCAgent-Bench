@@ -8,14 +8,14 @@ parameters:
     K: 6
     M: 5
   M:
-    K: 12
-    M: 10
+    K: 8192
+    M: 32768
   L:
-    K: 24
-    M: 20
+    K: 11585
+    M: 65535
   XL:
-    K: 48
-    M: 40
+    K: 16383
+    M: 131067
 init:
   arrays:
     A: (M, K)

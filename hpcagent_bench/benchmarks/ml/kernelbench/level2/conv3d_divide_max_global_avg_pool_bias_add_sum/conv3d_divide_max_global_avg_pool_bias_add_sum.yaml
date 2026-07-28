@@ -18,35 +18,35 @@ parameters:
     pool_size: 2
     sum_dim: 1
   M:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 8
-    kernel_size: 3
-    depth: 8
-    height: 8
-    width: 8
-    divisor: 2.0
-    pool_size: 2
-    sum_dim: 1
-  L:
-    batch_size: 8
-    in_channels: 16
-    out_channels: 16
-    kernel_size: 3
-    depth: 16
-    height: 16
-    width: 16
-    divisor: 2.0
-    pool_size: 2
-    sum_dim: 1
-  XL:
-    batch_size: 16
-    in_channels: 32
-    out_channels: 32
+    batch_size: 2
+    in_channels: 64
+    out_channels: 64
     kernel_size: 3
     depth: 32
     height: 32
     width: 32
+    divisor: 2.0
+    pool_size: 2
+    sum_dim: 1
+  L:
+    batch_size: 4
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    depth: 64
+    height: 64
+    width: 64
+    divisor: 2.0
+    pool_size: 2
+    sum_dim: 1
+  XL:
+    batch_size: 4
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    depth: 128
+    height: 128
+    width: 128
     divisor: 2.0
     pool_size: 2
     sum_dim: 1

@@ -17,35 +17,35 @@ parameters:
     output_padding: 0
   M:
     batch_size: 2
-    in_channels: 4
-    out_channels: 8
-    depth: 4
-    height: 4
-    width: 4
+    in_channels: 64
+    out_channels: 64
+    depth: 32
+    height: 32
+    width: 32
     kernel_size: 3
     stride: 2
     padding: 1
     output_padding: 0
   L:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 8
-    depth: 6
-    height: 6
-    width: 6
-    kernel_size: 3
+    batch_size: 2
+    in_channels: 62
+    out_channels: 62
+    depth: 58
+    height: 58
+    width: 58
+    kernel_size: 2
     stride: 2
     padding: 1
     output_padding: 0
   XL:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 16
-    depth: 6
-    height: 6
-    width: 6
-    kernel_size: 3
-    stride: 2
+    batch_size: 3
+    in_channels: 60
+    out_channels: 60
+    depth: 106
+    height: 106
+    width: 106
+    kernel_size: 2
+    stride: 1
     padding: 1
     output_padding: 0
 init:

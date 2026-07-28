@@ -14,32 +14,32 @@ parameters:
     height: 6
     width: 6
   M:
-    batch_size: 4
-    in_channels: 8
-    out_channels: 8
+    batch_size: 2
+    in_channels: 64
+    out_channels: 64
     kernel_size: 3
     pool_kernel_size: 2
-    depth: 12
-    height: 12
-    width: 12
+    depth: 32
+    height: 32
+    width: 32
   L:
-    batch_size: 8
-    in_channels: 16
-    out_channels: 16
+    batch_size: 4
+    in_channels: 64
+    out_channels: 64
     kernel_size: 3
     pool_kernel_size: 2
-    depth: 24
-    height: 24
-    width: 24
+    depth: 64
+    height: 64
+    width: 64
   XL:
-    batch_size: 16
-    in_channels: 32
-    out_channels: 32
+    batch_size: 4
+    in_channels: 64
+    out_channels: 64
     kernel_size: 3
     pool_kernel_size: 2
-    depth: 48
-    height: 48
-    width: 48
+    depth: 128
+    height: 128
+    width: 128
 init:
   arrays:
     x: (batch_size, in_channels, depth, height, width)

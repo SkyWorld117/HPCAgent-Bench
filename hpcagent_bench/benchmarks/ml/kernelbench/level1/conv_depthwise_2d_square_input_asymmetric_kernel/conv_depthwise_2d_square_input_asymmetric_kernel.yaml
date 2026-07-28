@@ -15,35 +15,35 @@ parameters:
     stride: 1
     width: 8
   M:
-    batch_size: 8
+    batch_size: 64
     bias: false
     dilation: 1
-    height: 16
-    in_channels: 8
+    height: 1024
+    in_channels: 256
     kernel_size: 3
     padding: 1
     stride: 1
-    width: 16
+    width: 8
   L:
-    batch_size: 16
+    batch_size: 89
     bias: false
     dilation: 1
-    height: 32
-    in_channels: 16
-    kernel_size: 3
+    height: 1427
+    in_channels: 504
+    kernel_size: 2
     padding: 1
     stride: 1
-    width: 32
+    width: 7
   XL:
-    batch_size: 32
+    batch_size: 124
     bias: false
     dilation: 1
-    height: 64
-    in_channels: 32
-    kernel_size: 3
+    height: 1989
+    in_channels: 994
+    kernel_size: 2
     padding: 1
     stride: 1
-    width: 64
+    width: 7
 init:
   arrays:
     x: (batch_size, in_channels, height, width)

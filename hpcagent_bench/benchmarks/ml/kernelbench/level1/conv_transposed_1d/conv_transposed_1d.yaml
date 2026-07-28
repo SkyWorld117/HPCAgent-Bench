@@ -16,35 +16,35 @@ parameters:
     padding: 1
     stride: 1
   M:
-    batch_size: 8
-    bias: false
-    groups: 1
-    in_channels: 8
-    kernel_size: 3
-    length: 16
-    out_channels: 16
-    output_padding: 0
-    padding: 1
-    stride: 1
-  L:
-    batch_size: 16
-    bias: false
-    groups: 1
-    in_channels: 16
-    kernel_size: 3
-    length: 32
-    out_channels: 32
-    output_padding: 0
-    padding: 1
-    stride: 1
-  XL:
     batch_size: 32
     bias: false
     groups: 1
     in_channels: 32
     kernel_size: 3
-    length: 64
-    out_channels: 64
+    length: 1024
+    out_channels: 1024
+    output_padding: 0
+    padding: 1
+    stride: 1
+  L:
+    batch_size: 63
+    bias: false
+    groups: 1
+    in_channels: 63
+    kernel_size: 2
+    length: 2039
+    out_channels: 2039
+    output_padding: 0
+    padding: 1
+    stride: 1
+  XL:
+    batch_size: 126
+    bias: false
+    groups: 1
+    in_channels: 126
+    kernel_size: 1
+    length: 4061
+    out_channels: 4061
     output_padding: 0
     padding: 1
     stride: 1

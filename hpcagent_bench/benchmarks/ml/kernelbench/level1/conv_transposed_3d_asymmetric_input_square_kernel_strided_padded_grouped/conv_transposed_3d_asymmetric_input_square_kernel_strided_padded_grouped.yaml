@@ -20,36 +20,36 @@ parameters:
   M:
     batch_size: 8
     bias: false
-    depth: 12
-    groups: 1
-    height: 16
-    in_channels: 8
-    kernel_size: 3
-    out_channels: 16
-    output_padding: 0
-    padding: 1
-    stride: 1
-    width: 16
-  L:
-    batch_size: 16
-    bias: false
-    depth: 24
+    depth: 32
     groups: 1
     height: 32
-    in_channels: 16
+    in_channels: 8
     kernel_size: 3
     out_channels: 32
     output_padding: 0
     padding: 1
     stride: 1
     width: 32
-  XL:
-    batch_size: 32
+  L:
+    batch_size: 20
     bias: false
-    depth: 48
+    depth: 64
     groups: 1
     height: 64
-    in_channels: 32
+    in_channels: 20
+    kernel_size: 3
+    out_channels: 64
+    output_padding: 0
+    padding: 1
+    stride: 1
+    width: 64
+  XL:
+    batch_size: 48
+    bias: false
+    depth: 64
+    groups: 1
+    height: 64
+    in_channels: 48
     kernel_size: 3
     out_channels: 64
     output_padding: 0
