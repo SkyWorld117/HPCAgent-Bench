@@ -30,11 +30,17 @@ class Benchmark(object):
                  variant: Optional[str] = None,
                  fuzz_iteration: Optional[int] = None,
                  input_seed: Optional[int] = None,
-                 params_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Materializes benchmark data for a preset/datatype/variant/fuzz draw (cached by call signature)."""
+                 params_override: Optional[Dict[str, Any]] = None,
+                 hidden_variant: Optional[str] = None) -> Dict[str, Any]:
+        """Materializes benchmark data for a preset/datatype/variant/fuzz draw (cached by call signature).
+
+        ``hidden_variant`` is unrelated to ``variant`` (a benchmark-declared algorithm choice):
+        it is a :data:`hidden.VARIANTS` name from the held-out correctness rotation, and only
+        reaches the declarative (auto-initialize) init path -- see that call below.
+        """
 
         cache_key = (preset, variant, fuzz_iteration, input_seed,
-                     repr(sorted(params_override.items())) if params_override else None)
+                     repr(sorted(params_override.items())) if params_override else None, hidden_variant)
         if cache_key in self.bdata.keys():
             return self.bdata[cache_key]
 
@@ -99,10 +105,13 @@ class Benchmark(object):
                                      distribution=dist_name,
                                      variant_spec=variant_spec,
                                      seed=seed,
-                                     params_override=parameters if is_fuzz else None)
+                                     params_override=parameters if is_fuzz else None,
+                                     hidden_variant=hidden_variant)
             for name, v in zip(spec.init.output_args, values):
                 data[name] = v
         elif info_init:
+            # Legacy custom initialize() has no per-array spec surface for auto_initialize to
+            # thread hidden_variant through, so a hidden-variant rotation does not reach it here.
             base = "hpcagent_bench.benchmarks.{r}.{m}".format(r=self.info["relative_path"].replace('/', '.'),
                                                               m=self.info["module_name"])
             # Fall back to <module_name>_numpy when the bare module_name module is absent.
@@ -122,8 +131,8 @@ class Benchmark(object):
             for sname, sval in (info_init.get("scalars") or {}).items():
                 data.setdefault(sname, sval)
             init_inputs = [data[a] for a in info_init["input_args"]]
-            # Seed both the legacy global RNG and an explicit Generator for standardised init fns.
-            np.random.seed(seed)
+            # Explicit Generator handed to init fns that declare an ``rng`` param; a global
+            # np.random.seed() here would couple every legacy-RNG kernel to draw order.
             rng = np.random.default_rng(seed)
             # Call the init function directly; forward standardised datatype/rng/dist/variant_spec
             # kwargs only when the function declares them (or **kwargs).
