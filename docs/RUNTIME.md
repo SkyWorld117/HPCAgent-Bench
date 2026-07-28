@@ -46,23 +46,34 @@ degrades gracefully rather than taking down the sweep.
 
 ## Container backends (`runtime.backend`)
 
-Only **apptainer** and **podman** -- both are what CSCS launches, and both consume the ONE
-universal OCI image (`containers/hpcagent_bench.Dockerfile`):
+**One OCI image** (`containers/hpcagent_bench.Dockerfile`), built once per hardware variant;
+four backends consume it, in preference order (podman and docker run the OCI tag directly,
+apptainer converts it to a SIF, `ce` imports it to SquashFS -- the OCI image is the one
+artifact, a laptop / cloud VM / HPC site all start from it):
 
-| backend | runs the image via | rootless | notes |
-|---------|--------------------|----------|-------|
-| `apptainer` (default) | a SIF built from the OCI image | yes | `hpcagent-bench-install-apptainer`; Harbor names it `singularity` |
-| `podman` | the OCI tag directly | yes | launched directly, not through Harbor |
+| backend | runs the image via | rootless | Harbor provider | notes |
+|---------|--------------------|----------|------------------|-------|
+| `podman` (default) | the OCI tag directly | yes, daemonless | none | the only one of the four that runs unprivileged on both a laptop and an HPC login node; the wrapper script probes this first |
+| `docker` | the OCI tag directly | no (daemon) | `docker` | needs dockerd and a root-equivalent group, so it is the laptop / cloud-VM path, never the HPC one |
+| `apptainer` | a SIF built FROM the OCI image | yes | `singularity` | `hpcagent-bench-install-apptainer`; a **conversion target**, not an independent build -- for shared/HPC sites that need a SIF |
+| `ce` | a SquashFS import of the OCI image (`enroot import`) | n/a -- selected by an `srun` flag, not invoked directly | none | CSCS Alps' Container Engine; NOT an exec wrapper -- there is no wrapper command and no local launch form, the image is chosen by `srun --environment=<edf>` |
 
-Select with `$HPCAGENT_BENCH_RUNTIME_BACKEND=apptainer|podman`. Both run an image directly via
-`hpcagent_bench.containers.local_run_command` / `scripts/run_agent_in_container.sh`. Harbor (the
-Terminal-Bench orchestrator) drives `singularity` only here (`harbor_env_for` maps
-apptainer -> singularity); a podman run goes through the direct launcher.
+Select with `$HPCAGENT_BENCH_RUNTIME_BACKEND=podman|docker|apptainer|ce`. The exec backends
+(`podman`/`docker`/`apptainer`) run an image via `hpcagent_bench.containers.local_run_command` /
+`scripts/run_agent_in_container.sh` (which probes `podman` -> `docker` -> `apptainer` when no
+backend is pinned; `ce` is deliberately not probed there, since it has no wrapper argv to
+assemble -- see `scripts/cscs/submit_foundation_alps.sbatch`). Harbor (the Terminal-Bench
+orchestrator) only knows `docker` and `singularity` (`harbor_env_for` maps `docker -> docker`,
+`apptainer -> singularity`, and raises for `podman` and `ce`, which Harbor has no provider for --
+a Harbor run needs `docker` or `apptainer`).
 
 **Build the image (one OCI recipe, `--build-arg HW=cpu|nvidia|amd`):**
 ```
 podman build -f containers/hpcagent_bench.Dockerfile --build-arg HW=cpu -t hpcagent_bench:cpu .
-# apptainer SIF from the SAME OCI (daemon-agnostic):
+# docker is a drop-in substitute for podman above on a machine with a daemon (same flags, same
+# OCI tag, except the NVIDIA GPU flag: `--device nvidia.com/gpu=all` for podman, `--gpus all`
+# for docker -- see hpcagent_bench/container_backends.txt).
+# apptainer SIF from the SAME OCI (daemon-agnostic conversion, not a separate build):
 podman save hpcagent_bench:cpu -o hpcagent_bench-cpu.tar && apptainer build hpcagent_bench-cpu.sif docker-archive:hpcagent_bench-cpu.tar
 ```
 Then `scripts/run_agent_in_container.sh <hw> -- <agent args>` runs it with the device passed
@@ -207,9 +218,10 @@ there -- not fixed by this driver.
 
 ## Distributed run (cluster) -- static agent / judge / inference
 
-HPCAgent-Bench runs as **single-node containers** (apptainer or podman) wired by **static,
-round-robin** assignment -- no container spans nodes, no MPI between containers, no dynamic
-load balancing. Each **agent worker** is bound once to one vLLM endpoint (think) and one
+HPCAgent-Bench runs as **single-node containers** (podman, docker, apptainer, or CSCS Alps' `ce`)
+wired by
+**static, round-robin** assignment -- no container spans nodes, no MPI between containers, no
+dynamic load balancing. Each **agent worker** is bound once to one vLLM endpoint (think) and one
 judge endpoint (authoritative HTTP grade): worker `w` uses `vllm_urls[w % V]` and
 `judge_urls[w % J]`.
 

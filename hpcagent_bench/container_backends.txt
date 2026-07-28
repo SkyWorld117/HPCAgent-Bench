@@ -5,10 +5,44 @@
 # (a .properties/.env shape -- deliberately NOT JSON/YAML so bash can read it with a
 # three-line `while IFS='=' read` loop). Blank lines and `#` comments are ignored.
 #
-# Only apptainer + podman are supported: both are what CSCS launches, and both consume
-# the ONE universal OCI image (apptainer builds a SIF from it; podman runs the OCI tag
-# directly). A multi-node inference endpoint (a vLLM behind >1 node) is a ray cluster of
-# these single-node containers exposing ONE URL -- no container ever spans nodes.
+# There is ONE image and it is OCI. Every backend here consumes that same image: podman and
+# docker run the OCI tag directly, apptainer builds a SIF from it, and the CSCS Alps container
+# engine imports it to SquashFS. That is the point of shipping OCI -- a laptop, a cloud VM and
+# an HPC site all start from the same artifact, and only the sites whose engine wants another
+# layer format convert.
+#
+# PODMAN LEADS, not docker. Docker needs a running daemon and membership of a root-equivalent
+# group, which no HPC login node grants; podman is the OCI runtime that is rootless and
+# daemonless, so it is the one that actually runs in both places. docker stays fully supported
+# for the laptop and cloud-VM case where it is already what people have.
+#
+# Each row declares a FAMILY and a KIND. The family is what the benchmark actually supports;
+# the row is one implementation of it.
+#
+#   family=oci  -- runs the shipped OCI image directly. podman and docker are two flavours of
+#                  ONE interface: same verb, same bind/workdir/env flags, same tag. They differ
+#                  in exactly two ways, both recorded below -- the NVIDIA flag spelling, and
+#                  whether a daemon plus a root-equivalent group is required.
+#   family=sif  -- a SIF built from that same OCI image (apptainer).
+#   family=ce   -- CSCS Alps' container engine. Under the hood this IS podman, with a SquashFS
+#                  layer format and pre-defined OCI hooks that give Cray-native fabric and GPU
+#                  performance, so it is nearly the `oci` family. It is kept SEPARATE on purpose:
+#                  selecting `oci` must never silently resolve to the one backend that cannot be
+#                  launched locally and that fails without an EDF. Same runtime, different
+#                  contract -- and the contract is what a caller has to get right.
+#
+#   kind=exec      -- the backend WRAPS the command:  <backend> <verb> ... <image> <cmd...>
+#   kind=srun_env  -- the backend is selected by a SLURM FLAG and there is no wrapper at all:
+#                     `srun --environment=<edf.toml> <cmd...>`. The EDF file declares the image,
+#                     the mounts, the workdir and the env, so every flag field below is empty
+#                     for such a row and reading one would be a category error.
+#
+# `rootless=1` marks a runtime an unprivileged user can invoke with no daemon and no
+# root-equivalent group membership. That is the property that decides what may be a DEFAULT,
+# because a default has to work on an HPC login node as well as a laptop.
+#
+# A multi-node inference endpoint (a vLLM behind >1 node) is a ray cluster of these
+# single-node containers exposing ONE URL -- no container ever spans nodes.
 #
 # INVARIANT: every value is a whitespace-separated TOKEN LIST with no intra-token
 # spaces (`run --rm --network host` is three tokens; a path/env value with a space
@@ -19,6 +53,40 @@
 
 global.passthrough=HPCAGENT_BENCH_OLLAMA_HOST OLLAMA_HOST HPCAGENT_BENCH_OLLAMA_MODEL ANTHROPIC_API_KEY HPCAGENT_BENCH_LOCAL_MODEL
 
+# Rootless, daemonless OCI: the default, and the only exec wrapper that runs unprivileged on
+# both a laptop and an HPC login node.
+podman.family=oci
+podman.rootless=1
+podman.kind=exec
+podman.verb=run --rm --network host
+podman.bind=-v
+podman.workdir=-w
+podman.env=-e
+podman.gpu.nvidia=--device nvidia.com/gpu=all
+podman.gpu.amd=--device /dev/kfd --device /dev/dri --group-add keep-groups
+podman.image_form=tag
+podman.image_default=hpcagent_bench:{hw}
+podman.harbor_env=
+
+# The same OCI image under a daemon. Needs dockerd and a root-equivalent group, so it is the
+# laptop / cloud-VM path, never the HPC one.
+docker.family=oci
+docker.rootless=0
+docker.kind=exec
+docker.verb=run --rm --network host
+docker.bind=-v
+docker.workdir=-w
+docker.env=-e
+docker.gpu.nvidia=--gpus all
+docker.gpu.amd=--device /dev/kfd --device /dev/dri --group-add video
+docker.image_form=tag
+docker.image_default=hpcagent_bench:{hw}
+docker.harbor_env=docker
+
+# SIF conversion of the same OCI image (`apptainer build ... docker-archive:...`).
+apptainer.family=sif
+apptainer.rootless=1
+apptainer.kind=exec
 apptainer.verb=exec
 apptainer.bind=--bind
 apptainer.workdir=--pwd
@@ -29,12 +97,14 @@ apptainer.image_form=sif
 apptainer.image_default=hpcagent_bench-{hw}.sif
 apptainer.harbor_env=singularity
 
-podman.verb=run --rm --network host
-podman.bind=-v
-podman.workdir=-w
-podman.env=-e
-podman.gpu.nvidia=--device nvidia.com/gpu=all
-podman.gpu.amd=--device /dev/kfd --device /dev/dri --group-add keep-groups
-podman.image_form=tag
-podman.image_default=hpcagent_bench:{hw}
-podman.harbor_env=
+# CSCS Alps container engine: podman under a SquashFS layer format with Cray-tuned OCI hooks,
+# so family=oci -- the same runtime, reached differently. What IS different is the LAUNCH: there
+# is no wrapper argv, the container comes from the EDF passed to srun and the command runs
+# unwrapped, so this row carries no verb/bind/workdir/env. Set $HPCAGENT_BENCH_EDF or pass the
+# path explicitly; there is no default, because an EDF names a site-specific image on scratch.
+ce.family=ce
+ce.rootless=1
+ce.kind=srun_env
+ce.srun_flag=--environment
+ce.image_form=edf
+ce.harbor_env=
