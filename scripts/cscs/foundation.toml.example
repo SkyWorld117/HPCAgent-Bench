@@ -9,13 +9,18 @@
 #
 # On Alps every `srun` must carry `--environment=<this file>` or the step runs outside the image.
 #
-# THE IMAGE IS OCI. That is the shipped artifact and nothing here changes it; Alps' container
-# engine simply wants it as a SquashFS on scratch, which is a one-time import you run off the
-# batch path (see the header of submit_foundation_alps.sbatch for the two commands). Compute
-# nodes are GH200 quads, so the image must be linux/arm64: build it with
-# `docker buildx --platform linux/arm64` (or podman) on a build box, never on the login node.
+# THE IMAGE IS OCI, and the container engine converts it ITSELF. A registry reference in the
+# `image` field below is pulled, converted to SquashFS and cached by CE -- there is no manual
+# import step. Pre-importing to a .sqsh on scratch is an optimisation that skips the per-job
+# pull, not a requirement (see the header of submit_foundation_alps.sbatch).
+#
+# Compute nodes are GH200 quads, i.e. aarch64. One TAG can serve both architectures if it is a
+# multi-arch manifest list (`docker buildx build --platform linux/amd64,linux/arm64 --push`);
+# an amd64-only image fails at exec time inside the first step, not at submission.
 
-# An OCI reference OR an absolute SquashFS path on scratch. The sqsh path is the reliable one.
+# EITHER a registry reference, in the engine's `[REGISTRY#]IMAGE[:TAG]` form:
+#   image = "quay.io#spcl/hpcagent_bench:cpu"
+# OR an absolute SquashFS path on scratch, when a pre-import is worth the setup:
 image = "${SCRATCH}/ce-images/hpcagent_bench-aarch64.sqsh"
 
 mounts = [

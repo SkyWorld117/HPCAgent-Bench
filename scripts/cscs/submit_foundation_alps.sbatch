@@ -15,17 +15,20 @@
 #
 # `-A <account>` is mandatory on Alps (or export SBATCH_ACCOUNT first).
 #
-# ONE-TIME IMAGE SETUP, off the batch path. The shipped artifact is an OCI image; Alps' engine
-# wants it as SquashFS on scratch. Build for arm64 on a build box, then import:
+# IMAGE SETUP. None is required: put a registry reference in the EDF's `image` field and the
+# container engine pulls it, converts it to SquashFS and caches it. Pre-importing only skips
+# that per-job pull:
 #
-#   docker buildx build --platform linux/arm64 -f containers/hpcagent_bench.Dockerfile \
-#          --build-arg HW=cpu -t hpcagent_bench:cpu-aarch64 .
-#   docker save hpcagent_bench:cpu-aarch64 -o hpcagent_bench-aarch64.tar
-#   # on Alps, once:
-#   enroot import -o $SCRATCH/ce-images/hpcagent_bench-aarch64.sqsh dockerd://hpcagent_bench:cpu-aarch64
+#   enroot import -o $SCRATCH/ce-images/hpcagent_bench-aarch64.sqsh docker://<registry>#hpcagent_bench:cpu
 #
-# The image must be linux/arm64. An x86_64 image will not run on a GH200 node, and the failure
-# arrives as an exec-format error inside the first step rather than at submission.
+# GH200 nodes are aarch64. One tag serves both architectures when it is a multi-arch manifest
+# list -- build it once on a build box, never on the login node:
+#
+#   docker buildx build --platform linux/amd64,linux/arm64 --push \
+#          -f containers/hpcagent_bench.Dockerfile --build-arg HW=cpu -t <registry>/hpcagent_bench:cpu .
+#
+# An amd64-only image will not run on a GH200 node, and the failure arrives as an exec-format
+# error inside the first step rather than at submission.
 #
 # Overridable: FRAMEWORKS, BENCH, PRESET, REPEAT, TIMEOUT, DATATYPE.
 #

@@ -10,12 +10,33 @@
 # this machine has", and it resolves to a concrete implementation. It is not a runtime itself
 # and nothing is ever launched as `oci`.
 #
-# There is ONE distributed image and it is OCI. That choice is forced by the direction of the
-# conversions, not by taste: an OCI image converts INTO SquashFS (Alps' engine) or a SIF
-# (apptainer), and neither converts back. Ship a SIF and a docker user has nothing to run; ship
-# OCI and every site can convert to whatever its engine loads fastest. HPC sites do convert --
-# pulling an OCI image over a parallel filesystem is slow, which is the whole reason SquashFS
-# and SIF exist.
+# There is ONE distributed image per hardware target (cpu / nvidia / amd) and it is OCI. That
+# choice is forced by the direction of the conversions: an OCI image converts INTO SquashFS
+# (Alps' engine) or a SIF (apptainer), and neither converts back. Ship a SIF and a docker user
+# has nothing to run.
+#
+# NOTHING has to be converted by hand. Each backend pulls the OCI reference from the registry
+# and does its own conversion:
+#
+#   apptainer pull docker://<registry>/hpcagent_bench:<hw>     -> SIF, built on the spot
+#   EDF:  image = "<registry>#hpcagent_bench:<hw>"             -> SquashFS, pulled and cached by CE
+#   docker/podman run <registry>/hpcagent_bench:<hw>           -> no conversion at all
+#
+# A pre-imported .sqsh or a prebuilt .sif is an OPTIMISATION (it skips the per-job pull), never a
+# requirement. Sites convert because pulling an OCI image over a parallel filesystem is slow,
+# which is the whole reason SquashFS and SIF exist.
+#
+# One TAG can still cover both CPU architectures: a multi-arch manifest list built with
+# `docker buildx build --platform linux/amd64,linux/arm64 --push` lets the registry hand each
+# host the right manifest. GH200 nodes are aarch64, so an amd64-only image fails there at exec
+# time -- the tag must contain an arm64 manifest, not merely exist.
+#
+# CAVEAT, and it is the reason this benchmark cannot promise a container is enough: one COMPILED
+# image is portable, not performance-portable. MPI (Open MPI vs MPICH), BLAS/LAPACK and Fortran
+# have no common ABI, and vectorisation and GPU codegen are baked in at build time -- see XaaS
+# (Hoefler et al., IEEE CiSE 2024, arXiv:2401.04552; Copik et al., SC'25, arXiv:2509.17914). On a
+# site whose fabric or math library differs, the image runs and the NUMBER is wrong. That is what
+# the Cray hooks below exist to paper over, and why a distributed run must enable them.
 #
 # NATIVE is a first-class member, not the absence of one. A site with no container runtime at
 # all still has to be able to run the benchmark, and saying so as a backend keeps that path on
