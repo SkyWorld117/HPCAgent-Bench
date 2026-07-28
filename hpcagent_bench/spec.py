@@ -356,6 +356,29 @@ def parse_baseline(raw: Any, relative_path: str, source: str = "<spec>") -> Base
 #: is a load error, not a silently ignored line.
 ARRAY_ENTRY_KEYS = frozenset({"shape", "dtype", "dist", "domain"})
 
+
+def init_arrays_raw(init: "InitSpec") -> Dict[str, Any]:
+    """``init.arrays`` as a manifest spells it, rebuilt from the per-property maps the parser
+    split it into.
+
+    The exact inverse of the ``init.arrays`` loop in :meth:`BenchSpec.from_dict`, and it lives
+    beside that loop so the two cannot drift: anything that round-trips a spec back into a raw
+    dict (:func:`hpcagent_bench.emit_bridge.legacy_bench_info_dict`) must re-emit the ONE
+    declaration surface, never the internal maps. A bare string is used where the entry declares
+    nothing but a shape, matching the shorthand the parser accepts."""
+    out: Dict[str, Any] = {}
+    for name, shape in init.shapes.items():
+        entry: Dict[str, Any] = {"shape": shape}
+        if name in init.dtypes:
+            entry["dtype"] = init.dtypes[name]
+        if name in init.dists:
+            entry["dist"] = init.dists[name]
+        if name in init.domains:
+            entry["domain"] = init.domains[name]
+        out[name] = shape if len(entry) == 1 else entry
+    return out
+
+
 #: What kind of execution-path decision a ``config:`` knob makes (its optional ``selects:``).
 #: Purely descriptive today -- nothing branches on it -- but a closed vocabulary catches a typo
 #: at load time instead of letting it pass through silently.

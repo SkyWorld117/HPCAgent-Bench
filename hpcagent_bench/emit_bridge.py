@@ -23,7 +23,7 @@ import sys
 import tempfile
 from typing import Any, Dict, Iterator, List, Optional
 
-from hpcagent_bench.spec import BenchSpec, DEFAULT_FUZZ
+from hpcagent_bench.spec import BenchSpec, DEFAULT_FUZZ, init_arrays_raw
 
 
 def _layouts_to_raw(layouts: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,14 +136,22 @@ def legacy_bench_info_dict(spec: BenchSpec, config: Optional[str] = None) -> Dic
             "input_args": list(spec.init.input_args),
             "output_args": list(spec.init.output_args),
         }
-        if spec.init.shapes:
-            init["shapes"] = spec.init.shapes
+        # The round-trip spelling is the SAME one a manifest uses: an array is declared once,
+        # under ``init.arrays``. Exporting the parser's internal per-property maps (shapes,
+        # dists) as top-level keys would emit exactly the legacy surface ``BenchSpec.from_dict``
+        # refuses, so ``Benchmark.get_data`` -- which re-parses this dict -- would fail to load
+        # every declaratively-initialised kernel.
+        arrays = init_arrays_raw(spec.init)
+        if arrays:
+            init["arrays"] = arrays
         if spec.init.scalars:
             init["scalars"] = spec.init.scalars
-        if spec.init.dtypes:
-            init["dtypes"] = spec.init.dtypes
-        if spec.init.dists:
-            init["dists"] = spec.init.dists
+        # ``init.dtypes`` types SYMBOLS. The parser merges per-array dtypes into the same map,
+        # so an entry naming a declared array is that array's element type and has already gone
+        # out on its ``arrays`` entry -- re-emitting it here would be the second home again.
+        symbol_dtypes = {name: dt for name, dt in spec.init.dtypes.items() if name not in spec.init.shapes}
+        if symbol_dtypes:
+            init["dtypes"] = symbol_dtypes
         bench["init"] = init
     if spec.variants and spec.variants != {"default": {}}:
         bench["variants"] = spec.variants
