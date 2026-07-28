@@ -324,7 +324,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     array_args = list(info["array_args"])
     input_args = list(info["input_args"])
     output_args = list(info.get("output_args", []))
-    shapes_raw = info.get("init", {}).get("shapes", {})
+    shapes_raw = declared_shapes(info.get("init", {}) or {})
     parameters = info.get("parameters", {})
     preset_symbols = _collect_symbols(parameters)
     # Preset names with a non-integer value (e.g. solver ``tol``=1e-6) are float
@@ -733,6 +733,26 @@ def parse_kernel(numpy_py: pathlib.Path,
 def _load_bench_info(path: pathlib.Path) -> Dict:
     raw = json.loads(path.read_text())
     return raw.get("benchmark", raw)
+
+
+def declared_shapes(init: Dict) -> Dict[str, str]:
+    """``{array: shape expression}`` from an ``init`` block, whichever spelling it carries.
+
+    An array is declared under ``init.arrays``, either as a bare shape string or as a mapping
+    with a ``shape`` key. Reading ``init["shapes"]`` directly -- the retired spelling -- is what
+    silently reduced this emitter to ONE translating port out of 200: the key stopped being
+    exported, ``shapes_raw`` came back empty, and every kernel with a declaratively-initialised
+    >=2-D array was emitted against shapes the emitter had to guess instead of the ones its
+    manifest declared. Kernels initialising through ``init.func_name`` were unaffected, which is
+    why the polybench corpus looked fine throughout.
+
+    ``shapes`` is still accepted here, because a bench_info JSON on disk may predate the change
+    and this reader must not be a second place that decides what a manifest may say."""
+    arrays = init.get("arrays") or {}
+    out: Dict[str, str] = {name: entry if isinstance(entry, str) else entry["shape"] for name, entry in arrays.items()}
+    for name, shape in (init.get("shapes") or {}).items():
+        out.setdefault(name, shape)
+    return out
 
 
 def _choose_sparse_config(info: Dict, config: Optional[str] = None) -> Optional[str]:
