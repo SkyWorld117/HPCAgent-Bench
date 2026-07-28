@@ -4,13 +4,14 @@ func_name: conv3d_scaling_tanh_multiply_sigmoid
 kind: microkernel
 level: 2
 parameters:
+  # A list-valued symbol cannot cross the scalar ABI (ctypes has no argument for it), and this
+  # one only restated the matching array's declared shape while the kernel body never read it.
   S:
     batch_size: 2
     in_channels: 4
     out_channels: 4
     kernel_size: 3
     scaling_factor: 2.0
-    bias_shape: [4, 1, 1, 1]
     depth: 4
     height: 4
     width: 4
@@ -20,7 +21,6 @@ parameters:
     out_channels: 8
     kernel_size: 3
     scaling_factor: 2.0
-    bias_shape: [8, 1, 1, 1]
     depth: 8
     height: 8
     width: 8
@@ -30,7 +30,6 @@ parameters:
     out_channels: 16
     kernel_size: 3
     scaling_factor: 2.0
-    bias_shape: [16, 1, 1, 1]
     depth: 16
     height: 16
     width: 16
@@ -40,7 +39,6 @@ parameters:
     out_channels: 32
     kernel_size: 3
     scaling_factor: 2.0
-    bias_shape: [32, 1, 1, 1]
     depth: 32
     height: 32
     width: 32

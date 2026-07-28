@@ -11,7 +11,7 @@ from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
 from numpyto_common.emitter import BaseEmitter
 from numpyto_common.frontend import _names_used_as_int
-from numpyto_common.lowering import _walk_complex
+from numpyto_common.lowering import _MATH_INTRINSIC_NAMES, _walk_complex
 
 #: Whole-identifier matcher for scanning a shape-token string for the names it references.
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
@@ -291,7 +291,12 @@ _INT_CALLS_ARGDEP = {"max", "min", "int_floor", "python_mod"}
 #: Fortran intrinsics whose argument the standard requires to be REAL/COMPLEX (an INTEGER
 #: is rejected outright); numpy promotes an integer operand to float for these, so mirror
 #: that with an explicit REAL(). ABS/MOD/MAX/MIN/SIGN are excluded -- they keep their integer result.
-_REAL_ARG_INTRINSICS = frozenset({"exp", "sqrt", "log", "sin", "cos", "tgamma", "lgamma"})
+#: Every transcendental takes a real argument, so the promotion follows the math-intrinsic name set
+#: rather than a hand-picked seven -- ``np.tanh(0)`` / ``np.log1p(n)`` on an integer operand is a
+#: gfortran type error, and the names that reach the last-resort and bind(C) paths got no REAL() at
+#: all. ABS/MOD/MAX/MIN/SIGN stay out: they keep their integer result.
+_REAL_ARG_INTRINSICS = frozenset(_MATH_INTRINSIC_NAMES) - frozenset(
+    {"abs", "fabs", "mod", "fmod", "max", "min", "sign"})
 
 _SYMBOL_INT_TAG = next((t for t in ("int64", "int32", "int16", "int8") if _fortran_type(t) == _fortran_type("int")),
                        "int64")
@@ -308,6 +313,10 @@ _MAX_CALL_NAMES = frozenset({"max", "fmax"})
 
 #: Elementwise math intrinsics/aliases handled verbatim in the np.<attr>(x) call path.
 _UNARY_MATH_ATTRS = frozenset({"sqrt", "exp", "log", "sin", "cos", "tanh"})
+
+#: Emitted as a Fortran intrinsic that reduces the WHOLE array, so none of them can honour an axis.
+_WHOLE_ARRAY_REDUCTIONS = frozenset(
+    {"mean", "sum", "prod", "max", "min", "argmax", "argmin", "any", "all", "count_nonzero", "median"})
 _ABS_ATTRS = frozenset({"absolute", "fabs"})
 _CONJ_ATTRS = frozenset({"conj", "conjugate"})
 _REAL_IMAG_ATTRS = frozenset({"real", "imag"})
@@ -1443,7 +1452,7 @@ class _FortranBodyEmitter(BaseEmitter):
             if fn in _FORTRAN_FN_EXPR and len(node.args) == 1:
                 libm = fn if self._rk == "c_double" else fn + "f"
                 self._used_libm.add((libm, self._rk))
-                return f"{libm}({self.emit_expr(node.args[0])})"
+                return f"{libm}({self._as_real_arg(node.args[0])})"
             # Integer-returning conversions (int/floor/ceil -> INT/FLOOR/CEILING)
             # default to int32 in Fortran; pin them to the int64 ABI kind.
             if fn in _INT_CONV_INTRINSIC and len(node.args) == 1:
@@ -1456,7 +1465,8 @@ class _FortranBodyEmitter(BaseEmitter):
                 else:
                     args = ", ".join(self.emit_expr(a) for a in node.args)
                 return f"{up}({args})"
-            args = ", ".join(self.emit_expr(a) for a in node.args)
+            args = ", ".join(
+                (self._as_real_arg(a) if fn in _REAL_ARG_INTRINSICS else self.emit_expr(a)) for a in node.args)
             return f"{fn}({args})"
         # np.X(args) / arr.X(args): map common numpy calls to Fortran intrinsics so
         # kernels whose lowering didn't expand the call still produce valid code.
@@ -1482,6 +1492,18 @@ class _FortranBodyEmitter(BaseEmitter):
                     if intrinsic == "CMPLX":
                         return f"CMPLX({args_e[0]}, kind={kind})"
                     return f"{intrinsic}({args_e[0]}, {kind})"
+            # Every whole-array intrinsic below reduces over ALL of it. A call that still carries an
+            # axis reached here because lowering declined it, and dropping the axis silently gave a
+            # full reduction -- ``np.any(A, axis=0)`` became a scalar ``ANY``, no diagnostic.
+            # numpy takes the axis positionally too (``np.sum(A, 0)``), so a keyword-only check let the
+            # positional form through to the very full reduction this guard exists to prevent.
+            if attr in _WHOLE_ARRAY_REDUCTIONS:
+                axis_arg = next((k.value for k in node.keywords if k.arg == "axis"), None)
+                if axis_arg is None and len(node.args) > 1:
+                    axis_arg = node.args[1]
+                if axis_arg is not None and not (isinstance(axis_arg, ast.Constant) and axis_arg.value is None):
+                    raise NotImplementedError(f"np.{attr} carries axis={ast.unparse(axis_arg)!r} but reached emit "
+                                              f"unlowered; the Fortran intrinsic reduces the WHOLE array")
             if attr == "transpose" and args_e:
                 # Only apply when the operand is a bare Name -- a subscripted operand would produce nonsense.
                 if node.args and isinstance(node.args[0], ast.Name):
@@ -1553,6 +1575,15 @@ class _FortranBodyEmitter(BaseEmitter):
                     return f"[{', '.join(parts)}]"
                 return f"[{', '.join(args_e)}]"
             if attr == "norm" and args_e:
+                # This emits the 2-norm. An explicit ``ord`` (positional [1] or keyword) asks for a
+                # DIFFERENT norm entirely -- 1-norm, inf-norm, Frobenius -- so honouring only the
+                # operand silently answered a question that was not asked.
+                ord_arg = next((k.value for k in node.keywords if k.arg == "ord"), None)
+                if ord_arg is None and len(node.args) > 1:
+                    ord_arg = node.args[1]
+                if ord_arg is not None and not (isinstance(ord_arg, ast.Constant) and ord_arg.value in (None, 2)):
+                    raise NotImplementedError(f"np.linalg.norm(ord={ast.unparse(ord_arg)!r}) reached emit; only the "
+                                              f"2-norm is emitted here")
                 return f"SQRT(SUM({args_e[0]} ** 2))"
             # np.where(cond, a, b) -- Fortran MERGE(a, b, cond). MERGE requires a
             # and b to share type+kind, so promote an integer constant when the

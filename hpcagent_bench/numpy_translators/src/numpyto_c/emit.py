@@ -47,7 +47,7 @@ def _is_int_cast(node: ast.AST) -> bool:
 #: libm functions with a <name>f single-precision variant, emitted in a float32 kernel (see _math_name).
 _FLOATABLE = frozenset({
     "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "exp", "exp2",
-    "expm1", "log", "log2", "log10", "log1p", "sqrt", "cbrt", "hypot", "atan2", "pow", "floor", "ceil", "round",
+    "expm1", "log", "log2", "log10", "log1p", "sqrt", "cbrt", "hypot", "atan2", "pow", "floor", "ceil", "round", "rint",
     "trunc", "fabs", "fmod", "copysign", "erf", "erfc", "tgamma", "lgamma"
 })
 
@@ -493,8 +493,15 @@ class _CBodyEmitter(BaseEmitter):
                 return f"int_floor({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
             if isinstance(node.op, ast.Mod):
                 return f"python_mod({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
-            # scalar @ scalar: numpy treats 0-D @ as ordinary multiplication; reached when the matmul hoister rejected it.
+            # 0-D @ 0-D is ordinary multiplication -- but ONLY that. Emitting `*` for any surviving
+            # MatMult turned a batched matmul the hoister had silently declined into an elementwise
+            # product with no contraction at all, which compiles and returns wrong numbers.
             if isinstance(node.op, ast.MatMult):
+                for side in (node.left, node.right):
+                    if not self._is_scalar_operand(side):
+                        raise NotImplementedError(f"matmul {ast.unparse(node)} reached emit unlowered: "
+                                                  f"'{ast.unparse(side)}' is not a scalar, so '*' would drop "
+                                                  f"the contraction")
                 return (f"({self.emit_expr(node.left)} * "
                         f"{self.emit_expr(node.right)})")
             op = _BINOP.get(type(node.op))
@@ -694,8 +701,13 @@ class _CBodyEmitter(BaseEmitter):
                 key = attr[:-1] if attr.endswith("_") else attr
                 if key in dtypes.REGISTRY or key in dtypes.SCALAR_KINDS:
                     return f"(({dtypes.c_type(key)})({self.emit_expr(node.args[0])}))"
-            # np.flip/copy/transpose on a scalar Subscript is a no-op (slice-fusion lifted it into a per-element loop).
+            # np.flip/copy/transpose on a SCALAR is a no-op -- slice fusion already folded the index
+            # reversal into the subscript. On a whole array it is not: dropping it emitted a plain
+            # copy where the reversal or permutation belonged, silently and without a diagnostic.
             if attr in _NOOP_UNARY_ATTRS and len(node.args) == 1:
+                if not self._is_scalar_operand(node.args[0]):
+                    raise NotImplementedError(f"np.{attr}({ast.unparse(node.args[0])}) reached emit on a whole "
+                                              f"array; treating it as a no-op would drop the operation")
                 return self.emit_expr(node.args[0])
             # z.conjugate()/z.conj() never reaches emit (native_desugar rewrites it to np.conj(z), handled just below).
             if (isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy") and attr in _CONJ_ATTRS
@@ -803,6 +815,26 @@ class _CBodyEmitter(BaseEmitter):
         out.update(_integer_valued_locals(self.kir))
         self._int_locals_cache = out
         return out
+
+    def _is_scalar_operand(self, node: ast.AST) -> bool:
+        """True when ``node`` reads a single VALUE, not a whole array: a literal, a scalar name, or
+        a fully-indexed element. A bare array Name or a slice-bearing subscript is not."""
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, ast.Name):
+            return node.id not in self._array_names()
+        if isinstance(node, ast.Subscript):
+            index = node.slice
+            parts = index.elts if isinstance(index, ast.Tuple) else [index]
+            return not any(isinstance(p, ast.Slice) for p in parts)
+        if isinstance(node, ast.BinOp):
+            return self._is_scalar_operand(node.left) and self._is_scalar_operand(node.right)
+        if isinstance(node, ast.UnaryOp):
+            return self._is_scalar_operand(node.operand)
+        return isinstance(node, ast.Call)  # a lowered call returns a value
+
+    def _array_names(self) -> Set[str]:
+        return {a.name for a in self.kir.arrays} | set(self.kir.zeros_locals)
 
     def _is_complex_operand(self, node: ast.AST) -> bool:
         """True when node's element dtype is complex; delegates to _walk_complex so a real-returning accessor stays real."""

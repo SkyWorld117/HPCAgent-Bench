@@ -29,13 +29,16 @@ import json
 import os
 import pathlib
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+
+from numpyto_common import dtypes
 
 from numpyto_common.ir import ArrayDesc, KernelIR, ScalarDesc, SparseArrayDesc, SymbolDesc
 from numpyto_common.lib_nodes import _iter_extent_of, _read_axis_keepdims
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive,
-                                          _UfuncOutInline, _UfuncReduceToReducer, _eigh_alias_names, rewrite_curve_fit)
+                                          _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS, _eigh_alias_names,
+                                          expr_rank, rank_table, rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -63,6 +66,9 @@ def native_desugar(fn: ast.FunctionDef) -> None:
       native ``np.array`` constructor).
     * ``try: <body> except: <give-up>`` -> ``<body>`` (static backends have
       no exceptions; the handler can't fire).
+    * ``np.expand_dims(x, axis=k)`` -> ``x[:, ..., None, ...]`` and
+      ``np.swapaxes(x, i, j)`` -> ``np.transpose(x, <perm>)`` -- both are pure index rewrites
+      onto forms the pipeline already lowers.
     """
     _UfuncReduceToReducer().visit(fn)  # np.add.reduce -> np.sum before the elementwise-ufunc desugars
     _NewaxisToNone().visit(fn)
@@ -73,6 +79,92 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     _DropValidationGuards().visit(fn)
     _FoldStaticNoneBranches().visit(fn)
     ast.fix_missing_locations(fn)
+
+
+class _AxisReshapeToIndexing(ast.NodeTransformer):
+    """``np.expand_dims`` / ``np.swapaxes`` -> indexing forms the pipeline already lowers.
+
+    Both need the operand's rank: ``expand_dims`` to place the newaxis (a negative axis counts from
+    the RESULT rank), ``swapaxes`` to spell the full permutation. Unknown rank leaves the call
+    alone, which surfaces as an unsupported-call error rather than a wrong axis.
+    """
+
+    def __init__(self, ranks: Dict[str, int], scalars: FrozenSet[str] = frozenset()) -> None:
+        self.ranks = ranks
+        #: Declared scalar parameters. ``expr_rank`` only tracks arrays, so without these a
+        #: ``np.array(constant_value)`` on a scalar knob reads as "rank unknown".
+        self.scalars = scalars
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        name = _np_attr_name(node) if isinstance(node.func, ast.Attribute) else None
+        if name == "array" and len(node.args) == 1 and not isinstance(node.args[0], (ast.List, ast.Tuple)):
+            # ``np.array(0.0)`` is a 0-d array: the scalar itself. Only when the operand is already
+            # a scalar -- ``np.array(some_array)`` is a COPY, and dropping it would alias.
+            return node.args[0] if self._is_scalar(node.args[0]) else node
+        if name == "norm" and self._is_linalg(node.func) and node.args:
+            return self._axis_norm(node)
+        if name not in ("expand_dims", "swapaxes", "squeeze") or not node.args:
+            return node
+        rank = expr_rank(node.args[0], self.ranks)
+        axes = self._literal_axes(node)
+        if rank is None or axes is None:
+            return node
+        if name == "expand_dims":
+            axis = axes[0] % (rank + 1)
+            index = ", ".join(["None" if d == axis else ":" for d in range(rank + 1)])
+            return self._rewrite(f"({ast.unparse(node.args[0])})[{index}]", node)
+        if name == "squeeze":
+            axis = axes[0] % rank
+            index = ", ".join(["0" if d == axis else ":" for d in range(rank)])
+            return self._rewrite(f"({ast.unparse(node.args[0])})[{index}]", node)
+        i, j = (a % rank for a in axes[:2])
+        perm = list(range(rank))
+        perm[i], perm[j] = perm[j], perm[i]
+        return self._rewrite(f"np.transpose({ast.unparse(node.args[0])}, ({', '.join(map(str, perm))},))", node)
+
+    def _is_scalar(self, node: ast.expr) -> bool:
+        """Rank 0 for certain: a numeric literal or a declared scalar parameter."""
+        if isinstance(node, ast.Name):
+            return node.id in self.scalars
+        return expr_rank(node, self.ranks) == 0
+
+    def _is_linalg(self, func: ast.AST) -> bool:
+        """``np.linalg.norm``'s callee shape, so a user helper called ``norm`` is not caught."""
+        return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute)
+                and func.value.attr == "linalg")
+
+    def _axis_norm(self, node: ast.Call) -> ast.AST:
+        """``np.linalg.norm(v, axis=k)`` -> ``np.sqrt(np.sum(abs(v) ** 2, axis=k))``.
+
+        Only the default 2-norm; an explicit ``ord`` is a different reduction and is left alone.
+        ``abs(v) ** 2`` rather than ``v * v`` because the two disagree for a COMPLEX operand -- and
+        nothing downstream would have caught that, so the choice is made here where it is free.
+        """
+        kw = {k.arg: k.value for k in node.keywords}
+        if "ord" in kw or len(node.args) > 1 or "axis" not in kw:
+            return node
+        operand = ast.unparse(node.args[0])
+        # keepdims rides along: dropping it silently changed the result RANK, and l2_norm's
+        # ``x / np.linalg.norm(x, axis=1, keepdims=True)`` then broadcast against the wrong axis.
+        keep = f", keepdims={ast.unparse(kw['keepdims'])}" if "keepdims" in kw else ""
+        return self._rewrite(f"np.sqrt(np.sum(np.abs({operand}) ** 2, axis={ast.unparse(kw['axis'])}{keep}))", node)
+
+    def _literal_axes(self, node: ast.Call) -> Optional[List[int]]:
+        kw = {k.arg: k.value for k in node.keywords}
+        given = list(node.args[1:]) + ([kw["axis"]] if "axis" in kw else [])
+        out = []
+        for a in given:
+            if isinstance(a, ast.Constant) and isinstance(a.value, int) and not isinstance(a.value, bool):
+                out.append(a.value)
+            elif isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
+                out.append(-a.operand.value)
+            else:
+                return None
+        return out or None
+
+    def _rewrite(self, source: str, node: ast.Call) -> ast.AST:
+        return ast.copy_location(ast.parse(source, mode="eval").body, node)
 
 
 def _rename_rebound_parameters(fn: ast.FunctionDef, inputs: frozenset) -> None:
@@ -336,6 +428,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     # allowed mid statement) and would never inline -- its nested def is only
     # exposed by inlining the parent, a deadlock otherwise.
     _flatten_nested_helpers(tree)
+    _fuse_guarded_returns(tree)
     # Inline helper calls to a FIXPOINT: one pass only inlines the outermost
     # level (NodeTransformer doesn't re-visit spliced-in bodies), so a chain of
     # helpers calling helpers (lulesh's ``_lagrange_nodal`` -> ``_calc_force_
@@ -410,11 +503,29 @@ def parse_kernel(numpy_py: pathlib.Path,
     # parameters (every KernelBench conv/pool port normalises a knob to ``(s, s)``) is folded
     # against the values the call site actually passed.
     _scalar_names = frozenset(input_args) - frozenset(array_args)
+    # A structural constant becomes a literal BEFORE anything reads it: an axis, a repeat count and
+    # a slice bound all pick the loop nest, and none of them can be built from a runtime scalar.
+    _init_scalars = info.get("init", {}).get("scalars", {}) or {}
+    _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
+                                               runtime_args=input_args)).apply(fn)
+    # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only in
+    # the axis slot, where nothing else can be emitted.
+    _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args)).visit(fn)
+    ast.fix_missing_locations(fn)
+    # expand_dims/swapaxes first: they become plain indexing, which the tuple pass can then rank.
+    _AxisReshapeToIndexing(rank_table(fn, _declared_ranks(shapes_raw)), _scalar_names).visit(fn)
+    ast.fix_missing_locations(fn)
     desugar_tuples(fn,
                    int_scalars=_scalar_names - frozenset(_float_preset_names),
                    float_scalars=frozenset(_float_preset_names) & _scalar_names,
                    arrays=frozenset(array_args),
-                   ranks=_declared_ranks(shapes_raw))
+                   ranks=rank_table(fn, _declared_ranks(shapes_raw)))
+
+    # Whatever axis did not become a literal above has no emittable loop nest. Refuse it here rather
+    # than let a downstream reader mistake it for "no axis at all". A slice step and a negative
+    # slice start pick the nest the same way, so they are refused on the same pass.
+    _reject_symbolic_axis(fn)
+    _reject_unsupported_slices(fn)
 
     _rename_rebound_parameters(fn, frozenset(array_args) - frozenset(output_args))
 
@@ -650,10 +761,20 @@ def _choose_sparse_config(info: Dict, config: Optional[str] = None) -> Optional[
 
 
 def _default_const(node: ast.expr) -> ast.expr:
-    """Unwrap a dtype-cast default (``np.float64(1e-6)``, ``int(8)``) to its
-    inner literal so it folds as a plain numeric constant; otherwise return the
-    default expression unchanged."""
-    if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+    """Unwrap a dtype-CAST default (``np.float64(1e-6)``, ``int(8)``) to its inner literal so it
+    folds as a plain numeric constant; otherwise return the default expression unchanged.
+
+    The callee must actually be a cast. Unwrapping any single-constant-arg call replaced the call
+    with its ARGUMENT, so a ``scale=math.sqrt(64.0)`` default folded to 64.0 -- an 8x error.
+    """
+    if not (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)):
+        return node
+    func = node.func
+    name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
+    if name is None:
+        return node
+    key = name[:-1] if name.endswith("_") else name
+    if key in ("int", "float", "complex", "bool") or key in dtypes.REGISTRY or key in dtypes.SCALAR_KINDS:
         return ast.copy_location(ast.Constant(value=node.args[0].value), node)
     return node
 
@@ -1269,7 +1390,11 @@ class _SubstituteParamAliases(ast.NodeTransformer):
         for s in fn.body:
             if (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
                     and isinstance(s.value, ast.Name) and s.value.id in self.params
-                    and s.targets[0].id not in self.params and bare_binds.get(s.targets[0].id) == 1):
+                    and s.targets[0].id not in self.params and bare_binds.get(s.targets[0].id) == 1
+                    # ...and the ALIASED parameter is never rebound either. Substituting an alias of
+                    # a rebound name re-reads it at the USE site instead of the BIND site:
+                    # ``original_x = x; x = x * s; x = x + original_x`` became ``x*s + x*s``.
+                    and not bare_binds.get(s.value.id)):
                 self.subst[s.targets[0].id] = s.value.id
 
     def visit_Assign(self, node: ast.Assign):
@@ -1403,23 +1528,26 @@ def _resolve_call_args(call: ast.Call, helper: ast.FunctionDef) -> Optional[List
     ``def batchnorm2d(x, eps=1e-5)`` called as ``batchnorm2d(arr)``
     yields ``[arr, Constant(1e-5)]``.
 
-    Returns ``None`` when the count cannot be reconciled (more call
-    args than params, or a missing param without a default) -- the
-    inliner falls back to leaving the Call untouched.
+    KEYWORD arguments bind by name. They used to be dropped in favour of the parameter's default,
+    which is silent whenever the two happen to agree -- ``_logsumexp(x, axis=1)`` on a rank-2 input
+    took the default ``axis=-1`` and only matched because -1 IS 1 there.
+
+    Returns ``None`` when the call cannot be reconciled (too many positional args, an unknown or
+    doubly-bound keyword, or a missing param without a default) -- the inliner then leaves the Call
+    untouched.
     """
     param_names = [a.arg for a in helper.args.args]
-    defaults = list(helper.args.defaults)
+    defaults = dict(zip(param_names[len(param_names) - len(helper.args.defaults):], helper.args.defaults))
     call_args = list(call.args)
-    if len(call_args) > len(param_names):
-        return None
-    missing = len(param_names) - len(call_args)
-    if missing == 0:
-        return call_args
-    # Defaults align to the trailing parameters; require enough to
-    # cover every missing param.
-    if missing > len(defaults):
-        return None
-    return call_args + defaults[-missing:]
+    if len(call_args) > len(param_names) or any(kw.arg is None for kw in call.keywords):
+        return None  # too many positionals, or a **kwargs splat we cannot resolve
+    bound = dict(zip(param_names, call_args))
+    for kw in call.keywords:
+        if kw.arg not in param_names or kw.arg in bound:
+            return None
+        bound[kw.arg] = kw.value
+    resolved = [bound.get(name, defaults.get(name)) for name in param_names]
+    return None if any(a is None for a in resolved) else resolved
 
 
 def _synthesize_return_temps(fn: ast.FunctionDef):
@@ -2221,6 +2349,12 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         # slice / ``.real`` / ``.ndim``-guard forms). Runs before ``_mark_written_
         # outputs`` so a ufunc-out / roll rewrite is seen as a write to its target.
         native_desugar(hfn)
+        # A helper that survives inlining is emitted as its OWN kernel and lowered through the same
+        # expanders, so it needs the same structural guards the kernel body gets. Without them a
+        # symbolic axis inside a helper reached lowering and was read as "no axis" -- the
+        # instance-norm helpers reduced over EVERY axis instead of the spatial ones.
+        _reject_symbolic_axis(hfn)
+        _reject_unsupported_slices(hfn)
 
         if hret_shape is None:
             # SCALAR (by-value) return -- params inferred straight from the call.
@@ -2346,6 +2480,284 @@ def _collect_inlinable_helpers(tree: ast.Module, kernel_fn: ast.FunctionDef) -> 
         if isinstance(node, ast.FunctionDef) and node is not kernel_fn and _classify(node):
             out[node.name] = node
     return out
+
+
+#: Calls whose ``axis`` selects WHICH loop the lowering writes -- a structural choice, so an axis
+#: that is not a compile-time integer has no emittable form.
+#:
+#: Every op here had a way to swallow an unreadable axis rather than refuse it: a reduction read it
+#: as "no axis" and reduced over ALL of them (``_read_axis_keepdims`` returns ``None`` for both),
+#: and an index op whose axis never resolved fell through to the emitter's scalar no-op path, which
+#: dropped it outright -- ``np.flip(x, axis=dim)`` emitted a plain copy.
+AXIS_STRUCTURAL_FNS = frozenset(REDUCE_FNS) | {
+    "cumsum", "cumprod", "median", "count_nonzero", "squeeze", "expand_dims", "flip", "roll", "take", "repeat", "diff",
+    "sort", "argsort", "swapaxes", "moveaxis", "concatenate", "stack", "split", "unique", "fft", "ifft", "fftn",
+    "ifftn", "rfft", "irfft"
+}
+
+#: Which POSITIONAL slot each call puts ``axis`` in. Most reductions take it second; the ops that
+#: take a count or an index first put it third. Reading the wrong slot let ``np.repeat(A, 2, ax)``
+#: past the guard entirely (slot 1 held the literal repeat count) and made ``np.take(A, idx, ax)``
+#: refuse with the INDEX ARRAY named as the offending axis.
+#: ``np.fft.*`` takes a transform LENGTH first, so its axis is third too.
+AXIS_POSITION: Dict[str, int] = {
+    "repeat": 2,
+    "roll": 2,
+    "take": 2,
+    "diff": 2,
+    "split": 2,
+    "swapaxes": 1,
+    "unique": 4,
+    "fft": 2,
+    "ifft": 2,
+    "rfft": 2,
+    "irfft": 2,
+    "fftn": 2,
+    "ifftn": 2
+}
+
+
+class _FoldStructuralUses(ast.NodeTransformer):
+    """Fold a RUNTIME argument's constant value, but only where it picks the loop nest.
+
+    ``max_iter`` and ``dim`` are declared the same way -- an ``init.scalars`` default that is also an
+    ABI argument -- so no rule about the DECLARATION can separate them. The USE does: gmres computes
+    ``m = min(max_iter, N)``, a plain expression a runtime value evaluates fine, and folding it pins
+    the iteration count to the manifest. ``np.argmax(x, axis=dim)`` chooses the loop nest, which has
+    no runtime form at all, so there the literal is the only thing that can be emitted.
+
+    So this folds ONLY the axis slot of a structural call. Everywhere else the name survives and
+    reaches the ABI, and an axis that is genuinely runtime still meets the refusal downstream.
+    """
+
+    def __init__(self, const_syms: Dict[str, int]) -> None:
+        self.const_syms = const_syms
+
+    def _fold(self, node: Optional[ast.expr]) -> Optional[ast.expr]:
+        if isinstance(node, ast.Name) and node.id in self.const_syms:
+            return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        name = _np_attr_name(node)
+        if name not in AXIS_STRUCTURAL_FNS:
+            return node
+        for kw in node.keywords:
+            if kw.arg in ("axis", "axes"):
+                kw.value = self._fold(kw.value)
+        slot = AXIS_POSITION.get(name, 1)
+        if len(node.args) > slot:
+            node.args[slot] = self._fold(node.args[slot])
+        return node
+
+
+def _preset_constant_symbols(parameters: Dict, scalars: Dict) -> Dict[str, int]:
+    """Symbols with the SAME integer value in every preset. Only those may be folded into a
+    structural position: one artifact serves all presets, so a symbol that varies across them would
+    bake preset S's choice into the code the others run."""
+    per_name: Dict[str, List[int]] = {}
+    for values in (*[v for v in parameters.values() if isinstance(v, dict)], scalars or {}):
+        for name, value in values.items():
+            # A plain int only. A manifest scalar may hold a list (a per-axis stride/padding), which
+            # is neither an axis nor hashable.
+            if isinstance(value, int) and not isinstance(value, bool):
+                per_name.setdefault(name, []).append(value)
+            else:
+                per_name.setdefault(name, []).append(None)
+    return {name: values[0] for name, values in per_name.items() if len(set(values)) == 1 and values[0] is not None}
+
+
+def _structural_constants(parameters: Dict,
+                          scalars: Dict,
+                          shapes_raw: Dict,
+                          runtime_args=(),
+                          keep_only=None) -> Dict[str, int]:
+    """Preset-constant integers that CANNOT be a size, so folding them into the body is safe.
+
+    "Cannot be a size" is decided structurally: the name is absent from every ``init.shapes``
+    expression. That matters because one emitted artifact serves every preset AND the harness may
+    scale the declared sizes at run time -- a symbol that reaches an extent must stay a runtime
+    argument. A symbol that reaches only an axis, a repeat count, or a slice bound has one value for
+    the life of the artifact, and the loop nest cannot be built until it is a literal.
+
+    A name in ``runtime_args`` is excluded whatever its manifest default says: it reaches the ABI, so
+    the harness passes a value that need not be the default, and baking the default in is a
+    miscompile. gmres declares ``max_iter`` in ``init.scalars`` AND takes it as an argument -- folding
+    it turned the derived symbol ``m = min(max_iter, N)`` into ``min(100, N)``, pinning the iteration
+    count to the manifest's value for every run. When such a name IS used as an axis, the honest
+    outcome is the refusal downstream, not a fold: a runtime axis has no static loop nest.
+    """
+    extent_names: Set[str] = set()
+    for shape in (shapes_raw or {}).values():
+        try:
+            parsed = ast.parse(str(shape).strip(), mode="eval")
+        except SyntaxError:
+            continue
+        extent_names.update(n.id for n in ast.walk(parsed) if isinstance(n, ast.Name))
+    runtime = frozenset(runtime_args)
+    wanted = None if keep_only is None else frozenset(keep_only)
+    return {
+        name: value
+        for name, value in _preset_constant_symbols(parameters, scalars).items()
+        if name not in extent_names and name not in runtime and (wanted is None or name in wanted)
+    }
+
+
+class _FoldConstantSymbols(ast.NodeTransformer):
+    """Replace a load of a structural constant with its literal value.
+
+    A name the body REBINDS is left alone. The conv ports normalise a scalar knob to a pair
+    (``if isinstance(stride, int): stride = (stride, stride)``) and then read ``stride[0]``;
+    folding the loads turned that read into ``1[0]``, since the rebinding is what makes it a tuple.
+    """
+
+    def __init__(self, const_syms: Dict[str, int]) -> None:
+        self.const_syms = const_syms
+
+    def apply(self, fn: ast.FunctionDef) -> None:
+        rebound = {
+            leaf.id
+            for node in ast.walk(fn) if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For))
+            for tgt in (node.targets if isinstance(node, ast.Assign) else [node.target]) for leaf in ast.walk(tgt)
+            if isinstance(leaf, ast.Name)
+        }
+        self.const_syms = {k: v for k, v in self.const_syms.items() if k not in rebound}
+        self.visit(fn)
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if not isinstance(node.ctx, ast.Load) or node.id not in self.const_syms:
+            return node
+        return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
+
+
+def _reject_symbolic_axis(fn: ast.FunctionDef) -> None:
+    """Refuse a reduction / scan whose axis is present but not a literal.
+
+    Not pedantry: ``_read_axis_keepdims`` reports an unreadable axis as ``None``, which is the SAME
+    value it reports for ``np.sum(x)`` -- so ``np.sum(x, axis=dim)`` used to lower as a FULL
+    reduction over every axis and compile cleanly. A wrong answer is worse than no answer.
+    """
+    for node in ast.walk(fn):
+        name = _np_attr_name(node) if isinstance(node, ast.Call) else None
+        if name not in AXIS_STRUCTURAL_FNS:
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        slot = AXIS_POSITION.get(name, 1)
+        axis = kw.get("axis") or kw.get("axes") or (node.args[slot] if len(node.args) > slot else None)
+        if axis is not None and not _is_literal_axis(axis):
+            raise NotImplementedError(f"{ast.unparse(node)}: axis must be a compile-time integer "
+                                      f"(got {ast.unparse(axis)!r}); the emitted loop nest is chosen by it")
+        # keepdims decides the result RANK, and a non-literal one was read as False -- which then
+        # broadcast the reduction against the wrong axis.
+        keep = kw.get("keepdims")
+        if keep is not None and not (isinstance(keep, ast.Constant) and isinstance(keep.value, (bool, int))):
+            raise NotImplementedError(f"{ast.unparse(node)}: keepdims must be a compile-time constant "
+                                      f"(got {ast.unparse(keep)!r}); it decides the result rank")
+
+
+def _reject_unsupported_slices(fn: ast.FunctionDef) -> None:
+    """Refuse the two slice forms the index lowering silently ignores.
+
+    * a NON-LITERAL step: ``_slice_step_const`` returns ``None`` for it and for "no step at all",
+      and every consumer reads that as step 1 -- ``x[::s]`` emitted a contiguous copy, stride gone.
+    * a NEGATIVE lower bound: it is added to the iterator verbatim rather than resolved against the
+      axis length, so ``x[-3:]`` emitted ``x[i - 3]`` and read before the buffer. (A negative UPPER
+      bound is fine: it only shortens the trip count, which comes from the target's extent.)
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Slice):
+            continue
+        if node.step is not None and not _is_literal_axis(node.step):
+            raise NotImplementedError(f"slice step {ast.unparse(node.step)!r} must be a compile-time integer; "
+                                      f"a symbolic step is read as 1 and the stride is lost")
+        if isinstance(node.lower, ast.UnaryOp) and isinstance(node.lower.op, ast.USub):
+            raise NotImplementedError(f"negative slice start {ast.unparse(node.lower)!r} is not resolved against "
+                                      f"the axis length; write it as an explicit extent instead")
+
+
+def _is_literal_axis(node: ast.expr) -> bool:
+    """A literal axis: an int, a negated int, ``None``, or a tuple/list of those."""
+    if isinstance(node, ast.Constant):
+        return node.value is None or (isinstance(node.value, int) and not isinstance(node.value, bool))
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return _is_literal_axis(node.operand)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_is_literal_axis(e) for e in node.elts)
+    return False
+
+
+def _np_attr_name(node: ast.Call) -> Optional[str]:
+    """``np.sum(...)`` / ``x.sum(...)`` -> ``"sum"``, else ``None``."""
+    return node.func.attr if isinstance(node.func, ast.Attribute) else None
+
+
+def _static_flag_params(tree: ast.Module) -> Dict[str, FrozenSet[str]]:
+    """Per helper, the parameters bound to a compile-time literal at EVERY call site.
+
+    Such a parameter is a configuration flag, not data: after inlining substitutes the literal, a
+    branch on it is statically decidable and folds away. A parameter that any call site binds to an
+    expression is excluded -- there its value is only known at run time.
+    """
+    defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    literal: Dict[str, Dict[str, bool]] = {name: {} for name in defs}
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        if not (isinstance(call.func, ast.Name) and call.func.id in defs):
+            continue
+        hdef = defs[call.func.id]
+        pnames = [a.arg for a in hdef.args.args]
+        # An unsupplied trailing parameter takes its default, which is itself a compile-time value
+        # when the default is a literal -- ``_logsumexp(x, axis=1)`` leaves keepdims=False.
+        bound: Dict[str, Optional[ast.expr]] = {}
+        offset = len(pnames) - len(hdef.args.defaults)
+        for i, default in enumerate(hdef.args.defaults):
+            bound[pnames[offset + i]] = default
+        for i, arg in enumerate(call.args):
+            if i < len(pnames):
+                bound[pnames[i]] = arg
+        for kw in call.keywords:
+            if kw.arg is not None:
+                bound[kw.arg] = kw.value
+        for pname in pnames:
+            value = bound.get(pname)
+            is_literal = isinstance(value, ast.Constant)
+            literal[call.func.id][pname] = literal[call.func.id].get(pname, True) and is_literal
+    return {name: frozenset(p for p, ok in flags.items() if ok) for name, flags in literal.items()}
+
+
+def _fuse_guarded_returns(tree: ast.Module) -> None:
+    """``if FLAG: return A`` immediately before a trailing ``return B`` -> ``return A if FLAG else B``.
+
+    What it buys is inlinability: an early return anywhere but the last statement disqualifies a
+    helper, so the KernelBench ``_logsumexp(x, axis, keepdims)`` was emitted as its OWN kernel --
+    whose ``axis`` and ``keepdims`` are not declared parameters. Once fused it inlines, and the call
+    site's literal ``keepdims=False`` folds the branch away entirely.
+
+    That fold is a PRECONDITION, not a bonus, so the guard must be a parameter every call site binds
+    to a literal (:func:`_static_flag_params`). A runtime guard would leave the IfExp standing, and
+    an IfExp over ARRAY branches has no target form: C's ``?:`` rejects the operand types outright,
+    and Fortran's ``merge`` is rank-strict (and evaluates BOTH branches, so a guarded division or
+    subscript would run on the values the guard exists to exclude).
+    """
+    flags_by_helper = _static_flag_params(tree)
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        flags = flags_by_helper.get(fn.name, frozenset())
+        body = fn.body
+        while (len(body) >= 2 and isinstance(body[-1], ast.Return) and body[-1].value is not None
+               and isinstance(body[-2], ast.If) and not body[-2].orelse and len(body[-2].body) == 1
+               and isinstance(body[-2].body[0], ast.Return) and body[-2].body[0].value is not None
+               and _is_static_flag_test(body[-2].test, flags)):
+            guard = body[-2]
+            fused = ast.Return(value=ast.IfExp(test=guard.test, body=guard.body[0].value, orelse=body[-1].value))
+            body[-2:] = [ast.copy_location(fused, guard)]
+        ast.fix_missing_locations(fn)
+
+
+def _is_static_flag_test(test: ast.expr, flags: FrozenSet[str]) -> bool:
+    """``flag`` / ``not flag`` on a parameter that is a literal at every call site."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _is_static_flag_test(test.operand, flags)
+    return isinstance(test, ast.Name) and test.id in flags
 
 
 def _flatten_nested_helpers(tree: ast.Module) -> None:
@@ -2635,6 +3047,7 @@ class _InlineHelpers(ast.NodeTransformer):
                 if call_args is None:
                     return node
                 node.value.args = call_args
+                node.value.keywords = []
                 self._counter[0] += 1
                 prefix = f"__inl{self._counter[0]}_"
                 # Map params to call args; locals (assigned in body) get
@@ -2708,6 +3121,7 @@ class _InlineHelpers(ast.NodeTransformer):
         if call_args is None:
             return node
         node.value.args = call_args
+        node.value.keywords = []
         self._counter[0] += 1
         prefix = f"__inl{self._counter[0]}_"
         local_names = _collect_assigned_names(body)
@@ -2750,6 +3164,7 @@ class _InlineHelpers(ast.NodeTransformer):
         if call_args is None:
             return node
         node.args = call_args
+        node.keywords = []
         subst = dict(zip(param_names, node.args))
         body_stmts = _strip_docstrings(helper.body)
         if (len(body_stmts) == 1 and isinstance(body_stmts[0], ast.Return)):

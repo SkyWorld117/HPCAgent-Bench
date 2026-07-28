@@ -11,7 +11,10 @@ ABI question in exchange for nothing the kernel actually computes with.
 What folds, in one forward pass that interprets the tuple-valued names:
 
 * ``t = (a, b)``, ``t = u + v``, ``t = tuple(<expr> for i in range(K))`` -- bound, not emitted;
-* ``t[K]`` -> the K-th element expression, ``len(t)`` -> a constant;
+* ``t[K]`` -> the K-th element expression, ``t[i:j]`` -> a shorter tuple, ``len(t)`` -> a constant;
+* ``x.shape`` (rank known) -> ``(x.shape[0], ..., x.shape[r-1])``, so ``x.shape[2:]`` has a
+  compile-time LENGTH while its extents stay symbolic -- that is what makes the group-norm idiom
+  ``x.reshape((n, g, c // g) + x.shape[2:])`` a plain rank-3 reshape;
 * ``isinstance(x, T)`` -> a constant, from the kind the pass already knows for ``x``;
 * ``x is None`` -> a constant once ``x`` is known bound;
 * a static ``if`` / ``IfExp`` -> its live branch, which is what exposes the tuple binding beneath;
@@ -24,6 +27,8 @@ Entry point: :func:`desugar_tuples`.
 import ast
 import copy
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+
+from numpyto_common.numpy_desugar import expr_rank
 
 #: Module aliases a kernel may spell numpy as.
 NUMPY_MODULES = frozenset({"np", "numpy"})
@@ -122,6 +127,15 @@ class Env:
             self.tuples.pop(name, None)
             self.kinds.pop(name, None)
             self.bound.discard(name)
+
+
+def is_index_element(node: ast.AST) -> bool:
+    """An element that can only be part of a SUBSCRIPT index: a slice, ``None``, or an ellipsis."""
+    if isinstance(node, ast.Slice):
+        return True
+    if isinstance(node, ast.Constant):
+        return node.value is None or node.value is Ellipsis
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "slice"
 
 
 def assigned_names(node: ast.AST) -> Set[str]:
@@ -232,6 +246,10 @@ class TupleDesugar:
         """The element expressions of a compile-time tuple, or ``None``."""
         if isinstance(node, ast.Tuple):
             return list(node.elts)
+        if isinstance(node, ast.List) and node.elts and all(is_index_element(e) for e in node.elts):
+            # An INDEX list only (``[slice(None)] * x.ndim``, built to be mutated then tupled). A
+            # data list is left alone: it may be feeding ``np.array([...])``, which wants the List.
+            return list(node.elts)
         if isinstance(node, ast.Name) and node.id in env.tuples:
             return list(env.tuples[node.id])
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -244,8 +262,27 @@ class TupleDesugar:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "tuple" and len(
                 node.args) == 1 and not node.keywords:
             inner = self.tuple_of(node.args[0], env)
-            return inner if inner is not None else self.unroll(node.args[0], env)
-        return None
+            if inner is not None:
+                return inner
+            unrolled = self.unroll(node.args[0], env)
+            if unrolled is not None:
+                return unrolled
+            # ``tuple(range(2, x.ndim))`` -- the ports spell "every axis from here on" this way.
+            bounds = self.range_bounds(node.args[0], env)
+            return None if bounds is None else [ast.Constant(value=i) for i in range(*bounds)]
+        return self.shape_tuple(node)
+
+    def shape_tuple(self, node: ast.AST) -> Optional[List[ast.expr]]:
+        """``x.shape`` -> per-axis ``x.shape[i]``, once the rank is known. Length compile-time,
+        extents still symbolic -- exactly what a reshape needs and a tuple concat can consume."""
+        if not (isinstance(node, ast.Attribute) and node.attr == "shape"):
+            return None
+        rank = self.rank(node.value)
+        if rank is None:
+            return None
+        return [
+            ast.Subscript(value=copy.deepcopy(node), slice=ast.Constant(value=i), ctx=ast.Load()) for i in range(rank)
+        ]
 
     def repeat(self, seq: ast.AST, count: ast.AST, env: Env) -> Optional[List[ast.expr]]:
         """``(1,) * K`` -> K copies. The ports pad a broadcast shape out to an array's rank this way."""
@@ -254,8 +291,9 @@ class TupleDesugar:
         return None if elts is None or times is None or times < 0 else [copy.deepcopy(e) for e in elts] * times
 
     def rank(self, node: ast.AST) -> Optional[int]:
-        """The declared rank of an array expression (``x`` / ``x.ndim``'s subject)."""
-        return self.ranks.get(node.id) if isinstance(node, ast.Name) else None
+        """The rank of an array expression. Shared with the rest of the pipeline so that
+        ``np.expand_dims(x, axis=1).shape`` resolves by the same rules the emitter uses."""
+        return expr_rank(node, self.ranks)
 
     def unroll(self, node: ast.AST, env: Env) -> Optional[List[ast.expr]]:
         """``<expr> for i in range(K)`` -> the K substituted element expressions. The trip count must
@@ -304,6 +342,10 @@ class TupleDesugar:
             return self.loop(stmt, env)
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
             return self.assign(stmt, env, linear)
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Subscript):
+            element = self.assign_element(stmt, env, linear)
+            if element is not None:
+                return element
         for field, value in ast.iter_fields(stmt):
             if isinstance(value, ast.expr):
                 setattr(stmt, field, self.fold(value, env))
@@ -321,6 +363,7 @@ class TupleDesugar:
         if elts is not None and linear:
             env.tuples[name] = elts
             env.bound.add(name)
+            self.ranks.pop(name, None)  # now a tuple, so any array rank it carried is stale
             return []
         env.invalidate([name])
         if not isinstance(stmt.value, ast.Constant) or stmt.value.value is not None:
@@ -328,7 +371,38 @@ class TupleDesugar:
         value_kind = self.kind(stmt.value, env)
         if value_kind is not None and linear:
             env.kinds[name] = value_kind
+        self.track_rank(name, stmt.value, linear)
         return [stmt]
+
+    def assign_element(self, stmt: ast.Assign, env: Env, linear: bool) -> Optional[List[ast.stmt]]:
+        """``slices[k] = <index>`` on a bound index list -> rebind the list, emit nothing.
+
+        The ports build a full-slice list, overwrite ONE axis, then tuple it
+        (``slices = [slice(None)] * x.ndim; slices[dim] = slice(a, b); x[tuple(slices)]``). Returns
+        ``None`` when this is an ordinary array store, which must be left exactly as it is.
+        """
+        target = stmt.targets[0]
+        if not (isinstance(target.value, ast.Name) and target.value.id in env.tuples and linear):
+            return None
+        index = const_int(self.fold(copy.deepcopy(target.slice), env))
+        elements = env.tuples[target.value.id]
+        if index is None or not -len(elements) <= index < len(elements):
+            return None
+        elements[index] = self.fold(stmt.value, env)
+        return []
+
+    def track_rank(self, name: str, value: ast.expr, linear: bool) -> None:
+        """Record the target's rank from the ALREADY-FOLDED RHS. Folding is what makes it knowable:
+        ``y = x.reshape((n, g, c // g) + x.shape[2:])`` has no compile-time rank until the concat
+        collapses, and without ``y``'s rank the next line's ``y.ndim`` never folds either."""
+        if not linear:
+            self.ranks.pop(name, None)
+            return
+        rank = expr_rank(value, self.ranks)
+        if rank is None:
+            self.ranks.pop(name, None)
+        else:
+            self.ranks[name] = rank
 
     def branch(self, stmt: ast.If, env: Env, linear: bool) -> List[ast.stmt]:
         stmt.test = self.fold(stmt.test, env)
@@ -389,10 +463,27 @@ class _Folder(ast.NodeTransformer):
         elts = self.interp.tuple_of(node.value, self.env)
         if elts is None:
             return node
+        if isinstance(node.slice, ast.Slice):
+            sliced = self._slice_elements(elts, node.slice)
+            return node if sliced is None else self._materialize(sliced, node)
         index = const_int(node.slice)
         if index is None or not -len(elts) <= index < len(elts):
             return node
         return ast.copy_location(copy.deepcopy(elts[index]), node)
+
+    def _slice_elements(self, elts: List[ast.expr], sl: ast.Slice) -> Optional[List[ast.expr]]:
+        """``t[i:j:k]`` with literal bounds -> the selected elements. ``x.shape[2:]`` is the reason
+        this exists; an unbounded or symbolic bound leaves the subscript alone."""
+        bounds = []
+        for part in (sl.lower, sl.upper, sl.step):
+            if part is None:
+                bounds.append(None)
+                continue
+            value = const_int(part)
+            if value is None:
+                return None
+            bounds.append(value)
+        return [copy.deepcopy(e) for e in elts[slice(*bounds)]]
 
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         self.generic_visit(node)

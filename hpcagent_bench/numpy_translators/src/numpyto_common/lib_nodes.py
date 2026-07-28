@@ -16,7 +16,7 @@ Registry keys are the POST-``_MathRewriter`` call shape: ``np.sum`` is still
 
 import ast
 import copy
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 
@@ -1175,6 +1175,26 @@ def _scalarize_at_iters(expr: ast.expr, iters: List[ast.expr], shape_table: Dict
     return expr
 
 
+def _eval_axes(node) -> Optional[List[int]]:
+    """``[k]`` / ``[k1, k2, ...]`` for a literal axis spec, ``None`` when it is not one.
+
+    ``None`` here means UNREADABLE, which is not the same as "no axis given" -- callers have to
+    keep the two apart themselves, because only they know whether the slot they read is an axis.
+    """
+    value = _const_int(node)
+    if value is not None:
+        return [value]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        out = []
+        for elt in node.elts:
+            element = _const_int(elt)
+            if element is None:
+                return None
+            out.append(element)
+        return out
+    return None
+
+
 def _read_axis_keepdims(args, kwargs):
     """Return ``(axes, keepdims)`` from a call, keyword or positional. ``axes``:
     ``None`` for full reduction (``np.X(arr)``); ``[k]`` for single-axis
@@ -1182,41 +1202,34 @@ def _read_axis_keepdims(args, kwargs):
     multi-axis (``axis=(1, 2, 3)``/``axis=[1, 2, 3]``, order preserved for the
     reduction loop nest, though kept-axes ordering follows the source array).
     """
-
-    def _eval_int(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, int):
-            return node.value
-        if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant)
-                and isinstance(node.operand.value, int)):
-            return -node.operand.value
-        return None
-
-    def _eval_axes(node):
-        v = _eval_int(node)
-        if v is not None:
-            return [v]
-        if isinstance(node, (ast.Tuple, ast.List)):
-            out = []
-            for elt in node.elts:
-                ev = _eval_int(elt)
-                if ev is None:
-                    return None
-                out.append(ev)
-            return out
-        return None
-
+    # ``axes = None`` means "reduce over EVERY axis" downstream, so it may only ever come from an
+    # ABSENT argument. An ``axis=`` KEYWORD that is present but unreadable is refused instead:
+    # reading it as None turned ``np.sum(x, axis=dim)`` into a full reduction that compiled clean.
+    #
+    # The POSITIONAL slot stays best-effort here on purpose. This reader is shared with calls whose
+    # second positional argument is not an axis at all -- ``np.logaddexp(a, b)``, ``np.heaviside(a,
+    # b)``, ``np.isclose(a, b, 1e-12)`` -- so refusing on it rejects the second OPERAND. A caller
+    # that knows its slot 1 really is an axis checks it itself; see ``_expand_axis_reduction``.
     axes = None
-    keepdims = False
     if len(args) >= 2:
         axes = _eval_axes(args[1])
     for kw in kwargs or []:
         if kw.arg == "axis":
-            v = _eval_axes(kw.value)
-            if v is not None:
-                axes = v
-        elif kw.arg == "keepdims":
-            if isinstance(kw.value, ast.Constant):
-                keepdims = bool(kw.value.value)
+            if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+                axes = None
+                continue
+            axes = _eval_axes(kw.value)
+            if axes is None:
+                raise NotImplementedError(f"axis {ast.unparse(kw.value)!r} must be a compile-time integer or "
+                                          f"tuple of them (it selects the loop nest)")
+    keepdims = False
+    for kw in kwargs or []:
+        if kw.arg == "keepdims":
+            # Same rule: a non-literal keepdims changes the RESULT RANK, so it cannot default to False.
+            if not isinstance(kw.value, ast.Constant):
+                raise NotImplementedError(f"keepdims {ast.unparse(kw.value)!r} must be a compile-time "
+                                          f"constant (it selects the result rank)")
+            keepdims = bool(kw.value.value)
     return axes, keepdims
 
 
@@ -1236,6 +1249,12 @@ def _expand_axis_reduction(target, args, kwargs, shape_table, init, op_fn, post_
     """
     arr = args[0]
     shape = _resolve_shape(arr, shape_table)
+    # Here slot 1 REALLY is the axis (``np.sum(a, 1)``), unlike the shared reader's general case, so
+    # an unreadable one is refused rather than silently becoming a reduction over every axis.
+    if len(args) >= 2 and not (isinstance(args[1], ast.Constant) and args[1].value is None):
+        if _eval_axes(args[1]) is None:
+            raise NotImplementedError(f"axis {ast.unparse(args[1])!r} must be a compile-time integer or tuple "
+                                      f"of them (it selects the loop nest)")
     axes, keepdims = _read_axis_keepdims(args, kwargs)
     n_dim = len(shape)
 
@@ -1246,6 +1265,14 @@ def _expand_axis_reduction(target, args, kwargs, shape_table, init, op_fn, post_
     initial = _read_kwarg(kwargs, "initial")
     if initial is not None:
         init = initial
+
+    # ``where=`` masks which elements take part and ``dtype=`` pins the ACCUMULATOR type (the
+    # classic case being a float64 accumulator over a float32 operand, which changes the result,
+    # not just its storage). Neither is honoured by the loop below, so neither may be ignored.
+    for dropped in ("where", "dtype", "out"):
+        if _read_kwarg(kwargs, dropped) is not None:
+            raise NotImplementedError(f"reduction {dropped}= is not lowered; it changes the result, "
+                                      f"so it cannot be dropped")
 
     if axes is None:
         # Full reduction -- scalar target.
@@ -2868,15 +2895,15 @@ def _concat_operands_axis(args, kwargs, shape_table):
     seq = args[0]
     if not isinstance(seq, (ast.Tuple, ast.List)):
         raise NotImplementedError("np.concatenate: sequence must be a tuple/list")
-    axis = 0
     # ``axis`` may be a plain or negated literal (``axis=-1`` parses as
     # ``UnaryOp(USub, Constant(1))``, not ``Constant(-1)``); ``_const_int``
     # accepts both, and the ``axis < 0`` fixup below resolves it mod rank.
-    if len(args) >= 2 and _const_int(args[1]) is not None:
-        axis = _const_int(args[1])
-    for kw in kwargs:
-        if kw.arg == "axis" and _const_int(kw.value) is not None:
-            axis = _const_int(kw.value)
+    # ``axis=None`` is not "no axis": numpy FLATTENS every operand and concatenates the results,
+    # which is a different output rank. Refuse rather than fall through to the axis-0 default.
+    axis_node = _kwarg_or_pos(args, kwargs, 1, "axis")
+    if isinstance(axis_node, ast.Constant) and axis_node.value is None:
+        raise NotImplementedError("np.concatenate(axis=None) flattens every operand first; not lowered")
+    axis = _axis_literal_or_refuse(axis_node, "np.concatenate", 0)
     names: List[Optional[str]] = []
     shapes: List[Tuple[str, ...]] = []
     for op in seq.elts:
@@ -2962,6 +2989,25 @@ def _const_int(node: Optional[ast.expr]) -> Optional[int]:
     return None
 
 
+def _axis_literal_or_refuse(node: Optional[ast.expr], what: str, default: Optional[int] = None) -> int:
+    """The literal axis in ``node``; ``default`` when the argument is ABSENT; a refusal otherwise.
+
+    The distinction is the whole point. Reading an axis as ``default`` when it is merely
+    UNREADABLE is how ``np.concatenate((a, b), axis=dim)`` came to concatenate along axis 0 and
+    compile clean. An axis chooses the loop nest, so a static emitter has exactly two honest
+    answers: the literal, or a refusal.
+    """
+    if node is None:
+        if default is None:
+            raise NotImplementedError(f"{what}: axis is required")
+        return default
+    axis = _const_int(node)
+    if axis is None:
+        raise NotImplementedError(f"{what}: axis {ast.unparse(node)!r} must be a compile-time integer "
+                                  f"(it selects the loop nest, so there is no runtime form for it)")
+    return axis
+
+
 def _mul_exts(exprs) -> ast.expr:
     """Left-folded product of the given extent expressions (``1`` when empty) -- used to
     size a ``reshape(-1)`` dimension from the source extent and the other target dims."""
@@ -2978,12 +3024,7 @@ def _stack_axis(args, kwargs, rank: int) -> int:
     """The (possibly negative) NEW-axis position for ``np.stack``, normalized to
     ``[0, rank]`` (an insert position, so ``rank`` -- append -- is valid, unlike
     concatenate's ``[0, rank)``)."""
-    axis = 0
-    if len(args) >= 2 and _const_int(args[1]) is not None:
-        axis = _const_int(args[1])
-    for kw in (kwargs or []):
-        if kw.arg == "axis" and _const_int(kw.value) is not None:
-            axis = _const_int(kw.value)
+    axis = _axis_literal_or_refuse(_kwarg_or_pos(args, kwargs, 1, "axis"), "np.stack", 0)
     if axis < 0:
         axis += rank + 1
     if not (0 <= axis <= rank):
@@ -4074,6 +4115,11 @@ def expand_median(target, args, shape_table, kwargs=None, local_dtypes=None, fre
     copy so the input is not mutated."""
     if not args or not isinstance(args[0], ast.Name):
         raise NotImplementedError("np.median needs a bare-Name array")
+    # ONLY the full flattened median. An axis was silently ignored: the expander flattened every
+    # element and returned one scalar, so ``np.median(A, axis=1)`` computed a whole-array median
+    # and reported no error at all.
+    if _read_axis_keepdims(args, kwargs or [])[0] is not None:
+        raise NotImplementedError("np.median(axis=...) is not implemented; only the flattened median is")
     a = args[0]
     shape = shape_table.get(a.id)
     if shape is None:
@@ -4288,7 +4334,11 @@ def expand_reshape(target: ast.expr,
     flat_parts: List[str] = []
     for i, it in enumerate(tgt_iters):
         stride = _stride(tgt_shape, i)
-        flat_parts.append(it if stride == "1" else f"({it}) * {stride}")
+        # Parenthesise the STRIDE too: it is re-parsed from text, and a single compound factor came
+        # back unbracketed, so ``(i) * (w - k) / 1 + 1`` re-associated as ``(i*(w-k))/1 + 1``. Only
+        # the second-to-last axis of a reshape is ever a lone compound factor, which is why square
+        # 2-D cases were right and every conv shape gathered 75% of its elements from the wrong slot.
+        flat_parts.append(it if stride == "1" else f"({it}) * ({stride})")
     flat_expr = " + ".join(flat_parts) if flat_parts else "0"
 
     # Decode the source multi-index from the flat index via div/mod on the source
@@ -4359,15 +4409,13 @@ def expand_repeat(target: ast.expr,
     if len(args) < 2:
         raise NotImplementedError("np.repeat needs repetitions arg")
     k_arg = args[1]
-    # ``axis`` -- positional [2] or kwarg.
+    # ``axis`` -- positional [2] or kwarg. An ABSENT axis means numpy's flat repeat; an axis that is
+    # merely unreadable must NOT fall into that branch, because flat repeat is a different output
+    # shape and a different loop nest, not a degraded version of the same one.
+    axis_node = _kwarg_or_pos(args, kwargs, 2, "axis")
     axis: Optional[int] = None
-    if len(args) >= 3:
-        if (isinstance(args[2], ast.Constant) and isinstance(args[2].value, int)):
-            axis = args[2].value
-    for kw in (kwargs or []):
-        if kw.arg == "axis":
-            if (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int)):
-                axis = kw.value.value
+    if not (axis_node is None or (isinstance(axis_node, ast.Constant) and axis_node.value is None)):
+        axis = _axis_literal_or_refuse(axis_node, "np.repeat")
     n_dim = len(a_shape)
     if axis is None:
         # Flat repeat: each scalar element repeated K times.
@@ -5867,7 +5915,7 @@ def _unary_expr_expander(make: Callable[[ast.expr], ast.expr]) -> Callable:
 #: handled by ``MATH_BUILTINS``; this registers the ARRAY form so ``out =
 #: np.tan(arr)`` lowers to a loop. ``round``/``around`` map to ``rint``
 #: (round-half-to-even, matching numpy; C ``round`` is half-away-from-zero).
-_UNARY_C_MATH: Dict[str, str] = {
+UNARY_C_MATH: Dict[str, str] = {
     "tan": "tan",
     "sinh": "sinh",
     "cosh": "cosh",
@@ -5895,7 +5943,7 @@ _UNARY_C_MATH: Dict[str, str] = {
     "tgamma": "tgamma",
     "lgamma": "lgamma",
 }
-for _np_name, _c_name in _UNARY_C_MATH.items():
+for _np_name, _c_name in UNARY_C_MATH.items():
     NP_CALL_EXPANDERS[("np", _np_name)] = _unary_call_expander(_c_name)
 
 # Inline-expression ufuncs valid in both C and Fortran: square -> x*x,
@@ -6024,6 +6072,10 @@ def _matmul_result_shape(a_shape: Tuple[str, ...], b_shape: Tuple[str, ...]) -> 
     >= 3); and both-batched ``(*batch, m, k) @ (*batch, k, n) -> (*batch, m,
     n)`` when both ranks are >= 3 and share the same leading batch dims.
     """
+    # Normalise first: a PARAMETER's shape arrives as a list and a hoisted temp's as a tuple, so the
+    # ``a_shape[:-2] == b_shape[:-2]`` batch test below was comparing a list against a tuple and
+    # always answering False -- every batched matmul mixing the two was silently declined.
+    a_shape, b_shape = tuple(a_shape), tuple(b_shape)
     if len(a_shape) == 2 and len(b_shape) == 2:
         return (a_shape[0], b_shape[1])
     if len(a_shape) == 2 and len(b_shape) == 1:
@@ -6786,12 +6838,13 @@ class _CallHoister(ast.NodeTransformer):
         # otherwise the whole-array roll stays buried in the broadcast BinOp
         # and the per-element scalarizer mangles it into a scalar-arg roll.
         key = self._key_of(node)
-        if (key in ({("np", k)
-                     for k in {
-                         "sum", "max", "min", "mean", "prod", "std", "var", "median", "any", "all", "count_nonzero",
-                         "argmax", "argmin", "repeat", "transpose", "reshape", "triu", "tril", "flip", "roll", "copy"
-                     }}
-                    | {("np", "fft.fftn"), ("np", "fft.ifftn"), ("np", "fft.fft"), ("np", "fft.ifft")}) and node.args
+        if (key in (
+            {("np", k)
+             for k in {
+                 "sum", "max", "min", "mean", "prod", "std", "var", "median", "any", "all", "count_nonzero", "argmax",
+                 "argmin", "repeat", "transpose", "reshape", "triu", "tril", "flip", "roll", "copy", "cumsum", "cumprod"
+             }}
+                | {("np", "fft.fftn"), ("np", "fft.ifftn"), ("np", "fft.fft"), ("np", "fft.ifft")}) and node.args
                 and not isinstance(node.args[0], ast.Name)):
             first = node.args[0]
             ext = _iter_extent_of(first, self.shape_table)
@@ -7063,28 +7116,7 @@ class _CallHoister(ast.NodeTransformer):
                 return tuple(base)
         # Elementwise unary / binary share the operand shape; first array
         # operand (Name or Subscript-with-Slice) wins.
-        ELEMENTWISE = {
-            "copy",
-            "abs",
-            "exp",
-            "log",
-            "sqrt",
-            "sin",
-            "cos",
-            "tanh",
-            "negative",
-            "minimum",
-            "maximum",
-            "add",
-            "subtract",
-            "multiply",
-            "divide",
-            "true_divide",
-            "power",
-            "clip",
-            "where",
-        }
-        if op in ELEMENTWISE and args:
+        if op in ELEMENTWISE_SHAPE_OPS and args:
             # Broadcast the extents of ALL operands, not just the first: the
             # hoisted temp for ``np.maximum(a(M,), B(N, M))`` must be the full
             # broadcast shape ``(N, M)``, matching the elementwise expander's own
@@ -7238,6 +7270,27 @@ def _call_expander(expander, target, args, keywords, shape_table, local_dtypes=N
 #: full-slice form is canonicalised to a Name in ``visit_Assign``; only a
 #: shifted slice reaches here, and only the cumulative scans honour the
 #: lower-bound offset (via :func:`_scan_target_offsets`).
+#: Registered ops whose result shape is NOT the broadcast of its operands -- reductions,
+#: constructors, shape-changers and contractions. Everything else that has an expander IS
+#: elementwise, which is how :data:`ELEMENTWISE_SHAPE_OPS` below is derived.
+#:
+#: Derived, not restated, and computed AFTER every registration: the previous hand-written list was
+#: missing `square`, `reciprocal`, `degrees`, `radians`, `asarray`, the comparison ufuncs and the
+#: binary libm ufuncs, and each omission made ``_derive_output_shape`` return None -- which does not
+#: fail, it silently DECLINES to hoist and leaves a bare ``np.square(...)`` for the emitter.
+NON_ELEMENTWISE_SHAPE_OPS: Set[str] = set(_REDUCTION_NAMES) | {
+    "reshape", "repeat", "transpose", "flip", "roll", "triu", "tril", "concatenate", "stack", "pad", "diag", "diagonal",
+    "trace", "einsum", "tensordot", "inner", "outer", "dot", "vdot", "matmul", "cumsum", "cumprod", "linspace",
+    "arange", "zeros", "ones", "empty", "full", "eye", "identity", "fromfunction", "meshgrid", "mgrid", "sort",
+    "argsort", "histogram", "unique", "take", "interp", "searchsorted", "nonzero", "kron", "cross", "split",
+    "expand_dims", "squeeze", "swapaxes", "moveaxis", "ravel", "flatten", "tile", "broadcast_to", "atleast_1d",
+    "atleast_2d", "append", "insert", "delete"
+}
+
+ELEMENTWISE_SHAPE_OPS: FrozenSet[str] = frozenset(
+    name for module, name in NP_CALL_EXPANDERS
+    if module == "np" and "." not in name and name not in NON_ELEMENTWISE_SHAPE_OPS) | {"copy", "where", "clip"}
+
 _SLICE_TARGET_EXPANDERS = {("np", "cumsum"), ("np", "cumprod")}
 
 #: Expander keys that write element-wise to ``target`` (no allocation);
@@ -7261,6 +7314,7 @@ _ELEMENT_WRITE_EXPANDERS = {
     ("np", "logical_and"),
     ("np", "logical_or"),
     ("np", "logical_not"),
+    *(("np", _name) for _name in UNARY_C_MATH),
     ("np", "maximum"),
     ("np", "minimum"),
     ("np", "add"),

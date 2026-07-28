@@ -4,6 +4,8 @@ func_name: gemm_group_norm_min_bias_add
 kind: microkernel
 level: 2
 parameters:
+  # A list-valued symbol cannot cross the scalar ABI (ctypes has no argument for it), and this
+  # one only restated the matching array's declared shape while the kernel body never read it.
   S:
     batch_size: 4
     bias_shape:

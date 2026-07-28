@@ -12,5 +12,4 @@ def _softmax(x, axis=-1):
     return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
 
 def scaled_dot_product_attention(Q, K, V, out):
-    out = _scaled_dot_product_attention(Q, K, V)
-    out[:] = out
+    out[:] = _scaled_dot_product_attention(Q, K, V)

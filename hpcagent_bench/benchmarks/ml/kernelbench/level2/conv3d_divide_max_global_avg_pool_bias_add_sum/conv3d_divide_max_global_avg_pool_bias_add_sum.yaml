@@ -4,6 +4,8 @@ func_name: conv3d_divide_max_global_avg_pool_bias_add_sum
 kind: microkernel
 level: 2
 parameters:
+  # A list-valued symbol cannot cross the scalar ABI (ctypes has no argument for it), and this
+  # one only restated the matching array's declared shape while the kernel body never read it.
   S:
     batch_size: 2
     in_channels: 4
@@ -14,7 +16,6 @@ parameters:
     width: 4
     divisor: 2.0
     pool_size: 2
-    bias_shape: [4, 1, 1, 1]
     sum_dim: 1
   M:
     batch_size: 4
@@ -26,7 +27,6 @@ parameters:
     width: 8
     divisor: 2.0
     pool_size: 2
-    bias_shape: [8, 1, 1, 1]
     sum_dim: 1
   L:
     batch_size: 8
@@ -38,7 +38,6 @@ parameters:
     width: 16
     divisor: 2.0
     pool_size: 2
-    bias_shape: [16, 1, 1, 1]
     sum_dim: 1
   XL:
     batch_size: 16
@@ -50,7 +49,6 @@ parameters:
     width: 32
     divisor: 2.0
     pool_size: 2
-    bias_shape: [32, 1, 1, 1]
     sum_dim: 1
 init:
   arrays:

@@ -40,9 +40,9 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 from numpyto_common import dtypes
 from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
 from numpyto_common.numpy_desugar import _np_linalg_attr
-from numpyto_common.lib_nodes import (LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES, _broadcast_extents,
-                                      _is_integer_expr, _iter_extent_of, _scalarize_at_iters, _slice_step_const,
-                                      expand_meshgrid, extent_is_scalar)
+from numpyto_common.lib_nodes import (LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES, UNARY_C_MATH,
+                                      _broadcast_extents, _is_integer_expr, _iter_extent_of, _scalarize_at_iters,
+                                      _slice_step_const, expand_meshgrid, extent_is_scalar)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
                                      _substitute_inlined_scalar_defs)
 
@@ -1297,6 +1297,10 @@ class _MathRewriter(ast.NodeTransformer):
                 isinstance(node.func.value, ast.Name):
             mod = node.func.value.id
             name = node.func.attr
+            if mod in ("np", "numpy") and name == "clip" and len(node.args) == 3:
+                clipped = self._scalar_clip(node)
+                if clipped is not None:
+                    return clipped
             new_name = MATH_BUILTINS.get((mod, name))
             if new_name is not None:
                 # Skip the rename when the first arg involves an array
@@ -1334,6 +1338,21 @@ class _MathRewriter(ast.NodeTransformer):
             if replacement is not None:
                 return ast.Name(id=replacement, ctx=ast.Load())
         return node
+
+    def _scalar_clip(self, node: ast.Call) -> Optional[ast.expr]:
+        """``np.clip(a, lo, hi)`` on a SCALAR -> ``fmin(fmax(a, lo), hi)``. The array form is the
+        expander's job; this is the leftover after an enclosing expression was scalarized. ``fmax`` /
+        ``fmin`` (not the C macros) because numpy PROPAGATES NaN and both backends route those two
+        through their NaN-propagating helper. An open bound (``None``) drops its side."""
+        value, lo, hi = node.args
+        if self._refers_to_array(value):
+            return None
+        for bound, fn in ((lo, "fmax"), (hi, "fmin")):
+            if isinstance(bound, ast.Constant) and bound.value is None:
+                continue
+            value = ast.copy_location(ast.Call(func=ast.Name(id=fn, ctx=ast.Load()), args=[value, bound], keywords=[]),
+                                      node)
+        return value
 
     def _refers_to_array(self, expr: ast.expr) -> bool:
         """Return True if the expression reads any declared array as
@@ -1400,6 +1419,11 @@ _NP_ELEMENTWISE: Set[str] = {
     "logical_or",
     "logical_not",
 }
+
+# Every unary libm intrinsic is elementwise by construction, so take them from the table that
+# already routes them to C rather than restating the list -- a name present there but missing here
+# used to reach the emitter unlowered (``np.log1p(x) + np.maximum(x, 0)``, softplus).
+_NP_ELEMENTWISE |= set(UNARY_C_MATH)
 
 
 def _resolve_shape_token(node: ast.AST, shape_table: Dict[str, Tuple[str, ...]]) -> str:
@@ -2283,7 +2307,11 @@ def _iter_var_name(axis: int) -> str:
 
 #: Spellings an elementwise ufunc has ALREADY been lowered to by the time the slice-to-scalar
 #: rewriter runs -- ``np.maximum`` becomes a bare ``fmax`` well before this pass.
-_LOWERED_ELEMENTWISE: Set[str] = {"fmax", "fmin", "max", "min"}
+#: The POST-rename spellings of the elementwise intrinsics: ``_MathRewriter`` turns ``np.atan2``
+#: into a bare ``atan2``, and the per-element rewriter has to recognise the renamed form to
+#: subscriptify its arguments. Restating four of them left ``atan2``/``hypot``/``asin``/``pow`` with
+#: whole-array pointers inside a per-element store, which does not compile. Derived, not restated.
+_LOWERED_ELEMENTWISE: Set[str] = set(MATH_BUILTINS.values()) | {"max", "min"}
 
 
 def _np_func_name(func: ast.AST) -> Optional[str]:
@@ -4785,6 +4813,13 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
             return []
         p = arr_pos[0]
         idx_name = lead[p].id
+        # A GATHER needs integer indices. A boolean array in this position is a MASK, and the mask
+        # rewriter declines whenever it cannot prove the dtype -- ``m = flags.astype(bool);
+        # out[m] = 0`` then landed here and scattered through the 0/1 truth values, writing only
+        # out[0] and out[1]. Unknown dtype is unsafe for the same reason, so require integer.
+        if not dtypes.is_integer(self.local_dtypes.get(idx_name, "")):
+            raise NotImplementedError(f"{ast.unparse(target)}: index array {idx_name!r} is not a known integer "
+                                      f"dtype; a boolean here is a MASK, not a gather")
         extent = self.shape_table[idx_name][0]
         it = "__sc0"
         new_lead = list(lead)
@@ -6509,6 +6544,14 @@ def _lp_promote_true_division(ctx: LoweringContext) -> None:
     ast.fix_missing_locations(ctx.tree)
 
 
+def _lp_scalarized_math_rename(ctx: LoweringContext) -> None:
+    """Third and last math rename, once slice fusion has turned whole-array statements into
+    per-element ones. An intrinsic whose operand only becomes a scalar HERE (hardsigmoid's
+    ``np.clip((x + 3.0) / 6.0, 0, 1)`` -- array-valued at both earlier renames) has no later pass to
+    catch it and reaches the emitter as an unsupported call. Same rewriter, later state."""
+    _MathRewriter(set(ctx.arrays_shapes.keys()) | set(ctx.lib_shape_table.keys())).visit(ctx.tree)
+
+
 def _lp_lower_helpers(ctx: LoweringContext) -> None:
     """Lower each non-inlinable helper the same way -- it is a self-contained
     sub-kernel (own params + body). Its early ``return`` survives lowering (the
@@ -6533,6 +6576,7 @@ _LOWER_PHASES: List[Tuple[str, Callable[["LoweringContext"], None]]] = [
     ("whole-array-and-zeros", _lp_whole_array_and_zeros),
     ("slice-normalize-and-lift", _lp_slice_normalize_and_lift),
     ("slice-fusion-and-resolve", _lp_slice_fusion_and_resolve),
+    ("scalarized-math-rename", _lp_scalarized_math_rename),
     ("lower-helpers", _lp_lower_helpers),
 ]
 
