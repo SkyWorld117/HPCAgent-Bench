@@ -195,6 +195,10 @@ class InitSpec:
     #: ``dist``, e.g. a well-conditioned ``spd`` matrix beside a ``uniform``
     #: rhs). Arrays absent from this map use the run-wide default distribution.
     dists: Dict[str, str] = field(default_factory=dict)
+    #: Declared floor, in bytes, for scratch/persistent memory this kernel's ``init`` needs (e.g.
+    #: DaCe's library-init transients) -- from ``init.workspace.bytes``. ``None`` when the manifest
+    #: omits the block. Schema + validation only here; the harness reads it, this does not score it.
+    workspace_bytes: Optional[int] = None
 
 
 #: Closed set of sparse layout names HPCAgent-Bench supports. The 10-rule
@@ -1044,6 +1048,21 @@ class BenchSpec:
             init_out = init_raw.get("output_args")
             if init_out is None:
                 init_out = list(shapes) + list(init_raw.get("scalars", {}))
+            # ``init.workspace.bytes`` declares a scratch/persistent-memory floor (e.g. what DaCe
+            # allocates for library-init transients) -- optional, absent by default, and must be a
+            # real byte count: a negative or non-integer value fails LOUDLY here, at load time, not
+            # when the harness later tries to size an allocation from it.
+            workspace_raw = init_raw.get("workspace")
+            workspace_bytes = None
+            if workspace_raw is not None:
+                if not isinstance(workspace_raw, dict) or "bytes" not in workspace_raw:
+                    raise ValueError(f"{source}: init.workspace must be a mapping with a 'bytes' key "
+                                     f"(got {workspace_raw!r})")
+                workspace_bytes = workspace_raw["bytes"]
+                if isinstance(workspace_bytes, bool) or not isinstance(workspace_bytes, int) \
+                        or workspace_bytes < 0:
+                    raise ValueError(f"{source}: init.workspace.bytes must be a non-negative integer "
+                                     f"(got {workspace_bytes!r})")
             init_spec = InitSpec(
                 func_name=func_name,
                 input_args=tuple(init_raw.get("input_args", ())),
@@ -1052,6 +1071,7 @@ class BenchSpec:
                 scalars=dict(init_raw.get("scalars", {})),
                 dtypes=dtypes,
                 dists=dists,
+                workspace_bytes=workspace_bytes,
             )
 
         # Sparse layout blocks (optional). Look at both the outer (ext)
