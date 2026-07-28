@@ -9,53 +9,48 @@ parameters:
     bias: false
     depth: 6
     dilation: 1
-    groups: 1
     height: 8
     in_channels: 4
     kernel_size: 3
     out_channels: 8
-    padding: 1
-    stride: 1
     width: 8
   M:
     batch_size: 8
     bias: false
     depth: 38
     dilation: 1
-    groups: 1
     height: 40
     in_channels: 8
     kernel_size: 3
     out_channels: 40
-    padding: 1
-    stride: 1
     width: 40
   L:
     batch_size: 18
     bias: false
     depth: 54
     dilation: 1
-    groups: 1
     height: 56
     in_channels: 18
     kernel_size: 2
     out_channels: 56
-    padding: 1
-    stride: 1
     width: 56
   XL:
     batch_size: 39
     bias: false
     depth: 76
     dilation: 1
-    groups: 1
     height: 78
     in_channels: 39
     kernel_size: 2
     out_channels: 78
-    padding: 1
-    stride: 1
     width: 78
+config:
+  groups:
+    value: 1
+  padding:
+    value: 1
+  stride:
+    value: 1
 init:
   arrays:
     x: (batch_size, in_channels, height, width, depth)

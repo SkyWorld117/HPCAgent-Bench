@@ -11,8 +11,6 @@ parameters:
     height: 8
     in_channels: 4
     kernel_size: 3
-    padding: 1
-    stride: 1
     width: 8
   M:
     batch_size: 64
@@ -21,8 +19,6 @@ parameters:
     height: 1024
     in_channels: 256
     kernel_size: 3
-    padding: 1
-    stride: 1
     width: 8
   L:
     batch_size: 89
@@ -31,8 +27,6 @@ parameters:
     height: 1427
     in_channels: 504
     kernel_size: 2
-    padding: 1
-    stride: 1
     width: 7
   XL:
     batch_size: 124
@@ -41,9 +35,12 @@ parameters:
     height: 1989
     in_channels: 994
     kernel_size: 2
-    padding: 1
-    stride: 1
     width: 7
+config:
+  padding:
+    value: 1
+  stride:
+    value: 1
 init:
   arrays:
     x: (batch_size, in_channels, height, width)

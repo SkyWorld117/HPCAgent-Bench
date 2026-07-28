@@ -12,10 +12,7 @@ parameters:
     dim1: 4
     dim2: 5
     dim3: 3
-    kernel_size: 3
-    padding: 1
     return_indices: false
-    stride: 1
   M:
     batch_size: 4
     ceil_mode: false
@@ -24,10 +21,7 @@ parameters:
     dim1: 128
     dim2: 128
     dim3: 64
-    kernel_size: 3
-    padding: 1
     return_indices: false
-    stride: 1
   L:
     batch_size: 16
     ceil_mode: false
@@ -36,10 +30,7 @@ parameters:
     dim1: 128
     dim2: 128
     dim3: 64
-    kernel_size: 3
-    padding: 1
     return_indices: false
-    stride: 1
   XL:
     batch_size: 32
     ceil_mode: false
@@ -48,10 +39,14 @@ parameters:
     dim1: 128
     dim2: 128
     dim3: 64
-    kernel_size: 3
-    padding: 1
     return_indices: false
-    stride: 1
+config:
+  kernel_size:
+    value: 3
+  padding:
+    value: 1
+  stride:
+    value: 1
 init:
   arrays:
     x: (batch_size, channels, dim1, dim2, dim3)

@@ -8,38 +8,33 @@ parameters:
     batch_size: 4
     dilation: 1
     features: 4
-    kernel_size: 3
-    padding: 1
     return_indices: false
     sequence_length: 8
-    stride: 1
   M:
     batch_size: 128
     dilation: 1
     features: 512
-    kernel_size: 3
-    padding: 1
     return_indices: false
     sequence_length: 2048
-    stride: 1
   L:
     batch_size: 256
     dilation: 1
     features: 512
-    kernel_size: 3
-    padding: 1
     return_indices: false
     sequence_length: 2048
-    stride: 1
   XL:
     batch_size: 1024
     dilation: 1
     features: 512
-    kernel_size: 3
-    padding: 1
     return_indices: false
     sequence_length: 2048
-    stride: 1
+config:
+  kernel_size:
+    value: 3
+  padding:
+    value: 1
+  stride:
+    value: 1
 init:
   arrays:
     x: (batch_size, features, sequence_length)
