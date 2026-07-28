@@ -182,7 +182,7 @@ def _mpi_submission():
 
 def _run_distributed(monkeypatch,
                      *,
-                     node_counts,
+                     rank_counts,
                      anchor="serial",
                      runs=None,
                      mode="strong",
@@ -193,7 +193,7 @@ def _run_distributed(monkeypatch,
     ``suspect_above`` overrides ``record.speedup_suspect_above`` (else the real config default applies)."""
     import types
     from hpcagent_bench.harness.scoring import Score, ScalingRuns
-    overrides = {"mpi.mode": mode, "mpi.ranks": 4, "mpi.leaderboard_preset": "M", "mpi.node_counts": node_counts}
+    overrides = {"mpi.mode": mode, "mpi.ranks": 4, "mpi.leaderboard_preset": "M", "mpi.rank_counts": rank_counts}
     if suspect_above is not None:
         overrides["record.speedup_suspect_above"] = suspect_above
     real_get = M.config.get
@@ -226,7 +226,7 @@ def _run_distributed(monkeypatch,
 
 def test_distributed_attaches_scaling_curve(monkeypatch):
     """A configured P-sweep + a single-node anchor populates TaskScore.scaling; scalar S_i is unchanged."""
-    ts = _run_distributed(monkeypatch, node_counts=[1, 2, 4])
+    ts = _run_distributed(monkeypatch, rank_counts=[1, 2, 4])
     assert ts.scaling is not None
     assert [p.ranks for p in ts.scaling.points] == [1, 2, 4]
     assert ts.s_i == 4.0  # the curve never changes S_i
@@ -236,21 +236,21 @@ def test_distributed_superlinear_curve_is_uncapped(monkeypatch):
     """Integration check that the uncapped efficiency reaches TaskScore.scaling through the wiring."""
     from hpcagent_bench.harness.scoring import ScalingRuns
     ts = _run_distributed(monkeypatch,
-                          node_counts=[4],
+                          rank_counts=[4],
                           runs=ScalingRuns(measured_ns={4: 500}, anchor_ns={4: 4000}, notes=()))
     assert ts.scaling.points[0].efficiency == 2.0  # 8x on 4 nodes, not floored to 1
 
 
 def test_distributed_no_anchor_leaves_scaling_none(monkeypatch):
     """No single-node anchor => no curve, even with a configured sweep (never fabricate T_i(1))."""
-    ts = _run_distributed(monkeypatch, node_counts=[1, 2, 4], anchor=None)
+    ts = _run_distributed(monkeypatch, rank_counts=[1, 2, 4], anchor=None)
     assert ts.scaling is None
     assert ts.s_i == 4.0  # scalar path still scores
 
 
 def test_distributed_no_sweep_leaves_scaling_none(monkeypatch):
-    """An empty node_counts (the default) leaves the curve off; only the scalar S_i is produced."""
-    ts = _run_distributed(monkeypatch, node_counts=[])
+    """An empty rank_counts (the default) leaves the curve off; only the scalar S_i is produced."""
+    ts = _run_distributed(monkeypatch, rank_counts=[])
     assert ts.scaling is None
 
 
@@ -260,7 +260,7 @@ def test_distributed_no_sweep_leaves_scaling_none(monkeypatch):
 def test_distributed_suspect_default_threshold_unchanged(monkeypatch):
     """No override: the config default (1000.0) still flags a speedup no real kernel reaches,
     same as the old hardcoded compare."""
-    ts = _run_distributed(monkeypatch, node_counts=[], speedup=5000.0)
+    ts = _run_distributed(monkeypatch, rank_counts=[], speedup=5000.0)
     assert ts.suspect_count == 1
     assert ts.iterations[0].suspect is True
 
@@ -268,7 +268,7 @@ def test_distributed_suspect_default_threshold_unchanged(monkeypatch):
 def test_distributed_suspect_lowered_threshold_flags_previously_ok_speedup(monkeypatch):
     """A speedup that clears the default 1000.0 bound (4.0x) gets flagged once the config
     threshold is lowered below it -- proves the compare reads the config value, not a constant."""
-    ts = _run_distributed(monkeypatch, node_counts=[], speedup=4.0, suspect_above=2.0)
+    ts = _run_distributed(monkeypatch, rank_counts=[], speedup=4.0, suspect_above=2.0)
     assert ts.suspect_count == 1
     assert ts.iterations[0].suspect is True
 
@@ -276,7 +276,7 @@ def test_distributed_suspect_lowered_threshold_flags_previously_ok_speedup(monke
 def test_distributed_suspect_raised_threshold_stops_flagging(monkeypatch):
     """A speedup flagged at the default 1000.0 bound (5000x) clears once the config threshold is
     raised above it -- the high side must also read config, not just short-circuit past it."""
-    ts = _run_distributed(monkeypatch, node_counts=[], speedup=5000.0, suspect_above=10000.0)
+    ts = _run_distributed(monkeypatch, rank_counts=[], speedup=5000.0, suspect_above=10000.0)
     assert ts.suspect_count == 0
     assert ts.iterations[0].suspect is False
 
@@ -284,7 +284,7 @@ def test_distributed_suspect_raised_threshold_stops_flagging(monkeypatch):
 def test_distributed_suspect_nonfinite_ignores_threshold(monkeypatch):
     """A non-finite speedup stays suspect even under an enormous configured threshold -- the
     isfinite check must keep short-circuiting ahead of the config-sourced compare."""
-    ts = _run_distributed(monkeypatch, node_counts=[], speedup=float("inf"), suspect_above=1e18)
+    ts = _run_distributed(monkeypatch, rank_counts=[], speedup=float("inf"), suspect_above=1e18)
     assert ts.suspect_count == 1
     assert ts.iterations[0].suspect is True
 

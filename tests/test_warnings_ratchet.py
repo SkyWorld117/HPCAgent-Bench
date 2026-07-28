@@ -25,7 +25,10 @@ from hpcagent_bench.languages import build_kernel_lib_commands
 from hpcagent_bench.spec import BenchSpec
 
 #: REGISTRY keys of the 10 small foundation kernels the ratchet count below was measured
-#: against. Keys, not paths: ``BenchSpec`` owns both the kernel directory and the artifact
+#: against. The sample is interchangeable: the ratchet asserts ZERO warnings, so swapping one
+#: small kernel for another cannot move the expected count, only the build tally guarded by
+#: :data:`_MIN_BUILDS`. (``argmax_value`` replaced ``iv_additive`` when the induction-variable
+#: kernels were retired.) Keys, not paths: ``BenchSpec`` owns both the kernel directory and the artifact
 #: stem, so the sample cannot drift onto the pre-flatten ``foundation/cpp_backend/``
 #: leftovers that no emit refreshes -- which is how the first count came out too high.
 _KERNELS: Tuple[str, ...] = (
@@ -36,7 +39,7 @@ _KERNELS: Tuple[str, ...] = (
     "cond_reduce_sum",
     "ext_gather_load",
     "fuse_diamond",
-    "iv_additive",
+    "argmax_value",
     "jacobi2d_tiled_sym",
     "wavefront_2d",
 )

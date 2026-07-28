@@ -164,12 +164,12 @@ def hidden_wiring_manifest() -> Dict[str, Any]:
             }
         },
         "init": {
-            "shapes": {
+            "arrays": {
                 "u": "(256,)",
-                "spd": "(n,n)"
-            },
-            "dists": {
-                "spd": "well_conditioned"
+                "spd": {
+                    "shape": "(n,n)",
+                    "dist": "well_conditioned"
+                },
             },
         },
     }

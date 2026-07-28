@@ -198,19 +198,26 @@ variant sets it empty, which is the ablation control.
 
 Container images live in `containers/`. There is **one unified OCI recipe** --
 `containers/hpcagent_bench.Dockerfile` -- selected per **hardware** by a build arg
-`HW=cpu|nvidia|amd` (`cpu` is the default). Two runtime backends are supported,
-both rootless: **Apptainer** and **Podman**.
+`HW=cpu|nvidia|amd` (`cpu` is the default). Four backends run it, in preference order:
+**Podman** (the default -- consumes the OCI tag directly, rootless and daemonless, so it is
+the only one of the four that runs unprivileged on both a laptop and an HPC login node),
+**Docker** (the same OCI tag under a daemon; needs dockerd and a root-equivalent group, so it
+is the laptop / cloud-VM path, never the HPC one), **Apptainer** (builds a SIF FROM that same
+OCI image -- a conversion, for sites that need one), and **`ce`**, CSCS Alps' Container Engine
+(imports that same OCI image to SquashFS via `enroot`; selected by an `srun --environment=<edf>`
+flag rather than run directly -- it has no wrapper command and no local launch form).
 
 ```
-containers/hpcagent_bench.Dockerfile    the single OCI recipe   (build arg HW=cpu | nvidia | amd)
-containers/cpu.def                Apptainer build recipe  (quickstart CPU .sif)
-containers/judge.def              Apptainer build recipe  (the judge image)
+containers/hpcagent_bench.Dockerfile    the single OCI recipe          (build arg HW=cpu | nvidia | amd)
+containers/cpu.def                Apptainer conversion recipe  (quickstart CPU .sif)
+containers/judge.def              Apptainer conversion recipe  (the judge image)
 ```
 
 The image is the full toolchain + HPC libraries + the Python deps in
-`requirements/<hw>.txt`. Build the OCI image once, then either `apptainer build`
-a SIF from it (`docker-archive:...`) or `podman run` it directly; the `cpu.def`
-quickstart (`apptainer build hpcagent_bench-cpu.sif containers/cpu.def`) stays a valid
+`requirements/<hw>.txt`. Build the OCI image once (`podman build`, or `docker build` on a
+machine that already runs a daemon) and run the tag directly; convert it to a SIF with
+`apptainer build` (`docker-archive:...`) for a site that needs one -- the `cpu.def` quickstart
+(`apptainer build hpcagent_bench-cpu.sif containers/cpu.def`) stays a valid Apptainer-native
 shortcut. Compiler keys resolve from `hpcagent_bench/envs/compilers.yaml`. For the static
 distributed (multi-endpoint) launch, see [docs/LAUNCH.md](LAUNCH.md).
 

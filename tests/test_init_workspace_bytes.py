@@ -32,7 +32,7 @@ def _raw(**init_overrides: Any) -> Dict[str, Any]:
             }
         },
         "init": {
-            "shapes": {
+            "arrays": {
                 "x": "(N,)"
             },
             **init_overrides,

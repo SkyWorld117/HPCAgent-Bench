@@ -980,13 +980,17 @@ def score_scaling(submission: Submission,
                   task: Task,
                   single_node_anchor: Optional[Submission],
                   *,
-                  node_counts: Tuple[int, ...],
+                  rank_counts: Tuple[int, ...],
                   preset: str = "XL",
                   datatype: str = "float64",
                   rtol: Optional[float] = None,
                   atol: Optional[float] = None,
                   repeat: int = 5) -> ScalingRuns:
-    """Sweep a distributed submission over node counts ``P`` to build its scaling curve.
+    """Sweep a distributed submission over rank counts ``P`` to build its scaling curve.
+
+    ``P`` is a RANK count throughout, never a node count: it reaches the launcher's ``-n`` and
+    ``Descriptor(ranks=P)`` unchanged, and how many nodes those ranks land on is decided by the
+    launcher and the site's allocation, not here.
 
     For each ``P``: run the MPI submission on ``P`` ranks for ``T_i(P)``, and time the best correct
     single-node submission ``single_node_anchor`` SERIALLY on the SAME (for weak, grown) problem for
@@ -1062,7 +1066,7 @@ def score_scaling(submission: Submission,
             size_cache[sig] = (cand_data, oracle, t1, note)
             return size_cache[sig]
 
-        for p in sorted({int(x) for x in node_counts if int(x) >= 1}):
+        for p in sorted({int(x) for x in rank_counts if int(x) >= 1}):
             try:
                 cand_params = mpi_sizing.sized_params(base_params, cfg.mode, axis_syms, p, work_exp)
             except ValueError as exc:

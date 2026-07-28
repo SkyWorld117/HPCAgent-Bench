@@ -260,7 +260,7 @@ _INT32_BENCH = {
             "func_name": "initialize",
             "input_args": ["N"],
             "output_args": ["idx", "out"],
-            "shapes": {
+            "arrays": {
                 "idx": "(N,)",
                 "out": "(N,)"
             },
