@@ -85,16 +85,6 @@ if [[ -z "${CE_FLAG}" ]]; then
 fi
 CE=("${CE_FLAG}=${EDF}")
 
-# Only deterministic optimizers belong in this job: an agent column needs the inference and judge
-# roles this allocation does not have.
-IFS=',' read -r -a FRAMEWORK_LIST <<< "${FRAMEWORKS}"
-for fw in "${FRAMEWORK_LIST[@]}"; do
-    case "${fw}" in
-        numpy|polly|pluto|cc|cc_autopar|llvm|fortran|fortran_autopar|flang|dace_cpu) ;;
-        *) echo "FRAMEWORKS entry '${fw}' is not a deterministic optimizer" >&2; exit 1 ;;
-    esac
-done
-
 # DaCe writes one .so per SDFG variant per kernel. Keep that off the parallel FS, which turns
 # thousands of small compiler writes into the job's bottleneck, and off /tmp, which is tmpfs on
 # these nodes (the build would then compete with the run for RAM).
@@ -107,28 +97,14 @@ mkdir -p "${DACE_default_build_folder}"
 RUNDIR="${REPO}/results/foundation-alps-${SLURM_JOB_ID:-local}"
 mkdir -p "${RUNDIR}"
 
-# The CPU autoopt pipeline is the fork's canonicalize + finalize pair, which exists only on
-# spcl/dace@extended. Check it INSIDE the image -- the login node's python is not the one that
-# will run the sweep -- and fail here, where the message names the cause, rather than hundreds of
-# kernels deep with every dace column silently scored on the weaker auto_optimize.
-if [[ "${FRAMEWORKS}" == *dace_* ]]; then
-    srun "${CE[@]}" --nodes=1 --ntasks=1 \
-        python -c 'from dace.transformation.passes.canonicalize.pipeline import canonicalize' || {
-        echo "the image's dace has no canonicalize pipeline: HPCAgent-Bench needs spcl/dace@extended" >&2
-        exit 1
-    }
-fi
-
-# Thread counts come from flags.cpu_env, the same source the harness documents, so this script
-# cannot drift from it. Resolved inside the image, because that is where the core count that
-# matters is visible. Sound only because every rank is --exclusive on its own node, so the srun
-# steps below inherit the identical whole-node affinity.
-eval "$(srun "${CE[@]}" --nodes=1 --ntasks=1 python -c "
-from hpcagent_bench import flags
-from hpcagent_bench.flags import Mode
-for name, value in flags.cpu_env(Mode.MULTI_CORE).items():
-    print(f'export {name}={value}')
-")"
+# Columns, dace pipeline and autopar capability, checked in the LIBRARY
+# (hpcagent_bench/harness/preflight.py) -- the SAME call scripts/submit_deterministic.sbatch
+# makes, so the two cannot drift. Run INSIDE the image: the login node's python is not the one
+# that will run the sweep, and the core count that matters is the compute node's. Report goes to
+# stderr, the thread-count exports to stdout, which is what is eval'd here. Sound only because
+# every rank is --exclusive on its own node, so the srun steps below inherit that affinity.
+eval "$(srun "${CE[@]}" --nodes=1 --ntasks=1 \
+    hpcagent-bench preflight --frameworks "${FRAMEWORKS}" --print-env)"
 
 echo "ranks=${RANKS} frameworks=${FRAMEWORKS} bench=${BENCH} preset=${PRESET} cores=${OMP_NUM_THREADS}"
 echo "edf=${EDF} rundir=${RUNDIR}"

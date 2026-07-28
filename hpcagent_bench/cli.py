@@ -20,6 +20,7 @@ import argparse
 import dataclasses
 import json
 import pathlib
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -832,6 +833,17 @@ def cmd_quickstart(args) -> int:
     return 0
 
 
+def cmd_preflight(args) -> int:
+    """Check a batch job's columns, dace pipeline and autopar capability before it spends time."""
+    from hpcagent_bench.harness.preflight import run
+    code, report, env = run([name for name in args.frameworks.split(",") if name], print_env=args.print_env)
+    for line in report:
+        print(line, file=sys.stderr)  # stdout is what the caller EVALS; a diagnostic there would run
+    for line in env:
+        print(line)
+    return code
+
+
 def cmd_pluto_survey(args) -> int:
     """Survey the Pluto polyhedral backend over the affine foundation/hpc kernels."""
     from hpcagent_bench.support.collect.pluto_survey import survey
@@ -1283,6 +1295,11 @@ def build_parser() -> argparse.ArgumentParser:
     qs.add_argument("-d", "--dace", action="store_true", default=True, help="include dace_cpu (default on)")
     qs.add_argument("--no-dace", dest="dace", action="store_false")
     qs.set_defaults(func=cmd_quickstart)
+
+    pf = sub.add_parser("preflight", help="check a batch job's columns, dace pipeline and autopar capability")
+    pf.add_argument("--frameworks", required=True, help="comma-separated column list, as the submission script has it")
+    pf.add_argument("--print-env", action="store_true", help="also emit the thread-count `export` lines to eval")
+    pf.set_defaults(func=cmd_preflight)
 
     ps = sub.add_parser("pluto-survey", help="survey the Pluto polyhedral backend over the affine kernels")
     ps.set_defaults(func=cmd_pluto_survey)
