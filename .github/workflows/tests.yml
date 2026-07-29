@@ -108,34 +108,22 @@ jobs:
 
       - uses: ./.github/actions/setup
 
-      - name: Phase 1 -- YAML + tree + ABI contract + hidden-test firewall + HF export completeness
+      - name: Phase 1 -- unit sweep (every test file no other phase claims)
         if: ${{ !cancelled() }}
-        # test_bindings.py ran in NO job until now, which is why the C ABI could type nbody's
-        # dt: 0.05 as int64 -- int(0.05) == 0, a zero timestep -- corpus-wide and unnoticed.
-        # It is seconds of pure-python assertions over the manifests; it belongs in the cheap phase.
-        # test_vecmath.py is here for the same reason: libmvec was on for clang and off for gcc,
-        # so the cc-vs-llvm column reported 3.7x when the real compiler gap is 1.19x -- the rest
-        # was a library difference. Its compile probes need only gcc/g++/gfortran, all preinstalled.
-        # test_framework_cache.py pins the per-kernel framework-autogen + DaCe SDFG cache and its
-        # freshness guard (a stale sibling / .sdfgz would silently miscompile a graded run); its
-        # DaCe cases parse gemm (dace is installed here) and compile nothing, so it stays cheap.
+        # DISCOVERED, not enumerated. `ls` decides what runs and .github/dedicated_tests.txt
+        # records the exceptions, so a new test file is covered the moment it lands. The reverse
+        # -- filenames typed into this workflow -- drifted badly: 144 test files existed, 44 were
+        # named anywhere in CI, and 94 never ran, including the guards written for the regressions
+        # they were meant to catch. tests/test_ci_coverage.py fails if the two ever disagree.
+        # -n auto because these are the cheap files: xdist balances them across the runner's cores
+        # dynamically, which beats any static split of a set whose costs span three orders.
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=600 \
-            tests/test_yaml_style.py \
-            tests/test_tree_structure.py \
-            tests/test_bindings.py \
-            tests/test_compile_flags.py \
-            tests/test_vecmath.py \
-            tests/test_ncores.py \
-            tests/test_ext_break_scaled_exit.py \
-            tests/test_framework_flavors.py \
-            tests/test_framework_cache.py \
-            tests/test_sparse_init_precision.py \
-            tests/test_forkserver_preload.py \
-            tests/test_firewall.py \
-            tests/test_hf_export.py \
-            tests/test_kernelbench_references.py \
-            tests/test_verify_toolchain.py
+          excl=$(mktemp)
+          grep -vE '^\s*(#|$)' .github/dedicated_tests.txt > "$excl"
+          files=$(ls tests/test_*.py | grep -vxF -f "$excl")
+          test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
+          echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
+          python -m pytest -q -p no:cacheprovider -n auto --timeout=600 $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
@@ -274,8 +262,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           # An empty shard would make pytest collect the whole repo, so fail instead of over-running.
-          files=$(ls hpcagent_bench/numpy_translators/tests/test_*.py | sort |
-                  awk 'NR % 3 == ${{ matrix.shard }} % 3')
+          # Cost-balanced, not count-balanced: a level-3 kernel test is ~12x a level-1 one, so
+          # dealing files round-robin hands one shard the heavy end and idles the others.
+          files=$(python scripts/ci_shard.py --shard '${{ matrix.shard }}/3' \
+                    --files "$(ls hpcagent_bench/numpy_translators/tests/test_*.py)")
           test -n "$files" || { echo 'shard ${{ matrix.shard }} selected no files'; exit 1; }
           echo "$files"
           python -m pytest -q -p no:cacheprovider -rfsxX -n auto --timeout=900 $files
