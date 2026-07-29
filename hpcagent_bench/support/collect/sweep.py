@@ -359,10 +359,25 @@ def summarize_csv(paths: Sequence[str]) -> int:
               status, so a shard whose kernels stopped compiling (or silently miscompiled) fails
               the job instead of scrolling past in the log.
     """
+    # A shard CSV that is not there is the LOUDEST result this function can report: the rank died
+    # before writing a row, or wrote somewhere else. The caller passes a shell glob, which bash
+    # hands through verbatim when it matches nothing, so the unguarded form turns "every rank died"
+    # into a FileNotFoundError traceback naming a path with a `*` in it. Say what happened instead,
+    # and keep the non-zero exit -- an empty summary must never read as a clean run.
+    missing = [p for p in paths if not pathlib.Path(p).is_file()]
+    if missing:
+        print(f"summarize: {len(missing)} of {len(paths)} shard CSVs absent: {', '.join(missing)}")
+        print("summarize: a rank writes its CSV as it finishes, so an absent one means that rank "
+              "produced nothing -- check its log before reading anything below as a result.")
     rows: List[Dict[str, str]] = []
     for path in paths:
+        if path in missing:
+            continue
         with open(path, newline='') as fh:
             rows.extend(csv.DictReader(fh))
+    if not rows:
+        print("summarize: no rows in any shard CSV; nothing was measured.")
+        return max(len(missing), 1)
 
     def is_crash(row: Dict[str, str]) -> bool:
         return row['status'] == 'crash'

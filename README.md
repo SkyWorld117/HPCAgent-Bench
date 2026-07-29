@@ -234,8 +234,10 @@ python -m pip install .                             # the hpcagent_bench package
 
 **DaCe is the one framework `pip` cannot supply**, so it is its own step. The `dace` on PyPI is an
 old release that imports the numpy-2-removed `np.int`; HPCAgent-Bench develops against the
-`extended` branch of the fork, and the `dace_cpu` column's `autoopt` pipeline is that branch's
-`canonicalize` pass pipeline, which no other release has. Same clone the images and CI use:
+`extended` branch of the fork, and the `dace_cpu` column's `canonicalize` pipeline is that branch's
+`canonicalize` pass pipeline, which no other release has. (`dace_cpu_parallel` is the exception,
+built from upstream transformations only so it can be measured on both trees — see
+`samples/npbench_dace_flavors.sbatch`.) Same clone the images and CI use:
 
 ```sh
 git clone --depth 1 --recurse-submodules --shallow-submodules \

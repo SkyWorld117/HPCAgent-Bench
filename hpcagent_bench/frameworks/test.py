@@ -9,6 +9,7 @@ from sqlmodel import Session
 from hpcagent_bench import config, perf_reports
 from hpcagent_bench.frameworks import (Benchmark, Framework, timeout_decorator as tout, utilities as util)
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
+from hpcagent_bench.frameworks.framework import split_flavor
 from hpcagent_bench.frameworks.schema import Result, results_engine
 from hpcagent_bench.harness import recording
 from hpcagent_bench.precision import Precision, TOLERANCE_MATRIX, numpy_dtype, precision_from_datatype, tolerance_band
@@ -264,6 +265,14 @@ class Test(object):
         timestamp = int(time.time())
         # native vs container -- a containerized collector sets HPCAGENT_BENCH_RECORD_EXECUTION.
         execution = str(config.get("record.execution", "native"))
+        # Which BUILD produced these numbers (dace main vs extended, ...). Read from config for the
+        # same reason as `execution`: it is a property of the deployment, so the launcher that
+        # arranged the deployment sets it once (HPCAGENT_BENCH_RECORD_BUILD) instead of every call
+        # site threading it down. Empty => unlabelled, the single-build case.
+        build = str(config.get("record.build", "")) or None
+        # The flat CLI name splits here and only here: `dace_cpu_parallel` is stored as the backend
+        # plus the optimizer inside it, so grouping by backend does not have to know the flavors.
+        column, flavor = split_flavor(self.frmwrk.info["simple_name"])
         # recording.db_path, not a bare relative name: it anchors to the repo directory instead of
         # whatever the job happened to cd into, refuses memory-backed storage, and under a
         # distributed launch hands this rank its OWN shard (WAL needs a -shm mapping that Lustre and
@@ -276,13 +285,15 @@ class Test(object):
                            benchmark=self.bench.info["short_name"],
                            domain=domain,
                            preset=preset,
-                           framework=self.frmwrk.info["simple_name"],
+                           framework=column,
+                           flavor=flavor,
                            agent=None,
                            validated=d["validated"],
                            time=d["time"],
                            native_time=d.get("native_time"),
                            datatype=datatype if datatype is not None else 'float64',
                            variant=variant,
+                           build=build,
                            prompt_hash=None,
                            execution=execution))
             session.commit()

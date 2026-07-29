@@ -218,6 +218,10 @@ record:
                                   # (a containerized run). Stamped on every results/submissions/calls
                                   # row so a container-measured number is never compared against a
                                   # native one unknowingly. Containers set HPCAGENT_BENCH_RECORD_EXECUTION.
+  build: ""                       # which BUILD produced the numbers, when one framework flavor is run
+                                  # against more than one (dace `main` vs `extended`, a different BLAS,
+                                  # a different image). Stamped on every results row; empty = the
+                                  # single-build case. Launchers set HPCAGENT_BENCH_RECORD_BUILD.
 
 # Optional compiler diagnostics written under perf_reports/ (hpcagent_bench/perf_reports.py),
 # mirroring the benchmark folder structure. Two INDEPENDENT knobs, both OFF: a report

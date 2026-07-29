@@ -124,9 +124,10 @@ def load_results(db: Optional[str],
 
     Applies the shared selection (kernel / track / dwarf / ``@lvl<n>`` via
     :func:`select_short_names`), drops undomained / unvalidated rows, filters to ``datatype``
-    (legacy NULL treated float64) and ``preset``, and folds the sparse ``variant`` axis into
-    the ``benchmark`` name (``benchmark/variant``). One row per timed sample survives, with
-    columns ``benchmark``, ``domain``, ``framework``, ``time``.
+    (legacy NULL treated float64) and ``preset``, folds the sparse ``variant`` axis into the
+    ``benchmark`` name (``benchmark/variant``) and the ``flavor`` / ``build`` axes into the
+    ``framework`` name (``dace_cpu/canonicalize/extended``). One row per timed sample survives,
+    with columns ``benchmark``, ``domain``, ``framework``, ``time``.
     """
     # A distributed run leaves one DB per rank and no merged file until something asks for it; this
     # is that ask, so plotting a sharded run needs no separate aggregation step.
@@ -159,6 +160,17 @@ def load_results(db: Optional[str],
         data.loc[sparse_mask, 'benchmark'] = (data.loc[sparse_mask, 'benchmark'].astype(str) + '/' +
                                               data.loc[sparse_mask, 'variant'].astype(str))
         data = data.drop(['variant'], axis=1).reset_index(drop=True)
+
+    # `flavor` and `build` fold into `framework` exactly as `variant` folds into `benchmark` above:
+    # they are stored apart so the DB can be queried on either axis, and joined here because a
+    # figure plots one series per column. Without the fold, dace_cpu's three optimizers -- and the
+    # same optimizer measured on two DaCe trees -- would silently average into one line.
+    for axis in ('flavor', 'build'):
+        if axis in data.columns:
+            mask = data[axis].notna()
+            data.loc[mask,
+                     'framework'] = (data.loc[mask, 'framework'].astype(str) + '/' + data.loc[mask, axis].astype(str))
+            data = data.drop([axis], axis=1).reset_index(drop=True)
 
     data = data[data['preset'] == preset]
     data = data.drop(['preset'], axis=1).reset_index(drop=True)
