@@ -35,7 +35,7 @@
 #   BENCH=foundation@lvl2 PRESET=M FRAMEWORKS=dace_cpu,polly sbatch ... this script
 #
 # UNVERIFIED AGAINST THE SITE'S OWN SUBMISSION SCRIPTS. The Alps specifics here come from this
-# repo's own notes (scripts/cscs/env.toml.example, docs/LAUNCH.md), which state that node
+# repo's own notes (scripts/cscs/env.toml.example, docs/launch.md), which state that node
 # allocation and srun submission are owned externally. The partition name, the account, the
 # scratch layout and the reservation policy are the three things most likely to need a local
 # edit before this runs as-is.

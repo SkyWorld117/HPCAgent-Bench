@@ -4,7 +4,7 @@ An agent (or any auto-tuner) is handed a kernel and must return a faster, still-
 implementation. The NumPy reference is the ground truth; the agent is scored by the same
 machinery as any tuner -- a correctness gate plus speed versus a baseline.
 
-**Writing one?** Start with [docs/WRITING_AN_AGENT.md](../../docs/WRITING_AN_AGENT.md) -- the
+**Writing one?** Start with [docs/writing_an_agent.md](../../docs/writing_an_agent.md) -- the
 native Python API (`hpcagent_bench.init(...).score(...)`), an `Agent` subclass, or a container agent.
 
 ## The loop

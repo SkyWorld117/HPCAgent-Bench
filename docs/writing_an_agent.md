@@ -72,7 +72,7 @@ class MyAgent(Agent):
   per-kernel timeout; it keeps the best correct speedup across rounds instead of stopping on
   the first pass. Full mechanics (streaming, `CallPoint`, the typed `settings()` override):
   [`hpcagent_bench/harness/README.md`](../hpcagent_bench/harness/README.md). Why there is no explicit
-  "submit" signal: [AGENTS_AND_TOOL_ACCESS.md Sec. 4](AGENTS_AND_TOOL_ACCESS.md).
+  "submit" signal: [agents_and_tool_access.md Sec. 4](agents_and_tool_access.md).
 - **Reference agents to copy** (all in [`agent.py`](../hpcagent_bench/harness/agent.py)):
   `StubAgent` (echoes the reference -- the deterministic CI oracle), `OllamaAgent` /
   `LocalHFAgent` (local models, zero API cost), `OpenAIAgent` (any OpenAI-compatible endpoint --
@@ -170,7 +170,9 @@ deterministically (propose -> fail -> repair -> improve) in a test, use `Scripte
 
 ## Go deeper
 
-[AGENTS_AND_TOOL_ACCESS.md](AGENTS_AND_TOOL_ACCESS.md) (how this maps to Harbor/AlgoTune) .
+[agents_and_tool_access.md](agents_and_tool_access.md) (how this maps to Harbor/AlgoTune) .
 [`hpcagent_bench/docs/agent_service_contract.md`](../hpcagent_bench/docs/agent_service_contract.md) (the
 HTTP judge API) .
-[`hpcagent_bench/harness/README.md`](../hpcagent_bench/harness/README.md) (the loop internals).
+[`hpcagent_bench/harness/README.md`](../hpcagent_bench/harness/README.md) (the loop internals) .
+[DESIGN_hf_dataset_and_harbor.md](DESIGN_hf_dataset_and_harbor.md) (the HF Dataset export + Harbor
+adapter this maps onto, and the HPCAgent-Bench Score your submission is judged by).

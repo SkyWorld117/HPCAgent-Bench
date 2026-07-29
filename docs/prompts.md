@@ -1,7 +1,7 @@
 # The agent prompt
 
 How the agent-facing prompt is assembled, overridden, and varied -- the detail moved out
-of the root README. [PROMPT_WALKTHROUGH.md](PROMPT_WALKTHROUGH.md) renders one, block by
+of the root README. [prompt_walkthrough.md](prompt_walkthrough.md) renders one, block by
 block.
 
 Render any kernel's prompt:
@@ -71,7 +71,7 @@ build_prompt(task)
 
 **Full annotated walkthrough** -- a real rendered prompt, block by block, naming the
 template and the source of every interpolated value, with a context-provenance table:
-**[PROMPT_WALKTHROUGH.md](PROMPT_WALKTHROUGH.md)**.
+**[prompt_walkthrough.md](prompt_walkthrough.md)**.
 
 **Overriding the prompt** (no fork needed), simplest first:
 1. Drop a file into `prompt.template_dir` to shadow one `sections/<name>.j2` (or the whole

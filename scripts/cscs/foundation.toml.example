@@ -49,7 +49,7 @@ writable = true
 
 [env]
 # hwloc's GL/OpenCL probes open a display and hang the topology probe inside a container; a dace
-# import pulls mpi4py transitively and stalls before running a line (docs/RUNTIME.md).
+# import pulls mpi4py transitively and stalls before running a line (docs/runtime.md).
 HWLOC_COMPONENTS = "-opencl,-levelzero,-gl"
 UCX_VFS_ENABLE = "n"
 # The foundation sweep is single-node per rank and the ranks never talk to each other (the shard

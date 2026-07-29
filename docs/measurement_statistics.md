@@ -3,9 +3,9 @@
 How HPCAgent-Bench turns raw per-run timings into the numbers and figures it reports. The
 goal is a defensible, reproducible protocol: robust to OS noise, non-parametric (no
 normality assumption), and with every default stated rather than implicit. All of it is
-implemented in [`hpcagent_bench/stats.py`](../stats.py) and consumed by
-[`hpcagent_bench/plotting.py`](../plotting.py); the knobs live in
-[`config.yaml`](../config.yaml) under `measurement:`.
+implemented in [`hpcagent_bench/stats.py`](../hpcagent_bench/stats.py) and consumed by
+[`hpcagent_bench/plotting.py`](../hpcagent_bench/plotting.py); the knobs live in
+[`config.yaml`](../hpcagent_bench/config.yaml) under `measurement:`.
 
 ## Sampling
 
@@ -66,7 +66,7 @@ NA-ignoring) — the correct average for ratios. NumPy's own column shows absolu
 
 ## Figures
 
-Two report figures live in [`hpcagent_bench/plotting.py`](../plotting.py), both produced from the
+Two report figures live in [`hpcagent_bench/plotting.py`](../hpcagent_bench/plotting.py), both produced from the
 results DB, both reading + filtering it through the one `load_results` path and laying rows out
 with the one ordering scheme below (`hpcagent_bench/reporting_order.py`). Both render headless
 (`Agg`); `text.usetex` is set **per call** (`usetex=True` default) — pass `usetex=False` on a box

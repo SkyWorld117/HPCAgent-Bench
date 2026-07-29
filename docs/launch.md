@@ -225,7 +225,7 @@ recipe below fills in the SIF build, the Slingshot fabric hook, and multi-endpoi
 ### Worked recipe
 
 **1. Build the arm64 SIF (on a build box, then copy it over).** Unprivileged image builds are
-unreliable on HPC (see the HPC notes in [docs/RUNTIME.md](RUNTIME.md)). Build for `linux/arm64`
+unreliable on HPC (see the HPC notes in [docs/runtime.md](runtime.md)). Build for `linux/arm64`
 on the CSCS public GPU base:
 
 ```
@@ -247,7 +247,7 @@ The MPI track uses the same hook, and its ready-made EDF is
 multi-node MPI / inference paths, not single-node grading.
 
 **3. Launch the three roles under `srun`** -- one single-node container each; `--nv` passes the
-GPUs through (as in [docs/RUNTIME.md](RUNTIME.md)). The container commands are exactly the ones
+GPUs through (as in [docs/runtime.md](runtime.md)). The container commands are exactly the ones
 from **Launch order** above; only the `srun` allocation flags (owned by the site submission) wrap them:
 
 ```
@@ -298,7 +298,9 @@ EDF=$SCRATCH/mpi.toml RANK_COUNTS=1,2,4,8 RANKS_PER_NODE=4 \
 
 `RANK_COUNTS` defaults to `mpi.rank_counts` in `hpcagent_bench/config.yaml`. The candidates are the
 five kernels that declare an `mpi:` block: `cloudsc`, `heat_3d`, `jacobi_2d`, `scaled_add`,
-`mat_scaled_add`.
+`mat_scaled_add`. This section is the *submission*; for the halo/RMA/collective idioms a kernel's
+`kernel_mpi` implements once ranks are up, see [mpi_patterns.md](mpi_patterns.md), and for how a
+global array maps onto those ranks, [`hpcagent_bench/docs/mpi_distributions.md`](../hpcagent_bench/docs/mpi_distributions.md).
 
 **How the ranks find each other.** Containers do not cluster. Slurm places one container per rank
 and `srun --mpi=pmix` exports the PMIx server address plus that rank's rank/size into each

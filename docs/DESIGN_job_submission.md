@@ -7,7 +7,7 @@ things are being distributed, not because three scripts drifted apart.
 |---|---|---|---|
 | **corpus sweep** | the KERNEL LIST across ranks | no | `submit_deterministic.sbatch`, `cscs/submit_foundation_alps.sbatch` |
 | **role deployment** | ROLES (inference / judge / optimizer) across nodes | via the launcher, not MPI | `submit_launch.sbatch` |
-| **problem decomposition** | ONE KERNEL across ranks | yes, MPI | none yet -- the gap |
+| **problem decomposition** | ONE KERNEL across ranks | yes, MPI | `submit_mpi_scaling.sbatch`, `cscs/submit_mpi_scaling_alps.sbatch` |
 
 ## 1. Corpus sweep -- static round-robin, no coordination
 
@@ -54,7 +54,10 @@ node, exposing one URL.
 ## 3. Problem decomposition -- MPI inside containers
 
 The part with real risk. Verified working at 2/4/8 ranks locally (`jacobi_2d`, `heat_3d`,
-bit-exact against the 1-rank result); never yet run across nodes.
+bit-exact against the 1-rank result); never yet run across nodes. This section is about getting
+the ranks placed and connected; what a kernel does with them once connected (halo exchange, data
+distribution) is [mpi_patterns.md](mpi_patterns.md) and
+[`hpcagent_bench/docs/mpi_distributions.md`](../hpcagent_bench/docs/mpi_distributions.md).
 
 **The model.** One container per rank, one rank per container. Containers do not cluster —
 Slurm places them and MPI connects the processes inside them. Ranks discover each other through
@@ -77,12 +80,11 @@ ABI-compatible with the site's PMI and fabric. It is not automatic:
   scaling. A scaling curve is exactly the measurement that failure corrupts, so this must be
   asserted, not assumed.
 
-**What is missing.** No submission script requests `--nodes` sized to the rank count for this
-shape — `mpi_call.run` only ever builds `<launcher> -n <ranks> <program>`, and both existing
-scripts set `RANKS=$SLURM_JOB_NUM_NODES` with one task per node, where rank == node by
-construction. A cross-node MPI submission needs: an allocation sized to ranks (not nodes), the
-`srun --mpi=pmix` launch form instead of a bare `mpirun`, the fabric hook enabled, and the
-P-rank-equals-1-rank output check as its gate.
+**Still unverified.** `submit_mpi_scaling.sbatch` now sizes the allocation by RANK count with
+`RANKS_PER_NODE` explicit, launches with `srun --mpi=pmix`, and runs the P-rank == 1-rank gate
+before any timing is believed; the Alps variant adds the container flag and the fabric hook. What
+has NOT happened is a run on real Slurm: syntax, the EDF's TOML and the local multi-rank path are
+checked, placement across nodes is not.
 
 ## Invariants across all three
 

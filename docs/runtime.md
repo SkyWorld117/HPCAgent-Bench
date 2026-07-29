@@ -128,7 +128,7 @@ are wired.
   because MPICH is ABI-compatible, the same `./bench` binary runs unchanged. Locally,
   `mpi.launcher` runs `mpirun` inside the apptainer/podman sandbox; on the cluster the
   node allocation and the `srun`/site-MPI launch are external job submission, not run
-  from inside the repo -- see **docs/LAUNCH.md**.
+  from inside the repo -- see **docs/launch.md**.
 - **Device residency -- per array.** The agent places **each array on the host or the GPU
   independently** (a `location: "host"|"device"` on the array's distribution entry; `mpi.residency`
   is the run-wide default). The harness always scatters on the host, then moves each **device**
@@ -242,4 +242,4 @@ hpcagent-bench agent openai --kernels gemm,gesummv --baseline numpy --preset S
 `--pipeline auto` (default) turns the distributed path on when there is >1 endpoint on either
 tier or `>1` worker; `--native` is the serial in-process single-box path. Allocating nodes and
 starting the three roles (including any ray cluster) is the job submission's responsibility.
-See **docs/LAUNCH.md** for the full contract.
+See **docs/launch.md** for the full contract.

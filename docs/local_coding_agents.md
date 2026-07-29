@@ -104,7 +104,7 @@ back to the model is the natural next step here.)
 
 The default container path is the one OCI image (`containers/hpcagent_bench.Dockerfile`) built
 with Podman (the default -- rootless and daemonless) or Docker (a drop-in on a machine that
-already runs a daemon); see [docs/RUNTIME.md](RUNTIME.md). On a shared / HPC machine with
+already runs a daemon); see [docs/runtime.md](runtime.md). On a shared / HPC machine with
 neither, **Apptainer** still runs unprivileged, via the kept `cpu.def` recipe -- an
 Apptainer-native build straight from source, no OCI image needed:
 

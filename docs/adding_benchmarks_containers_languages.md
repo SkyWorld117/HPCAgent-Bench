@@ -219,7 +219,7 @@ machine that already runs a daemon) and run the tag directly; convert it to a SI
 `apptainer build` (`docker-archive:...`) for a site that needs one -- the `cpu.def` quickstart
 (`apptainer build hpcagent_bench-cpu.sif containers/cpu.def`) stays a valid Apptainer-native
 shortcut. Compiler keys resolve from `hpcagent_bench/envs/compilers.yaml`. For the static
-distributed (multi-endpoint) launch, see [docs/LAUNCH.md](LAUNCH.md).
+distributed (multi-endpoint) launch, see [docs/launch.md](launch.md).
 
 ## Add a language
 
@@ -250,3 +250,11 @@ LANG_EXT = { ..., "rust": "rs" }     # no leading dot
 
 The kernel then exports the canonical C symbol with `#[no_mangle] pub extern "C"`,
 and the harness compiles + calls it like any other language.
+
+## Add a framework backend
+
+A **language** (above) is a compiled C-ABI target; a **framework** is a Python-side backend
+(numba, dace, triton, tvm, cupy, pythran, jax, ...) whose implementation is auto-generated from
+the NumPy reference. Most kernels never need this section -- it is for wiring up a *new*
+framework, not a new kernel. Full mechanics, override points, and worked examples:
+[frameworks.md](frameworks.md).

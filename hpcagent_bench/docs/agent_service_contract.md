@@ -4,7 +4,7 @@ The judge service is the **services** side of the agent-bench topology. The agen
 the judge are **two instances of the same image** (identical toolchain / libraries /
 CPU), so a speedup is apples-to-apples. The model the agent thinks against is a
 third, separate role (a hosted API, a host Ollama, or the `inference` container --
-see `docs/LAUNCH.md`), never part of this judge API:
+see `docs/launch.md`), never part of this judge API:
 
 ```
 +-------------------+        HTTP         +----------------------------------------+

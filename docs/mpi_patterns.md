@@ -16,8 +16,8 @@ spacing mangles underscores, e.g. `MPI_Win_create` renders `MP I_WIN_CREATE`).
   baked grid), the UNTIMED `Scatterv`/`Gatherv`, and the timed loop. See
   `hpcagent_bench/support/bindings/mpi_driver.py`.
 - Scatter gives each rank its DISJOINT owned interior (NO ghost padding; see
-  `mpi_descriptor.py` + `mpi_distributions.md`). Kernel owns ALL inter-rank comm.
-- Kernel signature (`abi_contract.md` Sec. 12): local pointer tiles -> local scalars -> `MPI_Fint comm`
+  `mpi_descriptor.py` + [`mpi_distributions.md`](../hpcagent_bench/docs/mpi_distributions.md)). Kernel owns ALL inter-rank comm.
+- Kernel signature ([`abi_contract.md`](../hpcagent_bench/docs/abi_contract.md) Sec. 12): local pointer tiles -> local scalars -> `MPI_Fint comm`
   -> workspace pair. Kernel queries grid via `MPI_Cart_coords`/`MPI_Cart_shift`, exchanges its own
   halos, updates tiles in place. No global I/O.
 - Sizes = GLOBAL extents; rank derives local slab from N + its Cartesian coord ("global size,
@@ -201,7 +201,7 @@ When: initial distribution + final gather, or in-kernel re-layout. `darray` = on
 matching `mpi_descriptor`'s `block_cyclic` scheme (ScaLAPACK `INDXG2P`).
 
 HPCAgent-Bench map: `mpi_driver.py` uses contiguous `Scatterv`/`Gatherv` over per-rank counts (row-major
-grid, C-order compacted tiles -- see `mpi_distributions.md`), NOT `darray`. `darray` is the natural
+grid, C-order compacted tiles -- see [`mpi_distributions.md`](../hpcagent_bench/docs/mpi_distributions.md)), NOT `darray`. `darray` is the natural
 expert form for a v2 2-D block-cyclic (dense LA) kernel.
 
 CAVEAT: `Scatterv`/`Gatherv` worked examples are weak in this download -- the canon lives in the
