@@ -175,7 +175,7 @@ hpcagent_bench/
 |                                   agent+judge; inference is separate (inference.def); cpu.def/judge.def
 |                                   kept as Apptainer conversion recipes
 +-- scripts/                      hidden-test firewall + harness setup helpers
-`-- run_benchmark.py  quickstart.py  plot_results.py
+`-- run_benchmark.py  run_framework.py  plot_results.py   back-compat shims for the CLI
 ```
 
 ---
@@ -257,7 +257,7 @@ container the same `pip` line runs in the image. Native toolchains
 the `curl` examples want bash/zsh or the WSL2 shell -- native PowerShell/cmd are not targeted).
 
 ```sh
-python scripts/quickstart.py && python scripts/plot_results.py     # smoke-run a few benchmarks + plot
+hpcagent-bench quickstart && hpcagent-bench plot     # smoke-run a few benchmarks + plot
 ```
 
 ---
@@ -346,7 +346,7 @@ and **`XL`**. `S`/`M`/`L` target ~=10/100/1000 ms under NumPy; **`XL`** is the G
 arrays occupy **>= 4 GB** at fp64 (out of cache, DRAM/HBM-bound). Choose with `-p`:
 
 ```sh
-python scripts/run_benchmark.py -b gemm -f numpy -p XL
+hpcagent-bench run-benchmark -b gemm -f numpy -p XL
 ```
 
 A fifth preset, **`fuzzed`**, samples sizes in `[L, XL]` and cycles input distributions. It is
