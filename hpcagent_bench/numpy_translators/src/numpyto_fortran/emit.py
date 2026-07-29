@@ -394,6 +394,57 @@ def _produces_logical(rhs: ast.AST) -> bool:
     return False
 
 
+def _logical_locals(kir: KernelIR) -> Set[str]:
+    """Every local the backend must emit as Fortran LOGICAL.
+
+    ONE definition, read by both the body emitter (operand routing: a bare use is the logical,
+    not an integer flag to wrap ``/= 0``) and the declaration pass (``logical(c_bool) :: x``).
+    The two used to be computed separately and drifted, which is how a mask could be *used* as a
+    logical while being *declared* real.
+
+    Sources: a bare ``True``/``False`` assign, a ``bool`` entry in ``local_dtypes``, a
+    boolean-valued RHS, and -- transitively -- a plain copy from any of those.
+    """
+    names: Set[str] = set(_assigned_bool_literal(kir.tree))
+    names |= {nm for nm, dt in kir.local_dtypes.items() if dt in ("bool", "bool_")}
+    # (target, source) of the copies ``X[..] = Y[..]`` / ``X = Y`` that carry a dtype across.
+    copies: List[Tuple[str, str]] = []
+    for node in ast.walk(kir.tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        tgt = node.targets[0]
+        if isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name):
+            tgt_name = tgt.value.id
+        elif isinstance(tgt, ast.Name):
+            tgt_name = tgt.id
+        else:
+            continue
+        if _produces_logical(node.value):
+            names.add(tgt_name)
+            continue
+        src = node.value
+        if isinstance(src, ast.Subscript) and isinstance(src.value, ast.Name):
+            copies.append((tgt_name, src.value.id))
+        elif isinstance(src, ast.Name):
+            copies.append((tgt_name, src.id))
+    # ``mask[i] = cmp_tmp[i]`` -- the elementwise lowering of ``mask = a < b`` splits the compare
+    # into a bool temp and a copy, so the boolean only reaches ``mask`` through the copy. Fixpoint:
+    # ast.walk order is not dataflow order, so one pass can miss a chain.
+    bool_sources = {a.name for a in kir.arrays if a.dtype in ("bool", "bool_")}
+    # A DECLARED array carries the dtype of its own descriptor; a copy must never retype it.
+    declared = {a.name for a in kir.arrays if a.dtype not in ("bool", "bool_")}
+    changed = True
+    while changed:
+        changed = False
+        for tgt_name, src_name in copies:
+            if tgt_name in names or tgt_name in declared:
+                continue
+            if src_name in names or src_name in bool_sources:
+                names.add(tgt_name)
+                changed = True
+    return names
+
+
 def _int_literal_value(node: ast.AST) -> Optional[int]:
     """The integer value of a possibly-negated int literal (5 -> 5, -5 -> -5), else None."""
     if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
@@ -567,32 +618,6 @@ class _FortranBodyEmitter(BaseEmitter):
         out.append(f"{indent}end if")
         return "\n".join(out)
 
-    def _is_logical_operand(self, node: ast.AST) -> bool:
-        """True when node evaluates to a Fortran LOGICAL; used to route & / | to .AND. / .OR. rather than IAND/IOR."""
-        if isinstance(node, (ast.Compare, ast.BoolOp)):
-            return True
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return True
-        # ~x (mask inversion) is logical iff its operand is, so m & ~m3 routes to .AND.
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
-            return self._is_logical_operand(node.operand)
-        # A & | ^ combine of logicals is itself logical, so a nested combine routes
-        # the outer op to .AND./.OR. too (gfortran rejects IAND/IOR/IEOR of LOGICAL).
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
-            return self._is_logical_operand(node.left) and self._is_logical_operand(node.right)
-        if isinstance(node, ast.Name) and node.id in self._logical_array_locals:
-            return True
-        # A bool-typed scalar parameter (vexx_k config flag) is logical.
-        if isinstance(node, ast.Name) and node.id in self._bool_scalar_names():
-            return True
-        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
-            return True
-        # A subscript into a known boolean-array local is also logical.
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) \
-                and node.value.id in self._logical_array_locals:
-            return True
-        return False
-
     def _is_int_flag_scalar(self, node: ast.AST) -> bool:
         """arr[i] (int param array) or a bare int scalar param used as a 0/1 flag; can't retype to logical (C ABI)."""
         ints = vars(self).get("_int_array_names", set())
@@ -613,13 +638,31 @@ class _FortranBodyEmitter(BaseEmitter):
         return isinstance(node, ast.Name) and node.id in int_scalars
 
     def _is_logical_node(self, node: ast.AST) -> bool:
-        """True when node emits a Fortran LOGICAL: _produces_logical, a boolean-typed local, or a ~/& | ^ combine of those."""
+        """True when node emits a Fortran LOGICAL.
+
+        THE logical-ness oracle for this backend: operand routing (& | ^ -> .AND./.OR./.NEQV.),
+        ``.not.`` of a mask, the ``<logical> /= 0`` truthiness fold, and the ``if`` condition
+        emitters all ask this one question. Splitting it into per-site copies is what let an
+        ``if (~mask(i))`` condition get wrapped ``/= 0`` while the sibling ``.and.`` operand path
+        got it right, so keep every caller on this single predicate.
+        """
+        # Compare / BoolOp / not / ~logical / a & | ^ combine of logicals.
         if _produces_logical(node):
             return True
+        # ~x and a & | ^ combine are logical iff their operands are, INCLUDING when the operand is
+        # only known logical from the side tables below (_produces_logical is module-level and
+        # cannot see them), so recurse through this method rather than through _produces_logical.
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
             return self._is_logical_node(node.operand)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
             return self._is_logical_node(node.left) and self._is_logical_node(node.right)
+        # A folded ``.true.`` / ``.false.`` literal.
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return True
+        # A bool-typed scalar parameter (vexx_k config flag) declares logical(c_bool).
+        if isinstance(node, ast.Name) and node.id in self._bool_scalar_names():
+            return True
+        # A boolean-array/scalar local, bare or subscripted.
         logicals = vars(self).get("_logical_array_locals", set())
         if isinstance(node, ast.Name) and node.id in logicals:
             return True
@@ -638,37 +681,25 @@ class _FortranBodyEmitter(BaseEmitter):
     def _as_logical_operand(self, node: ast.AST) -> str:
         """Emit node as a Fortran LOGICAL operand for .and./.or.; a non-logical value becomes (expr) /= 0."""
         e = self.emit_expr(node)
-        if _produces_logical(node):
-            return e
-        # A boolean literal (a folded ``.false.`` / ``.true.``) is already logical.
-        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
-            return e
-        if isinstance(node, ast.Name) and node.id in self._bool_scalar_names():
-            return e
-        logicals = vars(self).get("_logical_array_locals", set())
-        if isinstance(node, ast.Name) and node.id in logicals:
-            return e
-        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in logicals):
+        if self._is_logical_node(node):
             return e
         return f"({e}) /= 0"
 
     def _emit_logical_test(self, node: ast.AST) -> str:
         """Emit a condition expression as a Fortran scalar LOGICAL, wrapping an integer-ish expression with /= 0."""
         cond = self.emit_expr(node)
-        # Already logical (& | ^ over LOGICAL operands yields LOGICAL too) -- no wrap
+        # Already logical (& | ^ / ~ over LOGICAL operands yields LOGICAL too) -- no wrap
         # needed; wrapping it in /= 0 would be a LOGICAL-vs-INTEGER type error.
-        if _produces_logical(node):
-            return cond
-        if isinstance(node, (ast.Compare, ast.BoolOp)):
-            return cond
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return cond
-        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        if self._is_logical_node(node):
             return cond
         # Heuristic: a bitwise BinOp, an int-intrinsic Call, or a Name in int_uses -- wrap with /= 0.
         int_uses = self._int_uses()
 
         def is_int_expr(n):
+            # A LOGICAL subexpression is never integer, whatever its operator says: ``~m`` and
+            # ``m1 ^ m2`` are .not./.neqv. on masks, not NOT/IEOR on bits.
+            if self._is_logical_node(n):
+                return False
             if isinstance(n, ast.Constant):
                 return isinstance(n.value, int) and not isinstance(n.value, bool)
             if isinstance(n, ast.BinOp):
@@ -1009,19 +1040,19 @@ class _FortranBodyEmitter(BaseEmitter):
             # & / | on LOGICAL operands (numpy's elementwise boolean AND/OR) must be
             # .AND./.OR. instead -- IAND/IOR reject a logical operand.
             if isinstance(node.op, ast.BitAnd):
-                if self._is_logical_operand(node.left) and self._is_logical_operand(node.right):
+                if self._is_logical_node(node.left) and self._is_logical_node(node.right):
                     return f"({self.emit_expr(node.left)} .AND. {self.emit_expr(node.right)})"
                 left, right = self._emit_bitwise_pair(node.left, node.right)
                 return f"IAND({left}, {right})"
             if isinstance(node.op, ast.BitOr):
-                if self._is_logical_operand(node.left) and self._is_logical_operand(node.right):
+                if self._is_logical_node(node.left) and self._is_logical_node(node.right):
                     return f"({self.emit_expr(node.left)} .OR. {self.emit_expr(node.right)})"
                 left, right = self._emit_bitwise_pair(node.left, node.right)
                 return f"IOR({left}, {right})"
             if isinstance(node.op, ast.BitXor):
                 # ^ on LOGICAL masks is elementwise XOR -> .neqv. (IEOR rejects a
                 # logical operand), mirroring the & / | handling above.
-                if self._is_logical_operand(node.left) and self._is_logical_operand(node.right):
+                if self._is_logical_node(node.left) and self._is_logical_node(node.right):
                     return f"({self.emit_expr(node.left)} .neqv. {self.emit_expr(node.right)})"
                 left, right = self._emit_bitwise_pair(node.left, node.right)
                 return f"IEOR({left}, {right})"
@@ -1770,7 +1801,10 @@ class _FortranBodyEmitter(BaseEmitter):
                     return True
                 if e.id in int_uses:
                     return True
-                return False
+                # Locals typed only through local_dtypes / the emit-time kind maps -- a hoisted
+                # IfExp temp (``x_ifexp0``) lands there and nowhere else, so without this a
+                # max(int_temp, int_expr) reads as mixed and lowers to the real-wrapped form.
+                return self._name_int_kind(e.id) is not None
             if isinstance(e, ast.BinOp):
                 # a % b / a // b are int-returning when operands are; a / b in
                 # Fortran follows the operand type (int/int=int).
@@ -2289,25 +2323,11 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
     # reads as INTEGER; typed before that pass it would look untyped and widen the temp to real.
     _record_ifexp_temp_dtypes(body_emitter, ifexp_temps, _safe_full)
     # Pre-compute logical_array_locals so _emit_subscript can detect arr[mask]
-    # boolean-indexing and emit PACK(arr, mask).
-    _pre_logical_arr_locals: Set[str] = set(_assigned_bool_literal(kir.tree))
-    # Array locals the lowering typed boolean via local_dtypes rather than a
-    # bare True/False literal assignment.
-    _ld_pre = kir.local_dtypes
-    _pre_logical_arr_locals |= {nm for nm, dt in _ld_pre.items() if dt in ("bool", "bool_")}
-    for node in ast.walk(kir.tree):
-        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
-            continue
-        tgt = node.targets[0]
-        if not _produces_logical(node.value):
-            continue
-        # Both a boolean ARRAY local (mask[i] = a[i] < b[i]) and a boolean SCALAR
-        # local are Fortran logical; route bare uses as LOGICAL, not /= 0.
-        if isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name):
-            _pre_logical_arr_locals.add(tgt.value.id)
-        elif isinstance(tgt, ast.Name):
-            _pre_logical_arr_locals.add(tgt.id)
-    body_emitter._logical_array_locals = _pre_logical_arr_locals
+    # boolean-indexing and emit PACK(arr, mask). Computed ONCE and handed to both the body
+    # emitter and the declaration pass below -- a bare use must be routed as LOGICAL exactly
+    # when the decl says logical(c_bool), and two separate computations is how that drifted.
+    logical_array_locals: Set[str] = _logical_locals(kir)
+    body_emitter._logical_array_locals = logical_array_locals
     # Int-typed PARAMETER arrays cannot be re-typed (C ABI); wrap their 0/1-flag
     # use with /= 0 at the condition site instead. NOT dtypes.is_integer: the question here
     # is what Fortran EMITS, and fp8 is stored as integer(c_int8_t) though its dtype is a
@@ -2351,19 +2371,8 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
     for s in kir.scalars:
         if s.dtype in ("int", "int32", "int64"):
             allowed_bound_names.add(s.name)
-    # Detect array locals whose body uses Compare/BoolOp on per-element
-    # assignments -- those must be Fortran logical arrays.
-    logical_array_locals: Set[str] = set(_assigned_bool_literal(kir.tree))
-    # Array locals the lowering typed boolean via local_dtypes are logical too.
-    _ld_decl = kir.local_dtypes
-    logical_array_locals |= {nm for nm, dt in _ld_decl.items() if dt in ("bool", "bool_")}
-    # SCALAR locals whose RHS is boolean-valued are Fortran logical too: the
-    # emitter's operand routing keys off this set, so without it a bare use is
-    # treated as an integer flag and wrapped /= 0, which gfortran rejects.
-    for node in ast.walk(kir.tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-                and _produces_logical(node.value)):
-            logical_array_locals.add(node.targets[0].id)
+    # ``logical_array_locals`` (computed above, shared with the body emitter) drives the
+    # logical(c_bool) declarations below.
     # Track inferred dtype for array locals via per-element assigns
     # (cols[si0] = A_col[expr] -> cols inherits A_col's dtype).
     inferred_local_dtypes: Dict[str, str] = {}
@@ -2374,8 +2383,6 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
         if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript)
                 and isinstance(node.targets[0].value, ast.Name)):
             rhs = node.value
-            if _produces_logical(rhs):
-                logical_array_locals.add(node.targets[0].value.id)
             # X[i] = Y[j] where Y is a typed array -- propagate Y's dtype to X.
             if isinstance(rhs, ast.Subscript) and isinstance(rhs.value, ast.Name):
                 src = rhs.value.id

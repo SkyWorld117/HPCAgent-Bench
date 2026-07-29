@@ -262,8 +262,16 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
             return expr_rank(value.func.value, ranks) if value.func.attr != "ravel" else 1
         # ``x.reshape((a, b))`` method form.
         if (isinstance(value.func, ast.Attribute) and value.func.attr == "reshape" and value.args):
-            n = _tuple_len(value.args[0]) or (len(value.args) if all(
-                isinstance(a, (ast.Name, ast.Constant)) for a in value.args) else None)
+            # Multi-arg spelling: ONE positional argument per dimension, so the rank is the
+            # argument count whatever each dimension expression looks like -- ``X.reshape(-1,
+            # X.shape[-1])`` (ls3df_scf) is rank 2, and neither ``-1`` (a UnaryOp) nor
+            # ``X.shape[-1]`` (a Subscript) is a bare Name. Requiring Name/Constant there read
+            # every such reshape as "rank unknown", which then reached np.linalg.cholesky as
+            # ndim 0. The single-arg spelling stays restricted: a lone Name may hold the whole
+            # shape TUPLE, which is a rank this cannot count.
+            n = _tuple_len(value.args[0])
+            if n is None and (len(value.args) > 1 or isinstance(value.args[0], (ast.Name, ast.Constant))):
+                n = len(value.args)
             if n is not None:
                 return n
         # Fallback: remaining np.<fn>(...) are elementwise/broadcasting ufuncs

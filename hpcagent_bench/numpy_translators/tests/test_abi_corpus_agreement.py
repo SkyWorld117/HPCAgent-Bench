@@ -21,10 +21,10 @@ Two distinct failure modes, asserted separately because they need different fixe
 
 All three lists below are ratchets, asserted in BOTH directions: a kernel that starts
 disagreeing fails, and a kernel that is fixed but left in the list also fails. Neither can
-rot silently. **Every kernel that lowers agrees exactly, so both disagreement lists are
-EMPTY** -- any entry appearing there again is a regression, not a backlog. The third list
-is different in kind: those kernels do not lower at all, so they have no emitted ABI to
-compare, and a REFUSAL is the wanted outcome rather than a defect to waive.
+rot silently. **Every kernel in the corpus lowers, and every one of them agrees exactly, so
+all three lists are EMPTY** -- any entry appearing again is a regression, not a backlog. The
+third list is different in kind: a kernel there does not lower at all, so it has no emitted
+ABI to compare, and a REFUSAL is the wanted outcome rather than a defect to waive.
 
 Marked ``integration``: it lowers the whole registry, far too slow for the default suite.
 """
@@ -50,14 +50,10 @@ KNOWN_NAME_DISAGREEMENTS: Dict[str, str] = {}
 #: the other two: a kernel that starts refusing fails here, and one that is fixed but left behind
 #: fails too. A refusal is not a waiver -- it is the translator declining to emit something it
 #: cannot emit correctly, which is the outcome we want over a silently wrong loop nest.
-KNOWN_NON_LOWERING: Dict[str, str] = {
-    "ml/kernelbench/level2/conv2d_instance_norm_divide/conv2d_instance_norm_divide":
-    "np.mean(x, axis=axes) inside a non-inlined helper: axes = tuple(range(2, x.ndim)) is not "
-    "folded on the helper path, and a symbolic axis has no static loop nest",
-    "ml/kernelbench/level2/conv3d_multiply_instance_norm_clamp_multiply_max/"
-    "conv3d_multiply_instance_norm_clamp_multiply_max":
-    "same instance-norm helper; same unfolded axes tuple",
-}
+#: EMPTY: the two instance-norm kernels pinned here (np.mean over an unfolded ``axes`` tuple inside
+#: a non-inlined helper) now lower, and their emitted ABI matches the binding exactly -- so they are
+#: gated by the two lists above like every other kernel, not skipped by this one.
+KNOWN_NON_LOWERING: Dict[str, str] = {}
 
 #: Names line up but a slot's DTYPE disagrees -- just as fatal, since SysV/AAPCS64 allocate INTEGER
 #: and SSE arguments from independent register sequences. EMPTY: an entry here is a regression.
