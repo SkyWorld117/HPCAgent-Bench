@@ -176,10 +176,8 @@ tools/pluto_affine_survey_results.txt
 # The filled-in Alps EDF: account-, image- and scratch-specific. Only the template is tracked.
 scripts/cscs/env.toml
 
-# Per-checkout agent / IDE config (Claude Code, etc.) -- machine-local, never committed. The
-# exception is .claude/skills/, the contributor workflows an agent loads on demand (docs/README.md).
-.claude/*
-!.claude/skills/
+# Per-checkout agent / IDE config (Claude Code, etc.) -- machine-local, never committed.
+.claude/
 
 # Native (no-container) run scratch -- keep the folder, ignore its contents.
 hpcagent_bench/native_runs/*
