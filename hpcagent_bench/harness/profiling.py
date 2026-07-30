@@ -3,7 +3,7 @@
 """Profile ONE submission with ``perf`` and hand back a folded call graph.
 
 This is the programmatic equivalent of steps 1-6 of the kernel-extraction workflow
-(``.claude/skills/profiling/SKILL.md``), which a human does by hand on a production
+(``docs/kernel_extraction.md``), which a human does by hand on a production
 application before porting a kernel out of it:
 
 1. **build with debug symbols** -- the submission is compiled by the usual
@@ -38,7 +38,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-from hpcagent_bench import config, flags, perf_reports
+from hpcagent_bench import config, flags, perf_reports, sizing
 from hpcagent_bench.flags import Mode
 from hpcagent_bench.harness import timing
 from hpcagent_bench.harness.envelope import Submission
@@ -229,7 +229,7 @@ def profile_submission(submission: Submission,
                 "reps": reps,
                 "warmup": warmup,
                 "timeout": rep_timeout,
-                "memory_gb": float(config.get("limits.kernel_memory_gb", 10)),
+                "memory_gb": sizing.kernel_memory_gb(spec, preset, datatype, submission.workspace_bytes),
                 "workspace_bytes": submission.workspace_bytes,
             }))
         # The inner per-rep guard bounds the measurement; this is the backstop for a child that
