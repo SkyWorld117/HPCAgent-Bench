@@ -12,6 +12,11 @@ Two doc roots, one rule:
   doc does not belong here.
 - **`docs/`** (this directory) -- everything a human reads: how-tos, design notes, references.
   Nothing here gates a submission.
+- **`.claude/skills/<name>/SKILL.md`** -- the same kind of how-to, written for a coding agent
+  working IN this repo to load on demand (today: `profiling`, extracting a benchmark from a
+  production application). The only tracked part of `.claude/`. Not to be confused with
+  `hpcagent_bench/harness/prompts/skills/`, which is DATA: fragments shipped into a graded
+  agent's prompt, about optimizing a kernel it was handed.
 
 Filenames are `lowercase_snake.md`, except the `DESIGN_` prefix, which is kept because it carries
 meaning: it marks a plan or decision record, not a description of what already exists.

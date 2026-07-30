@@ -612,7 +612,9 @@ This README is the single guide; these files go deeper on specific topics.
 
 Also linked inline above: [docs/launch.md](docs/launch.md) (cluster launch),
 [docs/prompts.md](docs/prompts.md) (the agent prompt), [docs/adding_benchmarks_containers_languages.md](docs/adding_benchmarks_containers_languages.md)
-(add a benchmark / container / language).
+(add a benchmark / container / language), and
+[`.claude/skills/profiling/SKILL.md`](.claude/skills/profiling/SKILL.md) (extract a benchmark
+out of a production application -- profile, cut, port, validate).
 
 ---
 
