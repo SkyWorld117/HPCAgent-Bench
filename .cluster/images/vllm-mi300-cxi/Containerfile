@@ -1,0 +1,63 @@
+# vLLM on CSCS Alps / AMD MI300
+#
+# CSCS currently documents statically linked aws-ofi-nccl hook variants only
+# for ROCm 5 and ROCm 6.  The default below is therefore an intentionally
+# pinned ROCm 6.4.1 compatibility image.  Override it only with another image
+# whose `torch.version.hip` has been checked against the EDF hook variant.
+ARG VLLM_ROCM_IMAGE=docker.io/rocm/vllm:rocm6.4.1_vllm_0.10.1_20250909
+FROM ${VLLM_ROCM_IMAGE}
+
+USER root
+
+# Multi-node vLLM uses Ray.  Keep this pinned so rebuilding the image does not
+# silently change the distributed runtime.  Override after testing a different
+# version with the selected vLLM base.
+ARG RAY_SPEC="ray[default]==2.48.0"
+
+# CSCS documents that libfabric must be available in the container.  At
+# runtime, the CXI hook replaces the generic container libfabric with the
+# matching host implementation and injects its dependencies/devices.
+# libfabric-bin supplies `fi_info` for the official CXI validation check.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       libfabric1 \
+       libfabric-bin \
+       iproute2 \
+       numactl \
+       procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Do not overwrite a Ray installation already supplied by the base image.
+# Otherwise install the explicitly pinned build argument.
+RUN if python3 -c 'import ray' >/dev/null 2>&1; then \
+      python3 -c 'import ray; print("Using Ray already present in base:", ray.__version__)'; \
+    else \
+      test -n "${RAY_SPEC}" || { echo >&2 'Ray is absent and RAY_SPEC is empty'; exit 2; }; \
+      if command -v uv >/dev/null 2>&1; then \
+        uv pip install --system --no-cache "${RAY_SPEC}"; \
+      else \
+        python3 -m pip install --no-cache-dir "${RAY_SPEC}"; \
+      fi; \
+    fi
+
+# Fail early if the expected runtime is incomplete.  GPU visibility and CXI
+# are runtime properties and are tested after the SquashFS image is launched
+# with the Container Engine hooks.
+RUN python3 - <<'PY'
+import torch
+import vllm
+import ray
+
+print("torch:", torch.__version__)
+print("HIP:", torch.version.hip)
+print("vLLM:", vllm.__version__)
+print("Ray:", ray.__version__)
+if not torch.version.hip:
+    raise RuntimeError("The selected base image is not ROCm-enabled")
+PY
+
+WORKDIR /workspace
+
+# Deliberately do not set NCCL_NET_PLUGIN, FI_PROVIDER, LD_LIBRARY_PATH,
+# NCCL_SOCKET_IFNAME, or CXI device paths here.  The CSCS aws_ofi_nccl hook
+# injects and configures the supported RCCL/OFI/libfabric/CXI stack at runtime.

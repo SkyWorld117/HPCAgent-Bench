@@ -1,0 +1,35 @@
+# CSCS Container Engine environment for an AMD MI300 image using ROCm 6.
+# Before launching:
+#   export VLLM_MI300_SQSH="$SCRATCH/ce-images/vllm-mi300-rocm6.sqsh"
+
+image = "${VLLM_MI300_SQSH}"
+entrypoint = false
+workdir = "${SCRATCH}"
+
+# Add /capstor or /iopsstor only when those filesystems are available on Opus.
+# Avoid mounting all of $HOME.
+mounts = [
+  "${SCRATCH}:${SCRATCH}"
+]
+
+[annotations]
+# This hook supports RCCL and implicitly enables the CXI hook.
+com.hooks.aws_ofi_nccl.enabled = "true"
+com.hooks.aws_ofi_nccl.variant = "rocm6"
+
+# Do not force com.hooks.netstack.source.  Each vCluster has a configured
+# default; Opus-specific availability is not documented on the public pages.
+
+[env]
+# Bring-up logging.  Change INFO to WARN after the network path is validated.
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,NET"
+
+# CSCS PyTorch recommendations for distributed jobs.
+TORCH_NCCL_ASYNC_ERROR_HANDLING = "1"
+MPICH_GPU_SUPPORT_ENABLED = "0"
+
+# Use a selectively mounted cache.  On a vCluster with iopsstor, consider
+# putting random-access Hugging Face cache data there instead.
+HF_HOME = "${SCRATCH}/.cache/huggingface"
+TOKENIZERS_PARALLELISM = "false"
