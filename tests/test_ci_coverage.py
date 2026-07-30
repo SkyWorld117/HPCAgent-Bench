@@ -8,6 +8,7 @@ meant to catch. A hand-written file list drifts in one direction only, because a
 by default and inertness is silent.
 """
 import pathlib
+import re
 from typing import Set
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -55,3 +56,27 @@ def test_the_sweep_is_discovered_not_enumerated() -> None:
     workflow = WORKFLOW.read_text()
     assert "dedicated_tests.txt" in workflow, "the sweep no longer reads the exclusion file"
     assert "ls tests/test_*.py" in workflow, "the sweep no longer discovers files with ls"
+
+
+def test_ci_never_asks_for_a_billed_runner() -> None:
+    """Standard GitHub-hosted runners are free on a public repo; LARGER runners bill per minute
+    even here. Self-hosted is our own hardware and bills nothing.
+
+    A guard rather than a review habit: `runs-on: ubuntu-latest-8-cores` is one plausible edit away
+    from `ubuntu-latest`, reads as a harmless speedup, and the cost of getting it wrong arrives on
+    an invoice rather than in a test run."""
+    standard = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "windows-latest", "macos-latest"}
+    offenders = []
+    for workflow in sorted((REPO / ".github" / "workflows").glob("*.y*ml")):
+        for line in workflow.read_text().splitlines():
+            match = re.match(r"\s*runs-on:\s*(.+?)\s*$", line)
+            if not match:
+                continue
+            value = match.group(1)
+            if value.startswith("["):  # a label list -- self-hosted, i.e. our own machine
+                if "self-hosted" not in value:
+                    offenders.append(f"{workflow.name}: {value}")
+            elif value not in standard:
+                offenders.append(f"{workflow.name}: {value}")
+    assert not offenders, (f"non-standard, billed-per-minute runners requested: {offenders}. "
+                           f"Free on a public repo are {sorted(standard)}, plus self-hosted labels.")
