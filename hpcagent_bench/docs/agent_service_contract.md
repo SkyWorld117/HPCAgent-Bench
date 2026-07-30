@@ -54,7 +54,7 @@ table + re-verify detail). A build or numeric failure is a normal scored result
 ## `POST /profile` -- where does the time actually go
 
 The programmatic form of steps 1-6 of the kernel-extraction workflow
-(`.claude/skills/profiling/SKILL.md`): build the submission with debug symbols, re-run the
+([`docs/kernel_extraction.md`](../../docs/kernel_extraction.md)): build the submission with debug symbols, re-run the
 graded measurement at each requested thread count under `perf record`, and answer with the
 folded call graph. Nothing here is graded, timed against a baseline, or recorded -- an agent
 uses it to decide WHAT to optimize, then submits to `/oracle`.
@@ -105,7 +105,7 @@ crashed) is a 500 carrying the child's stderr. The judge image already ships `pe
 
 The route is deliberately NOT advertised in the agent prompt -- a prompt cannot promise a
 capability the host may lack, and every extra fragment is measured prompt budget. To advertise
-it, add `hpcagent_bench/harness/prompts/tools/profile.md`; the prompt collects it with no code
+it, add `hpcagent_bench/tools/profile.md`; the prompt collects it with no code
 change.
 
 ## Config (`config.yaml` `service:` block; `HPCAGENT_BENCH_SERVICE_*` env overrides)
