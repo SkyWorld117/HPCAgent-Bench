@@ -1,6 +1,6 @@
 # Sample job submissions
 
-**Two** modes, four samples. They are concrete examples, not templates: edit the node counts and
+**Two** modes, six samples. They are concrete examples, not templates: edit the node counts and
 kernel selection at the top and submit. Each one only sets env knobs and hands off to the real
 script in `scripts/`, so a sample can never drift from the launcher it demonstrates.
 
@@ -27,6 +27,19 @@ while the framework list is short and fixed, so a framework-per-rank split leave
 behind the slowest column. Each rank takes `kernels[rank::nranks]` and runs *every* framework over
 its own kernels. Round-robin rather than contiguous blocks because neighbours in the sorted name list
 tend to be similar sizes.
+
+## The two mode exemplars
+
+One sample per mode, kept minimal so the mode itself is what you read:
+
+* **`agentic_container.sbatch`** — an LLM agent optimizing the corpus, scored by the judge. Set
+  `EDF=` (optional) and the model / endpoint knobs `scripts/submit_launch.sbatch` takes. Produces
+  judged scores plus timings.
+* **`deterministic_kernels_to_ranks.sbatch`** — deterministic columns over a kernel selection. Set
+  `FRAMEWORKS`, `BENCH`, `PRESET`. Produces the per-rank DB shards; the exit status is the merged
+  failure count.
+
+The four samples below are the second mode with a specific comparison already wired up.
 
 ## `hpc_dace_main_vs_pluto.sbatch` — one node, two optimizers, reports on
 
@@ -122,6 +135,79 @@ flavors.
 from it too and live under `ml/` here. Selecting by track would quietly make "the NPBench
 corpus" mean 49 of 54.
 
+## Native on CSCS Daint/Alps — no container
+
+Two samples run the same mode-2 sweep on Alps with **no container**: no EDF, no `--environment`, no
+`ce.srun_flag`. They keep the site knowledge from
+[`scripts/cscs/submit_foundation_alps.sbatch`](../scripts/cscs/submit_foundation_alps.sbatch) — `-A
+<account>` mandatory, aarch64 GH200 nodes, the DaCe build folder off `/tmp` (tmpfs on these nodes),
+results in the repo rather than node-local — and drop its container plumbing entirely.
+
+* **`cscs_alps_native_three_way.sbatch`** — `pluto`, `dace_cpu_autoopt` on `main`, and
+  `dace_cpu_autoopt` on `extended`. Three columns plus numpy, one speedup PDF.
+* **`cscs_alps_native_pipelines.sbatch`** — `parallel` + `autoopt` on `main`, and `parallel` +
+  `autoopt` + `canonicalize` on `extended`. Five stage-columns plus numpy, one speedup PDF.
+
+The first isolates the **tree**: one optimizer, two DaCes, so whatever differs between the two
+`autoopt` cells is the DaCe underneath. The second is the full pipeline grid, with the four shared
+cells as the control for the fifth — same reasoning as `npbench_dace_flavors.sbatch`, over the `hpc`
+track instead of NPBench.
+
+Native means **nothing comes from an image**, so all three must exist on the compute node, and each
+is refused by name at submission rather than discovered on rank 3 of an allocation already charged:
+
+* `HPCAGENT_BENCH_ENV` — a script the job `source`s: the site `module load`s plus the venv activate
+  for the python that has `hpcagent-bench` installed.
+* `DACE_MAIN` — a DaCe checkout on `main`. It goes on `PYTHONPATH`, so it is the **repo root**, not
+  its `dace/`.
+* `DACE_EXTENDED` — a DaCe checkout on `extended`, likewise.
+
+    HPCAGENT_BENCH_ENV=$SCRATCH/hpcagent-env.sh DACE_MAIN=$SCRATCH/dace-main \
+        DACE_EXTENDED=$SCRATCH/dace-extended \
+        sbatch -A <account> samples/cscs_alps_native_three_way.sbatch
+
+`require_native_env` / `require_dace_tree` / `evict_base_sdfg_cache` live in
+[`scripts/cscs/native_env.sh`](../scripts/cscs/native_env.sh), shared by both, for the same reason
+`ensure_branch` lives in `scripts/dace_branch.sh`: a second copy is how the two would drift.
+
+`BENCH=hpc` is **132** kernels. That is the number to size `--time` against — the defaults here are
+12 h over 4 nodes (three-way) and 8 nodes (pipelines), at `PRESET=L`, and are a starting point, not a
+measurement.
+
+### Two traps these two avoid
+
+**`numpy` must not carry a `build` stamp.** `HPCAGENT_BENCH_RECORD_BUILD` is read for *every*
+framework, not just the DaCe ones, and `plot` folds a non-null `build` into the series name. A numpy
+row stamped `main` therefore plots as `numpy/main`, and `heatmap_figure`'s `assert ('numpy' in
+frmwrks)` fails — no speedup table, after the whole sweep. Both native samples run the
+tree-independent columns (`numpy`, and `pluto` in the three-way job) in their own **unstamped**
+stage, so the baseline stays `numpy` and is still measured exactly once.
+
+> The two older DaCe samples above do **not** do this: `hpc_dace_main_vs_pluto.sbatch` exports
+> `HPCAGENT_BENCH_RECORD_BUILD=main` for its whole run, and `npbench_dace_flavors.sbatch` puts
+> `numpy` in its `main` stage. Both stamp the baseline and their final `plot` step trips that
+> assert. Not fixed here — it is a change to files this section does not own.
+
+**A base SDFG parsed by one tree must not be reused by the other.** `DACE_BUILD_ROOT` per stage
+separates the compiled `.so`, but the *parsed* base SDFG is cached a level above it, in
+`hpcagent_bench/benchmarks/<kernel>/.cache/<module>_cpu.sdfgz`, fingerprinted on the kernel sources
+and the precision **only** — not on which DaCe parsed them (`DaceFramework._sdfg_fingerprint`). Two
+trees in one job collide there: whichever stage runs first seeds the cache, and the second measures
+its own pipelines over the *first* tree's parse. Ordering-dependent, and it produces numbers that
+look entirely normal. Both samples call `evict_base_sdfg_cache` before each DaCe stage so every tree
+parses with its own frontend; a miss is just a rebuild.
+
+### Unverified
+
+Carried over from `submit_foundation_alps.sbatch`, which says the same of itself: **none of this has
+been checked against the site's own submission scripts.** The partition name, the account and the
+scratch layout are the three things most likely to need a local edit — no `--partition` line is set
+for that reason. `$SCRATCH` on Alps is still the parallel FS; `/iopsstor` (flash) suits thousands of
+small compiler writes better than `/capstor`, so point `DACE_BUILD_ROOT` there if both are mounted,
+but only the mount *names* are known here (from `scripts/cscs/env.toml.example`). There is no Slurm
+on the development box, so both scripts are verified only by `bash -n`, by the column names and CLI
+flags being checked against the code, and by their helpers being unit-exercised on a fake tree.
+
 ## Results and the DB
 
 Every rank writes its **own** `hpcagent_bench<rank>.db` in the repo directory. That is not a
@@ -151,7 +237,12 @@ merge itself if a shard moved, so the two steps cannot disagree.
     sbatch -A <account> samples/deterministic_kernels_to_ranks.sbatch
     DACE_MAIN=... sbatch -A <account> samples/hpc_dace_main_vs_pluto.sbatch
     DACE_MAIN=... DACE_EXTENDED=... sbatch -A <account> -N 8 samples/npbench_dace_flavors.sbatch
+    HPCAGENT_BENCH_ENV=... DACE_MAIN=... DACE_EXTENDED=... \
+        sbatch -A <account> samples/cscs_alps_native_three_way.sbatch
+    HPCAGENT_BENCH_ENV=... DACE_MAIN=... DACE_EXTENDED=... \
+        sbatch -A <account> samples/cscs_alps_native_pipelines.sbatch
 
-All three write under `results/`. The deterministic job's exit status is the merged failure count across
+All of them write under `results/`. The deterministic job's exit status is the merged failure count across
 shards, so a shard whose kernels stopped compiling (or silently miscompiled) fails the job instead of
-disappearing into one rank's log.
+disappearing into one rank's log. The multi-stage jobs run every stage even when an earlier one fails
+and report the failed stage names at the end — losing half a comparison silently is the worst outcome.
