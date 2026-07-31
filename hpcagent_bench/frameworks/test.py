@@ -171,6 +171,16 @@ class Test(object):
             # Fresh dict: bdata may be a cached object owned by get_data; mutating in place would
             # corrupt the cache for every later caller.
             bdata = {k: (detected_dtype(v) if type(v) is float else v) for k, v in bdata.items()}
+            # No --datatype was requested, so set_datatype(None) above bound the framework to fp64
+            # (see precision_from_datatype) while a legacy initialize() is free to default to
+            # something else -- arc_distance's is np.float32. Harmless for a dynamically-typed
+            # framework (numpy/numba dispatch on the array it is actually handed), but a compiled
+            # backend (DaCe) parses its @dace.program's fixed-width buffer types from this global
+            # BEFORE it ever sees bdata; left at fp64 it binds a float64 kernel to float32 buffers,
+            # a real ABI mismatch (undersized reads/writes) rather than a validation failure. Resync
+            # to what the data actually is, ahead of the implementations()/optimize() call below.
+            if datatype is None:
+                self.frmwrk.set_datatype(detected_dtype.__name__)
 
         # Run NumPy for validation
         if validate and self.frmwrk.fname != "numpy" and self.numpy:
@@ -290,23 +300,32 @@ class Test(object):
         with Session(engine) as session:
             for d in bvalues:
                 session.add(
-                    Result(timestamp=timestamp,
-                           benchmark=self.bench.info["short_name"],
-                           domain=domain,
-                           preset=preset,
-                           framework=column,
-                           flavor=flavor,
-                           agent=None,
-                           validated=d["validated"],
-                           time=d["time"],
-                           native_time=d.get("native_time"),
-                           datatype=datatype if datatype is not None else 'float64',
-                           variant=variant,
-                           build=build,
-                           prompt_hash=None,
-                           execution=execution,
-                           cpu=osinfo.cpu_model(),
-                           gpu=osinfo.gpu_model() if self.frmwrk.info["arch"] == "gpu" else None))
+                    Result(
+                        timestamp=timestamp,
+                        benchmark=self.bench.info["short_name"],
+                        domain=domain,
+                        preset=preset,
+                        framework=column,
+                        flavor=flavor,
+                        agent=None,
+                        validated=d["validated"],
+                        time=d["time"],
+                        native_time=d.get("native_time"),
+                        # What the run ACTUALLY materialized, not what was asked for. With no
+                        # --datatype the request is None and a legacy initialize() picks its own
+                        # width -- arc_distance's is float32 -- so a hardcoded 'float64' here
+                        # labels the row with a precision the data never had. Every consumer that
+                        # groups or filters on this column (the plot's datatype filter, the
+                        # per-precision comparisons) then compares fp32 timings inside an fp64
+                        # bucket. `detected_dtype` is the same value the tolerance band and the
+                        # framework binding are keyed off above, so all three now agree.
+                        datatype=datatype or (detected_dtype.__name__ if detected_dtype is not None else 'float64'),
+                        variant=variant,
+                        build=build,
+                        prompt_hash=None,
+                        execution=execution,
+                        cpu=osinfo.cpu_model(),
+                        gpu=osinfo.gpu_model() if self.frmwrk.info["arch"] == "gpu" else None))
             session.commit()
 
         # Return per-impl timing dict so the CLI can persist it as JSONL.
