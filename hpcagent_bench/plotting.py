@@ -56,6 +56,10 @@ from hpcagent_bench.spec import select_short_names  # noqa: E402
 #: Seed for every per-cell bootstrap so the same DB yields the same published figure.
 CI_SEED: int = 0
 
+#: The speedup denominator. Named here because it is not just another series: every ratio in the
+#: heatmap divides by it, so it has to survive :func:`load_results` under its own name.
+BASELINE: str = "numpy"
+
 #: Fixed categorical palette (colorblind-safe), one stable hue per framework slot; cycled if
 #: more frameworks than colors. A framework keeps its colour across every panel of the grid.
 _PALETTE: Tuple[str, ...] = ("#2a78d6", "#e07a2b", "#1baf7a", "#d64550", "#7a5cc0", "#b5892b", "#4aada6", "#c65b9b",
@@ -133,7 +137,20 @@ def load_results(db: Optional[str],
     """
     # A distributed run leaves one DB per rank and no merged file until something asks for it; this
     # is that ask, so plotting a sharded run needs no separate aggregation step.
-    conn = sqlite3.connect(recording.ensure_aggregated(db or recording.base_db_path()))
+    target = db or recording.base_db_path()
+    aggregate = recording.ensure_aggregated(target)
+    # sqlite3.connect CREATES an absent file, so a run that recorded nothing reaches the query with
+    # an empty DB and dies on a bare "no such table: results" naming neither the path it opened nor
+    # the shards it looked for. The shards are the authoritative writes (recording.db_path) and the
+    # base is the cache built from them, so "no shard beside the base" is the diagnosis worth
+    # printing: it says the RUN leg wrote nothing, which is never a plotting bug.
+    if not recording.table_exists(aggregate, "results"):
+        shards = recording.shard_paths(target)
+        raise RuntimeError(f"no results table in {aggregate!r}. Shards beside it: {shards or 'none'}. "
+                           f"A run records into its own shard (hpcagent_bench<N>.db) and the base is "
+                           f"rebuilt from those, so an absent table means the run leg recorded no rows "
+                           f"-- check that leg, not the plot.")
+    conn = sqlite3.connect(aggregate)
     data = pd.read_sql_query("SELECT * FROM results", conn)
     conn.close()
 
@@ -167,9 +184,17 @@ def load_results(db: Optional[str],
     # they are stored apart so the DB can be queried on either axis, and joined here because a
     # figure plots one series per column. Without the fold, dace_cpu's three optimizers -- and the
     # same optimizer measured on two DaCe trees -- would silently average into one line.
+    #
+    # The BASELINE never folds. `record.build` is a property of the deployment, so the launcher sets
+    # it once and every framework measured under it gets stamped, baseline included -- but the
+    # baseline is the DIVISOR, not a series. Fold it and one job's reference becomes `numpy/main`,
+    # which is no longer the name every speedup is divided by; fold two builds and there are two
+    # references and no defined denominator at all. It is also semantically empty: numpy does not
+    # depend on which DaCe tree was checked out. A sample that stamps a whole multi-stage run
+    # therefore used to sweep the entire corpus and only then fail in `plot`.
     for axis in ('flavor', 'build'):
         if axis in data.columns:
-            mask = data[axis].notna()
+            mask = data[axis].notna() & (data['framework'] != BASELINE)
             data.loc[mask,
                      'framework'] = (data.loc[mask, 'framework'].astype(str) + '/' + data.loc[mask, axis].astype(str))
             data = data.drop([axis], axis=1).reset_index(drop=True)
@@ -271,7 +296,15 @@ def plot_heatmap(benchmark="all",
     """
     set_usetex(usetex)
     everything = load_results(db, benchmark, preset, datatype, variant)
-    return [heatmap_figure(rows, order, machine_output(output, label)) for label, rows in machine_groups(everything)]
+    groups = machine_groups(everything)
+    # An empty selection must FAIL, not return []. Before the per-machine split this function always
+    # drew something or raised; the comprehension below would instead write no file and exit 0 --
+    # a plot leg that silently produces nothing while reporting success.
+    if not groups:
+        raise RuntimeError(f"no rows to plot: benchmark={benchmark!r} preset={preset!r} "
+                           f"datatype={datatype!r} variant={variant!r} db={db!r}. The DB has no "
+                           f"validated, domained rows matching that selection.")
+    return [heatmap_figure(rows, order, machine_output(output, label)) for label, rows in groups]
 
 
 def heatmap_figure(data: pd.DataFrame, order: str, output: str) -> str:

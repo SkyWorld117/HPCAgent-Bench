@@ -510,6 +510,21 @@ def user_version(path: str) -> int:
         conn.close()
 
 
+def table_exists(path: str, table: str) -> bool:
+    """Whether ``path`` holds ``table``.
+
+    Worth a named function because ``sqlite3.connect`` CREATES an absent file: a reader that
+    opens a DB no writer ever touched gets a valid empty connection, and only finds out one
+    query later, as ``no such table``, with neither the path nor the missing writer in the
+    message. Ask before querying and the caller can say what is actually wrong."""
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (table, )).fetchone() is not None
+    finally:
+        conn.close()
+
+
 def free_shard_slot(base: str) -> int:
     """Lowest shard number with no file beside ``base``."""
     slot = 0
