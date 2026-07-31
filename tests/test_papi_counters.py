@@ -10,6 +10,7 @@ The handful of tests that genuinely need counters are gated on an EXPLICIT predi
 ``find_library("papi")`` on Linux -- rather than a swallowed import error, so a skip here always
 means "this host has no PAPI" and never "something changed and the guard stopped noticing".
 """
+import ctypes
 import ctypes.util
 import json
 import os
@@ -18,7 +19,8 @@ import subprocess
 
 import pytest
 
-from hpcagent_bench import osinfo
+from hpcagent_bench import flags, osinfo
+from hpcagent_bench.flags import Mode
 from hpcagent_bench.harness import papi, profiling
 
 #: The environment predicate the skips key on. A name, not an exception: PAPI is a system
@@ -133,7 +135,10 @@ def counted_line(metric: str) -> str:
         "count": 7,
         "elapsed_ns": 1,
         "reps_counted": 1,
-        "hardware_counters": 5
+        "hardware_counters": 5,
+        "threads_counted": 3,
+        "scope": "all_threads",
+        "smt": True
     })
 
 
@@ -149,7 +154,7 @@ def test_one_wedged_metric_does_not_cost_the_others(monkeypatch, tmp_path) -> No
         return subprocess.CompletedProcess(argv, 0, stdout=counted_line(metric) + "\n", stderr="")
 
     monkeypatch.setattr(profiling.subprocess, "run", fake_run)
-    counters = profiling.count_metrics(tmp_path, tmp_path / "request.json", timeout=1.0)
+    counters = profiling.count_metrics(tmp_path, tmp_path / "request.json", threads=2, timeout=1.0)
     rows = {row["metric"]: row for row in counters["metrics"]}
     assert set(rows) == set(papi.METRICS) and counters["runs"] == len(papi.METRICS)
     assert rows["fp_ops"]["count"] is None and "wedged" in rows["fp_ops"]["missing"]
@@ -164,7 +169,7 @@ def test_a_dead_counting_process_is_decoded_into_that_metric_s_reason(monkeypatc
         return subprocess.CompletedProcess(argv, -11, stdout="", stderr="Segmentation fault")
 
     monkeypatch.setattr(profiling.subprocess, "run", fake_run)
-    rows = profiling.count_metrics(tmp_path, tmp_path / "request.json", timeout=1.0)["metrics"]
+    rows = profiling.count_metrics(tmp_path, tmp_path / "request.json", threads=2, timeout=1.0)["metrics"]
     assert all(row["count"] is None and "Segmentation fault" in row["missing"] for row in rows)
 
 
@@ -173,7 +178,11 @@ def test_the_rendered_table_carries_the_expression_and_the_ratio() -> None:
     CPU cannot express must render its reason, not a blank that reads as zero."""
     counters = {
         "threads":
-        1,
+        4,
+        "threads_counted":
+        5,
+        "smt":
+        True,
         "runs":
         3,
         "metrics": [{
@@ -197,6 +206,9 @@ def test_the_rendered_table_carries_the_expression_and_the_ratio() -> None:
     assert "no candidate is available on this CPU" in text
     # The instruction row's own ratio is 1000 by construction and says nothing, so it is blanked.
     assert "1000.00" not in text
+    # The threading scope is part of the reading, not a footnote: an SMT box that was not pinned
+    # and a count taken on one thread of eight are different numbers with the same units.
+    assert "4 thread(s), 5 counted" in text and "SMT on" in text
 
 
 def test_check_names_a_cause_a_caller_can_branch_on() -> None:
@@ -240,6 +252,43 @@ def test_the_counter_budget_is_reported_so_multiplexing_stays_checkable() -> Non
     assert max(len(c) for cands in papi.METRICS.values() for c in cands) <= budget
 
 
+def test_feature_set_is_the_intersection_of_what_we_want_and_what_the_cpu_has(monkeypatch) -> None:
+    """The query an agent, a test and the skill all start from -- answerable without a workload."""
+    monkeypatch.setattr(papi, "available_events", lambda: ZEN4_AVAILABLE)
+    monkeypatch.setattr(papi, "hardware_counters", lambda: 5)
+    features = papi.feature_set()
+    assert set(features["supported"]) | set(features["unsupported"]) == set(papi.METRICS)
+    assert not set(features["supported"]) & set(features["unsupported"]), "a metric cannot be both"
+    assert features["supported"]["cache_hits"]["expression"] == "PAPI_L1_DCA - PAPI_L1_DCM"
+    assert features["supported"]["cache_hits"]["derived"] is True
+    assert features["supported"]["instructions"]["derived"] is False
+    assert "PAPI_INT_INS" in features["unsupported"]["integer_instructions"]
+    assert features["hardware_counters"] == 5
+
+
+def test_feature_set_answers_for_a_subset_when_asked(monkeypatch) -> None:
+    monkeypatch.setattr(papi, "available_events", lambda: ZEN4_AVAILABLE)
+    monkeypatch.setattr(papi, "hardware_counters", lambda: 5)
+    features = papi.feature_set(("instructions", "integer_instructions"))
+    assert set(features["supported"]) == {"instructions"}
+    assert set(features["unsupported"]) == {"integer_instructions"}
+
+
+def test_no_candidate_can_exceed_a_plausible_counter_budget() -> None:
+    """A candidate wider than the CPU's counter registers would be MULTIPLEXED -- the estimate
+    this module exists to refuse. Four is the narrowest budget in the wild."""
+    assert max(len(c) for cands in papi.METRICS.values() for c in cands) <= 4
+
+
+def test_thread_ids_put_the_calling_thread_first() -> None:
+    """Order is load-bearing: the calling thread's set needs no attach, so a fallback drops
+    everything after it and is left with exactly the single-threaded answer."""
+    tids = papi.thread_ids()
+    assert tids[0] == os.getpid()
+    assert len(set(tids)) == len(tids)
+    assert sorted(tids[1:]) == list(tids[1:])
+
+
 @requires_papi
 def test_the_count_covers_the_timed_call_and_nothing_else() -> None:
     """The assertion this whole module exists for: gemm at preset S does 2*NI*NJ*NK multiply-adds,
@@ -281,3 +330,105 @@ def test_the_count_covers_the_timed_call_and_nothing_else() -> None:
     assert 0.95 * expected <= row["count"] <= 1.05 * expected, (
         f"{row['expression']} counted {row['count']}, expected ~{expected} (2*NI*NJ*NK): the "
         "counted region is not the timed call")
+
+
+#: A gemm submission that really does run on OpenMP worker threads, so a count that only saw the
+#: master thread is off by the thread count and this test says so. Hand-written rather than the
+#: generated reference precisely because the reference is serial -- a serial kernel cannot
+#: distinguish "counted every thread" from "counted the only thread".
+OPENMP_GEMM = """
+#include <stdint.h>
+void gemm_fp64(double *A, double *B, double *C, int64_t NI, int64_t NJ, int64_t NK,
+               double alpha, double beta, void *workspace, int64_t workspace_size) {
+    (void) workspace; (void) workspace_size;
+    #pragma omp parallel for
+    for (int64_t i = 0; i < NI; ++i) {
+        for (int64_t j = 0; j < NJ; ++j) C[i * NJ + j] *= beta;
+        for (int64_t k = 0; k < NK; ++k) {
+            double a = alpha * A[i * NK + k];
+            for (int64_t j = 0; j < NJ; ++j) C[i * NJ + j] += a * B[k * NJ + j];
+        }
+    }
+}
+"""
+
+
+def refusing_open_counter(original):
+    """A host that will not attach: the calling thread opens, every worker is refused.
+
+    Closes over the REAL function -- reading it back off the module would find this stand-in and
+    recurse forever, which is the shape of a patch that tests nothing.
+    """
+
+    def refuse(lib, tid: int, codes):
+        if tid == os.getpid():
+            return original(lib, tid, codes)
+        return ctypes.c_int(papi.PAPI_NULL), f"cannot attach to thread {tid}: simulated refusal"
+
+    return refuse
+
+
+@requires_papi
+def test_a_threaded_kernel_is_counted_on_every_thread_and_degrades_out_loud(monkeypatch) -> None:
+    """The headline of the multithreaded path: an OpenMP kernel's fp-op count must equal
+    2*NI*NJ*NK whatever the thread count, because the WORK does not change.
+
+    Counting only the calling thread would return roughly 1/N of that -- which is what PAPI does
+    by default, and exactly the wrong number wearing the right label. dace solves this by calling
+    PAPI from inside each OpenMP thread, which a judge holding an opaque .so cannot do; the master
+    thread attaches an event set per worker instead.
+
+    The same build then proves the OTHER half of the contract: a host that refuses the attach
+    still answers, with the master thread's share and a STATED scope. A silent fraction of the
+    kernel's work is the one outcome that must be impossible.
+    """
+    from hpcagent_bench.harness.envelope import Submission
+    from hpcagent_bench.harness.grading import _data_seeded
+    from hpcagent_bench.harness.sandbox import Sandbox
+    from hpcagent_bench.spec import BenchSpec
+    from hpcagent_bench.support.bindings.contract import binding_from_spec
+
+    if papi.resolve("fp_ops", papi.available_events()) is None:
+        pytest.skip(f"no fp-op preset on this CPU; available: {papi.available_events()}")
+    threads = min(4, flags.ncores())
+    if threads < 2:
+        pytest.skip(f"only {flags.ncores()} physical core(s) available; nothing to parallelise over")
+    for key, value in {**flags.cpu_env(Mode.MULTI_CORE, threads=threads), **papi.PINNED_ENV}.items():
+        monkeypatch.setenv(key, value)  # set BEFORE the .so loads, which is when OpenMP reads them
+
+    spec = BenchSpec.load("gemm")
+    sizes = spec.parameters["S"]
+    expected = 2 * sizes["NI"] * sizes["NJ"] * sizes["NK"]
+    binding = binding_from_spec(spec)
+    data = _data_seeded("gemm", "S", "float64", 42)
+    with Sandbox(binding) as sandbox:
+        built = sandbox.build(Submission(language="c", source=OPENMP_GEMM), debug=True)
+        assert built.ok, built.log[-2000:]
+        counted = papi.count_metric(built.lib, binding, data, "c", "fp_ops", reps=1, warmup=1, rep_timeout=300.0)
+        # The patch is inherited across the fork count_metric does, so it reaches the worker.
+        monkeypatch.setattr(papi, "open_counter", refusing_open_counter(papi.open_counter))
+        refused = papi.count_metric(built.lib, binding, data, "c", "fp_ops", reps=1, warmup=1, rep_timeout=300.0)
+
+    assert counted["count"] is not None, counted.get("missing")
+    assert counted["scope"] == "all_threads", counted.get("fallback")
+    assert counted["threads_counted"] > 1, "the OpenMP pool was never seen, so this proves nothing"
+    assert 0.95 * expected <= counted["count"] <= 1.05 * expected, (
+        f"counted {counted['count']} on {counted['threads_counted']} thread(s), expected "
+        f"~{expected}; {counted['count'] / expected:.2f}x suggests only some threads were counted")
+
+    assert refused["scope"] == "calling_thread" and refused["threads_counted"] == 1
+    assert "simulated refusal" in refused["fallback"]
+    assert refused["count"] < 0.9 * expected, (
+        "the master thread alone cannot have done all the work -- if it did, the kernel never "
+        "parallelised and the all-threads assertion above proved nothing")
+
+
+@requires_papi
+def test_open_counter_names_a_thread_it_cannot_attach_to() -> None:
+    """The refusal is a REASON, not a warning: one thread we cannot see makes the sum wrong."""
+    lib = papi.initialised()
+    code = ctypes.c_int(0)
+    lib.PAPI_event_name_to_code(b"PAPI_TOT_CYC", ctypes.byref(code))
+    _eventset, why = papi.open_counter(lib, 0x7FFFFFF0, [code])  # a tid that cannot exist
+    assert why is not None and "0x7ffffff0" not in why  # decimal, as /proc/self/task reports it
+    assert str(0x7FFFFFF0) in why

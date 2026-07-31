@@ -42,6 +42,30 @@ the seam that already promises to wrap ``fn(*c_args)`` and nothing else. That is
 module sits in the harness rather than beside the perf half, which deliberately imports nothing
 from here.
 
+Threading, and why there is no ``PAPI_thread_init`` here
+-------------------------------------------------------
+
+PAPI counts PER THREAD, so a multithreaded kernel counted naively reports its master thread's
+share under the whole kernel's name. dace solves this from the inside: its PAPI instrumentation
+generates the OpenMP region, so it can call ``PAPI_thread_init(omp_get_thread_num)`` once and then
+``PAPI_register_thread`` + ``PAPI_create_eventset`` on every worker -- inside an ``omp critical``,
+because PAPI's event-set creation is not thread-safe and racing it was a real bug there
+(dace ``papi-fix-2``, "Fix non thread safe papi init bug").
+
+That whole shape is unavailable to a judge, which holds an opaque ``.so`` and can run no code on
+its OpenMP workers. So this module inverts it: the master thread enumerates the process's threads
+(:func:`thread_ids`) and opens ONE ``PAPI_attach``-ed event set per worker
+(:func:`open_counter`), reads them all around the timed call, and sums. PAPI is therefore only
+ever called from a single thread -- which is why ``PAPI_thread_init`` and ``PAPI_register_thread``
+are absent, and why the non-thread-safe creation path dace had to serialize cannot be reached at
+all. Measured against an OpenMP kernel of known arithmetic: exact, on the nose.
+
+Two preconditions are CHECKED rather than assumed. The thread pool must already exist when the
+counters arm, so arming happens after a warmup rep; and the thread set must not move during the
+run, which is re-read at stop and fails the metric if it did. SMT is pinned around
+(:data:`PINNED_ENV`) rather than assumed absent, and reported either way: siblings share L1/L2, so
+an unpinned cache count measures the pair.
+
 Crash safety is :func:`~hpcagent_bench.frameworks.forked.run_forked`, the repo's one fork
 isolation (it is what :func:`~hpcagent_bench.harness.native_call._call_isolated` is built from).
 A segfault, an OOM kill or a PAPI bring-up failure during metric *k* costs metric *k*'s number and
@@ -50,12 +74,14 @@ nothing else.
 import ctypes
 import ctypes.util
 import functools
+import os
+import pathlib
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from hpcagent_bench import osinfo
+from hpcagent_bench import flags, osinfo
 from hpcagent_bench.frameworks.forked import forked_failure_reason, run_forked
 from hpcagent_bench.harness.native_call import _call_native_impl, _current_vmsize_bytes
 from hpcagent_bench.support.bindings.contract import Binding
@@ -75,6 +101,19 @@ ENUM_NEXT = 0
 
 #: ``PAPI_MAX_STR_LEN``: the buffer ``PAPI_event_code_to_name`` writes into.
 NAME_LEN = 128
+
+#: Where a process lists its own thread ids. Reading it is how a counted run finds the OpenMP
+#: worker threads it must count: they belong to a ``.so`` we did not compile and cannot inject
+#: into, so enumerating them from outside is the only handle there is.
+TASK_DIR = pathlib.Path("/proc/self/task")
+
+#: OpenMP placement forced on a counted run. ``cores`` makes each place one PHYSICAL core and
+#: ``close`` fills them in order, so with threads <= physical cores no two counted threads land on
+#: SMT siblings of the same core. That matters because siblings share L1/L2: unpinned, a cache-miss
+#: count measures whatever the pair did, and the number is not reproducible let alone attributable.
+#: It cannot fence out ANOTHER process's thread on a sibling -- no user-space code can -- which is
+#: why the payload reports ``smt`` as well as pinning it.
+PINNED_ENV: Dict[str, str] = {"OMP_PLACES": "cores", "OMP_PROC_BIND": "close"}
 
 #: (major, minor) pairs tried against ``PAPI_library_init``, newest first. The version it demands
 #: is ``PAPI_VER_CURRENT`` -- a header constant, ``major << 24 | minor << 16`` -- so a literal here
@@ -250,24 +289,102 @@ def missing(metric: str, reason: str) -> dict:
     return {"metric": metric, "count": None, "missing": reason}
 
 
+def feature_set(metrics: Sequence[str] = ()) -> dict:
+    """What this machine can actually measure: the INTERSECTION of what we ask for and what the
+    CPU reports, plus the complement with a reason each. Answers without running a workload.
+
+    The intersection was already implicit in :func:`resolve`'s ladder; this makes it a thing a
+    caller can hold. "Which of these seven can I get here" is the first question an agent, a test
+    and the skill all ask, and every one of them used to have to run a measurement to find out --
+    or, worse, guess from the CPU model.
+
+    ``supported`` maps metric -> the resolved expression; ``unsupported`` maps metric -> why. One
+    function rather than a class because there is one query: the answer is a snapshot of a machine,
+    and a snapshot is a dict.
+    """
+    available = available_events()
+    supported: Dict[str, dict] = {}
+    unsupported: Dict[str, str] = {}
+    for metric in (tuple(metrics) or tuple(METRICS)):
+        terms = resolve(metric, available)
+        if terms is None:
+            tried = ", ".join(expression(c) for c in METRICS[metric])
+            unsupported[metric] = f"no candidate is available on this CPU (tried: {tried})"
+        else:
+            supported[metric] = {
+                "expression": expression(terms),
+                "events": [event_name(t) for t in terms],
+                "derived": len(terms) > 1,
+                "terms": list(terms),
+            }
+    return {
+        "available_events": list(available),
+        "hardware_counters": hardware_counters(),
+        "smt": flags.smt_enabled(),
+        "supported": supported,
+        "unsupported": unsupported,
+    }
+
+
+def thread_ids() -> Tuple[int, ...]:
+    """This process's thread ids, the CALLING thread first.
+
+    Order is load-bearing: the calling thread's event set needs no attach (an unattached set
+    counts its own creator), so putting it first means a teardown can drop everything after it and
+    be left with exactly the single-threaded fallback.
+    """
+    me = os.getpid()  # the main thread's tid IS the pid
+    return (me, *sorted(int(p.name) for p in TASK_DIR.iterdir() if int(p.name) != me))
+
+
+def open_counter(lib: ctypes.CDLL, tid: int, codes: Sequence[ctypes.c_int]) -> Tuple[ctypes.c_int, Optional[str]]:
+    """An event set counting thread ``tid``, or ``(_, reason)`` when this host will not attach.
+
+    ``PAPI_attach`` is what makes MULTITHREADED counting possible at all here. dace can count from
+    inside each OpenMP thread because dace generates that code; a judge holds an opaque ``.so`` and
+    can run nothing on its workers, so the master thread opens one attached set per worker instead.
+    Nothing is ever called from a worker, which is also why no ``PAPI_thread_init`` /
+    ``PAPI_register_thread`` appears anywhere in this module -- see the module docstring.
+    """
+    eventset = ctypes.c_int(PAPI_NULL)
+    demand(lib, lib.PAPI_create_eventset(ctypes.byref(eventset)), "PAPI_create_eventset")
+    # An attached set must be bound to a component BEFORE the attach; the default (0) is the CPU.
+    demand(lib, lib.PAPI_assign_eventset_component(eventset, 0), "PAPI_assign_eventset_component")
+    if tid != os.getpid():
+        rc = lib.PAPI_attach(eventset, ctypes.c_ulong(tid))
+        if rc != PAPI_OK:  # a refused attach makes the SUM wrong, so it is a reason, not a warning
+            return eventset, f"cannot attach to thread {tid}: {strerror(lib, rc)}"
+    for code in codes:
+        demand(lib, lib.PAPI_add_event(eventset, code), "PAPI_add_event")
+    return eventset, None
+
+
 def counting_worker(lib_path: str, binding: Binding, data: Dict, lang: str, workspace_bytes: Optional[str], metric: str,
                     reps: int, warmup: int, rep_timeout: float, memory_bytes: int) -> dict:
-    """CHILD: resolve ``metric`` on this CPU and count it around the timed call. Returns the payload.
+    """CHILD: resolve ``metric`` on this CPU and count it across EVERY thread of the timed call.
 
     Resolution happens HERE, before the kernel runs, so a metric this CPU cannot express costs a
     fork and not a measured run. PAPI is brought up here too, in a process that exits right after,
     which is what PAPI's own per-process initialization guidance asks for.
 
-    The reading is taken per call and the counted value is the FASTEST measured rep's, matching
-    the best-of-reps reduction the score uses, so the counts and the time describe the same rep.
-    Warmup reps are dropped exactly as :func:`hpcagent_bench.harness.timing.sampled_reps` drops
-    their samples -- a cold-cache first pass would otherwise dominate every miss count.
+    Counters are armed AFTER the warmup reps and before the first measured one. That ordering is
+    the whole trick: a warmup rep is what materialises libgomp's thread pool, and a pool that does
+    not exist yet cannot be enumerated, let alone attached to. ``warmup`` is therefore floored at 1
+    here -- a counted run is diagnostic, so one extra untimed call is free, and without it a
+    multithreaded kernel would be counted on its master thread alone and silently report a
+    fraction of its work.
+
+    The reading is taken per call and summed across threads; the counted value is the FASTEST
+    measured rep's, matching the best-of-reps reduction the score uses, so the counts and the time
+    describe the same rep. Warmup reps are dropped exactly as
+    :func:`hpcagent_bench.harness.timing.sampled_reps` drops their samples.
     """
     import resource  # child-local, like _native_call_worker's: nothing in the parent needs it
-    terms = resolve(metric, available_events())
-    if terms is None:
-        tried = ", ".join(expression(c) for c in METRICS[metric])
-        return missing(metric, f"no candidate is available on this CPU (tried: {tried})")
+    features = feature_set((metric, ))
+    if metric in features["unsupported"]:
+        return missing(metric, features["unsupported"][metric])
+    resolved = features["supported"][metric]
+    terms: Sequence[str] = resolved["terms"]
 
     lib = initialised()
     # Same additive RLIMIT_AS cap _native_call_worker applies: the kernel's allowance ON TOP of
@@ -279,28 +396,54 @@ def counting_worker(lib_path: str, binding: Binding, data: Dict, lang: str, work
     codes = [ctypes.c_int(0) for _ in terms]
     for term, code in zip(terms, codes):
         demand(lib, lib.PAPI_event_name_to_code(event_name(term).encode(), ctypes.byref(code)), f"lookup {term}")
-    eventset = ctypes.c_int(PAPI_NULL)
-    demand(lib, lib.PAPI_create_eventset(ctypes.byref(eventset)), "PAPI_create_eventset")
-    for term, code in zip(terms, codes):
-        demand(lib, lib.PAPI_add_event(eventset, code), f"add {event_name(term)}")
 
     width = len(terms)
-    before = (ctypes.c_longlong * width)()
-    after = (ctypes.c_longlong * width)()
+    warm = max(warmup, 1)
+    handles: List[Tuple[int, ctypes.c_int]] = []
+    buffers: List[Tuple] = []
     readings: List[Tuple[int, List[int]]] = []
+    calls: List[int] = []
+    scope = {"threads": (), "how": "all_threads", "fallback": None}
+
+    def arm() -> None:
+        """One event set per live thread, then start them all."""
+        tids = thread_ids()
+        for tid in tids:
+            eventset, why = open_counter(lib, tid, codes)
+            if why is not None:  # one thread we cannot see makes the SUM wrong, not merely partial
+                for _t, extra in handles[1:]:
+                    lib.PAPI_destroy_eventset(ctypes.byref(extra))
+                del handles[1:]
+                scope["how"], scope["fallback"] = "calling_thread", why
+                break
+            handles.append((tid, eventset))
+        scope["threads"] = tuple(tid for tid, _ in handles)
+        buffers.extend(((ctypes.c_longlong * width)(), (ctypes.c_longlong * width)()) for _ in handles)
+        for _tid, eventset in handles:
+            demand(lib, lib.PAPI_start(eventset), "PAPI_start")
 
     def counted(fn, c_args) -> int:
-        # Read-delta rather than start/stop per rep: PAPI_start arms the counters once, and a
-        # pair of reads is the cheapest bracket that still isolates ONE call.
-        demand(lib, lib.PAPI_read(eventset, before), "PAPI_read")
+        index = len(calls)
+        calls.append(0)
+        if index < warm:  # untimed as far as the counters go: this is what creates the OpenMP pool
+            start = time.perf_counter_ns()
+            fn(*c_args)
+            return time.perf_counter_ns() - start
+        if index == warm:
+            arm()
+        # Read-delta rather than start/stop per rep: PAPI_start arms the counters once, and a pair
+        # of reads is the cheapest bracket that still isolates ONE call.
+        for (_tid, eventset), (before, _after) in zip(handles, buffers):
+            demand(lib, lib.PAPI_read(eventset, before), "PAPI_read")
         t0 = time.perf_counter_ns()
         fn(*c_args)
         ns = time.perf_counter_ns() - t0
-        demand(lib, lib.PAPI_read(eventset, after), "PAPI_read")
-        readings.append((ns, [int(after[i] - before[i]) for i in range(width)]))
+        for (_tid, eventset), (_before, after) in zip(handles, buffers):
+            demand(lib, lib.PAPI_read(eventset, after), "PAPI_read")
+        deltas = [sum(int(a[i] - b[i]) for b, a in buffers) for i in range(width)]
+        readings.append((ns, deltas))
         return ns
 
-    demand(lib, lib.PAPI_start(eventset), "PAPI_start")
     _call_native_impl(lib_path,
                       binding,
                       data,
@@ -310,24 +453,41 @@ def counting_worker(lib_path: str, binding: Binding, data: Dict, lang: str, work
                       to_host=lambda a: a,
                       timed_call=counted,
                       reps=reps,
-                      warmup=warmup,
+                      warmup=warm,
                       rep_timeout=rep_timeout)
+    # No thread may have APPEARED under the counters. A pool that grew mid-run leaves work on a
+    # thread nothing was attached to, and the sum is short by exactly that -- a wrong number with
+    # no symptom, which is the one outcome worth failing the metric over. A thread that EXITED is
+    # not checked here: its own PAPI_read would have failed loudly first.
+    appeared = sorted(set(thread_ids()) - set(scope["threads"]))
     # Disarm only, and unchecked: the counts are already harvested per rep, so a teardown error
     # must not be allowed to throw away good numbers.
-    lib.PAPI_stop(eventset, after)
+    for _tid, eventset in handles:
+        lib.PAPI_stop(eventset, buffers[0][1])
+    if scope["how"] == "all_threads" and appeared:
+        return missing(
+            metric, f"{len(appeared)} thread(s) started after the counters armed; the sum would "
+            "omit whatever ran on them")
+    if not readings:
+        return missing(metric, "no measured rep was counted")
 
-    measured = readings[warmup:] or readings
-    elapsed_ns, raw = min(measured, key=lambda r: r[0])
-    return {
+    elapsed_ns, raw = min(readings, key=lambda r: r[0])
+    row = {
         "metric": metric,
-        "expression": expression(terms),
-        "events": [event_name(t) for t in terms],
-        "derived": len(terms) > 1,
+        "expression": resolved["expression"],
+        "events": resolved["events"],
+        "derived": resolved["derived"],
         "count": combine(terms, raw),
         "elapsed_ns": elapsed_ns,
-        "reps_counted": len(measured),
-        "hardware_counters": hardware_counters(),
+        "reps_counted": len(readings),
+        "hardware_counters": features["hardware_counters"],
+        "threads_counted": len(handles),
+        "scope": scope["how"],
+        "smt": features["smt"],
     }
+    if scope["fallback"] is not None:
+        row["fallback"] = f"counted the calling thread only: {scope['fallback']}"
+    return row
 
 
 def count_metric(lib_path: str,

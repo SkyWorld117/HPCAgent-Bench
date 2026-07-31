@@ -96,11 +96,14 @@ what makes "ignore start-up" measurable instead of assumed. A build failure is a
 
 `null` unless the request asked. With `"counters":true`:
 ```json
-{"counters":{"threads":1,"runs":7,"metrics":[
+{"counters":{"threads":4,"threads_counted":5,"smt":true,
+             "pinned":{"OMP_PLACES":"cores","OMP_PROC_BIND":"close"},"runs":7,"metrics":[
   {"metric":"instructions","expression":"PAPI_TOT_INS","events":["PAPI_TOT_INS"],
-   "derived":false,"count":41203118,"elapsed_ns":1653872,"reps_counted":20,"hardware_counters":5},
+   "derived":false,"count":41203118,"elapsed_ns":1653872,"reps_counted":20,
+   "hardware_counters":5,"threads_counted":5,"scope":"all_threads","smt":true},
   {"metric":"cache_hits","expression":"PAPI_L1_DCA - PAPI_L1_DCM","events":["PAPI_L1_DCA","PAPI_L1_DCM"],
-   "derived":true,"count":10233871,"elapsed_ns":1661204,"reps_counted":20,"hardware_counters":5},
+   "derived":true,"count":10233871,"elapsed_ns":1661204,"reps_counted":20,
+   "hardware_counters":5,"threads_counted":5,"scope":"all_threads","smt":true},
   {"metric":"integer_instructions","count":null,
    "missing":"no candidate is available on this CPU (tried: PAPI_INT_INS)"}]}}
 ```
@@ -117,9 +120,18 @@ A metric no available event can express arrives with `count:null` and a `missing
 than a different quantity under the same name. A crashed or timed-out counting run loses that
 one metric the same way, never the profile.
 
-Counted runs are single-threaded on purpose: PAPI counts the calling thread, so a multi-threaded
-count would report the master thread's share under the whole kernel's name. Counts describe the
-WORK; `scalability` describes the parallelism.
+Counted runs are MULTITHREADED, at the `representative` thread count. PAPI counts one thread, so
+the master thread opens a `PAPI_attach`-ed event set per worker and sums -- a count is therefore
+thread-count invariant when the work is. `scope` says what was actually covered: `all_threads`,
+or `calling_thread` plus a `fallback` reason on a host that refuses the attach, in which case the
+number is the master's share and nothing else. A metric whose thread set grew mid-run comes back
+`count:null` rather than short. Counts still describe the WORK; `scalability` describes the
+parallelism.
+
+`smt:true` means the machine runs SMT. Counted threads are pinned to whole cores
+(`OMP_PLACES=cores`), which keeps two of OUR threads off one core's two halves; it cannot fence
+out another process, so on a loaded SMT box treat cache counts as indicative. Instruction and
+fp-op counts are per-thread and unaffected.
 
 `perf` is often unavailable (not installed, `kernel.perf_event_paranoid > 2`, a container
 without `CAP_PERFMON`, macOS). That is **503** with a machine-readable cause -- never an empty

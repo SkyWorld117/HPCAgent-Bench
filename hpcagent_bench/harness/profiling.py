@@ -201,20 +201,20 @@ def rising_hotspots(runs: List[ThreadRun], min_percent: float, limit: int = 5) -
     return sorted(moved, key=lambda m: (-m["delta_pct"], m["symbol"]))[:limit]
 
 
-def count_one(root: pathlib.Path, request_file: pathlib.Path, metric: str, *, timeout: float) -> dict:
+def count_one(root: pathlib.Path, request_file: pathlib.Path, metric: str, *, threads: int, timeout: float) -> dict:
     """Run the measurement ONCE more, counting only ``metric``; returns that metric's payload.
 
-    A fresh PROCESS rather than another fork, for one reason: PAPI counts the calling thread, so a
-    counted run must be single-threaded or the number is the master thread's share of the work
-    wearing the whole kernel's name -- and ``OMP_NUM_THREADS`` is read by the OpenMP runtime when
-    its image loads, which a variable set after a fork is too late to change. Inside that process
-    the count is still forked (:func:`~hpcagent_bench.harness.papi.count_metric`), which is what
-    turns a segfault into a named reason on the result line instead of a dead process the parent
-    has to decode. A process that dies anyway is decoded here, so both layers report a metric --
-    including a wedge past the deadline, which ``subprocess`` reports only by raising, and which
-    must cost this metric rather than every metric after it.
+    A fresh PROCESS rather than another fork, because both knobs a sound count depends on are read
+    by the OpenMP runtime when its image LOADS, which is too late to set after a fork: the thread
+    count, and the placement (:data:`~hpcagent_bench.harness.papi.PINNED_ENV`) that keeps two
+    counted threads off the two SMT halves of one core. Inside that process the count is still
+    forked (:func:`~hpcagent_bench.harness.papi.count_metric`), which is what turns a segfault into
+    a named reason on the result line instead of a dead process the parent has to decode. A process
+    that dies anyway is decoded here, so both layers report a metric -- including a wedge past the
+    deadline, which ``subprocess`` reports only by raising, and which must cost this metric rather
+    than every metric after it.
     """
-    env = {**os.environ, **flags.cpu_env(Mode.SINGLE_CORE)}
+    env = {**os.environ, **flags.cpu_env(Mode.MULTI_CORE, threads=threads), **papi.PINNED_ENV}
     argv = [sys.executable, "-m", MODULE, "--request", str(request_file), "--metric", metric]
     try:
         proc = subprocess.run(argv,
@@ -233,7 +233,7 @@ def count_one(root: pathlib.Path, request_file: pathlib.Path, metric: str, *, ti
     return result
 
 
-def count_metrics(root: pathlib.Path, request_file: pathlib.Path, *, timeout: float) -> dict:
+def count_metrics(root: pathlib.Path, request_file: pathlib.Path, *, threads: int, timeout: float) -> dict:
     """Every metric in :data:`hpcagent_bench.harness.papi.METRICS`, ONE measured run each.
 
     COST: this multiplies the profile's wall clock by the number of metrics (seven today) on top
@@ -241,11 +241,22 @@ def count_metrics(root: pathlib.Path, request_file: pathlib.Path, *, timeout: fl
     metric in one run -- does not exist: a CPU has a handful of counter registers (five here), and
     past that PAPI multiplexes and hands back estimates that read exactly like counts.
 
-    Single-threaded by construction (see :func:`count_one`), so these numbers describe the WORK
-    the kernel does, never how well it parallelizes; that question is the scaling table's.
+    ``threads`` is the profile's REPRESENTATIVE configuration, so the counts describe the run the
+    scaling table calls the fast one rather than some other shape of the same kernel. Every worker
+    thread is counted, not just the master (see :mod:`hpcagent_bench.harness.papi`); a host that
+    refuses the attach degrades to the master alone and SAYS so, per metric, in ``scope`` /
+    ``fallback``.
     """
-    rows = [count_one(root, request_file, metric, timeout=timeout) for metric in papi.METRICS]
-    return {"threads": 1, "runs": len(rows), "metrics": rows}
+    rows = [count_one(root, request_file, metric, threads=threads, timeout=timeout) for metric in papi.METRICS]
+    counted = [r["threads_counted"] for r in rows if r["count"] is not None]
+    return {
+        "threads": threads,
+        "threads_counted": max(counted) if counted else 0,
+        "smt": flags.smt_enabled(),
+        "pinned": dict(papi.PINNED_ENV),
+        "runs": len(rows),
+        "metrics": rows,
+    }
 
 
 def render_counters(counters: dict) -> List[str]:
@@ -258,8 +269,10 @@ def render_counters(counters: dict) -> List[str]:
     """
     rows = counters["metrics"]
     instructions = next((r["count"] for r in rows if r["metric"] == "instructions" and r["count"] is not None), 0)
+    smt = "SMT on, threads pinned to whole cores" if counters["smt"] else "no SMT"
     lines = [
-        "", f"hardware counters ({counters['runs']} single-threaded runs, one per metric)",
+        "", f"hardware counters ({counters['runs']} runs, one per metric; {counters['threads']} thread(s), "
+        f"{counters['threads_counted']} counted; {smt})",
         f"  {'metric':<24}  {'count':>15}  {'/1k instr':>9}  expression",
         f"  {'-' * 24}  {'-' * 15}  {'-' * 9}  {'-' * 34}"
     ]
@@ -269,7 +282,8 @@ def render_counters(counters: dict) -> List[str]:
             continue
         countable = instructions and row["metric"] != "instructions"  # 1000 per 1k is not a finding
         ratio = f"{1000.0 * row['count'] / instructions:9.2f}" if countable else f"{'--':>9}"
-        lines.append(f"  {row['metric']:<24}  {row['count']:15d}  {ratio}  {row['expression']}")
+        note = f"  [{row['fallback']}]" if "fallback" in row else ""
+        lines.append(f"  {row['metric']:<24}  {row['count']:15d}  {ratio}  {row['expression']}{note}")
     return lines
 
 
@@ -368,7 +382,10 @@ def profile_submission(submission: Submission,
                          frequency=frequency,
                          min_percent=min_percent) for n in counts
         ]
-        counted = count_metrics(sandbox.root, request, timeout=outer) if counters else None
+        # Counted at the configuration the scaling table calls representative, so the counts
+        # describe the run an optimizer will actually be judged on.
+        representative = min(runs, key=lambda r: r.elapsed_ns).threads
+        counted = count_metrics(sandbox.root, request, threads=representative, timeout=outer) if counters else None
 
     base_ns = runs[0].elapsed_ns
     payload = {
@@ -391,7 +408,7 @@ def profile_submission(submission: Submission,
         "call_graph_mode":
         perf_reports.PERF_CALL_GRAPH,
         "representative":
-        min(runs, key=lambda r: r.elapsed_ns).threads,
+        representative,
         "scalability": [{
             "threads": r.threads,
             "elapsed_ns": r.elapsed_ns,

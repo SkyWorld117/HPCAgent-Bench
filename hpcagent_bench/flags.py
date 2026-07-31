@@ -435,6 +435,22 @@ def physical_cores(cpus: Set[int]) -> int:
     return len(groups)
 
 
+def smt_enabled() -> bool:
+    """Whether this machine runs more than one hardware thread per physical core.
+
+    Sits beside :func:`physical_cores` because it is the same topology question asked the other
+    way: logical cpus > physical cores means SMT is on. It matters for a HARDWARE COUNTER rather
+    than for sizing -- two SMT siblings share the physical core's L1/L2, so a cache-miss count
+    taken while a sibling is busy measures the pair, not the thread
+    (:mod:`hpcagent_bench.harness.papi` pins around this and reports it either way).
+
+    Machine-wide on purpose, not this process's share: a sibling belonging to somebody ELSE's
+    process perturbs our counts exactly as much as one of ours would.
+    """
+    total = os.cpu_count() or 1
+    return total > physical_cores(set(range(total)))
+
+
 def ncores() -> int:
     """The number of physical cores available to THIS process, for OMP / autopar sizing.
 
