@@ -223,7 +223,8 @@ wired by
 **static, round-robin** assignment -- no container spans nodes, no MPI between containers, no
 dynamic load balancing. Each **agent worker** is bound once to one vLLM endpoint (think) and one
 judge endpoint (authoritative HTTP grade): worker `w` uses `vllm_urls[w % V]` and
-`judge_urls[w % J]`.
+`judge_urls[w % J]` -- and names `w % J` as the judge rank on every request, which that judge
+checks against its own `serve --rank` and refuses (421, ungraded) if it disagrees.
 
 - **judge** nodes run `hpcagent-bench serve` (the HTTP oracle; each bounds concurrent grades to its
   local device slots).

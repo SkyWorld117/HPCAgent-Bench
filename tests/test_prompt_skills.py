@@ -381,7 +381,9 @@ def test_both_a_curl_and_a_python_call_are_offered():
     prompt = service_prompt("gemm", "c", "http://judge:8000")
     assert "curl -s" in prompt
     assert "from hpcagent_bench.harness.tools import JudgeClient" in prompt
-    assert 'JudgeClient("http://judge:8000")' in prompt
+    # The documented Python call names the judge's rank too -- the judge refuses a request that
+    # does not say which judge it is addressed to, so a rank-free example would be a broken one.
+    assert 'JudgeClient("http://judge:8000", rank=0)' in prompt
 
 
 def test_the_python_wrapper_really_exposes_what_the_prompt_claims():

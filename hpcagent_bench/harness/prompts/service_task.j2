@@ -17,12 +17,12 @@ It must reproduce the semantics of this NumPy reference:
 It must reproduce the semantics of the NumPy reference. Read it from the judge at any
 time -- one judge serves many kernels, so name yours in the request:
 ```sh
-curl -s "{{ judge_url }}/task/{{ kernel }}?language={{ language }}" | jq -r .reference_numpy
+curl -s "{{ judge_url }}/task/{{ kernel }}?language={{ language }}&rank={{ judge_rank }}" | jq -r .reference_numpy
 ```
 or from Python (stdlib only):
 ```python
 from hpcagent_bench.harness.tools import JudgeClient
-JudgeClient("{{ judge_url }}").task("{{ kernel }}", "{{ language }}")["reference_numpy"]
+JudgeClient("{{ judge_url }}", rank={{ judge_rank }}).task("{{ kernel }}", "{{ language }}")["reference_numpy"]
 ```
 {% endif %}
 Argument order is the canonical HPCAgent-Bench C-ABI: array pointers first (alphabetical),
@@ -46,7 +46,7 @@ each size range below; the exact sizes are HELD OUT -- be fast across the whole 
 The baseline is compiled and timed **inside this same image**, so the comparison
 is apples-to-apples.
 
-## The judge service ({{ judge_url }})
+## The judge service ({{ judge_url }}, rank {{ judge_rank }})
 Drive the judge with these tools -- over HTTP (the `curl` lines below) or from
 Python via `hpcagent_bench.harness.tools.JudgeClient`:
 {% for frag in tool_fragments %}

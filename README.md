@@ -203,7 +203,7 @@ Same split as [above](#high-level-design), over HTTP:
   ```sh
   hpcagent-bench serve --port 8800        # the verification+oracle webapp (oracle + baseline)
   # in another shell, the agent (or you) calls it over the socket:
-  curl -s localhost:8800/baseline/gemm
+  curl -s 'localhost:8800/baseline/gemm?rank=0'   # rank = which judge you meant (default 0 = the only one)
   ```
 - **Containers (reproducible timing).** Run judge and agent as **two instances of the same
   image** -- identical toolchain + CPU -> bit-reproducible timing across machines (e.g. a shared
@@ -396,12 +396,12 @@ scored by the judge.
 
 ```sh
 # 1. the time to beat (measured inside the judge):
-curl -s localhost:8800/baseline/gemm?language=c
+curl -s 'localhost:8800/baseline/gemm?language=c&rank=0'
 #    -> {"baselines": {"numpy": <ns>}}
 
 # 2. submit + get scored (the judge compiles your source server-side):
 curl -s -X POST localhost:8800/oracle -H 'Content-Type: application/json' \
-     -d '{"kernel":"gemm","language":"c","source":"<your C source>"}'
+     -d '{"kernel":"gemm","language":"c","rank":0,"source":"<your C source>"}'
 ```
 
 **Every `200` response is the same shape -- a build or numeric failure is a NORMAL scored result
@@ -540,21 +540,25 @@ see which copy won when roots are layered. Host paths never reach the prompt: th
 compile commands carry a repo-absolute `-include` header, and it is reduced to its basename
 (kept in full for a `native` run, where the agent is on the host).
 
-**Reaching the judge.** One judge serves many kernels, so every call names its kernel. The
-agent needs only the endpoint or the Python wrapper -- the prompt documents both:
+**Reaching the judge.** One judge serves many kernels and one run has many judges, so every
+call names both its kernel and the judge rank it is addressed to. The agent needs only the
+endpoint or the Python wrapper -- the prompt documents both:
 
 ```sh
-curl -s "$JUDGE_URL/task/gemm?language=c"        # signature, reference, tolerances, goal
+curl -s "$JUDGE_URL/task/gemm?language=c&rank=0"  # signature, reference, tolerances, goal
 ```
 ```python
 from hpcagent_bench.harness.tools import JudgeClient
-judge = JudgeClient(judge_url)                    # per-agent; never global
+judge = JudgeClient(judge_url, rank=judge_rank)   # per-agent; never global
 spec   = judge.task("gemm", "c")
 result = judge.submit(submission, "gemm")         # terminal action: correctness + speed
 ```
 
 Agents are round-robined onto judge nodes (`judge_urls[w % J]`), so the URL is always
-per-agent. `tests/test_judge_routing.py` pins that two agents on two judges cannot
+per-agent -- and `w % J` is also the `rank` every request carries. The URL routes; the rank
+validates. A judge started with `serve --rank j` refuses (421, ungraded) anything addressed to
+another rank, so a stale `$JUDGE_URL` or an off-by-one fails loudly instead of being graded by
+the wrong live judge. `tests/test_judge_routing.py` pins that two agents on two judges cannot
 cross-talk.
 
 **Attempts.** How many tries a run gets, and how long, is `attempts:` in `config.yaml` --

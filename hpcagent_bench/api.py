@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.harness.timing import measurement_repeat
+from hpcagent_bench.harness.tools import DEFAULT_RANK
 
 if TYPE_CHECKING:  # the grading stack is imported lazily at call time (native only), so the
     from hpcagent_bench.harness.scoring import Score  # return-type forward-ref resolves for tooling only
@@ -101,9 +102,10 @@ class RunConfig:
     * server-only -- ``input_mode`` (what ``POST /oracle`` accepts). The client
       ignores it;
     * client-only -- ``mode`` (native vs a running judge), ``judge_url`` (container
-      target), ``rtol`` / ``atol`` (per-call tolerance overrides; ``None`` = the
-      precision-aware default from the datatype), ``hidden`` (also grade held-out
-      inputs). The server ignores these -- its policy is its own config.
+      target) + ``judge_rank`` (which judge that URL is expected to be), ``rtol`` /
+      ``atol`` (per-call tolerance overrides; ``None`` = the precision-aware default
+      from the datatype), ``hidden`` (also grade held-out inputs). The server ignores
+      these -- its policy is its own config, and its OWN rank is ``serve --rank``.
 
     ``rtol`` / ``atol`` default to ``None``: the scorer fills them from the
     datatype's precision band (``infrastructure.test.tolerances_for``) so fp32
@@ -119,6 +121,7 @@ class RunConfig:
     datatype: str = "float64"
     repeat: int = field(default_factory=measurement_repeat)  # timed reps; the shared measurement.repeat
     judge_url: Optional[str] = None  # client-only: container mode target; None -> $JUDGE_URL / localhost
+    judge_rank: int = DEFAULT_RANK  # client-only: the rank judge_url is expected to be; validated, never routed on
     rtol: Optional[float] = None  # client-only: None -> tolerances_for(datatype) at grade time
     atol: Optional[float] = None
     hidden: bool = True  # client-only: also grade held-out inputs (the overfit gate)
@@ -267,7 +270,7 @@ class Kernel:
 
     def _client(self):
         from hpcagent_bench.harness import tools
-        return tools.JudgeClient(self.config.judge_url)
+        return tools.JudgeClient(self.config.judge_url, rank=self.config.judge_rank)
 
 
 def _score_from_payload(payload: dict) -> Score:
