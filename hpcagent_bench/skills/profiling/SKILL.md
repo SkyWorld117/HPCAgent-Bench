@@ -69,9 +69,25 @@ events and scale the partial counts back up. What comes back looks exactly like 
 an extrapolation. So `counters:true` costs one extra measured run per metric on top of the
 thread sweep. Turn it on after the call graph has named the loop, not before.
 
-Which events exist is a property of *this CPU*, discovered at run time and never assumed:
-`PAPI_L1_DCM` is available on a Zen4 while `PAPI_L1_ICM`, `PAPI_L3_DCM` and `PAPI_L1_TCM` are
-not. Read the `expression` field, not just the metric name -- the metric names the question,
+The seven, and what each is for:
+
+| metric | question it answers |
+| --- | --- |
+| `instructions` | the denominator for everything else; work done, not time spent |
+| `data_cache_misses` | is the access pattern the problem |
+| `instruction_cache_misses` | did unrolling/inlining blow up the code footprint (usually no) |
+| `cache_hits` | with misses, the hit rate -- where the working set crosses a cache level |
+| `fp_ops` | how much of the math is real math |
+| `integer_instructions` | index arithmetic and bounds checks, i.e. overhead |
+| `fma_instructions` | did it fuse |
+
+Which of them this machine can actually give you is the intersection of that list with the CPU's
+own event table, computed at run time and never assumed: `PAPI_L1_DCM` is available on a Zen4
+while `PAPI_L1_ICM`, `PAPI_L3_DCM` and `PAPI_L1_TCM` are not. Ask before you measure --
+`papi.feature_set()` returns `supported` and `unsupported` with a reason each, without running a
+workload.
+
+Read the `expression` field, not just the metric name -- the metric names the question,
 `PAPI_L1_DCA - PAPI_L1_DCM` names the quantity that answered it. `count:null` with a `missing`
 reason means this CPU cannot express that metric; it never means zero, and nothing else is
 substituted under the name.
@@ -100,13 +116,45 @@ What the combinations mean:
 - **Instruction-cache misses that matter at all** -> unrolled or inlined too far. Rare in
   numerical kernels; when it appears it is self-inflicted.
 
-`fma_instructions` and `integer_instructions` count *instructions*, not operations -- one packed
-AVX-512 FMA is one instruction and thirty-two operations. Do not multiply them by a vector width
-you have not confirmed in the disassembly.
+### Traps, in the order you will hit them
 
-Counted runs are single-threaded, because PAPI counts the calling thread: a threaded count would
-report the master thread's share under the whole kernel's name. Counts describe the WORK; the
-scaling table describes the PARALLELISM. Do not read one for the other.
+**An instruction count is not an op count.** One packed AVX-512 FMA is 1 instruction and 32
+operations. `fma_instructions` and `integer_instructions` are instruction counts -- PAPI has no
+op-count preset for either on any CPU. Never multiply them by a vector width you have not read
+off the disassembly.
+
+**A zero is a measurement, not an absence.** `fma_instructions` reads exactly 0 for gemm on Zen4
+even though the kernel is full of FMAs: `PAPI_FMA_INS` is a *derived* preset there and AMD does
+not feed it. `count:null` means unavailable; `0` means PAPI counted and got nothing, which is
+either true or a broken derivation. Cross-check a suspicious zero against `objdump -d` before you
+conclude anything from it.
+
+**Counts are summed over every thread**, worker threads included -- the master thread's event set
+is attached to each of the others. So a count is thread-count invariant when the work is: gemm
+counts the same `fp_ops` at 1 thread and at 8. If it does not, the parallel version is doing extra
+work, and that is a finding. `scope` says which threads were counted; `scope: calling_thread`
+plus a `fallback` reason means the host refused the attach and the number is the master's share
+only -- one thread's worth, not the kernel's.
+
+**SMT contaminates cache counters.** Two hardware threads on one core share L1 and L2, so a
+sibling's misses land in your count. Counted runs pin to whole cores (`OMP_PLACES=cores`), which
+fences out our own threads but cannot fence out another process. `smt: true` in the payload plus
+a loaded box means treat miss counts as indicative, not exact. Instruction and fp-op counts are
+per-thread and unaffected.
+
+### When the counter and the call graph disagree
+
+Believe the **call graph** about WHERE and the **counter** about WHAT. They measure different
+things by different means: perf samples (statistical, attributed by instruction pointer, blurred
+by skid and inlining), PAPI counts (exact, attributed to a thread, blind to which line).
+
+- perf says a function is 90% of the time, counters say the work is tiny -> it is stalling, not
+  computing. Memory or dependences. The counter is right about the work; the profile is right
+  about the cost.
+- counters look healthy, the wall clock does not improve -> you sped up the part you measured.
+  Re-read `kernel_pct`: the time is somewhere the counted region does not cover.
+- the two disagree about a thread count -> the counters are the representative configuration
+  only. The scaling table is the authority on parallelism; counts describe WORK.
 
 ## Two rules that save the most time
 

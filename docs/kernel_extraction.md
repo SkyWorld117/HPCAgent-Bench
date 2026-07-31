@@ -56,10 +56,11 @@ by hand.
 
 ONE metric per run. A CPU has a handful of counter registers (5 on a Ryzen 8845HS); asking for
 more events at once makes PAPI or perf multiplex and hand back scaled estimates that read exactly
-like counts. Which preset events exist is per-CPU and must be discovered, not assumed. Read
-ratios, not raw counts -- misses per thousand instructions, flops per cycle, instructions per
-cycle -- and read the counting rules in `hpcagent_bench/skills/profiling/SKILL.md` before
-drawing a conclusion from them.
+like counts. Which preset events exist is per-CPU and must be discovered, not assumed. Counting a
+threaded kernel needs every worker thread, not just the one that called PAPI -- otherwise the
+number is 1/N of the work under the whole kernel's name. Read ratios, not raw counts -- misses per
+thousand instructions, flops per cycle, instructions per cycle -- and read the counting rules in
+`hpcagent_bench/skills/profiling/SKILL.md` before drawing a conclusion from them.
 
 ## 5. Analyze scalability
 
