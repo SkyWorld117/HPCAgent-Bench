@@ -28,7 +28,10 @@ promise:
 This module is the MECHANISM only -- where a report goes, how to disassemble a
 library, and how to sample a process with ``perf`` and fold the samples into a call
 graph (:func:`perf_check` / :func:`perf_record` / :func:`call_graph`, used by
-:mod:`hpcagent_bench.harness.profiling`). WHAT a compiler report says is the framework's
+:mod:`hpcagent_bench.harness.profiling`). Sampling's other half -- COUNTING, i.e. what the
+hardware did rather than where it was -- is :mod:`hpcagent_bench.harness.papi`; it lives with
+the harness because a counter must bracket the measured call itself, which this module
+deliberately cannot reach. WHAT a compiler report says is the framework's
 own answer, via the :meth:`Framework.opt_report` / :meth:`Framework.lowered_code` hooks;
 WHEN to ask is the harness's. It therefore imports nothing from
 :mod:`hpcagent_bench.frameworks` (which imports the harness that calls this), and takes the

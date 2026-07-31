@@ -59,15 +59,16 @@ graded measurement at each requested thread count under `perf record`, and answe
 folded call graph. Nothing here is graded, timed against a baseline, or recorded -- an agent
 uses it to decide WHAT to optimize, then submits to `/oracle`.
 
-Request -- the `/oracle` body plus three optional knobs:
+Request -- the `/oracle` body plus four optional knobs:
 ```json
 {"kernel":"gemm","language":"c","source":"<full source>","preset":"S",
- "threads":[1,2,4],"reps":20,"min_percent":1.0}
+ "threads":[1,2,4],"reps":20,"min_percent":1.0,"counters":false}
 ```
 `threads` defaults to `[1,2,4]` clamped to the physical cores available (the counts are pinned
 via `OMP_NUM_THREADS`/`MKL`/`OpenBLAS`/`BLIS`, so the submission's own OpenMP is what varies);
 `reps` defaults to `measurement.repeat`; `min_percent` (default 1.0) prunes call-graph branches
-below that share. `input_mode` applies exactly as it does to `/oracle`.
+below that share; `counters` (default **false**) adds PAPI hardware counts. `input_mode` applies
+exactly as it does to `/oracle`.
 
 Response (200):
 ```json
@@ -76,6 +77,7 @@ Response (200):
  "representative":4,
  "scalability":[{"threads":1,"elapsed_ns":1653872,"speedup":1.0,"kernel_pct":98.13}],
  "rising":[{"symbol":"reduce","dso":"libx.so","self_pct_low":2.1,"self_pct_high":11.4,"delta_pct":9.3}],
+ "counters":null,
  "configs":[{"threads":1,"elapsed_ns":1653872,"samples":38407,"kernel_pct":98.13,
              "hotspots":[{"symbol":"gemm_fp64","dso":"libgemm.so","self_pct":97.9,"total_pct":98.1}],
              "call_graph":{"symbol":"(all)","dso":"","self_pct":0.0,"total_pct":100.0,
@@ -90,6 +92,35 @@ the profile under the submitted symbol: the recording covers the whole child pro
 what makes "ignore start-up" measurable instead of assumed. A build failure is a normal answer
 (`build_ok: false` + the compiler log in `detail`).
 
+### `counters` -- what the machine did, not where it was
+
+`null` unless the request asked. With `"counters":true`:
+```json
+{"counters":{"threads":1,"runs":7,"metrics":[
+  {"metric":"instructions","expression":"PAPI_TOT_INS","events":["PAPI_TOT_INS"],
+   "derived":false,"count":41203118,"elapsed_ns":1653872,"reps_counted":20,"hardware_counters":5},
+  {"metric":"cache_hits","expression":"PAPI_L1_DCA - PAPI_L1_DCM","events":["PAPI_L1_DCA","PAPI_L1_DCM"],
+   "derived":true,"count":10233871,"elapsed_ns":1661204,"reps_counted":20,"hardware_counters":5},
+  {"metric":"integer_instructions","count":null,
+   "missing":"no candidate is available on this CPU (tried: PAPI_INT_INS)"}]}}
+```
+One measured run per metric, so `counters:true` **multiplies the profile's wall clock by the
+number of metrics** on top of the thread sweep -- that is why it is opt-in. The reason is the
+hardware: `hardware_counters` is how many events this CPU counts at once (5 on a Ryzen 8845HS),
+and asking for more than that makes PAPI multiplex and extrapolate, which returns estimates
+shaped exactly like counts.
+
+Read `expression`, not just `metric`: the metric names the question, the expression names the
+quantity that answered it. Availability is per-CPU and discovered at run time -- `PAPI_L1_DCH`
+exists almost nowhere, so `cache_hits` normally arrives `derived` from accesses minus misses.
+A metric no available event can express arrives with `count:null` and a `missing` reason rather
+than a different quantity under the same name. A crashed or timed-out counting run loses that
+one metric the same way, never the profile.
+
+Counted runs are single-threaded on purpose: PAPI counts the calling thread, so a multi-threaded
+count would report the master thread's share under the whole kernel's name. Counts describe the
+WORK; `scalability` describes the parallelism.
+
 `perf` is often unavailable (not installed, `kernel.perf_event_paranoid > 2`, a container
 without `CAP_PERFMON`, macOS). That is **503** with a machine-readable cause -- never an empty
 or invented profile:
@@ -98,7 +129,10 @@ or invented profile:
  "cause":"perf_event_paranoid"}
 ```
 Causes: `not_linux`, `perf_missing`, `no_perf_events`, `perf_event_paranoid`,
-`perf_record_failed`, `no_samples`. A profiled run that fails for its own reasons (the kernel
+`perf_record_failed`, `no_samples`. `counters:true` on a host without PAPI (or for a python
+submission, which has no native call to bracket) is the same 503 with the same `cause` field --
+`not_linux`, `papi_missing`, `papi_init_failed`, `not_native` -- so one branch handles both.
+A profiled run that fails for its own reasons (the kernel
 crashed) is a 500 carrying the child's stderr. The judge image already ships `perf`
 (`linux-perf` in `containers/hpcagent_bench.Dockerfile`); the host's
 `kernel.perf_event_paranoid` and the container's capabilities are still the site's to set.

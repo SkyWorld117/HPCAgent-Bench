@@ -25,22 +25,29 @@ application before porting a kernel out of it:
 Steps 7-14 (choosing a boundary, writing the port, its manifest and tests) are judgement and
 authoring; they stay in the skill.
 
+OPTIONALLY (``counters=True``, off by default) the profile also carries HARDWARE COUNTS --
+what the machine did, next to where the time went. See :func:`count_metrics` for the cost:
+one extra measured run per metric, because counting several metrics in one run would multiplex
+them into estimates.
+
 The module is also the child process it profiles: ``python -m hpcagent_bench.harness.profiling
 --request <json>`` runs the measurement through the ordinary
 :func:`~hpcagent_bench.harness.native_call._call_isolated` path -- the same build, data and timing
-core as a graded run, under ``perf`` instead of under the scorer.
+core as a graded run, under ``perf`` instead of under the scorer. ``--metric <name>`` selects the
+counting form of the same child instead.
 """
 import argparse
 import json
 import os
 import pathlib
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 from hpcagent_bench import config, flags, perf_reports, sizing
 from hpcagent_bench.flags import Mode
-from hpcagent_bench.harness import timing
+from hpcagent_bench.harness import papi, timing
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.grading import _data_seeded
 from hpcagent_bench.harness.native_call import _call_isolated
@@ -59,6 +66,12 @@ RESULT_PREFIX = "HPCAGENT_BENCH_PROFILE "
 
 #: This module, as the child ``python -m`` runs.
 MODULE = "hpcagent_bench.harness.profiling"
+
+#: Seconds a counting PROCESS gets on top of the budget its inner fork gets, covering interpreter
+#: start, imports and input generation. Deliberately non-zero: with equal budgets the two would
+#: race, and the process losing means a metric reported as "the process died" instead of the
+#: precise in-child reason. This is the backstop for a child wedged OUTSIDE the fork.
+COUNT_PROCESS_GRACE_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,29 @@ def run_workload(request: dict) -> dict:
                                                          reps=request["reps"],
                                                          warmup=request["warmup"])
     return {"elapsed_ns": min(samples) if samples else 0, "reps": len(samples)}
+
+
+def run_counted(request: dict, metric: str) -> dict:
+    """CHILD SIDE: count ONE hardware metric over the same measured reps ``run_workload`` times.
+
+    Same request file, same seeded data, same reps/warmup -- only the instrument differs, so a
+    count and a time describe the same work. :func:`~hpcagent_bench.harness.papi.count_metric`
+    owns the fork, so a kernel that segfaults under the counters returns a reason here rather
+    than killing this child.
+    """
+    spec = BenchSpec.load(request["kernel"])
+    binding = binding_from_spec(spec)
+    data = _data_seeded(request["kernel"], request["preset"], request["datatype"], request["seed"])
+    return papi.count_metric(request["lib"],
+                             binding,
+                             data,
+                             request["language"],
+                             metric,
+                             workspace_bytes=request["workspace_bytes"],
+                             reps=request["reps"],
+                             warmup=request["warmup"],
+                             rep_timeout=request["timeout"],
+                             memory_gb=request["memory_gb"])
 
 
 def child_result(stdout: str) -> Optional[dict]:
@@ -165,6 +201,78 @@ def rising_hotspots(runs: List[ThreadRun], min_percent: float, limit: int = 5) -
     return sorted(moved, key=lambda m: (-m["delta_pct"], m["symbol"]))[:limit]
 
 
+def count_one(root: pathlib.Path, request_file: pathlib.Path, metric: str, *, timeout: float) -> dict:
+    """Run the measurement ONCE more, counting only ``metric``; returns that metric's payload.
+
+    A fresh PROCESS rather than another fork, for one reason: PAPI counts the calling thread, so a
+    counted run must be single-threaded or the number is the master thread's share of the work
+    wearing the whole kernel's name -- and ``OMP_NUM_THREADS`` is read by the OpenMP runtime when
+    its image loads, which a variable set after a fork is too late to change. Inside that process
+    the count is still forked (:func:`~hpcagent_bench.harness.papi.count_metric`), which is what
+    turns a segfault into a named reason on the result line instead of a dead process the parent
+    has to decode. A process that dies anyway is decoded here, so both layers report a metric --
+    including a wedge past the deadline, which ``subprocess`` reports only by raising, and which
+    must cost this metric rather than every metric after it.
+    """
+    env = {**os.environ, **flags.cpu_env(Mode.SINGLE_CORE)}
+    argv = [sys.executable, "-m", MODULE, "--request", str(request_file), "--metric", metric]
+    try:
+        proc = subprocess.run(argv,
+                              capture_output=True,
+                              text=True,
+                              env=env,
+                              cwd=str(root),
+                              timeout=timeout + COUNT_PROCESS_GRACE_S)
+    except subprocess.TimeoutExpired:
+        return papi.missing(metric, f"counting process wedged past {timeout + COUNT_PROCESS_GRACE_S:g}s and was killed")
+    result = child_result(proc.stdout)
+    if result is None:
+        return papi.missing(
+            metric, f"counting process died (exit {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout).strip()[-300:]}")
+    return result
+
+
+def count_metrics(root: pathlib.Path, request_file: pathlib.Path, *, timeout: float) -> dict:
+    """Every metric in :data:`hpcagent_bench.harness.papi.METRICS`, ONE measured run each.
+
+    COST: this multiplies the profile's wall clock by the number of metrics (seven today) on top
+    of the ``perf`` sweep, which is why counters are off by default. The cheap alternative -- every
+    metric in one run -- does not exist: a CPU has a handful of counter registers (five here), and
+    past that PAPI multiplexes and hands back estimates that read exactly like counts.
+
+    Single-threaded by construction (see :func:`count_one`), so these numbers describe the WORK
+    the kernel does, never how well it parallelizes; that question is the scaling table's.
+    """
+    rows = [count_one(root, request_file, metric, timeout=timeout) for metric in papi.METRICS]
+    return {"threads": 1, "runs": len(rows), "metrics": rows}
+
+
+def render_counters(counters: dict) -> List[str]:
+    """The counters as a table: the metric, the expression that answered it, the count, and the
+    count per thousand instructions where an instruction count came back.
+
+    The ratio column is the one that carries meaning: a raw miss count says nothing without the
+    work it happened during, and misses-per-kilo-instruction is comparable across kernels, sizes
+    and machines in a way that a raw count is not.
+    """
+    rows = counters["metrics"]
+    instructions = next((r["count"] for r in rows if r["metric"] == "instructions" and r["count"] is not None), 0)
+    lines = [
+        "", f"hardware counters ({counters['runs']} single-threaded runs, one per metric)",
+        f"  {'metric':<24}  {'count':>15}  {'/1k instr':>9}  expression",
+        f"  {'-' * 24}  {'-' * 15}  {'-' * 9}  {'-' * 34}"
+    ]
+    for row in rows:
+        if row["count"] is None:
+            lines.append(f"  {row['metric']:<24}  {'--':>15}  {'--':>9}  {row['missing']}")
+            continue
+        countable = instructions and row["metric"] != "instructions"  # 1000 per 1k is not a finding
+        ratio = f"{1000.0 * row['count'] / instructions:9.2f}" if countable else f"{'--':>9}"
+        lines.append(f"  {row['metric']:<24}  {row['count']:15d}  {ratio}  {row['expression']}")
+    return lines
+
+
 def render_report(payload: dict) -> str:
     """The human view of a profile response: the scaling table, then the representative call graph.
 
@@ -184,6 +292,8 @@ def render_report(payload: dict) -> str:
         for row in payload["rising"]:
             lines.append(f"    {row['symbol']} [{row['dso']}]  "
                          f"{row['self_pct_low']:.2f}% -> {row['self_pct_high']:.2f}%")
+    if payload.get("counters"):
+        lines += render_counters(payload["counters"])
     for run in payload["configs"]:
         lines += ["", f"call graph @ {run['threads']} thread(s)", run["text"]]
     return "\n".join(lines)
@@ -197,14 +307,28 @@ def profile_submission(submission: Submission,
                        reps: Optional[int] = None,
                        threads: Optional[Sequence[int]] = None,
                        min_percent: float = 1.0,
+                       counters: bool = False,
                        frequency: int = perf_reports.PERF_FREQUENCY) -> dict:
     """Build, run and profile ``submission`` at each thread count; returns the profile payload.
 
     Raises :class:`~hpcagent_bench.perf_reports.PerfUnavailable` when this host cannot sample
     (checked FIRST, before anything is compiled) and ``RuntimeError`` when the profiled run itself
     fails. A build failure is a normal answer: ``build_ok`` is false and the compiler log comes back.
+
+    ``counters`` adds hardware counts (:func:`count_metrics`) and is OFF by default because it is
+    NOT free: it appends one further measured run per metric -- seven today -- to a sweep that has
+    already run one per thread count. Ask for it when "where is the time" has been answered and
+    "what is the machine doing there" has not. A host without PAPI raises
+    :class:`~hpcagent_bench.harness.papi.PapiUnavailable`, checked before the build for the same
+    reason perf is: an environment that cannot answer should say so before it compiles anything.
     """
     perf_reports.perf_check()
+    if counters:
+        papi.check()
+        if task.language == "python":
+            raise papi.PapiUnavailable(
+                "not_native", "counters bracket the native call the judge times; a python "
+                "submission has no such call, so profile it with the call graph alone")
     spec = BenchSpec.load(task.kernel)
     binding = binding_from_spec(spec)
     symbol = binding.symbols.get(task.language, binding.symbol)
@@ -244,6 +368,7 @@ def profile_submission(submission: Submission,
                          frequency=frequency,
                          min_percent=min_percent) for n in counts
         ]
+        counted = count_metrics(sandbox.root, request, timeout=outer) if counters else None
 
     base_ns = runs[0].elapsed_ns
     payload = {
@@ -275,6 +400,8 @@ def profile_submission(submission: Submission,
         } for r in runs],
         "rising":
         rising_hotspots(runs, min_percent),
+        "counters":
+        counted,
         "configs": [{
             "threads": r.threads,
             "elapsed_ns": r.elapsed_ns,
@@ -290,11 +417,17 @@ def profile_submission(submission: Submission,
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CHILD entry: run one configuration's reps and print the result line perf's parent reads."""
+    """CHILD entry: run one configuration's reps and print the result line the parent reads.
+
+    ``--metric`` switches from the sampled form (under ``perf record``) to the counted form; both
+    write the SAME :data:`RESULT_PREFIX` line, so the parent has one protocol to parse.
+    """
     ap = argparse.ArgumentParser(description="run one profiled measurement (invoked under perf record)")
     ap.add_argument("--request", required=True, help="path to the JSON request written by profile_submission")
+    ap.add_argument("--metric", default=None, choices=sorted(papi.METRICS), help="count this metric instead")
     args = ap.parse_args(argv)
-    result = run_workload(json.loads(pathlib.Path(args.request).read_text()))
+    request = json.loads(pathlib.Path(args.request).read_text())
+    result = run_counted(request, args.metric) if args.metric else run_workload(request)
     print(RESULT_PREFIX + json.dumps(result))
     return 0
 
