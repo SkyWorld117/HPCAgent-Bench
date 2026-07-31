@@ -184,12 +184,17 @@ def generated_source_text(cpp_backend: pathlib.Path, short: str, framework: str)
     """The auto-generated per-precision sources this framework compiled, concatenated with a per-file
     banner, or ``None`` when none are on disk. These are the ``<short>_fpNN.<ext>`` files a translator
     emitted from the numpy reference (source-to-source backends land their transformed code here too),
-    so dumping them shows the exact input that was built and timed."""
+    so dumping them shows the exact input that was built and timed.
+
+    Each file goes through :func:`hpcagent_bench.languages.annotate_generated`, which reformats the
+    REPORT COPY to the repo's column limit and appends clang-tidy's findings. The file on disk -- the
+    one that was compiled -- is not touched, so this cannot change a measured number."""
+    from hpcagent_bench import languages
     lang = FRAMEWORK_LANG[framework]
     parts: List[str] = []
     for src in _native_sources(cpp_backend, short, lang):
         if src.exists():
-            parts.append(f"// ==== {src.name} ====\n{src.read_text()}")
+            parts.append(f"// ==== {src.name} ====\n{languages.annotate_generated(src, lang)}")
     return "\n\n".join(parts) if parts else None
 
 

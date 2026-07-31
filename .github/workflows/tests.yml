@@ -390,6 +390,17 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider -n auto tests/test_e2e_numerical.py
 
+      # Phase 5d -- the optimization-report e2e. HERE and nowhere else: this is the ONLY runner that
+      # builds Pluto, and the test needs polycc AND dace in one process (dace comes from the shared
+      # setup, so this job is the only one that has both). Two kernels at preset S, single node, no
+      # MPI, no container. -rs so a toolchain skip is visible rather than a silent pass -- the test's
+      # own skip predicates are explicit (polycc on PATH, dace importable), never a bare except.
+      - name: Phase 5d -- opt-report + disassembly e2e [dace, pluto] @ S
+        if: ${{ !cancelled() }}
+        timeout-minutes: 25
+        run: |
+          python -m pytest -q -p no:cacheprovider -rs --timeout=1200 tests/test_opt_reports_e2e.py
+
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
         if: always()

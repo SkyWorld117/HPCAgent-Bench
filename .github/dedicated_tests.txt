@@ -53,6 +53,10 @@ tests/test_native_autogen.py
 tests/test_e2e_numerical.py
 tests/test_integration_sweep.py
 tests/test_kernelbench_translation.py
+# Phase 5d on frameworks-pluto: needs polycc AND dace in one process, and that is the only runner
+# with both. Excluded from the unit sweep because the sweep's runner has neither Pluto nor the
+# headroom -- it would skip there, and a skip that looks like a pass is what this file prevents.
+tests/test_opt_reports_e2e.py
 
 # --- containers: needs a rootless runtime on the runner -----------------------------------------
 tests/test_container_launch.py

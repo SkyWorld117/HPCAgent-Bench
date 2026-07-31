@@ -1,6 +1,6 @@
 # Sample job submissions
 
-**Two** modes, three samples. They are concrete examples, not templates: edit the node counts and
+**Two** modes, four samples. They are concrete examples, not templates: edit the node counts and
 kernel selection at the top and submit. Each one only sets env knobs and hands off to the real
 script in `scripts/`, so a sample can never drift from the launcher it demonstrates.
 
@@ -27,6 +27,36 @@ while the framework list is short and fixed, so a framework-per-rank split leave
 behind the slowest column. Each rank takes `kernels[rank::nranks]` and runs *every* framework over
 its own kernels. Round-robin rather than contiguous blocks because neighbours in the sorted name list
 tend to be similar sizes.
+
+## `hpc_dace_main_vs_pluto.sbatch` — one node, two optimizers, reports on
+
+Mode 2 on a **single** node: `#SBATCH --nodes=1 --ntasks-per-node=4`, so four kernel shards each
+measuring on a quarter of the node, over every kernel in the `hpc` track.
+
+| column | what it is |
+|---|---|
+| `dace_cpu_autoopt` | upstream `auto_optimize`, on DaCe `main` |
+| `pluto` | the polyhedral native column |
+| `numpy` | the reference. **Not optional** — `plot` builds its speedup table against it and fails without it |
+
+Both optimizer columns write **optimization reports**
+(`$HPCAGENT_BENCH_PERF_REPORTS_OPT_REPORT=1`, `…_GENERATED_SOURCE=1`). DaCe replays the compile
+command CMake recorded in its build folder's `compile_commands.json` with the repo's `-fopt-info`
+flags; Pluto prepends `polycc`'s own transformation report to clang's remarks. Both come from a
+separate compile-only run into a scratch directory, so the timed `.so` is untouched and a measured
+number is identical with the reports on or off — but each costs one extra compile per kernel ×
+column, which is why they are off by default.
+
+    DACE_MAIN=~/src/dace-main sbatch -A <account> samples/hpc_dace_main_vs_pluto.sbatch
+
+The branch check is the same `ensure_branch` the flavors job uses, now shared from
+`scripts/dace_branch.sh` rather than copied — two copies is how the two would drift into disagreeing
+about what "measured on `main`" means.
+
+> **Read the Pluto column's report before comparing it.** The `pluto` column currently compiles the
+> *untransformed* C++ — the same sources as `llvm`, with the same `clang++` — and never invokes
+> `polycc`. The transformation report says so in its own header. Until that is fixed the column is a
+> second `llvm`, not a polyhedral optimizer.
 
 ## `npbench_dace_flavors.sbatch` — one optimizer per column
 
@@ -108,10 +138,18 @@ Merging is automatic — no step to forget:
 
 The aggregate is always rebuilt from scratch, so merging twice cannot double the rows.
 
+Both DaCe samples end by forcing the merge (`hpcagent-bench aggregate-db`, so the one file to copy
+off the cluster exists whether or not anything reads it) and then rendering the **speedup table**
+with `hpcagent-bench plot` — the CLI verb, not `scripts/plot_results.py`, which is a shim over the
+same verb and on its way out. `plot` folds `flavor` and `build` back into one series name
+(`dace_cpu/autoopt/main`) exactly as it folds `variant` into the benchmark name, and it re-runs the
+merge itself if a shard moved, so the two steps cannot disagree.
+
 ## Submitting
 
     sbatch -A <account> samples/agentic_container.sbatch
     sbatch -A <account> samples/deterministic_kernels_to_ranks.sbatch
+    DACE_MAIN=... sbatch -A <account> samples/hpc_dace_main_vs_pluto.sbatch
     DACE_MAIN=... DACE_EXTENDED=... sbatch -A <account> -N 8 samples/npbench_dace_flavors.sbatch
 
 All three write under `results/`. The deterministic job's exit status is the merged failure count across

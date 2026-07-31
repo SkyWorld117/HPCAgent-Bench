@@ -81,11 +81,18 @@ class Test(object):
         report_str = frmwrk.info["full_name"] + " - " + impl_name
         # Structured failure reason for the caller to record (no silent drop).
         self._last_failure: Optional[str] = None
+        # The handle that was actually MEASURED, published for the report hooks. ``optimize``
+        # below rebinds the local ``impl``, which the caller never sees, so without this the
+        # diagnostics would describe the PRE-optimize handle: for DaCe that is the parsed
+        # @dace.program, which has no compiled artifact to report on at all. Set here rather
+        # than returned because every existing caller unpacks a fixed 3-tuple.
+        self._measured_impl: Any = impl
         try:
             # Optimizer seam (no-op by default): optimize ONCE before the runner +
             # timer are built, so the optimized program is what gets run AND
             # measured, and the optimize cost stays outside the timed bracket.
             impl = frmwrk.optimize(impl, self.bench, bdata)
+            self._measured_impl = impl
             plan = frmwrk.build_call(self.bench, impl, bdata)
         except Exception as e:
             print("Failed to load the {} implementation.".format(report_str))
@@ -250,7 +257,9 @@ class Test(object):
             _, timelist, native_times = self._execute(self.frmwrk, impl, impl_name, "median", context, repeat,
                                                       ignore_errors)
             # Diagnostics only now, once per impl: the artifact is built and every timing is taken.
-            self._write_perf_reports(self.frmwrk, impl, impl_name)
+            # The MEASURED handle, not the loop's -- see _execute; for a framework whose optimize()
+            # returns a compiled artifact (DaCe) they are different objects.
+            self._write_perf_reports(self.frmwrk, self._measured_impl, impl_name)
             if timelist:
                 natives = native_times if native_times else [None] * len(timelist)
                 for t, nt in zip(timelist, natives):
