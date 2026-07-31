@@ -831,14 +831,21 @@ def _default_const(node: ast.expr) -> ast.expr:
 def _fold_default_args(fn: ast.FunctionDef, input_args: List[str]) -> None:
     """Substitute kernel params that have a default AND are not in ``input_args``
     with that default value, folding them into body constants and dropping them
-    from the signature."""
+    from the signature.
+
+    KEYWORD-ONLY params (``def k(a, b, *, flag=False)``) fold identically: the harness calls
+    positionally through ``input_args`` and passes nothing else, so a defaulted keyword-only param
+    is exactly as constant as a defaulted positional one. Skipping them left cegterg's whole QE
+    config surface (``gamma_only``, ``lda_plus_u``, ``deeq_nc``, ...) in the emitted signature as
+    15 ABI slots the harness never passes, shifting every positional argument after them."""
     args = fn.args.args
     defaults = fn.args.defaults
-    if not defaults:
-        return
+    kwonlyargs = fn.args.kwonlyargs
     defaulted = list(zip(args[len(args) - len(defaults):], defaults))
+    # kw_defaults is positionally aligned with kwonlyargs; None means "no default".
+    kw_defaulted = [(a, d) for a, d in zip(kwonlyargs, fn.args.kw_defaults) if d is not None]
     subst: Dict[str, ast.expr] = {}
-    for a, d in defaulted:
+    for a, d in defaulted + kw_defaulted:
         if a.arg not in input_args:
             subst[a.arg] = _default_const(d)
     if not subst:
@@ -854,6 +861,8 @@ def _fold_default_args(fn: ast.FunctionDef, input_args: List[str]) -> None:
     _Sub().visit(fn)
     fn.args.args = [a for a in args if a.arg not in subst]
     fn.args.defaults = [d for a, d in defaulted if a.arg not in subst]
+    fn.args.kw_defaults = [d for a, d in zip(kwonlyargs, fn.args.kw_defaults) if a.arg not in subst]
+    fn.args.kwonlyargs = [a for a in kwonlyargs if a.arg not in subst]
     ast.fix_missing_locations(fn)
 
 
