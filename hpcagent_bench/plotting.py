@@ -33,6 +33,7 @@ stack.
 import collections
 import math
 import pathlib
+import re
 import sqlite3
 from typing import List, Optional, Sequence, Tuple
 
@@ -127,7 +128,8 @@ def load_results(db: Optional[str],
     (legacy NULL treated float64) and ``preset``, folds the sparse ``variant`` axis into the
     ``benchmark`` name (``benchmark/variant``) and the ``flavor`` / ``build`` axes into the
     ``framework`` name (``dace_cpu/canonicalize/extended``). One row per timed sample survives,
-    with columns ``benchmark``, ``domain``, ``framework``, ``time``.
+    with columns ``benchmark``, ``domain``, ``framework``, ``time``, plus the ``cpu`` / ``gpu``
+    machine axes, which are deliberately NOT folded -- see :func:`machine_groups`.
     """
     # A distributed run leaves one DB per rank and no merged file until something asks for it; this
     # is that ask, so plotting a sharded run needs no separate aggregation step.
@@ -177,6 +179,39 @@ def load_results(db: Optional[str],
     return data
 
 
+def machine_label(cpu: object, gpu: object) -> str:
+    """Filename-safe identity of one machine: the CPU, plus the device when one was used."""
+    parts = [str(cpu)] + ([str(gpu)] if isinstance(gpu, str) and gpu else [])
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", "-".join(parts)).strip("-") or "unknown"
+
+
+def machine_groups(data: pd.DataFrame) -> List[Tuple[str, pd.DataFrame]]:
+    """Split rows into one frame per ``(cpu, gpu)``: a figure may only compare one machine's runs.
+
+    Every other axis in :func:`load_results` FOLDS -- flavor and build join the framework name so
+    two pipelines read as two series in one figure. Hardware is the opposite. A speedup is a ratio
+    against the numpy baseline, so a candidate timed on one node over a baseline timed on another
+    is not a speedup at all, it is a hardware comparison; and nothing downstream can notice,
+    because both rows are perfectly well-formed. Partition, never fold.
+
+    Sorted by label, so one DB always yields the same files in the same order.
+    """
+    grouped = [(machine_label(cpu, gpu), rows.drop(["cpu", "gpu"], axis=1).reset_index(drop=True))
+               for (cpu, gpu), rows in data.groupby(["cpu", "gpu"], dropna=False)]
+    return sorted(grouped, key=lambda pair: pair[0])
+
+
+def machine_output(output: str, label: str) -> str:
+    """``plots/heatmap.pdf`` -> ``plots/heatmap.<machine>.pdf``.
+
+    Suffixed ALWAYS, even when the DB holds one machine: a fixed filename would silently change
+    meaning the day a second machine's rows land beside the first, which is exactly the mix-up the
+    split exists to prevent.
+    """
+    path = pathlib.Path(output)
+    return str(path.with_name(f"{path.stem}.{label}{path.suffix}"))
+
+
 def cell_summary(data: pd.DataFrame) -> pd.DataFrame:
     """Per ``(benchmark, domain, framework)`` cell: the outlier-cleaned median and its
     bootstrap CI (:func:`hpcagent_bench.stats.median_ci`, which warns -- naming the cell -- on
@@ -214,8 +249,12 @@ def plot_heatmap(benchmark="all",
                  order: str = BY_DWARF,
                  db=None,
                  output=PLOTS_DIR + "/heatmap.pdf",
-                 usetex: bool = True) -> str:
-    """Read ``db`` and emit the speedup heatmap to ``output`` (a PDF).
+                 usetex: bool = True) -> List[str]:
+    """Read ``db`` and emit ONE speedup heatmap PER MACHINE; returns the paths written.
+
+    A plural return, because a results DB may hold rows from more than one node and those may
+    never share a figure (:func:`machine_groups`). ``output`` names the family, not a file: each
+    machine gets ``<stem>.<cpu>[-<gpu>]<ext>``.
 
     :param benchmark: selector (kernel / track / dwarf / ``@lvl<n>``) matched against
         the ``benchmark`` (short_name) column; ``all`` keeps every row.
@@ -226,12 +265,21 @@ def plot_heatmap(benchmark="all",
     :param order: row ordering, ``by_dwarf`` (default) or ``by_level`` (see
         :mod:`hpcagent_bench.reporting_order`).
     :param db: SQLite results DB path; ``None`` uses the configured ``record.db_path``.
-    :param output: PDF path to write (default under ``results/plots``).
+    :param output: PDF path FAMILY (default under ``results/plots``); each machine's file is this
+        name with the machine label inserted before the extension.
     :param usetex: render text with LaTeX (default); ``False`` for a LaTeX-free box.
     """
     set_usetex(usetex)
-    data = load_results(db, benchmark, preset, datatype, variant)
+    everything = load_results(db, benchmark, preset, datatype, variant)
+    return [heatmap_figure(rows, order, machine_output(output, label)) for label, rows in machine_groups(everything)]
 
+
+def heatmap_figure(data: pd.DataFrame, order: str, output: str) -> str:
+    """Draw ONE machine's speedup heatmap to ``output``; returns the path written.
+
+    Split from :func:`plot_heatmap` so the per-machine partition happens once, above the drawing,
+    rather than being threaded through it.
+    """
     # Per-cell cleaned median + CI (the median drives best-selection AND the plotted value).
     summary = cell_summary(data)
     best = summary[["benchmark", "domain", "framework", "time"]].copy()
@@ -362,8 +410,11 @@ def plot_distribution_grid(benchmark="all",
                            db=None,
                            output=PLOTS_DIR + "/distribution.pdf",
                            col_width_in: float = 3.4,
-                           usetex: bool = True) -> str:
-    """Emit a grid of per-kernel sample distributions (violin or box) to ``output`` (a PDF).
+                           usetex: bool = True) -> List[str]:
+    """Emit ONE per-kernel distribution grid (violin or box) PER MACHINE; returns the paths written.
+
+    Plural for the same reason as :func:`plot_heatmap`: rows from two nodes may not share a figure,
+    so ``output`` names the family and each machine's file carries its label.
 
     Modelled on npbench's per-kernel subplot grid (framework-coloured, one shared legend), but
     with FIXED per-framework slots: every panel reserves one slot per framework in
@@ -386,11 +437,23 @@ def plot_distribution_grid(benchmark="all",
     if kind not in ("violin", "box"):
         raise ValueError(f"kind must be 'violin' or 'box' (got {kind!r})")
     set_usetex(usetex)
-    data = load_results(db, benchmark, preset, datatype, variant)
+    everything = load_results(db, benchmark, preset, datatype, variant)
     if framework is not None:
-        data = data[data['framework'] == framework].reset_index(drop=True)
-    if data.empty:
+        everything = everything[everything['framework'] == framework].reset_index(drop=True)
+    if everything.empty:
         raise RuntimeError(f"no rows to plot for benchmark={benchmark!r} preset={preset!r} datatype={datatype!r}")
+    return [
+        distribution_figure(rows, kind, order, machine_output(output, label), col_width_in)
+        for label, rows in machine_groups(everything)
+    ]
+
+
+def distribution_figure(data: pd.DataFrame, kind: str, order: str, output: str, col_width_in: float) -> str:
+    """Draw ONE machine's distribution grid to ``output``; returns the path written.
+
+    Split from :func:`plot_distribution_grid` for the same reason as :func:`heatmap_figure`: the
+    per-machine partition belongs above the drawing, not threaded through it.
+    """
 
     kernels = list(dict.fromkeys(data['benchmark'].tolist()))  # unique, insertion order
     ordered, _spans = _reorder_rows(kernels, order)

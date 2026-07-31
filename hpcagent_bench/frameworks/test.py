@@ -6,7 +6,7 @@ import numpy as np
 
 from sqlmodel import Session
 
-from hpcagent_bench import config, perf_reports
+from hpcagent_bench import config, osinfo, perf_reports
 from hpcagent_bench.frameworks import (Benchmark, Framework, timeout_decorator as tout, utilities as util)
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
 from hpcagent_bench.frameworks.framework import split_flavor
@@ -295,7 +295,9 @@ class Test(object):
                            variant=variant,
                            build=build,
                            prompt_hash=None,
-                           execution=execution))
+                           execution=execution,
+                           cpu=osinfo.cpu_model(),
+                           gpu=osinfo.gpu_model() if self.frmwrk.info["arch"] == "gpu" else None))
             session.commit()
 
         # Return per-impl timing dict so the CLI can persist it as JSONL.
