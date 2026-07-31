@@ -11,10 +11,15 @@ from hpcagent_bench.precision import Precision
 from hpcagent_bench.spec import KERNELS, BenchSpec, validate_min_precision
 from tests.numerical_oracle import FP16_BACKENDS, MISSING_EMIT_FEATURE, OUT_OF_SCOPE, PRECISIONS, run_kernel
 
-#: Backends fed by the STATIC translators' native emit, so a MISSING_EMIT_FEATURE entry excuses these
-#: and only these. numba/pythran/jax emit independently and must still pass for a listed kernel --
-#: otherwise one missing C feature would silently excuse every backend.
-NATIVE_EMIT_BACKENDS = ("c", "cpp", "fortran", "pluto")
+#: Backends fed DIRECTLY by the static translators' native emit, so a MISSING_EMIT_FEATURE entry
+#: excuses these and only these. numba/pythran/jax emit independently and must still pass for a
+#: listed kernel -- otherwise one missing C feature would silently excuse every backend.
+#:
+#: ``pluto`` is deliberately absent even though it consumes the emitted C: it is DOWNSTREAM of the
+#: emit, so when the emit is excused it reports its own ``skip:native-emit`` rather than the
+#: excuse string, and demanding the excuse verbatim fails a correctly-behaving backend. The ratchet
+#: keeps its teeth regardless -- if a listed kernel ever emits, c/cpp/fortran stop matching.
+NATIVE_EMIT_BACKENDS = ("c", "cpp", "fortran")
 
 # Backends gated here. cupy is excluded -- needs a GPU, would only ``skip:not-installed`` in CI.
 # CI splits this sweep across runners by backend via HPCAGENT_BENCH_E2E_BACKENDS; unset = the full set.
