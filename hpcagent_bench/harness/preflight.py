@@ -132,7 +132,7 @@ def run(frameworks: Sequence[str],
             report.append(f"preflight: {name} PARALLELIZES on this node ({detail})")
         else:
             report.append(f"preflight: WARNING -- {name} is {verdict}: {detail}; "
-                          "this column is serial -O3 wearing an autopar label")
+                          "this column is a serial baseline wearing an autopar label")
     env = [f"export {name}={value}"
            for name, value in thread_env(ranks_per_node=ranks_per_node).items()] if print_env else []
     return 0, report, env
