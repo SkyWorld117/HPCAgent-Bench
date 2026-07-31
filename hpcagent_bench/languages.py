@@ -475,7 +475,9 @@ def tidy_footer(source: pathlib.Path, lang: str) -> str:
     tidy = shutil.which("clang-tidy")
     if tidy is None:
         return comment_block("clang-tidy: not installed on this host -- no findings collected.") + "\n"
-    cmd = [tidy, str(source), f"-checks={GENERATED_TIDY_CHECKS}", "--quiet", "--", std_flag(lang), "-O3"]
+    # Optimization level from the matrix, never spelled here: this is a real compiler invocation,
+    # so a literal would be exactly the drift tests/test_no_literal_flags.py exists to catch.
+    cmd = [tidy, str(source), f"-checks={GENERATED_TIDY_CHECKS}", "--quiet", "--", std_flag(lang), flags.OPT_LEVEL]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     findings = proc.stdout.strip()
     header = f"==== clang-tidy ====\n$ {shlex.join(cmd)}"

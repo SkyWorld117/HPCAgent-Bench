@@ -88,6 +88,12 @@ VECMATH_H: pathlib.Path = paths.ROOT / "hpcagent_bench" / "envs" / "vecmath.h"
 _VECLIB_CLANG = " -fveclib=libmvec" if osinfo.IS_LINUX else ""
 _VECLIB_GCC = f" -include {shlex.quote(str(VECMATH_H))}" if osinfo.IS_LINUX else ""
 
+#: The optimization level every CPU baseline compiles at, named so that a DIAGNOSTIC tool -- e.g.
+#: clang-tidy parsing generated source -- can request the same level without string-literalling it
+#: somewhere the matrix cannot see. This is what makes the "single source of truth" above literally
+#: true rather than aspirational.
+OPT_LEVEL = "-O3"
+
 #: Clang baseline: -O3 + native arch + OpenMP + vectorized libm (no fast-math). On Linux
 #: OpenMP is pinned to GNU ``libgomp`` (like POLLY_PAR/PLUTO_PAR -- clang's default
 #: ``libomp`` is a separate, frequently-absent package) and glibc's ``libmvec`` is added;
