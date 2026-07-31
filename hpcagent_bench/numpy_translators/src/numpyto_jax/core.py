@@ -1197,6 +1197,11 @@ def emit_jax(numpy_src: str, func_name: str, jit: bool = False) -> str:
 
     Helper functions the kernel calls (``relu``/``softmax`` for ``mlp``) are
     emitted as plain module-level functions ahead of the kernel."""
+    # Same contract as the module caches cleared below: the temp-name counters are unique
+    # only WITHIN one kernel, so a translation starts them over. Left running they number
+    # the next kernel from wherever this one stopped -- output that depends on emission order.
+    _TUPLE_CTR[0] = 0
+    _CHAIN_CTR[0] = 0
     tree = ast.parse(numpy_src)
     fn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
     if fn is None:

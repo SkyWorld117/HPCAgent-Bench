@@ -3383,6 +3383,7 @@ def _expand_einsum_ellipsis(spec: str, ranks: List[int]) -> str:
 
 
 #: Counter for the scratch buffers :func:`_materialize_operands` spills non-Name operands into.
+#: Reset per translation unit by :func:`reset_temp_counters`.
 _OP_SPILL_TEMP = [0]
 
 
@@ -5361,8 +5362,20 @@ def expand_linalg_solve(target: ast.expr,
 #: ``np.linalg.inv`` once per SCF sub-solve, each a different size, so the
 #: second call's shape would overwrite the first's declaration and the first
 #: inversion would malloc from an uninitialised dimension. A per-call suffix
-#: keeps each buffer distinct.
+#: keeps each buffer distinct. Reset per translation unit by :func:`reset_temp_counters`.
 _LINALG_AW = [0]
+
+
+def reset_temp_counters() -> None:
+    """Zero the scratch-buffer name counters at the start of a translation unit.
+
+    They only have to be unique WITHIN one kernel, but they are module state, so left
+    running they number the second kernel emitted in a process from wherever the first
+    stopped -- the emitted text then depends on what else the process translated, and
+    re-emitting the same kernel twice yields two different sources. Called by
+    :func:`numpyto_common.lowering.lower`, the single entry point of a translation unit."""
+    _OP_SPILL_TEMP[0] = 0
+    _LINALG_AW[0] = 0
 
 
 def expand_linalg_inv(target: ast.expr,

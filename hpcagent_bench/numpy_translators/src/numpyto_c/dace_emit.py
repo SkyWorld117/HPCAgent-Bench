@@ -7,6 +7,7 @@ from typing import Dict, List
 
 from numpyto_common.ir import KernelIR
 from numpyto_common.numpy_desugar import desugar_for_python_backend
+from numpyto_common.ordered import OrderedSet
 
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 
@@ -457,7 +458,9 @@ def _scan_size_assigns(fn_ast: ast.AST, targets: set):
                 if nm not in first_rhs:
                     first_rhs[nm] = node.value
                     order.append(nm)
-    reassigned = {nm for nm, c in counts.items() if c > 1}
+    # Ordered: the caller PREPENDS one ``<nm>_iter = <nm>`` statement per reassigned name to the
+    # emitted body, so this order is statement order in the generated program.
+    reassigned = OrderedSet(nm for nm, c in counts.items() if c > 1)
     return first_rhs, order, reassigned
 
 
@@ -591,7 +594,9 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # A scalar param used as an array shape (e.g. ``Nt`` sizing ``KE[Nt + 1]``) must be a dc.symbol:
     # a dace shape annotation cannot reference a runtime scalar, and a name cannot be both. Promote it
     # to a module-level symbol and drop it from the scalar params below (the caller binds it as a symbol).
-    shape_scalars = {s for s in scalars if s in shape_idents}
+    # Ordered: the loop below appends into ``symbol_names``, which IS the emitted dc.symbol
+    # declaration block, so these have to keep the parameter order ``scalars`` came in.
+    shape_scalars = OrderedSet(s for s in scalars if s in shape_idents)
     for s in shape_scalars:
         if s not in symbol_names:
             symbol_names.append(s)

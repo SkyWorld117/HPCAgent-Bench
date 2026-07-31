@@ -39,10 +39,11 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
+from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import _np_linalg_attr
 from numpyto_common.lib_nodes import (LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES, UNARY_C_MATH,
                                       _broadcast_extents, _is_integer_expr, _iter_extent_of, _scalarize_at_iters,
-                                      _slice_step_const, expand_meshgrid, extent_is_scalar)
+                                      _slice_step_const, expand_meshgrid, extent_is_scalar, reset_temp_counters)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
                                      _substitute_inlined_scalar_defs)
 
@@ -6497,7 +6498,9 @@ def _lp_slice_fusion_and_resolve(ctx: LoweringContext) -> None:
     # param-only _detect_output_and_index_arrays misses it) must be integer;
     # C/Fortran reject a float subscript. A name used as a subscript index is always
     # integral, so this is sound.
-    _idx_locals: Set[str] = set()
+    # Ordered: the loop below inserts into ``ctx.local_dtypes``, and that dict's order is what
+    # the fp8 prelude and the Fortran declaration block iterate.
+    _idx_locals = OrderedSet()
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript):
             sl = node.slice
@@ -6642,6 +6645,9 @@ def lower(kir: KernelIR) -> KernelIR:
     :func:`_assert_lowering_invariants` after every phase.
     """
     check = _assert_lowering_invariants if _INVARIANT_ENV in os.environ else None
+    # One lower() call == one translation unit, so this is where the lib_nodes scratch-name
+    # counters start over; leaving them running makes the text depend on emission order.
+    reset_temp_counters()
     ctx = LoweringContext(kir, copy.deepcopy(kir))
     for _name, _phase in _LOWER_PHASES:
         _phase(ctx)

@@ -36,6 +36,7 @@ from numpyto_common import dtypes
 
 from numpyto_common.ir import ArrayDesc, KernelIR, ScalarDesc, SparseArrayDesc, SymbolDesc
 from numpyto_common.lib_nodes import _iter_extent_of, _read_axis_keepdims
+from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive,
                                           _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS, _eigh_alias_names,
@@ -936,7 +937,10 @@ def _synthesize_legacy_sparse_layouts(info: Dict) -> Dict:
     legacy sparse kernels emit correct SpMV without a spec migration. Returns
     ``{}`` when the kernel is not a legacy sparse kernel."""
     variants = info.get("variants") or {}
-    formats = {v.get("format") for v in variants.values() if isinstance(v, dict) and v.get("format")}
+    # Ordered: ``_expand_sparse_arrays`` falls back to ``next(iter(variants))`` -- the FIRST
+    # declared variant -- to pick which physical buffers become the emitted parameters, so
+    # the manifest's declaration order has to survive the dedup.
+    formats = OrderedSet(v.get("format") for v in variants.values() if isinstance(v, dict) and v.get("format"))
     matrix = _legacy_sparse_matrix_name(info)
     if not formats or matrix is None:
         return {}
@@ -3352,7 +3356,10 @@ def _collect_assigned_names(stmts):
     caller symbol of the same name -- chebyshev_filter_subspace's ``_hpsi``
     stencil loop var ``m`` vs the kernel's Chebyshev-degree ``m`` (the
     inlined loop overwrote ``m`` to len(_CW), truncating the degree loop)."""
-    out = set()
+    # Ordered: a helper parameter that the body REASSIGNS is initialised from its call
+    # argument in the order this walk found it (_InlineHelpers below), so hash order here
+    # would shuffle the emitted prologue -- conv2d_relu_bias_add's stride/padding/dilation.
+    out = OrderedSet()
 
     def _bind(target):
         if isinstance(target, ast.Name):
