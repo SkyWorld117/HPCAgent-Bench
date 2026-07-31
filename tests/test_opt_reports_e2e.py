@@ -28,6 +28,7 @@ import pytest
 
 from hpcagent_bench import paths, perf_reports
 from hpcagent_bench.spec import BenchSpec, KernelRegistry
+from tests.plot_family import one_plot
 
 #: The smallest selection that still exercises both columns on more than one kernel: the two level-1
 #: map_reduce kernels, ``arc_distance`` and ``compute``. Two rather than one because a single kernel
@@ -193,9 +194,9 @@ def test_the_dace_report_names_the_pipeline_it_measured(swept: pathlib.Path) -> 
 def test_the_run_plots_a_speedup_table(swept: pathlib.Path) -> None:
     """The whole point of running three columns into one DB: a speedup table against numpy. Rendered
     through the CLI verb, not scripts/plot_results.py -- that shim is on its way out."""
-    out = swept / "heatmap.pdf"
+    output_name = "heatmap.pdf"
     run_cli(swept, "plot", "-b", SELECTOR, "-p", PRESET, "--db", str(swept / "hpcagent_bench.db"), "--no-usetex",
-            "--output", str(out))
-    assert out.is_file(), "plot produced no file"
+            "--output", str(swept / output_name))
+    out = one_plot(swept, output_name)
     size = out.stat().st_size
     assert size >= MIN_PDF_BYTES, f"{out} is {size} bytes -- an empty figure, not a speedup table"
