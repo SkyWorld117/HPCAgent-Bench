@@ -131,3 +131,21 @@ def test_every_pytest_plugin_the_workflow_asks_for_is_installed() -> None:
     missing = sorted(d for d in asked if d not in setup)
     assert not missing, (f"PYTEST_ADDOPTS asks for {missing}, which .github/actions/setup/action.yml "
                          f"does not install -- every pytest call in CI would fail on an unrecognized argument")
+
+
+def test_asking_for_skip_reasons_does_not_hide_the_failures() -> None:
+    """``-r`` REPLACES the report set, it does not add to it. pytest's default is ``-rfE``, so a
+    phase that asks for skip reasons with a bare ``-rs`` prints its skips and stops naming which
+    tests FAILED -- the summary still says ``5 failed`` and no longer says which five.
+
+    That is measured, not theorised: on the same three-test file, ``-rs`` prints only the SKIPPED
+    line while ``-rfEs`` prints ``FAILED ...::test_fail`` above it. A CI job whose whole purpose is
+    to say what broke must keep the f and E.
+    """
+    # Only pytest lines, and only a STANDALONE -r<letters> token: --no-install-recommends is not one.
+    offenders = [
+        i + 1 for i, line in enumerate(WORKFLOW.read_text().splitlines()) if "pytest" in line
+        for token in re.findall(r"(?<![\w-])-r[a-zA-Z]+\b", line) if "s" in token and "f" not in token
+    ]
+    assert not offenders, (f"tests.yml lines {offenders} ask for skip reasons without keeping failures in the "
+                           "report set; use -rfEs so a failing test is still named in the short summary")
