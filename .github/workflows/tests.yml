@@ -56,6 +56,10 @@ jobs:
     name: unit (format + structure + agent-bench + e2e[numba,jax])
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
         with:
@@ -212,6 +216,18 @@ jobs:
   # translators -- the numpyto_* translator's own suite (~640 tests), sharded three ways by file.
   # Port fidelity + the benchmark reference validators moved to the mpi runner (see BALANCE above).
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   translators:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: translators (numpyto op suite)
@@ -220,6 +236,10 @@ jobs:
     # ONE runner. It was three, cost-sharded, until run 30480407159 measured the result: 4m + 8m +
     # 9m. Three runners and a splitting mechanism to move a 21m job off a critical path set by
     # e2e[pythran] at 31m -- so the sharding bought no wall clock at all and cost two runners.
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -277,6 +297,18 @@ jobs:
   # frameworks-pluto -- the ONLY runner that builds Pluto. Codegen frameworks (cc/llvm/tvm/pluto)
   # + fp16, plus the pluto slice of the e2e sweep (pluto is opt-in in run_kernel, named here).
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-translators
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   frameworks-pluto:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: frameworks + pluto (codegen backends + fp16 + e2e[pluto])
@@ -285,6 +317,10 @@ jobs:
     env:
       # bondhugula/pluto @ 0.12.0-33-gdc46216 -- pin for reproducibility, bump deliberately.
       PLUTO_COMMIT: dc462163c8b4fc97d378a4d245d1a64741cb4111
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -414,11 +450,27 @@ jobs:
   # HPCAGENT_BENCH_E2E_BACKENDS and run_kernel(only_backends=...) emits ONLY the requested backends, so a
   # job that omits pythran never invokes a pythran compile.
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-frameworks-pluto
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   e2e-native:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: e2e[c,cpp,fortran] + integration sweep
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -518,11 +570,27 @@ jobs:
   # MB. Folding it into the native job overran the 16 GB runner (exit 143). Same partition mechanism
   # as e2e-native: HPCAGENT_BENCH_E2E_BACKENDS="pythran" so run_kernel(only_backends=...) emits pythran only.
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-e2e-native
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   e2e-pythran:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: e2e[pythran]
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -583,11 +651,27 @@ jobs:
   # docker save -> apptainer build -> exec). Split off from the sweep so the heavy docker+apptainer
   # build neither contends for the pythran runner's RAM nor serializes behind the native sweep.
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-e2e-pythran
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   container-image:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: agent-bench container image (build + launch)
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -669,6 +753,18 @@ jobs:
   # it. The launch/e2e tests ``mpirun --oversubscribe`` on the CI cores and self-skip cleanly when
   # MPI_Init cannot bootstrap; the GPU-device e2e tests self-skip with no CUDA/nvcc.
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-container-image
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   mpi:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: mpi (distributed track -- descriptor + codegen + launch + scoring)
@@ -684,6 +780,10 @@ jobs:
       OMPI_MCA_btl: self,vader
       OMPI_MCA_rmaps_base_oversubscribe: "1"
       UCX_VFS_ENABLE: "n"
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -794,11 +894,27 @@ jobs:
   # On the CPU runners those cases self-skip (no CUDA / no triton), so nothing is lost meanwhile.
   # To enable: flip ``if: false`` to a self-hosted GPU runner label.
   # ===========================================================================================
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-mpi
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   gpu:
     if: false
     name: gpu (tvm-gpu / triton codegen) [disabled -- no GPU runner]
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # Job-level so every pytest here collects; --cov-report= suppresses the per-job
+      # render (the combine job owns the only report).
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -811,3 +927,72 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider -rs --timeout=900 \
             tests/test_frameworks.py tests/test_fp16.py
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-gpu
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # ===========================================================================================
+  # coverage -- the ONE total. Each job above uploads its raw .coverage* data; nothing renders a
+  # report per job, because eight partial percentages are not a coverage figure and reading them
+  # as one is the mistake this job exists to prevent.
+  #
+  # if: always() so the total is still produced when a job went red -- a red run's coverage is the
+  # most useful moment to look at it. `coverage combine` needs relative_files (pyproject) since the
+  # container job's paths differ from the runner's.
+  # ===========================================================================================
+  coverage:
+    if: always()
+    name: coverage (combined total)
+    needs: [unit, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install coverage
+        run: python -m pip install coverage
+      - name: Download every job's coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-data
+          merge-multiple: true
+      - name: Combine and report
+        run: |
+          shopt -s nullglob dotglob
+          files=(coverage-data/.coverage*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no coverage data was uploaded by any job -- the total cannot be computed"
+            exit 1
+          fi
+          coverage combine "${files[@]}"
+          coverage report --precision=2 | tee coverage.txt
+          coverage xml -o coverage.xml
+          coverage html -d htmlcov
+          {
+            echo '## Total coverage'
+            echo
+            echo '```'
+            tail -n 25 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the combined report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage.txt
+            htmlcov/
+          if-no-files-found: warn
