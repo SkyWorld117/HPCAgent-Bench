@@ -47,7 +47,7 @@ REPEAT = "2"
 #: The columns under test, plus the numpy baseline that must exist for ``plot`` to build a speedup.
 FRAMEWORKS = ("numpy", "dace_cpu_autoopt", "pluto")
 
-#: The two report kinds and the root each lands under -- opt_report in ``.opt_reports/``, the
+#: The two report kinds and the root each lands under -- ``perf_reports/<kind>/``, the
 #: disassembly in ``perf_reports/``. Asserting the ROOTS differ is part of the contract.
 KINDS = ("opt_report", "lowered_code")
 
@@ -141,10 +141,10 @@ def test_the_selector_still_names_both_kernels() -> None:
 
 
 def test_the_two_report_kinds_have_separate_roots() -> None:
-    """``opt_report`` lands in ``.opt_reports/`` and the disassembly in ``perf_reports/``; the paths
+    """Each kind lands under its own ``perf_reports/<kind>/`` subtree; the paths
     asserted below are only meaningful if those roots are still distinct."""
-    assert perf_reports.report_root("opt_report") == paths.ROOT / ".opt_reports"
-    assert perf_reports.report_root("lowered_code") == paths.ROOT / "perf_reports"
+    assert perf_reports.report_root("opt_report") == paths.ROOT / "perf_reports" / "opt_report"
+    assert perf_reports.report_root("lowered_code") == paths.ROOT / "perf_reports" / "lowered_code"
 
 
 @requires_polycc

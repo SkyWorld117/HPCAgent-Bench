@@ -1,7 +1,7 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Optional compiler-report + lowered-code dumps, and the ``perf`` sampling mechanism. The
-opt-report lands under ``.opt_reports/``; the disassembly + generated-source dumps land under
+every kind lands under ``perf_reports/<kind>/``; the tree below that mirrors
 ``perf_reports/`` (see :func:`report_root`).
 
 Two INDEPENDENT report capabilities, BOTH OFF BY DEFAULT:
@@ -53,19 +53,18 @@ from hpcagent_bench import config, osinfo, paths
 #: output that only an opted-in run produces.
 REPORTS: pathlib.Path = paths.ROOT / "perf_reports"
 
-#: The compiler OPTIMIZATION reports get their own top-level ``.opt_reports/`` root (dot-prefixed,
-#: gitignored + gitkeep'd exactly like ``perf_reports/``), so opt-report generation lands apart from
-#: the heavier disassembly + generated-source dumps. Same on-demand, mirror-the-kernel-tree layout.
-OPT_REPORTS: pathlib.Path = paths.ROOT / ".opt_reports"
-
 #: Report kind -> the filename suffix it lands under. The kind is also the config
 #: key (``perf_reports.<kind>``) and the env knob (``$HPCAGENT_BENCH_PERF_REPORTS_<KIND>``),
 #: so the two capabilities stay independently switchable with no third name to keep
 #: in sync.
+#: One name per kind, used THREE ways: the subdirectory under :data:`REPORTS`, the filename suffix,
+#: and the config key (``perf_reports.<kind>`` / ``$HPCAGENT_BENCH_PERF_REPORTS_<KIND>``). Keeping
+#: them identical is the point -- the previous spelling had ``opt_report`` write ``opt-report.txt``
+#: beside ``lowered_code`` writing ``asm.txt``, three conventions for one concept.
 KINDS = {
-    "opt_report": "opt-report.txt",
-    "lowered_code": "asm.txt",
-    "generated_source": "generated-src.txt",
+    "opt_report": "opt_report.txt",
+    "lowered_code": "lowered_code.txt",
+    "generated_source": "generated_source.txt",
 }
 
 
@@ -82,19 +81,23 @@ def enabled(kind: str) -> bool:
 
 
 def report_root(kind: str) -> pathlib.Path:
-    """Root directory report ``kind`` lands under: the opt-report gets its own ``.opt_reports/``; the
-    disassembly + generated-source dumps share ``perf_reports/``. Read at call time so a test (or a
-    relocation) can move either root."""
+    """Root directory report ``kind`` lands under: ``perf_reports/<kind>/``.
+
+    One root with a per-kind subdirectory, not one top-level root per kind. Separation was the only
+    thing the second root bought, and a subdirectory buys it without a second name to gitignore, a
+    second ``.gitkeep`` to keep, and a second convention to remember. :data:`REPORTS` is read at call
+    time so a test (or a relocation) can move the whole tree.
+    """
     if kind not in KINDS:
         raise KeyError(f"unknown report kind {kind!r}; known: {sorted(KINDS)}")
-    return OPT_REPORTS if kind == "opt_report" else REPORTS
+    return REPORTS / kind
 
 
 def report_path(relative_path: str, module_name: str, framework: str, impl_name: str, kind: str) -> pathlib.Path:
     """Where report ``kind`` for one (kernel, framework, implementation) lands.
 
     ``<root>/<relative_path>/<module_name>.<framework>.<impl_name>.<suffix>`` -- ``root`` is
-    :func:`report_root` (``.opt_reports/`` for the opt-report, ``perf_reports/`` otherwise).
+    :func:`report_root` (``perf_reports/<kind>/``).
 
     Framework and implementation are in the FILENAME, not directory levels: the
     variants of one kernel are read side by side (why did clang vectorize this loop

@@ -102,18 +102,25 @@ def test_report_flags_never_name_a_missing_constant():
 
 def test_report_path_mirrors_the_benchmark_tree():
     p = perf_reports.report_path("hpc/map_reduce/arc_distance", "arc_distance", "cc", "default", "lowered_code")
-    assert p.parent == perf_reports.REPORTS / "hpc/map_reduce/arc_distance"
-    assert p.name == "arc_distance.cc.default.asm.txt"
+    assert p.parent == perf_reports.REPORTS / "lowered_code" / "hpc/map_reduce/arc_distance"
+    assert p.name == "arc_distance.cc.default.lowered_code.txt"
 
 
-def test_opt_report_lands_under_its_own_root():
-    """The opt-report generation gets its own top-level .opt_reports/; the other dumps stay in perf_reports/."""
+def test_every_kind_lands_under_its_own_subtree():
+    """One root, a subdirectory per kind, and the kind spelled the SAME way in both places.
+
+    The previous layout gave ``opt_report`` a second top-level root and wrote it as
+    ``opt-report.txt`` beside ``lowered_code``'s ``asm.txt`` -- three spellings of one concept. This
+    pins the invariant that replaced them: for every kind, root and suffix are the kind's own name.
+    """
     opt = perf_reports.report_path("hpc/map_reduce/arc_distance", "arc_distance", "cc", "default", "opt_report")
-    assert opt.parent == perf_reports.OPT_REPORTS / "hpc/map_reduce/arc_distance"
-    assert opt.name == "arc_distance.cc.default.opt-report.txt"
-    assert perf_reports.report_root("opt_report") == perf_reports.OPT_REPORTS
-    assert perf_reports.report_root("lowered_code") == perf_reports.REPORTS
-    assert perf_reports.report_root("generated_source") == perf_reports.REPORTS
+    assert opt.parent == perf_reports.REPORTS / "opt_report" / "hpc/map_reduce/arc_distance"
+    assert opt.name == "arc_distance.cc.default.opt_report.txt"
+    roots = {kind: perf_reports.report_root(kind) for kind in perf_reports.KINDS}
+    assert roots == {kind: perf_reports.REPORTS / kind for kind in perf_reports.KINDS}
+    assert len(set(roots.values())) == len(perf_reports.KINDS), "two kinds share a subtree"
+    for kind, suffix in perf_reports.KINDS.items():
+        assert suffix == f"{kind}.txt", f"{kind} writes {suffix!r}; the suffix must be the kind's name"
 
 
 def test_write_none_means_not_supported_and_writes_nothing(tmp_path, monkeypatch):

@@ -222,11 +222,8 @@ id_ecdsa*
 # width, so a committed report would describe someone else's CPU), and the tree is
 # created on demand per kernel. The directory itself is kept (.gitkeep) so an
 # enabled run has a root to write under without the first one having to mkdir it.
-# The opt-report generation lands in its own .opt_reports/ root (report_root()).
 perf_reports/**
 !perf_reports/.gitkeep
-.opt_reports/**
-!.opt_reports/.gitkeep
 
 # Per-kernel framework-autogen + DaCe SDFG cache (hpcagent_bench.framework_cache) lives in each
 # kernel's `.cache/` and is already covered by the bare `.cache` rule near the top of this file --
