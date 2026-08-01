@@ -22,7 +22,9 @@ mini-swe-agent) calls over a port:
 * ``POST /profile``  same body (+ ``threads``, ``reps``, ``min_percent``, ``counters``)  ->
   build with debug symbols, run the same measurement under ``perf`` at each thread
   count, and return the folded call graph (JSON + a rendered text tree), optionally
-  with PAPI hardware counts. Diagnostic only: nothing here is scored or recorded.
+  with PAPI hardware counts. A ``cuda``/``hip`` submission is traced by ``nsys``
+  instead and answers with the kernel timeline, the transfers and the launch
+  geometry. Diagnostic only: nothing here is scored or recorded.
 
 The submission is compiled + timed HERE, next to the baseline -- so the speedup
 is apples-to-apples and the agent can neither read the hidden tests nor tamper
@@ -51,11 +53,12 @@ from hpcagent_bench import config
 from hpcagent_bench.api import InputMode, RunConfig
 from hpcagent_bench.harness import native_call
 from hpcagent_bench.harness.envelope import Submission
-from hpcagent_bench.harness.judge_scheduler import DeviceSlot, JudgeConfig
+from hpcagent_bench.harness.judge_scheduler import DeviceSlot, JudgeConfig, gpu_capacity_bytes
 from hpcagent_bench.harness.scoring import measure_baselines, score, suspect_threshold
 from hpcagent_bench.harness.timing import measurement_baseline, measurement_repeat
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.harness.tools import DEFAULT_RANK
+from hpcagent_bench.spec import KERNELS
 
 #: Top-level template for the judge-driven (HTTP) agent prompt.
 SERVICE_TEMPLATE = "service_task.j2"
@@ -357,16 +360,20 @@ class JudgeHandler(BaseHTTPRequestHandler):
         kernel = body.get("kernel")
         language = body.get("language", "c")
         preset = body.get("preset", self.cfg.preset)
-        if not kernel:
-            return self._send(400, {"error": "body must include 'kernel'"})
+        # A non-str kernel is a body-shape fault: the registry lookup below would raise TypeError on it.
+        if not isinstance(kernel, str) or not kernel:
+            return self._send(400, {"error": "body must include 'kernel' (a benchmark name)"})
         try:
             submission = _submission_from_body(body, language, self.cfg)
         except ValueError as exc:
             return self._send(400, {"error": str(exc)})
+        if kernel not in KERNELS:
+            # Existence is a request fault; Task() never checks it, so it leaked into score()/perf_check().
+            return self._send(404, {"error": f"no task for {kernel!r}: unknown benchmark"})
         try:
             source_mode = "any" if submission.library is not None else "restricted"
             task = Task(kernel, source_mode, language)
-        except Exception as exc:  # noqa: BLE001 -- unknown kernel etc. -> 404
+        except Exception as exc:  # noqa: BLE001 -- defensive: a bad source_mode/residency triple -> 404
             return self._send(404, {"error": f"no task for {kernel!r}: {exc}"})
         if route == "profile":
             return self._profile(submission, task, body, preset)
@@ -404,25 +411,48 @@ class JudgeHandler(BaseHTTPRequestHandler):
         otherwise be taken against a concurrent grade). A host that cannot sample answers 503 with
         the machine-readable ``cause`` -- never an empty or invented profile.
 
-        ``counters: true`` adds hardware counts, and is opt-in because it costs one further
-        measured run per metric; a host without PAPI answers 503 with a ``cause`` of its own,
-        through the same branch, because both unavailabilities carry the same field.
+        ``counters: true`` adds hardware counts for the ``counter_group`` named question
+        (default ``overview``), and is opt-in because it costs one further measured run per metric
+        in that group; a host without PAPI answers 503 with a ``cause`` of its own, through the
+        same branch, because both unavailabilities carry the same field. An unknown group is the
+        request's fault, not the host's, so it is a 400 and never a 503.
+
+        A ``cuda``/``hip`` submission is traced by ``nsys`` instead
+        (:mod:`hpcagent_bench.harness.gpu_profiling`): a host call graph of a device kernel shows
+        the synchronization it waited in and nothing about the kernel. The dispatch is the
+        LANGUAGE, so an agent asks the one route the same way whatever it submitted; ``residency``
+        (default ``host``) picks the device-resident timing the graded track uses.
         """
+        from hpcagent_bench.harness.gpu_profiling import GpuProfilerUnavailable, profile_gpu_submission
         from hpcagent_bench.harness.papi import PapiUnavailable
-        from hpcagent_bench.harness.profiling import profile_submission
+        from hpcagent_bench.harness.profiling import DEFAULT_COUNTER_GROUP, profile_submission
+        from hpcagent_bench.harness.task import GPU_LANGUAGES
         from hpcagent_bench.perf_reports import PerfUnavailable
         try:
+            task = dataclasses.replace(task, residency=str(body.get("residency", task.residency)))
             with self.device_slot():
-                payload = profile_submission(submission,
-                                             task,
-                                             preset=preset,
-                                             datatype=self.cfg.datatype,
-                                             reps=body.get("reps"),
-                                             threads=body.get("threads"),
-                                             min_percent=float(body.get("min_percent", 1.0)),
-                                             counters=bool(body.get("counters", False)))
-        except (PerfUnavailable, PapiUnavailable) as exc:
+                if task.language in GPU_LANGUAGES:
+                    payload = profile_gpu_submission(submission,
+                                                     task,
+                                                     preset=preset,
+                                                     datatype=self.cfg.datatype,
+                                                     reps=body.get("reps"),
+                                                     min_percent=float(body.get("min_percent", 1.0)),
+                                                     counters=bool(body.get("counters", False)))
+                else:
+                    payload = profile_submission(submission,
+                                                 task,
+                                                 preset=preset,
+                                                 datatype=self.cfg.datatype,
+                                                 reps=body.get("reps"),
+                                                 threads=body.get("threads"),
+                                                 min_percent=float(body.get("min_percent", 1.0)),
+                                                 counters=bool(body.get("counters", False)),
+                                                 counter_group=str(body.get("counter_group", DEFAULT_COUNTER_GROUP)))
+        except (PerfUnavailable, PapiUnavailable, GpuProfilerUnavailable) as exc:
             return self._send(503, {"error": str(exc), "cause": exc.cause})
+        except ValueError as exc:  # an unknown counter group is a bad REQUEST, not a bad host
+            return self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001 -- a failed profiled run is infra, not a score
             return self._send(500, {"error": f"profile failed for {task.kernel!r}: {exc}"})
         return self._send(200, payload)
@@ -462,7 +492,7 @@ def local_device_slots() -> List[DeviceSlot]:
     the configured CPU slots. The judge is single-node (agents reach it over HTTP and are
     assigned to one statically), so every slot is local and GPU-pinnable."""
     cfg = JudgeConfig.from_config()
-    slots = [DeviceSlot("gpu", g) for g in range(cfg.gpus_per_node)]
+    slots = [DeviceSlot("gpu", g, gpu_capacity_bytes(g)) for g in range(cfg.gpus_per_node)]
     slots += [DeviceSlot("cpu", c) for c in range(cfg.cpu_slots_per_node)]
     return slots
 
