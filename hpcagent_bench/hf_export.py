@@ -35,11 +35,11 @@ from typing import Any, Dict, List, Optional, Sequence
 from hpcagent_bench import paths
 from hpcagent_bench.support.bindings import binding_from_spec
 from hpcagent_bench.support.sanitize import strip_comments
+from hpcagent_bench.harness.grading import DEFAULT_BASELINE
 from hpcagent_bench.spec import KERNELS, BenchSpec, ResolvedBench
 
 #: The judge's default speedup denominator (policy, not spec; see scoring.py) --
 #: the sequential-C reference (numpy fallback per-kernel when C can't be emitted).
-_DEFAULT_BASELINE = "c"
 #: The agent harness default source mode (the adapter compiles the agent's source).
 _DEFAULT_SOURCE_MODE = "restricted"
 
@@ -143,7 +143,7 @@ def resolved_row(spec: BenchSpec, rb: ResolvedBench, commit: str = "") -> Export
         languages=json.dumps(list(spec.languages)),
         datatypes=json.dumps(list(spec.precisions)),
         source_mode=_DEFAULT_SOURCE_MODE,
-        baseline=_DEFAULT_BASELINE,
+        baseline=DEFAULT_BASELINE,
         parameters=json.dumps(spec.parameters, sort_keys=True),
         fuzz=json.dumps(spec.fuzz, sort_keys=True),
         signature=signature,

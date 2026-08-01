@@ -56,6 +56,13 @@ LANG_EXT: Dict[str, str] = {
     "hip": "hip",
 }
 
+#: Language token -> the TRANSLATOR target that emits its reference. C and C++ share one emitter
+#: (the C ABI is the contract, not the source dialect), so this is not the identity map and is not
+#: derivable from :data:`LANG_EXT`. Lives here because the emitter choice is a property of the
+#: language, and two copies of it -- one in ``autogen`` and one in ``harness.agent`` -- meant adding
+#: a language could teach the generator about it while leaving the agent path silently unaware.
+LANG_TARGET: Dict[str, str] = {"c": "c", "cpp": "c", "fortran": "fortran"}
+
 
 @functools.lru_cache(maxsize=1)
 def _load_compilers() -> Dict[str, dict]:
