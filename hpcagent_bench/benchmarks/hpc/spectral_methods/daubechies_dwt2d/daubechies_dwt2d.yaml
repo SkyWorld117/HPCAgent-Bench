@@ -11,16 +11,24 @@ parameters:
     N: 8192
     nlevels: 5
   L:
-    N: 16384
+    N: 16260
     nlevels: 5
   XL:
-    N: 65536
+    N: 32272
     nlevels: 5
   fuzzed:
     N:
-      set: [64, 128, 256, 512, 1024]
+      set:
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
     nlevels:
-      set: [1, 2, 3]
+      set:
+      - 1
+      - 2
+      - 3
 init:
   input_args:
   - N
@@ -28,6 +36,11 @@ init:
   - image
   - out
   func_name: initialize
+  arrays:
+    image:
+      shape: (N, N)
+    out:
+      shape: (N, N)
 array_args:
 - image
 - out

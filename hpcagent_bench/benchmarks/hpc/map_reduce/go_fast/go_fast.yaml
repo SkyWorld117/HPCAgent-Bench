@@ -19,6 +19,11 @@ init:
   - a
   - out
   func_name: initialize
+  arrays:
+    a:
+      shape: (N, N)
+    out:
+      shape: (N, N)
 array_args:
 - a
 - out

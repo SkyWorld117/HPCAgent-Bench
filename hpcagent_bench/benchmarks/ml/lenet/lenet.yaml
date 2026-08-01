@@ -44,6 +44,31 @@ init:
     C_before_fc1: 0
   dtypes:
     C_before_fc1: int64
+  arrays:
+    input:
+      shape: (N, H, W, 1)
+    conv1:
+      shape: (5, 5, 1, 6)
+    conv1bias:
+      shape: (6,)
+    conv2:
+      shape: (5, 5, 6, 16)
+    conv2bias:
+      shape: (16,)
+    fc1w:
+      shape: (16 * (((H - 4) // 2 - 4) // 2) * (((W - 4) // 2 - 4) // 2), 120)
+    fc1b:
+      shape: (120,)
+    fc2w:
+      shape: (120, 84)
+    fc2b:
+      shape: (84,)
+    fc3w:
+      shape: (84, 10)
+    fc3b:
+      shape: (10,)
+    out:
+      shape: (N, 10)
 array_args:
 - input
 - conv1

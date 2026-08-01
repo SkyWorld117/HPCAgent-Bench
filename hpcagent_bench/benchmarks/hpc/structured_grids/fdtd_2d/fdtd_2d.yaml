@@ -37,6 +37,15 @@ init:
     ex_courant: 0.5
     hz_courant: 0.7
   func_name: initialize
+  arrays:
+    ex:
+      shape: (NX, NY)
+    ey:
+      shape: (NX, NY)
+    hz:
+      shape: (NX, NY)
+    _fict_:
+      shape: (TMAX,)
 array_args:
 - ex
 - ey

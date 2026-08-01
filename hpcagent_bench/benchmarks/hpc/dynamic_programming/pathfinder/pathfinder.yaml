@@ -11,11 +11,11 @@ parameters:
     rows: 4096
     cols: 131072
   L:
-    rows: 8192
-    cols: 262144
+    rows: 8130
+    cols: 183955
   XL:
-    rows: 16384
-    cols: 262144
+    rows: 16135
+    cols: 258175
 init:
   input_args:
   - rows
@@ -24,6 +24,13 @@ init:
   - grid
   - dp
   func_name: initialize
+  arrays:
+    grid:
+      shape: (rows, cols)
+      dtype: int32
+    dp:
+      shape: (cols,)
+      dtype: int32
 array_args:
 - grid
 - dp

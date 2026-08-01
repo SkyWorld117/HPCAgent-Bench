@@ -13,12 +13,12 @@ parameters:
     W: 16384
     r: 26
   L:
-    H: 30652
-    W: 30652
+    H: 22994
+    W: 22994
     r: 26
   XL:
-    H: 57344
-    W: 57344
+    H: 32272
+    W: 32272
     r: 26
 init:
   input_args:
@@ -28,6 +28,11 @@ init:
   - image
   - out
   func_name: initialize
+  arrays:
+    image:
+      shape: (H, W)
+    out:
+      shape: (H, W)
 array_args:
 - image
 - out

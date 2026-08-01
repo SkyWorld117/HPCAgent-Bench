@@ -23,6 +23,11 @@ init:
   - image
   - out
   func_name: initialize
+  arrays:
+    image:
+      shape: (N, N)
+    out:
+      shape: (N, N)
 array_args:
 - image
 - out

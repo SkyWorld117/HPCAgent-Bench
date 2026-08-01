@@ -23,7 +23,7 @@ parameters:
     camb: 0.02
     amb: 80.0
   L:
-    N: 256
+    N: 337
     niter: 50
     cx: 0.1
     cy: 0.1
@@ -32,7 +32,7 @@ parameters:
     camb: 0.02
     amb: 80.0
   XL:
-    N: 1024
+    N: 885
     niter: 50
     cx: 0.1
     cy: 0.1
@@ -48,6 +48,13 @@ init:
   - power
   - T
   func_name: initialize
+  arrays:
+    temp:
+      shape: (N, N, N)
+    power:
+      shape: (N, N, N)
+    T:
+      shape: (N, N, N)
 array_args:
 - temp
 - power

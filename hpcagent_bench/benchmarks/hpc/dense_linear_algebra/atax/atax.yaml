@@ -10,11 +10,11 @@ parameters:
     M: 20000
     N: 25000
   L:
-    M: 40000
-    N: 50000
+    M: 28573
+    N: 35716
   XL:
-    M: 80000
-    N: 100000
+    M: 40821
+    N: 51026
 init:
   input_args:
   - M
@@ -24,6 +24,13 @@ init:
   - A
   - out
   func_name: initialize
+  arrays:
+    x:
+      shape: (N,)
+    A:
+      shape: (M, N)
+    out:
+      shape: (N,)
 array_args:
 - A
 - x

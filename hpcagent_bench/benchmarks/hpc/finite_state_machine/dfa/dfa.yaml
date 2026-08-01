@@ -28,8 +28,6 @@ init:
   - trans
   - symbols
   - counts
-  # trans/symbols/counts are all int64 (initialize() fills them np.int64); the fp64
-  # default would silently rebind them as float64 buffers.
   scalars:
     counts: 0
     symbols: 0
@@ -39,6 +37,16 @@ init:
     symbols: int64
     trans: int64
   func_name: initialize
+  arrays:
+    trans:
+      shape: (NS, NA)
+      dtype: int64
+    symbols:
+      shape: (N,)
+      dtype: int64
+    counts:
+      shape: (NS,)
+      dtype: int64
 array_args:
 - trans
 - symbols

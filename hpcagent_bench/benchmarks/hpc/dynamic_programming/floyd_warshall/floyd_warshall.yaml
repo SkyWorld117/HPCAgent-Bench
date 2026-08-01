@@ -18,6 +18,10 @@ init:
   output_args:
   - path
   func_name: initialize
+  arrays:
+    path:
+      shape: (N, N)
+      dtype: int32
 array_args:
 - path
 output_args:

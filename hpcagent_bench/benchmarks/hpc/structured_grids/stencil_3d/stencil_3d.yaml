@@ -11,10 +11,10 @@ parameters:
     N: 400
     R: 6
   L:
-    N: 640
+    N: 637
     R: 6
   XL:
-    N: 1024
+    N: 1013
     R: 6
 init:
   func_name: initialize
@@ -25,6 +25,13 @@ init:
   - in_grid
   - out_grid
   - w_dist
+  arrays:
+    in_grid:
+      shape: (N, N, N)
+    out_grid:
+      shape: (N, N, N)
+    w_dist:
+      shape: (R + 1,)
 array_args:
 - in_grid
 - out_grid

@@ -26,6 +26,9 @@ init:
   - b1
   - b2
   func_name: initialize
+  arrays:
+    u:
+      shape: (N, N)
 array_args:
 - u
 output_args:

@@ -44,6 +44,13 @@ init:
   - power
   - T
   func_name: initialize
+  arrays:
+    temp:
+      shape: (N, N)
+    power:
+      shape: (N, N)
+    T:
+      shape: (N, N)
 array_args:
 - temp
 - power

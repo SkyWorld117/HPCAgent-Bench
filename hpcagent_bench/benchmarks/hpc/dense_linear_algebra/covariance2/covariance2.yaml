@@ -25,6 +25,11 @@ init:
   - data
   - out
   func_name: initialize
+  arrays:
+    data:
+      shape: (N, M)
+    out:
+      shape: (M, M)
 array_args:
 - data
 - out

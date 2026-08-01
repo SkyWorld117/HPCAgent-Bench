@@ -26,6 +26,13 @@ init:
   - A
   - B
   func_name: initialize
+  arrays:
+    C:
+      shape: (N, N)
+    A:
+      shape: (N, M)
+    B:
+      shape: (N, M)
 array_args:
 - C
 - A

@@ -27,8 +27,6 @@ init:
   - b
   - c
   - out
-  # array_1/array_2/out are all int64 (initialize() fills them np.int64); the fp64
-  # default would silently rebind them as float64 buffers.
   scalars:
     array_1: 0
     array_2: 0
@@ -38,6 +36,16 @@ init:
     array_2: int64
     out: int64
   func_name: initialize
+  arrays:
+    array_1:
+      shape: (M, N)
+      dtype: int64
+    array_2:
+      shape: (M, N)
+      dtype: int64
+    out:
+      shape: (M, N)
+      dtype: int64
 array_args:
 - array_1
 - array_2

@@ -12,12 +12,14 @@ parameters:
   XL:
     N: 2147483648
   fuzzed:
-    N: [1000000, 536870911]
-# Closing byte swap -- an axis, drawn independently of N. 1 first: it is the value
-# the fixed presets carried before this became a config knob.
+    N:
+    - 1000000
+    - 536870911
 config:
   reflect_out:
-    domain: [1, 0]
+    domain:
+    - 1
+    - 0
     selects: branch
 init:
   input_args:
@@ -35,6 +37,13 @@ init:
     crc: int64
     data: int64
   func_name: initialize
+  arrays:
+    data:
+      shape: (N,)
+      dtype: uint8
+    crc:
+      shape: (1,)
+      dtype: int64
 array_args:
 - data
 - crc

@@ -38,6 +38,15 @@ init:
   - C
   - D
   func_name: initialize
+  arrays:
+    A:
+      shape: (NI, NK)
+    B:
+      shape: (NK, NJ)
+    C:
+      shape: (NJ, NL)
+    D:
+      shape: (NI, NL)
 array_args:
 - A
 - B

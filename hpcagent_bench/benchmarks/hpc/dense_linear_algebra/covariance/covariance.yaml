@@ -25,6 +25,11 @@ init:
   - data
   - cov
   func_name: initialize
+  arrays:
+    data:
+      shape: (N, M)
+    cov:
+      shape: (M, M)
 array_args:
 - data
 - cov

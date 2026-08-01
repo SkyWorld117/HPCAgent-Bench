@@ -9,9 +9,9 @@ parameters:
   M:
     N: 576
   L:
-    N: 815
+    N: 764
   XL:
-    N: 1152
+    N: 1013
 init:
   input_args:
   - N
@@ -19,6 +19,11 @@ init:
   - A
   - B
   func_name: initialize
+  arrays:
+    A:
+      shape: (N, N, N)
+    B:
+      shape: (N, N, N)
 array_args:
 - A
 - B

@@ -19,6 +19,11 @@ init:
   - graph
   - dist
   func_name: initialize
+  arrays:
+    graph:
+      shape: (N, N)
+    dist:
+      shape: (N,)
 array_args:
 - graph
 - dist

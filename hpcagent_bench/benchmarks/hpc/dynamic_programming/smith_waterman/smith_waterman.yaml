@@ -29,9 +29,17 @@ init:
     H: 0
   dtypes:
     H: int32
-  # H is the int32 DP score table (initialize() fills it np.int32); the fp64 default
-  # would silently rebind it as a float64 buffer.
   func_name: initialize
+  arrays:
+    a:
+      shape: (N,)
+      dtype: int32
+    b:
+      shape: (N,)
+      dtype: int32
+    H:
+      shape: (N + 1, N + 1)
+      dtype: int32
 array_args:
 - a
 - b

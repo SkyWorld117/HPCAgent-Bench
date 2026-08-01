@@ -44,6 +44,13 @@ init:
   - dy
   - dt
   func_name: initialize
+  arrays:
+    u:
+      shape: (ny, nx)
+    v:
+      shape: (ny, nx)
+    p:
+      shape: (ny, nx)
 array_args:
 - u
 - v

@@ -10,11 +10,11 @@ parameters:
     W: 15360
     H: 8640
   L:
-    W: 30720
-    H: 17280
+    W: 25709
+    H: 14461
   XL:
-    W: 61440
-    H: 34560
+    W: 43031
+    H: 24204
 init:
   input_args:
   - W
@@ -26,6 +26,11 @@ init:
   scalars:
     alpha: 0.25
   func_name: initialize
+  arrays:
+    imgIn:
+      shape: (W, H)
+    imgOut:
+      shape: (W, H)
 array_args:
 - imgIn
 - imgOut

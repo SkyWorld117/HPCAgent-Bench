@@ -29,6 +29,13 @@ init:
     seq: int32
     table: int32
   func_name: initialize
+  arrays:
+    seq:
+      shape: (N,)
+      dtype: int32
+    table:
+      shape: (N, N)
+      dtype: int32
 array_args:
 - seq
 - table

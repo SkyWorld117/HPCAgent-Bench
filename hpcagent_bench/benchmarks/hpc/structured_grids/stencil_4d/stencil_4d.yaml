@@ -30,6 +30,13 @@ init:
   - in_grid
   - out_grid
   - w_dist
+  arrays:
+    in_grid:
+      shape: (B, N, N, N)
+    out_grid:
+      shape: (B, N, N, N)
+    w_dist:
+      shape: (R + 1,)
 array_args:
 - in_grid
 - out_grid

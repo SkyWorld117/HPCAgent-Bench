@@ -17,6 +17,9 @@ init:
   output_args:
   - A
   func_name: initialize
+  arrays:
+    A:
+      shape: (N, N)
 array_args:
 - A
 output_args:

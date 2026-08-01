@@ -18,10 +18,6 @@ init:
   output_args:
   - graph
   - level
-  # graph is a 0/1 adjacency matrix and level is an integer hop distance --
-  # both genuinely integer (the initializer fills them as np.int64). Declared
-  # so the strict-typed Fortran backend emits integer arrays (a real-typed
-  # ``level`` makes the ``np.where`` -> ``merge`` mix int64 with real).
   scalars:
     graph: 0
     level: 0
@@ -29,6 +25,13 @@ init:
     graph: int64
     level: int64
   func_name: initialize
+  arrays:
+    graph:
+      shape: (N, N)
+      dtype: int64
+    level:
+      shape: (N,)
+      dtype: int64
 array_args:
 - graph
 - level

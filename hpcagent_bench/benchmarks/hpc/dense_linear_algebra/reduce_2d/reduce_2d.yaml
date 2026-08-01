@@ -12,11 +12,11 @@ parameters:
     N: 16384
     M: 16384
   L:
-    N: 32768
-    M: 32768
+    N: 27345
+    M: 27345
   XL:
-    N: 65536
-    M: 65536
+    N: 45640
+    M: 45640
   paper:
     N: 16384
     M: 16384
@@ -28,6 +28,11 @@ init:
   output_args:
   - matrix
   - out
+  arrays:
+    matrix:
+      shape: (N, M)
+    out:
+      shape: (N,)
 array_args:
 - matrix
 - out
