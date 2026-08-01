@@ -24,14 +24,14 @@ parameters:
     in_channels: 8191
     kernel_size: 2
     length: 7
-    out_channels: 7
+    out_channels: 8
   XL:
     batch_size: 16382
     bias: false
     in_channels: 16382
     kernel_size: 2
     length: 7
-    out_channels: 7
+    out_channels: 8
 config:
   dilation:
     value: 1

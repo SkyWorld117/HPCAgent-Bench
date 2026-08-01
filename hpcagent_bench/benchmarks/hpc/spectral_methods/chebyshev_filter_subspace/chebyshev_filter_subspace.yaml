@@ -16,11 +16,11 @@ parameters:
   L:
     N: 119
     k: 52
-    m: 9
+    m: 10
   XL:
     N: 223
     k: 83
-    m: 8
+    m: 10
   fuzzed:
     N: [12, 140]
     k: [4, 72]

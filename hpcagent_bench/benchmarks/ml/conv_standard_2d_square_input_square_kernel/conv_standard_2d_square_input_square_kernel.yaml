@@ -12,10 +12,10 @@ parameters:
     num_classes: 1000
   L:
     batch_size: 392
-    num_classes: 765
+    num_classes: 1000
   XL:
     batch_size: 4805
-    num_classes: 585
+    num_classes: 1000
 init:
   arrays:
     x: (batch_size, 3, 224, 224)

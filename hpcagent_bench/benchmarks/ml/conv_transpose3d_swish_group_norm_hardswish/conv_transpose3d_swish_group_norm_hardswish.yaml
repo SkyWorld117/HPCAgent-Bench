@@ -47,7 +47,7 @@ parameters:
     kernel_size: 2
     stride: 1
     padding: 1
-    groups: 1
+    groups: 2
 init:
   arrays:
     x: (batch_size, in_channels, depth, height, width)

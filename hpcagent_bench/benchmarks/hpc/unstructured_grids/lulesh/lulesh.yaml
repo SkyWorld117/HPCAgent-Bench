@@ -39,10 +39,10 @@ parameters:
     nsteps: 30
   L:
     numElem: 1568558
-    nsteps: 17
+    nsteps: 30
   XL:
     numElem: 27000000
-    nsteps: 10
+    nsteps: 30
   # Fuzzed draws MUST keep numElem a perfect cube -- initialize() -> _edge_elems()
   # raises on a non-cube, so the default continuous [L, XL] range would crash every
   # fuzz/perf cell. Sample the edge from the validated set and cube it by
