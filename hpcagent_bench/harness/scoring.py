@@ -500,8 +500,19 @@ def score(submission: Submission,
                         params_override=params_override)
     cases = [] if not hidden else (
         hidden_cases if hidden_cases is not None else hidden_tests.hidden_cases(spec, preset))
-    hidden_data = [(case.label, _data_seeded(task.kernel, case.preset, datatype, case.seed,
-                                             hidden_variant=case.variant)) for case in cases]
+    # A case that names config knobs runs at THIS preset's sizes with those knobs substituted:
+    # params_override replaces the parameter block verbatim, so the sizes have to come along or the
+    # held-out case would silently run at whatever the override alone spelled.
+    hidden_data = [(case.label,
+                    _data_seeded(task.kernel,
+                                 case.preset,
+                                 datatype,
+                                 case.seed,
+                                 params_override=({
+                                     **spec.parameters[case.preset],
+                                     **dict(case.config)
+                                 } if case.config else params_override),
+                                 hidden_variant=case.variant)) for case in cases]
 
     device = task.residency == "device"
     timeout = float(config.get("timeouts.kernel_s", 300))
