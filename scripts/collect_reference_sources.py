@@ -778,11 +778,17 @@ def build_report(results: Dict[str, FamilyResult], created: Dict[str, int], poly
         "lulesh": "hpcagent_bench/tests/ports/lulesh/baseline/lulesh_comp_kernels_reference.f90",
         "tsvc_cpp": "TSVC_2 C++ microkernels (tsvc_2{,_5}/.../<name>/<name>_d.cpp, timing removed)",
         "tsvc_cpp_emitted": "NumpyToX reference_source(Task(<kernel>, cpp)); microkernel-less foundation kernels",
+        "kernelbench": "third_party/KernelBench/KernelBench/level{1,2}/<n>_<Name>.py (in-repo submodule)",
     }
+    # .get, not [], because FAMILY_ORDER is the single source of truth for which families exist and
+    # this table is only their description: `kernelbench` was added to the tuple and not here, and
+    # the KeyError killed the report AFTER the copies had already been written -- so a real run left
+    # 200 files on disk and no record of them.
     for fam in FAMILY_ORDER:
         r = results.get(fam, FamilyResult())
         matched = len(r.copies) + len(r.skips)
-        lines.append(f"| {fam} | {src_roots[fam]} | {matched} | {created.get(fam, 0)} | {len(r.skips)} |")
+        root = src_roots.get(fam, "(source root undocumented -- add it to src_roots)")
+        lines.append(f"| {fam} | {root} | {matched} | {created.get(fam, 0)} | {len(r.skips)} |")
     lines.append("")
     lines.append(f"PolyBench fetch outcome: **{polybench_state}**.")
     lines.append("")
