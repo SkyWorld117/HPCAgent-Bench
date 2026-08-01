@@ -53,6 +53,7 @@ from hpcagent_bench import config
 from hpcagent_bench.api import InputMode, RunConfig
 from hpcagent_bench.harness import native_call
 from hpcagent_bench.harness.envelope import Submission
+from hpcagent_bench.harness import memory_pool
 from hpcagent_bench.harness.judge_scheduler import DeviceSlot, JudgeConfig, gpu_capacity_bytes
 from hpcagent_bench.harness.scoring import measure_baselines, score, suspect_threshold
 from hpcagent_bench.harness.timing import measurement_baseline, measurement_repeat
@@ -533,8 +534,20 @@ def make_server(host: str,
     return ThreadingHTTPServer((host, port), handler)
 
 
-def serve(host: str = "0.0.0.0", port: int = 8800, cfg: Optional[RunConfig] = None, rank: int = DEFAULT_RANK) -> int:
-    """Run the judge service until interrupted (the ``hpcagent-bench serve`` entry)."""
+def serve(host: str = "0.0.0.0",
+          port: int = 8800,
+          cfg: Optional[RunConfig] = None,
+          rank: int = DEFAULT_RANK,
+          pool_bytes: int = 0,
+          workspace_bytes: int = 0) -> int:
+    """Run the judge service until interrupted (the ``hpcagent-bench serve`` entry).
+
+    ``pool_bytes``/``workspace_bytes`` are what :mod:`hpcagent_bench.harness.judge_scheduler` planned
+    for this rank. Reserving them BEFORE the first request keeps allocation out of every timed
+    section, and turns "this device cannot host the selection" into one startup message instead of a
+    grade that fails somewhere in the middle of a sweep. Zero (the default) allocates on demand,
+    which is what a local judge wants.
+    """
     # Threaded server: forking a native child from a thread can deadlock, so pin the scorer's
     # isolated calls to forkserver (forks from a clean single-threaded helper).
     config.set_override("runtime.mp_context", "forkserver")
@@ -542,6 +555,12 @@ def serve(host: str = "0.0.0.0", port: int = 8800, cfg: Optional[RunConfig] = No
     # once so each timed fork skips a ~235ms numpy/scipy re-import (else repeat=100 blows the timeout).
     multiprocessing.set_forkserver_preload(FORKSERVER_PRELOAD)
     cfg = cfg or from_config()
+    if pool_bytes or workspace_bytes:
+        # The SAME device shape build_device_pool sizes the slot pool from, so the reservation lands
+        # where the grades will run: a node with GPUs configured away serves from the host.
+        gpus = JudgeConfig.from_config().gpus_per_node
+        _, detail = memory_pool.reserve(pool_bytes, workspace_bytes, device=0 if gpus else None)
+        print(f"judge memory: {detail}")
     srv = make_server(host, port, cfg, rank=rank)
     print(f"hpcagent_bench judge service on http://{host}:{port}  "
           f"(rank={rank}, oracle={cfg.oracle.value}, baseline={cfg.baseline_token}, "
