@@ -7,9 +7,13 @@ else, and if the columns that need spcl/dace@extended are exactly the ones that 
 ``dace_cpu_parallel`` exists to be runnable on upstream DaCe, and a gate that fires on every
 ``dace_*`` name would make that impossible while the column still looked fine locally.
 """
+import json
+import shlex
+
 import pytest
 
-from hpcagent_bench.frameworks.dace_framework import DACE_PIPELINES, DEFAULT_PIPELINES, needed_pipelines
+from hpcagent_bench.frameworks.dace_framework import (DACE_PIPELINES, DEFAULT_PIPELINES, needed_pipelines,
+                                                      recorded_compiles)
 from hpcagent_bench.frameworks.framework import (FRAMEWORK_META, check_flavor_registry, framework_flavors, split_flavor)
 from hpcagent_bench.harness import preflight
 
@@ -146,3 +150,38 @@ def test_absent_shard_csvs_report_instead_of_tracebacking(tmp_path, capsys):
     assert summarize_csv([missing]) > 0
     out = capsys.readouterr().out
     assert "absent" in out and "nothing was measured" in out
+
+
+def test_both_build_modes_expose_the_commands_the_opt_report_replays(tmp_path):
+    """The opt-report replays the compile command DaCe recorded; WHICH record exists is the build mode.
+
+    ``compiler.build_mode=native`` -- what CI turns on for every job -- never runs CMake, so there is
+    no ``compile_commands.json`` and the commands live in the per-object ``.cmd`` files instead.
+    Reading only CMake's record left the dace column with NO opt-report at all on a native build while
+    the disassembly, which reads the ``.so``, kept passing -- so nothing said the report had gone.
+    """
+    source = tmp_path / "src" / "cpu" / "k.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text("int main() { return 0; }\n")
+    build = tmp_path / "build"
+    build.mkdir()
+    argv = ["c++", "-O3", "-c", str(source), "-o", str(build / "cpu__k.cpp.o")]
+    foreign = "c++ -c /elsewhere/x.cpp"
+
+    # native: one .cmd per object, argv joined by spaces, run from the build folder.
+    (build / "cpu__k.cpp.o.cmd").write_text(" ".join(argv))
+    (build / "env__other.cpp.o.cmd").write_text(foreign)
+    assert recorded_compiles(tmp_path) == [(str(build), argv)]
+
+    # cmake: the same two units, as CMake writes them.
+    (build / "compile_commands.json").write_text(
+        json.dumps([{
+            "directory": str(build),
+            "command": shlex.join(argv),
+            "file": str(source)
+        }, {
+            "directory": str(build),
+            "command": foreign,
+            "file": "/elsewhere/x.cpp"
+        }]))
+    assert recorded_compiles(tmp_path) == [(str(build), argv)]

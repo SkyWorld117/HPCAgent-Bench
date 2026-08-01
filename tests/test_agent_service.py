@@ -108,6 +108,22 @@ def test_profile_route_rejects_bad_bodies_exactly_like_oracle():
         srv.server_close()
 
 
+def test_unknown_kernel_is_404_on_both_post_routes():
+    """A kernel that does not exist is a REQUEST fault: refused 404 before either route builds,
+    times or profiles anything. Pinned separately from the parity test above because parity alone
+    cannot see this drift on a host that HAS perf -- there /profile fails at the same
+    BenchSpec.load as /oracle, so both routes drift together (to 500) and the test stays green."""
+    srv, port = _server(ServiceConfig(input_mode="source"))
+    try:
+        for route in ("/oracle", "/profile"):
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                _post(port, route, {"kernel": "no_such_kernel", "language": "c", "rank": RANK, "source": "x"})
+            assert ei.value.code == 404, route
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_oracle_rejects_wrong_input_mode():
     """input_mode=source must reject a prebuilt-library submission (400)."""
     srv, port = _server(ServiceConfig(input_mode="source"))
