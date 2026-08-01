@@ -80,3 +80,33 @@ def test_ci_never_asks_for_a_billed_runner() -> None:
                 offenders.append(f"{workflow.name}: {value}")
     assert not offenders, (f"non-standard, billed-per-minute runners requested: {offenders}. "
                            f"Free on a public repo are {sorted(standard)}, plus self-hosted labels.")
+
+
+def test_no_workflow_declares_the_same_key_twice() -> None:
+    """A duplicate mapping key makes GitHub reject the WHOLE workflow at startup -- zero jobs, zero
+    logs, and a run that reports "failed because of a workflow file issue" with nothing to read.
+
+    PyYAML does not help: it silently keeps the last value, so a duplicate parses locally, passes
+    every yaml-based check, and only fails once pushed. That is exactly how a second job-level
+    ``env:`` shipped in frameworks-pluto and mpi -- the coverage variable landed in a new block
+    beside the existing one and quietly discarded ``PLUTO_COMMIT`` and the four ``OMPI_MCA_*``
+    settings on the way. This loader refuses instead of keeping the last one.
+    """
+    import yaml
+
+    class NoDuplicates(yaml.SafeLoader):
+        pass
+
+    def strict_mapping(loader, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise AssertionError(f"duplicate key {key!r} at line {key_node.start_mark.line + 1}")
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+    NoDuplicates.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, strict_mapping)
+    for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        yaml.load(path.read_text(), Loader=NoDuplicates)  # raises AssertionError naming the key
+    yaml.load((REPO / ".github" / "actions" / "setup" / "action.yml").read_text(), Loader=NoDuplicates)
