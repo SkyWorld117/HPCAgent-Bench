@@ -10,11 +10,11 @@ parameters:
     N: 6144
     TSTEPS: 2
   L:
-    N: 14189
-    TSTEPS: 4
+    N: 11841
+    TSTEPS: 3
   XL:
-    N: 32768
-    TSTEPS: 10
+    N: 22820
+    TSTEPS: 6
 init:
   arrays:
     A: (N,N)

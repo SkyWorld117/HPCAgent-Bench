@@ -8,9 +8,9 @@ parameters:
   M:
     NG: 39280640
   L:
-    NG: 129888053
+    NG: 90456562
   XL:
-    NG: 429496729
+    NG: 208305913
 # The two-stream coefficients are physically constrained: optical depth od >= 0, and
 # g1 > g2 > 0 so that k = sqrt((g1 - g2) * (g1 + g2)) is real. The disjoint g1/g2
 # intervals encode g1 > g2; the `max(..., 1e-12)` in the kernel is the guard for the

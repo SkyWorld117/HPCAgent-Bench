@@ -10,11 +10,11 @@ parameters:
     LEN_1D: 134217728
     M: 2
   L:
-    LEN_1D: 377718467
+    LEN_1D: 264378263
     M: 2
   XL:
-    LEN_1D: 1062983574
-    M: 1
+    LEN_1D: 520764784
+    M: 2
 init:
   arrays:
     a: (LEN_1D,)

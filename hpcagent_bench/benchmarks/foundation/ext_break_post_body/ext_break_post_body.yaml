@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 95000000
   L:
-    LEN_1D: 260775092
+    LEN_1D: 181608837
   XL:
-    LEN_1D: 715827882
+    LEN_1D: 347176523
 init:
   input_args:
   - LEN_1D

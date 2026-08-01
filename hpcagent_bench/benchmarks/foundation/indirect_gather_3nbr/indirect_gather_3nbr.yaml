@@ -8,9 +8,9 @@ parameters:
   M:
     N: 20971520
   L:
-    N: 75029991
+    N: 52252342
   XL:
-    N: 268435456
+    N: 130191196
 init:
   arrays:
     field: (N,)

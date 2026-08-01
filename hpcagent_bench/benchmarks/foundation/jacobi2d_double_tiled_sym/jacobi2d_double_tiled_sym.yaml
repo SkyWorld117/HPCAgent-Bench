@@ -12,13 +12,13 @@ parameters:
     T1: 64
     T2: 8
   L:
-    LEN_2D: 19184
-    T1: 54
-    T2: 4
+    LEN_2D: 16139
+    T1: 64
+    T2: 8
   XL:
-    LEN_2D: 32673
-    T1: 45
-    T2: 4
+    LEN_2D: 23125
+    T1: 64
+    T2: 8
 init:
   arrays:
     a: (LEN_2D,LEN_2D)

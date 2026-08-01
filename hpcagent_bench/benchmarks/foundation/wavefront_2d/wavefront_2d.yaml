@@ -8,9 +8,9 @@ parameters:
   M:
     N: 12288
   L:
-    N: 20724
+    N: 19135
   XL:
-    N: 34952
+    N: 29798
 init:
   arrays:
     aa: (N,N)

@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 8192
+    LEN_2D: 7476
   L:
-    LEN_2D: 11585
+    LEN_2D: 7707
   XL:
-    LEN_2D: 16383
+    LEN_2D: 7946
 init:
   arrays:
     out: (LEN_2D,LEN_2D)
