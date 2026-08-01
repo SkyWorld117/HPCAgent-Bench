@@ -24,13 +24,6 @@ init:
   - grid
   - dp
   func_name: initialize
-  arrays:
-    grid:
-      shape: (rows, cols)
-      dtype: int32
-    dp:
-      shape: (cols,)
-      dtype: int32
 array_args:
 - grid
 - dp

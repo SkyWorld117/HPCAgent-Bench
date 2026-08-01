@@ -135,12 +135,12 @@ jobs:
           files=$(ls tests/test_*.py | grep -vxF -f "$excl")
           test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
           echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
-          python -m pytest -q -p no:cacheprovider -n auto --timeout=600 $files
+          python -m pytest -q -p no:cacheprovider -rs -n auto --timeout=600 $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
         run: |
-          python -m pytest -q -p no:cacheprovider tests/test_native_autogen.py
+          python -m pytest -q -p no:cacheprovider -rs tests/test_native_autogen.py
 
       - name: Phase 3 -- agent-bench (tools + no-op/BLAS optimizers, both modes, in-proc judge)
         if: ${{ !cancelled() }}
@@ -149,7 +149,7 @@ jobs:
         # of the whole job dying at the 90-min job timeout and skipping 5 + 7.
         timeout-minutes: 25
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=600 \
+          python -m pytest -q -p no:cacheprovider -rs --timeout=600 \
             tests/test_agent_tools.py \
             tests/test_noop_optimizer.py \
             tests/test_blas_optimizer.py \
@@ -169,7 +169,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "numba,jax"
         run: |
-          python -m pytest -q -p no:cacheprovider -n auto --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rs -n auto --timeout=600 tests/test_e2e_numerical.py
 
       - name: Phase 6 -- integration-marked tests (build/run real artifacts)
         if: ${{ !cancelled() }}
@@ -180,7 +180,7 @@ jobs:
         # `make test` excludes this marker for a fast local loop; CI is where they must run.
         timeout-minutes: 25
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=900 -m integration \
+          python -m pytest -q -p no:cacheprovider -rs --timeout=900 -m integration \
             tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: Phase 7 -- export (+ publish on a main push) the HuggingFace dataset
@@ -358,7 +358,12 @@ jobs:
       - uses: ./.github/actions/setup
 
       - name: Setup -- apache-tvm (tvm_cpu framework)
-        run: python -m pip install apache-tvm
+        # apache-tvm's libtvm_runtime.so resolves tvm::ffi::* out of the SEPARATE apache-tvm-ffi
+        # wheel. Installing only apache-tvm loads to
+        # "undefined symbol: _ZN3tvm3ffi4json9StringifyE...", which the suite then reports as
+        # "tvm import failed" and SKIPS -- a broken install wearing an absent one's clothes.
+        # Both pinned to the pair this repo develops against.
+        run: python -m pip install apache-tvm==0.25.0rc0 apache-tvm-ffi==0.1.12
 
       - name: Setup -- build Pluto (polyhedral source-to-source) against LLVM/clang 17
         # HARD step (proven recipe -- containers/pluto.Dockerfile builds the same way): a build
@@ -423,7 +428,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "pluto"
         run: |
-          python -m pytest -q -p no:cacheprovider -n auto tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rs -n auto tests/test_e2e_numerical.py
 
       # Phase 5d -- the optimization-report e2e. HERE and nowhere else: this is the ONLY runner that
       # builds Pluto, and the test needs polycc AND dace in one process (dace comes from the shared
@@ -519,7 +524,7 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 15
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=1800 tests/test_integration_sweep.py
+          python -m pytest -q -p no:cacheprovider -rs --timeout=1800 tests/test_integration_sweep.py
 
       - name: Phase 5 -- e2e numerical sweep [c, cpp, fortran] @ S, fp64
         if: ${{ !cancelled() }}
@@ -528,7 +533,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "c,cpp,fortran"
         run: |
-          python -m pytest -q -p no:cacheprovider -n auto --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rs -n auto --timeout=600 tests/test_e2e_numerical.py
 
       - name: Phase 5b -- e2e numerical sweep [c, cpp, fortran] @ S, fp32
         # The SAME corpus at fp32. Not redundant with the fp64 phase above: fp64 emits with an empty
@@ -547,7 +552,7 @@ jobs:
           HPCAGENT_BENCH_E2E_BACKENDS: "c,cpp,fortran"
           HPCAGENT_BENCH_E2E_PRECISION: "fp32"
         run: |
-          python -m pytest -q -p no:cacheprovider -n auto --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rs -n auto --timeout=600 tests/test_e2e_numerical.py
 
       # The KernelBench subtrack is EXCLUDED from the sweep above (test_e2e_numerical's
       # UNGATED_SUBTRACKS), so without this nothing in CI would notice a translator change halving
@@ -639,7 +644,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "pythran"
         run: |
-          python -m pytest -q -p no:cacheprovider -n 1 --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rs -n 1 --timeout=600 tests/test_e2e_numerical.py
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
@@ -741,7 +746,7 @@ jobs:
         env:
           HPCAGENT_BENCH_JUDGE_SIF: ${{ github.workspace }}/hpcagent_bench-cpu.sif
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=900 tests/test_container_launch.py
+          python -m pytest -q -p no:cacheprovider -rs --timeout=900 tests/test_container_launch.py
 
   # ===========================================================================================
   # mpi -- the whole MPI / distributed-residency track on its own runner (the "5th runner"): the
@@ -835,7 +840,7 @@ jobs:
       - name: Phase 1 -- data distribution + descriptor (pure numpy, no launcher)
         if: ${{ !cancelled() }}
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=600 \
+          python -m pytest -q -p no:cacheprovider -rs --timeout=600 \
             tests/test_mpi_descriptor.py \
             tests/test_mpi_scatter_gather_roundtrip.py \
             tests/test_mpi_wire.py \
@@ -845,7 +850,7 @@ jobs:
       - name: Phase 2 -- driver / stub codegen + ABI shape (mpicc.mpich -c compile checks)
         if: ${{ !cancelled() }}
         run: |
-          python -m pytest -q -p no:cacheprovider --timeout=600 \
+          python -m pytest -q -p no:cacheprovider -rs --timeout=600 \
             tests/test_mpi_driver_codegen.py \
             tests/test_mpi_halo.py
 
@@ -920,7 +925,7 @@ jobs:
           python-version: '3.12'
       - uses: ./.github/actions/setup
       - name: Setup -- GPU codegen frameworks (tvm + triton)
-        run: python -m pip install apache-tvm triton
+        run: python -m pip install apache-tvm==0.25.0rc0 apache-tvm-ffi==0.1.12 triton
       - name: GPU frameworks + fp16 (tvm-gpu / triton targets)
         run: |
           python -m pytest -q -p no:cacheprovider -rs --timeout=900 \

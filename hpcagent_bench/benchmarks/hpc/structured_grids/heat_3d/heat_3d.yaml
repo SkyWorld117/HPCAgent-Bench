@@ -26,11 +26,6 @@ init:
   scalars:
     alpha: 0.125
   func_name: initialize
-  arrays:
-    A:
-      shape: (N, N, N)
-    B:
-      shape: (N, N, N)
 array_args:
 - A
 - B
