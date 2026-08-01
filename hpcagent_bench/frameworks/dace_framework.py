@@ -59,6 +59,28 @@ def strip_output_args(argv: Sequence[str]) -> List[str]:
     return kept
 
 
+def recorded_compiles(folder: pathlib.Path) -> List[Tuple[str, List[str]]]:
+    """``(directory, argv)`` for every translation unit DaCe compiled from ``<folder>/src``.
+
+    WHICH record exists is decided by ``compiler.build_mode``, so both are read here: ``cmake`` leaves
+    CMake's ``build/compile_commands.json``, while ``native`` never runs CMake and instead writes the
+    exact command per object to ``build/<tag>.o.cmd`` (its own staleness check reads them back).
+    Native records a plain space-join of the argv, NOT the shell-quoted line it executes, so
+    :func:`shlex.split` recovers the tokens only while none of them needs quoting -- the one quoted
+    token it emits, ``-DDACE_BINARY_DIR="..."``, is referenced by no generated source, and a build
+    path containing a space would defeat this reader. Units compiled from outside ``src`` (an
+    environment's own sources) are dropped either way -- they are not the code DaCe generated.
+    """
+    build = folder / "build"
+    src_root = str(folder / "src")
+    db = build / "compile_commands.json"
+    if db.is_file():
+        return [(str(e["directory"]), shlex.split(e["command"])) for e in json.loads(db.read_text())
+                if str(e["file"]).startswith(src_root)]
+    recorded = [shlex.split(cmd.read_text()) for cmd in sorted(build.glob("*.o.cmd"))]
+    return [(str(build), argv) for argv in recorded if any(token.startswith(src_root) for token in argv)]
+
+
 def report_flags_for(compiler: str) -> str:
     """The optimization-report flags for the compiler binary ``compiler``, or ``""`` when it has none.
 
@@ -495,7 +517,9 @@ class DaceFramework(Framework):
     #   empty file that reads as "DaCe did nothing" -- strictly worse than no file.
     # * The GENERATED C++ is the real answer, and it is on disk at ``<build_folder>/src/cpu``.
     # * The C++ COMPILER's own opt-report is recovered by replaying the exact compile command DaCe
-    #   recorded in ``<build_folder>/build/compile_commands.json`` with the report flags appended.
+    #   recorded as it built -- CMake's ``build/compile_commands.json`` under ``build_mode=cmake``, or
+    #   native mode's per-object ``build/<tag>.o.cmd`` (see :func:`recorded_compiles`) -- with the
+    #   report flags appended.
     #
     # Which pipeline won is not in any of those files, so every report is prefixed with it -- a
     # ``dace_cpu`` row that searched three pipelines is otherwise unattributable.
@@ -545,9 +569,10 @@ class DaceFramework(Framework):
     def opt_report(self, program: Any, bench: Benchmark) -> Optional[str]:
         """The C++ compiler's vectorization report for the code DaCe generated, or ``None``.
 
-        DaCe compiles through CMake, so the flags are not ours to choose -- but CMake records the
-        exact command per translation unit in ``build/compile_commands.json``, and replaying that
-        command with the repo's report flags appended reports on the SAME compilation. The flags come
+        The flags are not ours to choose -- but DaCe records the exact command per translation unit as
+        it builds (CMake's ``compile_commands.json``, or native mode's per-object ``.cmd`` files; see
+        :func:`recorded_compiles`), and replaying that command with the repo's report flags appended
+        reports on the SAME compilation. The flags come
         from :func:`hpcagent_bench.languages.report_flags` (``compilers.yaml``'s ``report_ref``), which is
         the same decision the native backend already made -- gcc ``-fopt-info-vec-*``, clang
         ``-Rpass=loop-vectorize|slp-vectorizer`` -- rather than a second flag set for DaCe.
@@ -561,22 +586,17 @@ class DaceFramework(Framework):
         folder = self.build_folder(program)
         if folder is None:
             return None
-        db = folder / "build" / "compile_commands.json"
-        if not db.is_file():
-            return None
-        src_root = str(folder / "src")
-        entries = [e for e in json.loads(db.read_text()) if str(e["file"]).startswith(src_root)]
+        entries = recorded_compiles(folder)
         if not entries:
             return None
         chunks = [f"pipeline: {program.name}"]
         with tempfile.TemporaryDirectory(prefix="dace_opt_report_") as scratch:
-            for entry in entries:
-                argv = shlex.split(entry["command"])
+            for directory, argv in entries:
                 rflags = report_flags_for(argv[0])
                 if not rflags:
                     return None
                 cmd = strip_output_args(argv) + shlex.split(rflags) + ["-o", str(pathlib.Path(scratch) / "report.o")]
-                proc = subprocess.run(cmd, cwd=entry["directory"], capture_output=True, text=True)
+                proc = subprocess.run(cmd, cwd=directory, capture_output=True, text=True)
                 if proc.returncode != 0:
                     return None
                 chunks.append(f"$ {shlex.join(cmd)}\n{proc.stderr}")

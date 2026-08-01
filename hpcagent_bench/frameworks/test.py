@@ -311,15 +311,9 @@ class Test(object):
                         validated=d["validated"],
                         time=d["time"],
                         native_time=d.get("native_time"),
-                        # What the run ACTUALLY materialized, not what was asked for. With no
-                        # --datatype the request is None and a legacy initialize() picks its own
-                        # width -- arc_distance's is float32 -- so a hardcoded 'float64' here
-                        # labels the row with a precision the data never had. Every consumer that
-                        # groups or filters on this column (the plot's datatype filter, the
-                        # per-precision comparisons) then compares fp32 timings inside an fp64
-                        # bucket. `detected_dtype` is the same value the tolerance band and the
-                        # framework binding are keyed off above, so all three now agree.
-                        datatype=datatype or (detected_dtype.__name__ if detected_dtype is not None else 'float64'),
+                        # The contract -d selects and speedups group by, not the width the buffers came out at.
+                        # ``or`` not ``is not None``: an empty -d is absent, not a datatype named "".
+                        datatype=datatype or 'float64',
                         variant=variant,
                         build=build,
                         prompt_hash=None,

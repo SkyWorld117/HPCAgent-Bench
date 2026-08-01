@@ -258,8 +258,11 @@ def mismatch_detail(name: str, got: np.ndarray, exp: np.ndarray) -> str:
     if got.dtype.kind in "iub" and exp.dtype.kind in "iub":
         d = float(np.abs(got.astype(np.int64) - exp.astype(np.int64)).max())
         return f"FAIL:{name}:d={d:.2e}"
-    g = got.astype(np.float64, copy=False)
-    e = exp.astype(np.float64, copy=False)
+    # complex128 when either side is complex: the float64 cast DISCARDS the imaginary part (a
+    # ComplexWarning) and understated the distance -- 5.31e-06 reported for a 5.36e-06 miss.
+    dt = np.complex128 if (np.iscomplexobj(got) or np.iscomplexobj(exp)) else np.float64
+    g = got.astype(dt, copy=False)
+    e = exp.astype(dt, copy=False)
     finite = np.isfinite(g) & np.isfinite(e)
     # A nan/inf on ONE side has no meaningful distance, so it is excluded from ``d`` -- but excluding
     # it silently reported the worst possible failure as float noise (a kernel returning NaN read as
