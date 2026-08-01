@@ -110,3 +110,24 @@ def test_no_workflow_declares_the_same_key_twice() -> None:
     for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
         yaml.load(path.read_text(), Loader=NoDuplicates)  # raises AssertionError naming the key
     yaml.load((REPO / ".github" / "actions" / "setup" / "action.yml").read_text(), Loader=NoDuplicates)
+
+
+def test_every_pytest_plugin_the_workflow_asks_for_is_installed() -> None:
+    """A plugin flag in PYTEST_ADDOPTS is a HARD dependency: pytest fails at argument parsing, so
+    every phase of every job dies before collecting a single test.
+
+    That is not hypothetical. Setting ``PYTEST_ADDOPTS: --cov=hpcagent_bench`` job-wide without
+    adding pytest-cov to the setup action turned six green jobs red at once, each with
+    ``ERROR: usage: python -m pytest [options]`` and nothing else -- a failure that looks like a
+    test failure and is not one. The flags and the install list have to agree.
+    """
+    import re
+
+    setup = (REPO / ".github" / "actions" / "setup" / "action.yml").read_text()
+    text = WORKFLOW.read_text()
+    # option prefix -> the distribution that provides it
+    plugins = {"--cov": "pytest-cov", "--timeout": "pytest-timeout", "-n ": "pytest-xdist", "--dist": "pytest-xdist"}
+    asked = {dist for opt, dist in plugins.items() if re.search(rf"PYTEST_ADDOPTS:.*{re.escape(opt.strip())}", text)}
+    missing = sorted(d for d in asked if d not in setup)
+    assert not missing, (f"PYTEST_ADDOPTS asks for {missing}, which .github/actions/setup/action.yml "
+                         f"does not install -- every pytest call in CI would fail on an unrecognized argument")

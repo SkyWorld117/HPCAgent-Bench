@@ -37,7 +37,7 @@ runs:
         pip_retry() { for i in 1 2 3 4 5; do python -m pip install "$@" && return 0; echo "pip attempt $i failed; retrying in $((i*5))s"; sleep $((i*5)); done; return 1; }
         python -m pip install --upgrade pip
         pip_retry -r requirements.txt \
-          pytest pytest-timeout pytest-xdist sympy jinja2 cffi tree-sitter-language-pack psutil py-cpuinfo
+          pytest pytest-timeout pytest-xdist pytest-cov sympy jinja2 cffi tree-sitter-language-pack psutil py-cpuinfo
         pip_retry -e .
         # DaCe: editable install of spcl/dace @ extended (the branch HPCAgent-Bench develops against), NOT the
         # stock PyPI wheel. extended carries compiler.build_mode=native, which compiles each SDFG by
