@@ -5,10 +5,15 @@ base image as both judge and agent on CSCS Alps nodes.
 
 ```text
 containers/cluster/generic/
+  agent/
+    start_run.sh
+    tools/
   amd/
     Dockerfile
     build_sqsh.sh
     optarena-amd-mi300.toml
+  judge/
+    tools/web_search.py
   nvidia/
     Dockerfile
     build_sqsh.sh
@@ -238,6 +243,19 @@ Ready-to-edit sbatch examples are included at:
 containers/cluster/generic/amd/agent.sbatch.example
 containers/cluster/generic/nvidia/agent.sbatch.example
 ```
+
+## Judge Placeholder
+
+The judge container is not implemented yet. The only prepared judge-side execution
+tool is:
+
+```bash
+python3 containers/cluster/generic/judge/tools/web_search.py --query "..."
+```
+
+It reads `.env`, calls SerpAPI, crawls result pages with Crawl4AI, and summarizes
+with a vLLM/OpenAI-compatible chat endpoint. It is designed to be called as a
+separate process by a later judge service.
 
 ## Notes
 
