@@ -57,6 +57,23 @@ def needs_canonicalize(frameworks: Sequence[str]) -> List[str]:
     return out
 
 
+def needs_polycc(frameworks: Sequence[str]) -> List[str]:
+    """The requested columns whose TIMED build runs ``polycc`` -- ``pluto`` today. The genuine Pluto
+    column transforms the emitted scop with ``polycc --pet`` and compiles the RESULT (see
+    ``cpp_runtime._ensure_built_pluto``); with polycc absent it declines EVERY kernel, so a whole job
+    would produce nothing but skips. Named here so the cause is reported once, up front."""
+    return [name for name in frameworks if name == "pluto"]
+
+
+def check_polycc() -> str:
+    """``""`` when ``polycc`` is on PATH, else why not. ``pluto`` is the only column that needs it; the
+    Pluto toolchain is provided natively (source ``slurm/hpcagent-env.sh``), not by any uenv or image."""
+    import shutil
+    if shutil.which("polycc") is None:
+        return "polycc is not on PATH; the pluto column needs the Pluto toolchain (source slurm/hpcagent-env.sh)"
+    return ""
+
+
 def check_dace_pipeline() -> str:
     """``""`` when the installed dace carries the fork's canonicalize pipeline, else why not.
 
@@ -127,6 +144,13 @@ def run(frameworks: Sequence[str],
             report.append(f"preflight: FATAL -- {problem} (needed by {', '.join(fork_columns)})")
             return 1, report, []
         report.append(f"preflight: dace canonicalize pipeline present (needed by {', '.join(fork_columns)})")
+    pluto_columns = needs_polycc(frameworks)
+    if pluto_columns:
+        problem = check_polycc()
+        if problem:
+            report.append(f"preflight: FATAL -- {problem} (needed by {', '.join(pluto_columns)})")
+            return 1, report, []
+        report.append(f"preflight: polycc present (needed by {', '.join(pluto_columns)})")
     for name, verdict, detail in check_autopar(frameworks):
         if verdict == AutoparVerdict.OK.value:
             report.append(f"preflight: {name} PARALLELIZES on this node ({detail})")
