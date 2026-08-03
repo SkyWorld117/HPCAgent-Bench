@@ -2706,7 +2706,14 @@ class _FoldStructuralUses(ast.NodeTransformer):
         self.visit(fn)
 
     def _fold(self, node: Optional[ast.expr]) -> Optional[ast.expr]:
-        if isinstance(node, ast.Name) and node.id in self.const_syms:
+        """The manifest value, but only for a name that still HOLDS it.
+
+        The rebound check lives here rather than at one call site because both slots need it for the
+        same reason: once the body reassigns the name, the manifest default is no longer what the
+        slot reads, and substituting it is a wrong axis or a wrong stride THAT STILL COMPILES. When
+        the name is genuinely runtime the honest outcome is the refusal downstream, not a fold.
+        """
+        if isinstance(node, ast.Name) and node.id in self.const_syms and node.id not in self.rebound:
             return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
         return node
 
@@ -2734,13 +2741,11 @@ class _FoldStructuralUses(ast.NodeTransformer):
         Bounds are NOT folded: they are ordinary integer expressions a runtime value evaluates fine,
         and the trip count comes from the target's extent.
 
-        A name the body REBINDS is left alone, for :class:`_FoldConstantSymbols`'s reason: once
-        rebound, the manifest default is no longer what the slice reads, and folding it there is a
-        wrong stride that still compiles. The axis slot above predates this and keeps its own rule.
+        A name the body REBINDS is left alone -- see :meth:`_fold`, which is where that rule lives
+        for both slots.
         """
         self.generic_visit(node)
-        if not (isinstance(node.step, ast.Name) and node.step.id in self.rebound):
-            node.step = self._fold(node.step)
+        node.step = self._fold(node.step)
         return node
 
 
@@ -2797,15 +2802,32 @@ def _structural_constants(parameters: Dict,
 
 
 def _rebound_names(fn: ast.FunctionDef) -> FrozenSet[str]:
-    """Every name ``fn`` ASSIGNS to (``=`` / ``+=`` / annotated / loop variable), targets unpacked.
+    """Every name ``fn`` BINDS anywhere in its body, targets unpacked.
 
     A manifest value is only the artifact's value while the name still HOLDS it, so both folds above
-    consult this before substituting.
+    consult this before substituting. EVERY binding form counts, not just ``=``: this is the sole
+    barrier against folding a stale value into a slot that still compiles, so a form it misses is a
+    wrong axis or a wrong stride with no error attached. ``:=``, ``with ... as``, ``except ... as``
+    and a comprehension target bind exactly as an assignment does -- the comprehension's is its own
+    scope, but treating it as a rebinding only costs a fold that was never necessary.
     """
-    return frozenset(leaf.id for node in ast.walk(fn)
-                     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For))
-                     for tgt in (node.targets if isinstance(node, ast.Assign) else [node.target])
-                     for leaf in ast.walk(tgt) if isinstance(leaf, ast.Name))
+    names: Set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            targets: List[Optional[ast.expr]] = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor, ast.NamedExpr, ast.comprehension)):
+            targets = [node.target]
+        elif isinstance(node, ast.withitem):
+            targets = [node.optional_vars]
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                names.add(node.name)
+            continue
+        else:
+            continue
+        names.update(leaf.id for tgt in targets if tgt is not None for leaf in ast.walk(tgt)
+                     if isinstance(leaf, ast.Name))
+    return frozenset(names)
 
 
 class _FoldConstantSymbols(ast.NodeTransformer):
