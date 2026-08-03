@@ -165,7 +165,15 @@ jobs:
         # Bounded like Phase 3 so a wedged worker fails this step (leaving Phase 7 to run),
         # not the job. --timeout is the per-test backstop; the oracle already SIGKILLs its
         # own forked jax/native children, so this only catches an in-process numba hang.
-        timeout-minutes: 35
+        #
+        # 35 -> 55: the old budget was set against a 200-port kernelbench subtrack and an
+        # UNINSTRUMENTED run. Both moved. The subtrack is now 239 (+19.5%) and coverage is on
+        # job-wide, which is deliberate here -- unlike Phase 2c this phase drives real library
+        # code, so its coverage is signal and cannot just be switched off. Last green run took
+        # 26:01; it reached 93% before the runner killed it at 35:00. This is a budget correction
+        # for work that was added on purpose, not headroom for a hang -- the per-test --timeout=600
+        # is still what catches that.
+        timeout-minutes: 55
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "numba,jax"
         run: |
@@ -881,6 +889,23 @@ jobs:
 
       - name: Phase 2c -- benchmark reference validation (numpy vs naive loop / GT4Py DSL / physics)
         if: ${{ !cancelled() }}
+        env:
+          # NO COVERAGE on this phase, deliberately. Every file it measures lives under
+          # hpcagent_bench/benchmarks/, which [tool.coverage.run] omit excludes from the report --
+          # so instrumenting it buys exactly nothing and costs the job.
+          #
+          # `omit` stops LINE tracing, not the per-call dispatch: sys.settrace fires on every call
+          # event even for files it will not record. This phase is call-dominated (the cloudsc
+          # branch test alone makes 4.4M calls), so it pays that dispatch 4.4M times for data that
+          # is then discarded. Measured locally: 8.28 s bare, >120 s instrumented. In CI the same
+          # 745 tests went from 183.57 s to 736 s once coverage landed, pushing the heaviest test
+          # past --timeout=600 -- which is why this job has been red for three consecutive runs.
+          #
+          # COVERAGE_CORE=sysmon is NOT the way out here: coverage 7.13.5 refuses it whenever
+          # `branch = true` on Python < 3.14 ("sys.monitoring can't measure branches in this
+          # version") and again for concurrency=, then warns and silently falls back to the C
+          # tracer. It reads as a fix and changes nothing.
+          PYTEST_ADDOPTS: ""
         run: |
           # Discover the whole tree rather than listing files: the xsbench / gromacs / lavamd
           # reference suites sat outside an explicit list here and so never ran in CI at all.

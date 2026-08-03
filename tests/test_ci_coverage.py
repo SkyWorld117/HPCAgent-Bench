@@ -178,3 +178,43 @@ def test_the_combined_total_is_built_from_every_job_not_one_of_them() -> None:
     assert 'Combined ${#files[@]} file' in text, (
         "nothing checks that combine consumed every uploaded file; a partial combine prints a "
         "perfectly plausible percentage and stays green, which is how this went unnoticed")
+
+
+def test_the_corpus_reference_phase_is_not_instrumented() -> None:
+    """Phase 2c runs ``hpcagent_bench/benchmarks/``. Every file it measures is inside the
+    ``[tool.coverage.run] omit`` pattern, so instrumenting it produces no report data at all --
+    it is pure cost.
+
+    And the cost is not small. ``omit`` stops LINE tracing, not the per-call dispatch: sys.settrace
+    fires on every call event even for a file it will never record. This phase is call-dominated
+    (one cloudsc test makes 4.4M calls), so it pays that dispatch millions of times to discard the
+    result. Measured: 8.28 s bare against >120 s instrumented, and in CI the same 745 tests went
+    183.57 s -> 736 s when coverage landed, which is what pushed the heaviest test past
+    ``--timeout=600`` and made the job red for three consecutive runs.
+
+    ``COVERAGE_CORE=sysmon`` is not an escape: coverage refuses it while ``branch = true`` on
+    Python < 3.14 and again for ``concurrency=``, warns, and falls back to the C tracer -- so it
+    looks like a fix and changes nothing.
+    """
+    text = WORKFLOW.read_text()
+    phase = text.index("Phase 2c -- benchmark reference validation")
+    nxt = text.index("- name: ", phase)
+    step = text[phase:nxt]
+    assert 'PYTEST_ADDOPTS: ""' in step, (
+        "Phase 2c must clear PYTEST_ADDOPTS: it runs only corpus files, every one of which the "
+        "coverage config omits, so instrumenting it costs the job and yields nothing")
+
+
+def test_the_coverage_omit_list_and_the_uninstrumented_phase_agree() -> None:
+    """The phase above is only safe to leave uninstrumented BECAUSE its tree is omitted. If the
+    omit pattern is ever narrowed, that phase silently starts being the one place a real library
+    path went unmeasured -- so pin the two together rather than leaving the link in a comment.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads((REPO / "pyproject.toml").read_text())
+    omit = pyproject["tool"]["coverage"]["run"]["omit"]
+    assert any(
+        pattern.startswith("hpcagent_bench/benchmarks")
+        for pattern in omit), ("coverage no longer omits hpcagent_bench/benchmarks/, but Phase 2c still runs that tree "
+                               "with coverage disabled -- either re-instrument the phase or restore the omit")
