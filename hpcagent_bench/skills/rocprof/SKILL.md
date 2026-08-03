@@ -41,7 +41,7 @@ ran; if it says `rocprof`, half the fields below are absent for that reason alon
 | --- | --- | --- |
 | kernel stats | `*_kernel_stats.csv` | per kernel: `Calls`, `TotalDurationNs`, `AverageNs`, `MinNs`, `MaxNs`, `Percentage` |
 | memory copy stats | `*_memory_copy_stats.csv` | per operation: how long H2D / D2H took. NO byte volume |
-| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_*`, `Grid_Size_*` (in WORK-ITEMS), `Group_Segment_Size` (LDS bytes). No register count |
+| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_{X,Y,Z}`, `Grid_Size_{X,Y,Z}` (in WORK-ITEMS), the LDS size, `Scratch_Size`, `VGPR_Count`, `Accum_VGPR_Count`, `SGPR_Count`. The LDS column was `Group_Segment_Size` and is `LDS_Block_Size` on rocprofiler-sdk 1.1.0 -- the reader still matches the OLD name, so it finds no LDS on current ROCm |
 | agent info | `*_agent_info.csv` | the PART: `Wave_Front_Size`, `Num_Xcc`, `Cu_Count`, `Simd_Count`, `Max_Waves_Per_Simd`, `Lds_Size_In_Kb`, `Product_Name` |
 
 They are found recursively: some ROCm releases write them flat, others under `<hostname>/<pid>/`.
@@ -60,7 +60,9 @@ Run totals: `device_ns`, `device_ns_per_rep`, `device_pct`, `launch_count`, `ker
 
 These come back `null` on AMD and never `0`, because a zero there would be a measurement:
 
-- `registers_per_thread` -- the kernel trace carries no VGPR/SGPR count. Nobody looked.
+- `registers_per_thread` -- the READER does not fill it, not because the data is absent: measured on
+  rocprofiler-sdk 1.1.0 the kernel trace DOES carry `VGPR_Count`, `Accum_VGPR_Count` and
+  `SGPR_Count`. Wiring those through is a real gap, not a hardware limit.
 - `total` / `unit` on a memory row -- rocprofv3 TIMES the copies and does not size them. A 2.4 ms
   transfer of 0 MB would be the lie; no volume is the truth.
 - `min_ns` / `max_ns` -- absent under the deprecated v1 only.

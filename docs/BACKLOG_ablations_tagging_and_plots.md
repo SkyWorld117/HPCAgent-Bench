@@ -160,3 +160,44 @@ so grow the two together rather than landing 31 more unverified translations.
 
 5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
 well, or the results get read off the plot that misleads. 3 and 4 are independent.
+
+## 11. The rocprofv3 CSV reader matches an OLD schema
+
+Found by running `rocprofv3` on real hardware (Radeon 780M / gfx1103, ROCm 7.2.4,
+rocprofiler-sdk 1.1.0) rather than reading docs. Two columns the reader expects are not what the
+current tool emits:
+
+- **LDS size.** The reader (and `tests/test_gpu_profiling.py`'s `ROCPROF_CSVS` fixtures) matches
+  `Group_Segment_Size`. rocprofiler-sdk 1.1.0 emits **`LDS_Block_Size`**. So on current ROCm the
+  reader finds no LDS column at all -- silently, since a missing optional column reads as `null`.
+- **Register counts.** `registers_per_thread` is documented in the skill as unavailable ("the
+  kernel trace carries no VGPR/SGPR count"). It is available: the trace carries `VGPR_Count`,
+  `Accum_VGPR_Count` and `SGPR_Count`. Wiring them through would make the AMD occupancy story as
+  complete as the NVIDIA one, since registers-per-thread is what turns "occupancy is low" into a
+  cause.
+
+Measured header, verbatim:
+
+```
+Kind, Agent_Id, Queue_Id, Stream_Id, Thread_Id, Dispatch_Id, Kernel_Id, Kernel_Name,
+Correlation_Id, Start_Timestamp, End_Timestamp, LDS_Block_Size, Scratch_Size, VGPR_Count,
+Accum_VGPR_Count, SGPR_Count, Workgroup_Size_X/Y/Z, Grid_Size_X/Y/Z
+```
+
+Also measured, and worth fixing at the same time:
+
+- `*_kernel_stats.csv` carries a `StdDev` column the reader does not surface. Run-to-run spread per
+  kernel is exactly what a "did this change anything" question needs.
+- `*_memory_copy_trace.csv` has NO size field on this version (`Kind, Direction, Stream_Id,
+  Source_Agent_Id, Destination_Agent_Id, Correlation_Id, Start_Timestamp, End_Timestamp`), so the
+  `total`/`unit` nulls are correct for CSV. The buffer-tracing record does define `bytes`, so
+  another emitter may carry it -- check before promising it.
+- The output layout is FLAT on this version (`<dir>/<prefix>_kernel_stats.csv`), not
+  `<hostname>/<pid>/`. Keep the recursive glob; just do not assume the nested form.
+- **`rocprofv3` requires `hsa-amd-aqlprofile` and does not depend on it.** Without it the run dies
+  with `error while loading shared libraries: libhsa-amd-aqlprofile64.so.1` prefixed with the
+  CHILD's name, so it reads as a bug in the profiled program. Worth a preflight check in the
+  backend.
+
+Fix the reader and the fixtures together, and pin BOTH spellings so the reader survives either
+ROCm generation.

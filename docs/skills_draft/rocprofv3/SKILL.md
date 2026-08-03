@@ -13,10 +13,17 @@ why a kernel is slow -- that is `rocprof-compute`.
 
 ## What was measured here, and what was not
 
-**There is no AMD GPU on the box this was written on.** No command below was executed. Every flag,
-file name and column comes from the upstream ROCm documentation cited at the bottom, and from the
-CSV readers this repo already ships. Treat the tool behaviour as unverified; check `rocprofv3
---help` before building a plan on a flag.
+The trace below WAS executed here: Radeon 780M (**gfx1103**, RDNA3 integrated), ROCm 7.2.4,
+rocprofiler-sdk 1.1.0, against a real HIP fixture. Every CSV column named below was read back off
+that run. What was NOT verified here is anything CDNA-specific -- an iGPU has no HBM and no
+Infinity Fabric, and the MI300 counter expressions are a different architecture's -- so treat the
+tool MECHANICS as measured and the MI300 numbers as documentation.
+
+WARNING: `rocprofv3` needs `hsa-amd-aqlprofile` and does not pull it in. Without it the run dies
+with `error while loading shared libraries: libhsa-amd-aqlprofile64.so.1` -- prefixed with **YOUR
+program's name**, not the profiler's, because the library is injected into the child. The binary
+links and runs fine standalone, so this reads as a bug in your code and is not one. `apt install
+hsa-amd-aqlprofile`.
 
 The READING RULE in "rank by the right column" is not vendor folklore -- it was measured on the
 NVIDIA twin of this page, where the fixture's launch-bound kernel owns **67.3%** of device time by
@@ -49,14 +56,19 @@ They answer different questions:
 
 | report | file | what it answers |
 | --- | --- | --- |
-| kernel stats | `*_kernel_stats.csv` | per kernel: `Calls`, `TotalDurationNs`, `AverageNs`, `MinNs`, `MaxNs`, `Percentage` |
+| kernel stats | `*_kernel_stats.csv` | per kernel: `Name`, `Calls`, `TotalDurationNs`, `AverageNs`, `Percentage`, `MinNs`, `MaxNs`, `StdDev` |
 | memory copy stats | `*_memory_copy_stats.csv` | per operation: how long H2D / D2H took. **NO byte volume** |
-| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_*`, `Grid_Size_*` (in WORK-ITEMS), `LDS_Block_Size` (LDS bytes, rounded up to the allocation granule) |
+| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_{X,Y,Z}`, `Grid_Size_{X,Y,Z}` (in WORK-ITEMS), `LDS_Block_Size`, `Scratch_Size`, **`VGPR_Count`**, `Accum_VGPR_Count`, **`SGPR_Count`**, `Start_Timestamp`, `End_Timestamp` |
 | agent info | `*_agent_info.csv` | the PART: `Wave_Front_Size`, `Num_Xcc`, `Cu_Count`, `Simd_Count`, `Max_Waves_Per_Simd`, `Lds_Size_In_Kb` |
 | domain stats | `*_domain_stats.csv` | per API/dispatch DOMAIN totals -- the top-level split before you rank within one |
 
-Find them RECURSIVELY. Some ROCm releases write them flat in the output directory, others under
+Find them RECURSIVELY. Measured on rocprofiler-sdk 1.1.0 the layout is FLAT --
+`<dir>/<prefix>_kernel_stats.csv` and friends, no subdirectories -- but other releases write under
 `<hostname>/<pid>/`, and a glob that assumes one layout silently finds nothing on the other.
+
+The REGISTER COUNTS are the reason to read the kernel trace even when you already have the stats:
+`VGPR_Count` and `SGPR_Count` are what turn "occupancy is low" into a cause, and they are per
+dispatch rather than per kernel.
 
 **Read `*_agent_info.csv` first.** It is the part's geometry, measured, and it is what makes every
 occupancy sentence arithmetic instead of folklore. `Grid_Size_*` is in WORK-ITEMS, not workgroups
@@ -93,19 +105,23 @@ the span being divided by. AMD has the same hazard in a different place: the fir
 code object pays a load, and `hipMalloc` of a large buffer is not free. Time the STEADY-STATE
 reps, not the process.
 
-## Copies: the byte volume is there, in the right format
+## Copies carry no byte volume in the CSV
 
-The memory-copy STATS report gives durations only. The byte count exists -- the buffer-tracing
-record carries a `bytes` field, emitted in the Perfetto, rocpd and JSON outputs -- so ask for a
-format that carries it rather than reconstructing transfer sizes from your source:
+Measured on rocprofiler-sdk 1.1.0: `*_memory_copy_trace.csv` has exactly these columns --
 
-```sh
-rocprofv3 --memory-copy-trace --output-format csv json -- ./your_app
+```
+Kind, Direction, Stream_Id, Source_Agent_Id, Destination_Agent_Id,
+Correlation_Id, Start_Timestamp, End_Timestamp
 ```
 
-Divide bytes by the reported time to get the achieved rate, then compare against the link: a
-PCIe-attached part and an Infinity-Fabric-attached one differ by an order of magnitude, so "is this
-copy slow" has no answer without knowing which one you are on.
+-- and no size field of any kind. The underlying buffer-tracing record does define a `bytes`
+member, so it can reach other emitters, but **do not plan on getting it out of `--output-format
+csv`**, and check your own emitter before believing a page (including this one) that says you can.
+
+So the achieved rate has to come from transfer sizes you know from your own source, divided by the
+reported duration. Then compare against the link: a PCIe-attached part and an Infinity-Fabric-
+attached one differ by an order of magnitude, and an integrated GPU has neither -- it shares the
+host memory controller, so a "copy" there is not the same operation at all.
 
 The actionable findings are almost always structural rather than rate-related: a copy inside the
 timestep loop that could be hoisted, a H2D of data the device already had, or pageable host memory
