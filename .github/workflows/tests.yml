@@ -1003,6 +1003,11 @@ jobs:
           # the defect ever announced itself. One subdirectory per artifact, so no collision.
       - name: Combine and report
         run: |
+          # pipefail, because every command below is piped into `tee`: without it the pipeline's
+          # status is tee's, a torn or malformed coverage database exits 0, and the only check that
+          # then fires is the file-count one -- which reports a partial merge and sends the reader
+          # after the wrong cause entirely.
+          set -o pipefail
           shopt -s nullglob dotglob
           files=(coverage-data/*/.coverage*)
           if [ ${#files[@]} -eq 0 ]; then

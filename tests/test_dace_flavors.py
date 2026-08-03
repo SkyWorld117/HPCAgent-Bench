@@ -219,7 +219,13 @@ def test_ccache_is_offered_to_cmake_without_depending_on_path_order():
 
     if shutil.which("ccache") is None:
         pytest.skip("no ccache on this host")
-    saved = {k: os.environ.get(k) for k in ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER")}
+    # Every launcher pin_build_caching sets, not the two this test asserts on: CUDA is the one it
+    # would leak, and a leaked CMAKE_CUDA_COMPILER_LAUNCHER silently routes a later test's nvcc
+    # through ccache. Test-order dependence, and the pollution direction is toward passing.
+    saved = {
+        f"CMAKE_{lang}_COMPILER_LAUNCHER": os.environ.get(f"CMAKE_{lang}_COMPILER_LAUNCHER")
+        for lang in ("C", "CXX", "CUDA")
+    }
     try:
         for key in saved:
             os.environ.pop(key, None)

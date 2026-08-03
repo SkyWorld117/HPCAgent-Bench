@@ -232,6 +232,13 @@ def test_ci_installs_the_tools_that_fail_silently_when_absent() -> None:
     guard that checks one direction of a two-directional error.
     """
     setup = (REPO / ".github" / "actions" / "setup" / "action.yml").read_text()
+    # The INSTALL lines, not the whole file: the comment block right above them explains why each
+    # tool is there and names both, so a substring search over the file passes on its own prose
+    # after the package is dropped -- the same silent-absence failure this test exists to catch.
+    joined = re.sub(r"\\\n\s*", " ", setup)  # the package list wraps with a backslash continuation
+    installs = [line for line in joined.splitlines() if "apt-get install" in line]
+    installed = " ".join(installs)
+    assert installs, "no apt-get install line in .github/actions/setup/action.yml"
     for tool in ("ninja-build", "ccache"):
-        assert tool in setup, (f"{tool} is not installed by .github/actions/setup/action.yml; without it the "
-                               f"build silently loses its cache instead of failing")
+        assert tool in installed, (f"{tool} is not installed by .github/actions/setup/action.yml; without it the "
+                                   f"build silently loses its cache instead of failing")
