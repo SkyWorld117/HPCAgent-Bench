@@ -45,6 +45,40 @@ nothing. Two scripted recipes:
 Include the verification step in each, not just the build: `papi_component_avail` plus one real
 counted region. A build that links and counts nothing is the failure mode.
 
+### The AMD PROFILER install is the harder half, and needs its own sample
+
+NVIDIA needs no sample: install the CUDA Toolkit and you have `nsys`, `ncu` and CUPTI. AMD does
+not work that way, and every step below cost time on 2026-08-03 that a sample would have saved.
+Write it as a runnable script plus a preflight check, not prose:
+
+- **Ubuntu already packages ROCm** (7.2.4 as of writing). Do NOT send people to
+  `amdgpu-install`: the URL is version-pinned and 404s, and `repo.radeon.com` has no directory for
+  a recent Ubuntu codename. `apt install rocminfo rocm-smi hip-runtime-amd hipcc-rocm
+  rocprofiler-sdk rocprofiler-compute` is the whole thing.
+- **The tools install to `/opt/rocm/bin` and are NOT on PATH.** `rocprofv3: command not found`
+  while `apt` reports the package as newest is the confusing first symptom.
+- **`hsa-amd-aqlprofile` is REQUIRED by rocprofv3 and is not a dependency of it.** Missing, the run
+  fails with `libhsa-amd-aqlprofile64.so.1` prefixed with the CHILD program's name -- so it reads
+  as a bug in the code being profiled. This deserves an explicit preflight check in the backend.
+- **`rocprof-compute` has pinned Python deps** (`astunparse==1.6.2` against a system 1.6.3, plus
+  `plotext`, `dash`, `colorlover`, `kaleido`, `plotille`, `textual` absent). Ubuntu's python3 is
+  PEP-668 externally managed, so the sample should build a
+  `python3 -m venv --system-site-packages` from
+  `/opt/rocm/libexec/rocprofiler-compute/requirements.txt` rather than fighting pip.
+- **Two ROCm toolchains coexist and do not interoperate.** `/usr/bin/hipcc` links against
+  `/usr/lib/rocm/llvm` and fails with `undefined symbol: __hipUnregisterFatBinary`;
+  `/opt/rocm/bin/amdclang++` has no device bitcode. The build that works crosses them:
+
+  ```sh
+  /usr/lib/rocm/llvm/bin/clang++ --driver-mode=g++ -O2 -x hip --offload-arch=<gfx> \
+    --hip-device-lib-path=/usr/lib/rocm/llvm/lib/clang/20/amdgcn/bitcode \
+    -L/opt/rocm/lib -lamdhip64 -Wl,-rpath,/opt/rocm/lib
+  ```
+
+- **An unsupported target needs an override.** gfx1103 (Radeon 780M) is not on ROCm's official
+  list; `HSA_OVERRIDE_GFX_VERSION=11.0.0` is the escape hatch. `rocm_agent_enumerator` prints the
+  real target and should be the sample's first line.
+
 ## 4. README: document the tag system
 
 Users should be able to register and add tags. For now the one tag that must exist is `npbench`.
