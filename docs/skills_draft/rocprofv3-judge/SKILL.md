@@ -198,8 +198,12 @@ rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE TCC_HIT_sum TCC_MISS_sum -- ./your_app
 
 Results land in `pmc_<n>/<pid>_counter_collection.csv`, one directory per pass. The file is PID-prefixed, so glob (`pmc_*/*_counter_collection.csv`) rather than naming it.
 
-**The counter budget is hardware, and exceeding it costs runs.** Too many counters in one row and
-the kernel is executed multiple times to collect them all.
+**The counter budget is hardware, and exceeding it FAILS THE JOB -- it does not replay.** From
+rocprofv3's own `--pmc` help: *"job will fail if entire set of counters cannot be collected in
+single pass"*. This is the opposite of `ncu`, which quietly replays the kernel until it has every
+metric, and the opposite of rocprof v1. So an over-long counter list costs you the run rather than
+the wall-clock, and the remedy is yours to apply: split the list across passes yourself, using the
+input file below. Never grow a `--pmc` list hoping the tool will cope.
 
 **Repeating `--pmc` does NOT give you two passes -- it silently DISCARDS the first.** The option
 is declared `nargs="*"` with no `append` action, so the second occurrence overwrites the first and

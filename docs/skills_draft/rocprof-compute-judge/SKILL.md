@@ -11,10 +11,27 @@ Run `rocprof` first anyway. A perfectly analysed kernel that owns 4% of the run 
 
 ## What was measured here, and what was not
 
-**There is no AMD GPU on the box this was written on.** No command below was executed, no number
-below was observed. Every flag, file name, metric and formula comes from the upstream ROCm
-documentation cited at the bottom. Treat all of it as unverified and check the first command
-against your own `--help` before building a plan on it.
+**No command below was executed and no number below was observed.** Every flag, file name, metric
+and formula comes from the upstream ROCm documentation cited at the bottom. Treat all of it as
+unverified and check the first command against your own `--help` before building a plan on it.
+
+What WAS established, on a Radeon 780M with ROCm 7.2.4: `rocprof-compute` is INSTALLED by the
+distro ROCm packages and still refuses to run, because it pins Python dependencies the system
+Python does not satisfy. Every subcommand -- including `--help` -- exits after printing:
+
+```
+[ERROR] the 'astunparse==1.6.2' distribution does not meet version requirements to use rocprofiler-compute.
+  --> version installed : 1.6.3
+[ERROR] The 'plotext' package was not found in the current execution environment.
+[ERROR] The 'dash>=3.0.0' package was not found in the current execution environment.
+   ... 11 packages in total
+```
+
+Note it exits **0**, so a wrapper that checks the return code concludes the profile succeeded and
+finds no output. The pin is exact (`==1.6.2`) and the installed version is NEWER, so this does not
+resolve by upgrading; build a venv from
+`<rocm-root>/libexec/rocprofiler-compute/requirements.txt`. Confirm `rocprof-compute --help`
+actually prints its usage before assuming the tool is available on any host.
 
 What is NOT vendor folklore is the reading ORDER, and the reason to trust it here is a measured
 one: on the NVIDIA twin of this page, following the ladder in order produced a **47.4x** kernel
