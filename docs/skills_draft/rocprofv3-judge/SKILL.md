@@ -95,7 +95,7 @@ They answer different questions:
 | --- | --- | --- |
 | kernel stats | `*_kernel_stats.csv` | per kernel: `Name`, `Calls`, `TotalDurationNs`, `AverageNs`, `Percentage`, `MinNs`, `MaxNs`, `StdDev` |
 | memory copy stats | `*_memory_copy_stats.csv` | per operation: how long H2D / D2H took. **NO byte volume** |
-| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_{X,Y,Z}`, `Grid_Size_{X,Y,Z}` (in WORK-ITEMS), `LDS_Block_Size`, `Scratch_Size`, **`VGPR_Count`**, `Accum_VGPR_Count`, **`SGPR_Count`**, `Start_Timestamp`, `End_Timestamp` |
+| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_{X,Y,Z}`, `Grid_Size_{X,Y,Z}` (in WORK-ITEMS), `LDS_Block_Size` (LDS bytes, rounded UP to the allocation granule -- so an upper bound on what the kernel asked for, and `Group_Segment_Size` on releases before rocprofiler-sdk 1.1.0), `Scratch_Size`, **`VGPR_Count`**, `Accum_VGPR_Count`, **`SGPR_Count`**, `Start_Timestamp`, `End_Timestamp` |
 | agent info | `*_agent_info.csv` | the PART: `Wave_Front_Size`, `Num_Xcc`, `Cu_Count`, `Simd_Count`, `Max_Waves_Per_Simd`, `Lds_Size_In_Kb` |
 | domain stats | `*_domain_stats.csv` | per API/dispatch DOMAIN totals -- the top-level split before you rank within one |
 
@@ -152,11 +152,14 @@ Correlation_Id, Start_Timestamp, End_Timestamp
 ```
 
 -- and no size field of any kind. The underlying buffer-tracing record does define a `bytes`
-member, so it can reach other emitters, but **do not plan on getting it out of `--output-format
-csv`**, and check your own emitter before believing a page (including this one) that says you can.
+member, so a NON-CSV emitter may still carry it: the same
+`rocprofv3 --memory-copy-trace -- ./your_app` run under `--output-format json` (or the `rocpd`
+database, or `pftrace` read in Perfetto) is where to look before giving up on it. What is measured
+here is only that `--output-format csv` has no such column, so **do not plan on getting it out of
+CSV**, and check your own emitter before believing a page (including this one) either way.
 
-So the achieved rate has to come from transfer sizes you know from your own source, divided by the
-reported duration. Then compare against the link: a PCIe-attached part and an Infinity-Fabric-
+Failing that, the achieved rate has to come from transfer sizes you know from your own source,
+divided by the reported duration. Then compare against the link: a PCIe-attached part and an Infinity-Fabric-
 attached one differ by an order of magnitude, and an integrated GPU has neither -- it shares the
 host memory controller, so a "copy" there is not the same operation at all.
 
@@ -186,11 +189,22 @@ sync: 1 kernels still active") for a further 10s+ before finalizing. So the obse
 and a hang in a program that runs clean without the profiler -- the same trap as the missing
 aqlprofile library above, and it will read as your kernel faulting.
 
-Two consequences. Run every `--pmc` invocation under a `timeout`, since it can fail by hanging
-rather than by exiting. And treat counter support as a per-ARCHITECTURE question: the trace side of
-this page works on the same part where the counter side aborts, so "rocprofv3 works here" says
-nothing about whether `--pmc` does. Consumer and integrated RDNA parts are the ones to check first;
-the CDNA datacenter parts these counter names are documented for are where the support is.
+**`HSA_OVERRIDE_GFX_VERSION` does not rescue this**, and it is the first thing to reach for
+because it is the standard escape hatch for an unsupported target. Measured: with
+`HSA_OVERRIDE_GFX_VERSION=11.0.0` exported and the kernel compiled `--offload-arch=gfx1100`, the
+application itself runs clean, and `--pmc` produces the SAME abort -- the warning still names
+**gfx1103**. The override is a ROCr/HIP-layer lie about the ISA; rocprofiler reads the real hardware
+ID when it enumerates counters, so the two never meet. A missing counter set on your part is not a
+configuration you can talk your way out of.
+
+Three consequences. Run every `--pmc` invocation under `timeout -k`, not a bare `timeout`: measured,
+the SIGTERM at the deadline is caught by rocprofv3's own signal handler, logged as "caught signal
+15", and the process keeps running -- it needs a SIGKILL to die. Never leave one unattended in a
+wrapper that assumes `timeout` terminates things. And treat counter support as a per-ARCHITECTURE
+question: the trace side of this page works on the same part where the counter side aborts, so
+"rocprofv3 works here" says nothing about whether `--pmc` does. Consumer and integrated RDNA parts
+are the ones to check first; the CDNA datacenter parts these counter names are documented for are
+where the support is.
 
 ```sh
 rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE TCC_HIT_sum TCC_MISS_sum -- ./your_app

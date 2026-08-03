@@ -54,12 +54,12 @@ Write it as a runnable script plus a preflight check, not prose:
 - **Ubuntu already packages ROCm** (7.2.4 as of writing). Do NOT send people to
   `amdgpu-install`: the URL is version-pinned and 404s, and `repo.radeon.com` has no directory for
   a recent Ubuntu codename. `apt install rocminfo rocm-smi hip-runtime-amd hipcc-rocm
-  rocprofiler-sdk rocprofiler-compute` is the whole thing.
+  rocprofiler-sdk rocprofiler-compute hsa-amd-aqlprofile` is the whole thing -- the last one is not
+  a dependency of any of the others and `rocprofv3` requires it, so an install line without it
+  reproduces the exact failure this section exists to prevent (item 11 has the symptom, which does
+  not look like a missing package).
 - **The tools install to `/opt/rocm/bin` and are NOT on PATH.** `rocprofv3: command not found`
   while `apt` reports the package as newest is the confusing first symptom.
-- **`hsa-amd-aqlprofile` is REQUIRED by rocprofv3 and is not a dependency of it.** Missing, the run
-  fails with `libhsa-amd-aqlprofile64.so.1` prefixed with the CHILD program's name -- so it reads
-  as a bug in the code being profiled. This deserves an explicit preflight check in the backend.
 - **`rocprof-compute` has pinned Python deps** (`astunparse==1.6.2` against a system 1.6.3, plus
   `plotext`, `dash`, `colorlover`, `kaleido`, `plotille`, `textual` absent). Ubuntu's python3 is
   PEP-668 externally managed, so the sample should build a
@@ -70,14 +70,22 @@ Write it as a runnable script plus a preflight check, not prose:
   `/opt/rocm/bin/amdclang++` has no device bitcode. The build that works crosses them:
 
   ```sh
-  /usr/lib/rocm/llvm/bin/clang++ --driver-mode=g++ -O2 -x hip --offload-arch=<gfx> \
-    --hip-device-lib-path=/usr/lib/rocm/llvm/lib/clang/20/amdgcn/bitcode \
+  HIPCLANG=/usr/lib/rocm/llvm/bin/clang++
+  $HIPCLANG --driver-mode=g++ -O2 -x hip --offload-arch=<gfx> \
+    --hip-device-lib-path="$($HIPCLANG --print-resource-dir)/amdgcn/bitcode" \
     -L/opt/rocm/lib -lamdhip64 -Wl,-rpath,/opt/rocm/lib
   ```
 
-- **An unsupported target needs an override.** gfx1103 (Radeon 780M) is not on ROCm's official
-  list; `HSA_OVERRIDE_GFX_VERSION=11.0.0` is the escape hatch. `rocm_agent_enumerator` prints the
-  real target and should be the sample's first line.
+  DERIVE the bitcode path, never write `.../clang/20/...`: the major version is whatever that
+  install happens to ship, and on any other one the directory is absent and the compile fails with
+  a missing-bitcode error that looks exactly like the toolchain mismatch this bullet is about.
+
+- **An unsupported target needs an override, and it only covers the RUNTIME.** gfx1103 (Radeon
+  780M) is not on ROCm's official list; `HSA_OVERRIDE_GFX_VERSION=11.0.0` plus
+  `--offload-arch=gfx1100` runs HIP code fine. It does NOT reach rocprofiler: measured, `--pmc`
+  under the override still aborts and still names gfx1103, because counter enumeration reads the
+  real hardware ID. `rocm_agent_enumerator` prints the real target and should be the sample's
+  first line.
 
 ## 4. README: document the tag system
 
@@ -195,43 +203,46 @@ so grow the two together rather than landing 31 more unverified translations.
 5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
 well, or the results get read off the plot that misleads. 3 and 4 are independent.
 
-## 11. The rocprofv3 CSV reader matches an OLD schema
+## 11. The rocprofv3 CSV reader matched an OLD schema -- FIXED, one part still open
 
 Found by running `rocprofv3` on real hardware (Radeon 780M / gfx1103, ROCm 7.2.4,
-rocprofiler-sdk 1.1.0) rather than reading docs. Two columns the reader expects are not what the
-current tool emits:
+rocprofiler-sdk 1.1.0) rather than reading docs. Two columns the reader expected were not what the
+current tool emits. Both are now read, and the fixtures carry both generations:
 
-- **LDS size.** The reader (and `tests/test_gpu_profiling.py`'s `ROCPROF_CSVS` fixtures) matches
-  `Group_Segment_Size`. rocprofiler-sdk 1.1.0 emits **`LDS_Block_Size`**. So on current ROCm the
-  reader finds no LDS column at all -- silently, since a missing optional column reads as `null`.
-- **Register counts.** `registers_per_thread` is documented in the skill as unavailable ("the
-  kernel trace carries no VGPR/SGPR count"). It is available: the trace carries `VGPR_Count`,
-  `Accum_VGPR_Count` and `SGPR_Count`. Wiring them through would make the AMD occupancy story as
-  complete as the NVIDIA one, since registers-per-thread is what turns "occupancy is low" into a
-  cause.
+- **LDS size.** The reader matched `Group_Segment_Size`; rocprofiler-sdk 1.1.0 emits
+  **`LDS_Block_Size`**. The symptom was NOT a `null`, which is what made it worth fixing before the
+  rest: `column()` returns `""` for an unmatched prefix and `number("")` is `0.0`, so a 16 KB
+  workgroup came back as `shared_memory: 0.0, shared_memory_unit: "B"` -- a measurement, saying the
+  LDS budget was free. An agent then sizes a tile against a budget it has already spent. Both
+  spellings are pinned now, and a trace carrying NEITHER reports `null`.
+- **Register counts.** `registers_per_thread` was documented as unavailable ("the kernel trace
+  carries no VGPR/SGPR count"). It is available: the trace carries `VGPR_Count`, `Accum_VGPR_Count`
+  and `SGPR_Count`. `VGPR_Count` is now the row's `registers_per_thread`. `SGPR_Count` stays out:
+  the scalar file is per wavefront and has no NVIDIA counterpart, so it has no field in a schema
+  whose whole point is being vendor-independent.
 
-Measured header, verbatim:
+Measured header, verbatim (ONE physical line -- `tests/test_gpu_profiling.py`'s `ROCPROF_CSVS`
+entries are exactly this shape, and a wrapped copy pasted into a fixture makes `csv.DictReader`
+read lines 2 and 3 as data):
 
 ```
-Kind, Agent_Id, Queue_Id, Stream_Id, Thread_Id, Dispatch_Id, Kernel_Id, Kernel_Name,
-Correlation_Id, Start_Timestamp, End_Timestamp, LDS_Block_Size, Scratch_Size, VGPR_Count,
-Accum_VGPR_Count, SGPR_Count, Workgroup_Size_X/Y/Z, Grid_Size_X/Y/Z
+Kind,Agent_Id,Queue_Id,Stream_Id,Thread_Id,Dispatch_Id,Kernel_Id,Kernel_Name,Correlation_Id,Start_Timestamp,End_Timestamp,LDS_Block_Size,Scratch_Size,VGPR_Count,Accum_VGPR_Count,SGPR_Count,Workgroup_Size_X,Workgroup_Size_Y,Workgroup_Size_Z,Grid_Size_X,Grid_Size_Y,Grid_Size_Z
 ```
 
-Also measured, and worth fixing at the same time:
+Also measured. The first is STILL OPEN; the rest are recorded because they are right and easy to
+un-learn:
 
-- `*_kernel_stats.csv` carries a `StdDev` column the reader does not surface. Run-to-run spread per
-  kernel is exactly what a "did this change anything" question needs.
+- **OPEN:** `*_kernel_stats.csv` carries a `StdDev` column the reader does not surface. Run-to-run
+  spread per kernel is exactly what a "did this change anything" question needs.
 - `*_memory_copy_trace.csv` has NO size field on this version (`Kind, Direction, Stream_Id,
   Source_Agent_Id, Destination_Agent_Id, Correlation_Id, Start_Timestamp, End_Timestamp`), so the
   `total`/`unit` nulls are correct for CSV. The buffer-tracing record does define `bytes`, so
-  another emitter may carry it -- check before promising it.
+  another emitter (`--output-format json`, rocpd, pftrace) may carry it -- check before promising
+  it.
 - The output layout is FLAT on this version (`<dir>/<prefix>_kernel_stats.csv`), not
   `<hostname>/<pid>/`. Keep the recursive glob; just do not assume the nested form.
 - **`rocprofv3` requires `hsa-amd-aqlprofile` and does not depend on it.** Without it the run dies
   with `error while loading shared libraries: libhsa-amd-aqlprofile64.so.1` prefixed with the
-  CHILD's name, so it reads as a bug in the profiled program. Worth a preflight check in the
-  backend.
-
-Fix the reader and the fixtures together, and pin BOTH spellings so the reader survives either
-ROCm generation.
+  CHILD's name, so it reads as a bug in the profiled program. The install bullet in the AMD sample
+  above now names the package; a preflight check in the backend is still worth having, since the
+  message the harness quotes is the child's.

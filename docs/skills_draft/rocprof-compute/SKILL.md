@@ -11,11 +11,13 @@ Run `rocprof` first anyway. A perfectly analysed kernel that owns 4% of the run 
 
 ## What was measured here, and what was not
 
-**No command below was executed and no number below was observed.** Every flag, file name, metric
-and formula comes from the upstream ROCm documentation cited at the bottom. Treat all of it as
-unverified and check the first command against your own `--help` before building a plan on it.
+**No PROFILE was collected and no number below was observed** -- not one metric, threshold, chart
+or formula on this page came off a run. All of it comes from the upstream ROCm documentation cited
+at the bottom. Treat it as unverified and check the first command against your own `--help` before
+building a plan on it.
 
-What WAS established, on a Radeon 780M with ROCm 7.2.4: `rocprof-compute` is INSTALLED by the
+Exactly one thing WAS executed, and it is why nothing else was, on a Radeon 780M with ROCm 7.2.4:
+`rocprof-compute` is INSTALLED by the
 distro ROCm packages and still refuses to run, because it pins Python dependencies the system
 Python does not satisfy. Every subcommand -- including `--help` -- exits after printing:
 
@@ -29,9 +31,18 @@ Python does not satisfy. Every subcommand -- including `--help` -- exits after p
 
 Note it exits **0**, so a wrapper that checks the return code concludes the profile succeeded and
 finds no output. The pin is exact (`==1.6.2`) and the installed version is NEWER, so this does not
-resolve by upgrading; build a venv from
-`<rocm-root>/libexec/rocprofiler-compute/requirements.txt`. Confirm `rocprof-compute --help`
-actually prints its usage before assuming the tool is available on any host.
+resolve by upgrading. Build the venv with `--system-site-packages`:
+
+```sh
+python3 -m venv --system-site-packages ~/.venvs/rocprof-compute
+~/.venvs/rocprof-compute/bin/pip install -r <rocm-root>/libexec/rocprofiler-compute/requirements.txt
+```
+
+The flag is not optional. `rocprof-compute` lives under the ROCm tree and imports the
+distro-installed ROCm Python modules; an ISOLATED venv satisfies every pinned pip requirement and
+then fails on those instead, which reads as the diagnosis having been wrong. Confirm
+`rocprof-compute --help` actually prints its usage before assuming the tool is available on any
+host.
 
 What is NOT vendor folklore is the reading ORDER, and the reason to trust it here is a measured
 one: on the NVIDIA twin of this page, following the ladder in order produced a **47.4x** kernel
