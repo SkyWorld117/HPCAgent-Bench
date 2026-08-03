@@ -776,15 +776,26 @@ def build_report(results: Dict[str, FamilyResult], created: Dict[str, int], poly
     lines.append("| Family | Source root | Matched | Copied | Skipped |")
     lines.append("|--------|-------------|--------:|-------:|--------:|")
     src_roots = {
-        "icon_fortran": "dace-fortran/tests/icon/full/velocity_full.f90",
-        "npbench": "npbench/npbench/benchmarks/<group>/<kernel>/<kernel>_numpy.py",
-        "cloudsc": "npbench-cloudsc/.../weather_stencils/cloudsc/cloudsc_numpy.py",
-        "tsvc": "TSVC_2/src/tsvc.c (per-function s<NNNN>)",
-        "polybench": "PolyBench/C 4.2.1 (git fetch) <cat>/<kernel>/<kernel>.c",
-        "lulesh": "hpcagent_bench/tests/ports/lulesh/baseline/lulesh_comp_kernels_reference.f90",
-        "tsvc_cpp": "TSVC_2 C++ microkernels (tsvc_2{,_5}/.../<name>/<name>_d.cpp, timing removed)",
-        "tsvc_cpp_emitted": "NumpyToX reference_source(Task(<kernel>, cpp)); microkernel-less foundation kernels",
-        "kernelbench": "third_party/KernelBench/KernelBench/level{1,2,3}/<n>_<Name>.py (in-repo submodule)",
+        "icon_fortran":
+        "dace-fortran/tests/icon/full/velocity_full.f90",
+        "npbench":
+        "npbench/npbench/benchmarks/<group>/<kernel>/<kernel>_numpy.py",
+        "cloudsc":
+        "npbench-cloudsc/.../weather_stencils/cloudsc/cloudsc_numpy.py",
+        "tsvc":
+        "TSVC_2/src/tsvc.c (per-function s<NNNN>)",
+        "polybench":
+        "PolyBench/C 4.2.1 (git fetch) <cat>/<kernel>/<kernel>.c",
+        "lulesh":
+        "hpcagent_bench/tests/ports/lulesh/baseline/lulesh_comp_kernels_reference.f90",
+        "tsvc_cpp":
+        "TSVC_2 C++ microkernels (tsvc_2{,_5}/.../<name>/<name>_d.cpp, timing removed)",
+        "tsvc_cpp_emitted":
+        "NumpyToX reference_source(Task(<kernel>, cpp)); microkernel-less foundation kernels",
+        # Derived: KERNELBENCH_LEVELS is what was actually globbed, and a hand-written "level{1,2,3}"
+        # keeps claiming that range after a level4 lands and gets collected.
+        "kernelbench": ("third_party/KernelBench/KernelBench/{" + ",".join(KERNELBENCH_LEVELS) +
+                        "}/<n>_<Name>.py (in-repo submodule)"),
     }
     # .get, not [], because FAMILY_ORDER is the single source of truth for which families exist and
     # this table is only their description: `kernelbench` was added to the tuple and not here, and

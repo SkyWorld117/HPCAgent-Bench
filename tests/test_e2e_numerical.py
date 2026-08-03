@@ -65,13 +65,13 @@ MIN_PRECISION_KERNELS = ("mandelbrot1", "mandelbrot2")
 #: shrink but never quietly absorb anything else.
 UNGATED_SUBTRACKS = ("kernelbench", )
 
-#: What UNGATED_SUBTRACKS covers today. Lower it as ports start translating; raising it needs a
-#: reason. The reason it moved 200 -> 239: the exclusion is by SUBTRACK, and the subtrack itself
-#: grew by the 39 level3 networks. No kernel that WAS gated became ungated -- the set is defined by
-#: `spec.subtrack in UNGATED_SUBTRACKS` and that predicate did not change. Deriving it from
-#: KERNELBENCH_PORT_COUNT rather than restating the number is what keeps that true: the two can no
-#: longer disagree, so this stays a pin on the subtrack's size and never becomes a place to park a
-#: kernel that fails.
+#: What UNGATED_SUBTRACKS covers today, derived from KERNELBENCH_PORT_COUNT rather than restated:
+#: the exclusion is by SUBTRACK, so the two sides ARE the same predicate and a second literal could
+#: only ever disagree with the first. That is also the limit of what this pins. It catches a SECOND
+#: subtrack joining the exclusion -- the count jumps past the kernelbench size and the ratchet
+#: fires. It cannot catch a kernelbench port that starts translating and should leave: nothing here
+#: is keyed on pass/fail, by the deliberate decision above. Lowering this number therefore means
+#: retiring the subtrack exclusion for per-kernel gating, not editing a constant.
 UNGATED_COUNT = KERNELBENCH_PORT_COUNT
 
 

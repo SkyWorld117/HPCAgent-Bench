@@ -504,15 +504,24 @@ def test_every_manual_sized_page_is_gated():
     root = paths.ROOT
     pages = sorted((root / "hpcagent_bench" / "skills").glob("*/SKILL.md"))
     pages += sorted((root / "docs" / "skills_draft").glob("*/SKILL.md"))
+    classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS
     ungated = []
+    on_disk = set()
     for path in pages:
         skill = parse_skill(path.read_text(), path)
-        classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS
-        if len(skill.body.splitlines()) >= MANUAL_LINES and skill.name not in classified:
-            ungated.append((skill.name, len(skill.body.splitlines())))
+        on_disk.add(skill.name)
+        lines = len(skill.body.splitlines())
+        if lines >= MANUAL_LINES and skill.name not in classified:
+            ungated.append((skill.name, lines))
     assert not ungated, (f"manual-sized pages classified as neither instrument nor always-inline: {ungated}. "
                          f"Every line of these goes into EVERY prompt unless the page is gated -- put each in "
                          f"INSTRUMENT_SKILLS or, with a reason, in ALWAYS_INLINE_MANUALS")
+    # And the other direction, which is the one a one-sided gate always misses: a classified name
+    # whose page was renamed or deleted sits in the frozenset forever, matching nothing, drifting
+    # exactly as a hand-written list drifts -- silently, since load_skills simply never resolves it.
+    stale = sorted(classified - on_disk)
+    assert not stale, (f"{stale} are classified in INSTRUMENT_SKILLS/ALWAYS_INLINE_MANUALS but no SKILL.md "
+                       f"declares those names; drop them or fix the page's `name:`")
 
 
 def test_a_page_is_not_both_gated_and_always_inlined():
