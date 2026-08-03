@@ -1,6 +1,55 @@
 ! Adapted from ICON dynamical core (mo_velocity_advection / velocity_tendencies subroutine)
 ! (https://gitlab.dkrz.de/icon/icon-model (project site: icon-model.org)), BSD-3-Clause. Not the
 ! scoring oracle (the numpy reference remains the correctness oracle).
+!
+! ---------------------------------------------------------------------------------------------
+! PARALLEL STRUCTURE: ADAPTED, NOT COPIED VERBATIM.
+!
+! This file is a single-translation-unit reprint (fparser/flang) of several ICON modules. Fortran
+! directives are comments, so the reprint dropped every !$OMP / !$ACC line of the originals. The
+! !$OMP directives below are restored from the originals named at each loop. Each one is spelled
+! out beside the loop it governs, together with the dependence argument that makes it legal FOR
+! THE LOOP IN THIS FILE (not merely the fact that upstream carried one).
+!
+! Two adaptations apply throughout:
+!   * ICON writes the schedule as a cpp macro. omp_definitions.inc:38 defines
+!     `ICON_OMP_DEFAULT_SCHEDULE SCHEDULE(dynamic,1)` and :39 `ICON_OMP_RUNTIME_SCHEDULE
+!     SCHEDULE(runtime)` for compilers other than Cray/Intel/NVHPC (line 33/34 give
+!     SCHEDULE(guided) for those three). This file has no cpp include, so the macro bodies are
+!     written out.
+!   * ICON guards several nests with #ifdef __LOOP_EXCHANGE (transposed jk/je index order) and
+!     #ifndef _OPENACC (loop fusion for GPU). The reprint kept the __LOOP_EXCHANGE-off,
+!     _OPENACC-off arms. Directives that belong only to the other arm are NOT restored.
+!
+! !$ACC IS DELIBERATELY NOT RESTORED. The original carries 94 !$ACC lines rooted in
+! mo_velocity_advection.f90:164, verbatim:
+!     !$ACC DATA COPYIN(z_w_concorr_me, z_kin_hor_e, z_vt_ie) &
+!     !$ACC   CREATE(z_w_concorr_mc, z_w_con_c, cfl_clipping, z_w_con_c_full, z_v_grad_w, z_w_v, zeta, z_ekinh, levmask, levelmask) &
+!     !$ACC   PRESENT(p_diag, p_prog, p_int, p_metrics, p_patch) &
+!     !$ACC   PRESENT(iqidx, iqblk, ividx, icblk, icidx, ieidx, ieblk, incblk, ivblk, incidx)
+!   Three reasons it cannot be carried over as written. (1) The PRESENT list names the pointer
+!   aliases icidx/ieidx/... that the reprint removed; this file indexes p_patch%edges%cell_idx
+!   directly, so those names do not exist here. (2) PRESENT(p_diag, p_prog, p_int, p_metrics,
+!   p_patch) is a promise that ICON keeps elsewhere with !$ACC ENTER DATA on its state modules;
+!   this translation unit has no such mapping, so DEFAULT(PRESENT) would fault at run time.
+!   (3) The two most heavily decorated regions (mo_velocity_advection.f90:204 and :531) sit over
+!   the _OPENACC arms of #ifdefs, and this file holds the other arm -- upstream:531
+!   `!$ACC LOOP GANG VECTOR COLLAPSE(2) PRIVATE(vcfl) REDUCTION(MAX: maxvcfl)` cannot be placed
+!   on the CPU arm reprinted here, whose jk loop contains a CYCLE and an imperfect nest.
+!   Restoring a subset would make this file read as GPU-ready when it is not.
+!
+! Vectorization hints (!DIR$ IVDEP on the innermost je/jc loops, !$NEC outerloop_unroll(N),
+! !DIR$ ATTRIBUTES ALIGN, !DIR$ PREFERVECTOR) are likewise not restored: they target Intel/NEC/Cray
+! and no build line here uses those compilers.
+!
+! DETERMINISM: the restored directives keep this file bit-reproducible. Every floating-point
+! result is a function of its own (je/jc, jk, jb) index triple; there is no cross-iteration
+! accumulation over the parallel axis, so no `reduction(+:...)` is needed anywhere and none is
+! added. The only reductions in the algorithm are MAX (exact, order-independent) and they stay
+! inside one block: maxvcfl is thread-private, published as vcflmax(jb), and folded by a serial
+! MAXVAL after the parallel region. SCHEDULE(dynamic,1) therefore changes which thread runs
+! which block but not a single bit of the answer.
+! ---------------------------------------------------------------------------------------------
 
 MODULE mo_decomposition_tools
   IMPLICIT NONE
@@ -114,6 +163,19 @@ CONTAINS
     INTEGER :: i_startidx, i_endidx
     LOGICAL :: lzacc
     CALL set_acc_host_or_device(lzacc, lacc)
+! Upstream: icon-model/externals/iconmath/src/interpolation/mo_lib_interpolation_scalar.F90:1382-1383,
+! verbatim:
+!     !$OMP PARALLEL
+!     !$OMP DO PRIVATE(jb,i_startidx,i_endidx,jv,jk) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header). The reprint inlined the _lib body unchanged,
+! so this jb loop IS the upstream jb loop.
+! Dependence argument for THIS loop: iteration jb writes only p_vert_out(:,:,jb), and the jb
+! ranges are disjoint, so there is no output or flow dependence between blocks. Every cross-block
+! read is p_cell_in(vert_cell_idx(...), jk, vert_cell_blk(...)), and p_cell_in is INTENT(IN) and
+! untouched here, so neighbour access is read-only. i_startidx/i_endidx/jv/jk are subroutine-level
+! locals reused by each block, hence PRIVATE.
+!$OMP PARALLEL
+!$OMP DO PRIVATE(jb,i_startidx,i_endidx,jv,jk) SCHEDULE(dynamic,1)
     DO jb = i_startblk, i_endblk
       CALL get_indices_v_lib(i_startidx_in, i_endidx_in, nproma, jb, i_startblk, i_endblk, i_startidx, i_endidx)
       DO jk = 1, elev
@@ -122,6 +184,11 @@ CONTAINS
         END DO
       END DO
     END DO
+! Upstream mo_lib_interpolation_scalar.F90:1414-1415, verbatim:
+!     !$OMP END DO NOWAIT
+!     !$OMP END PARALLEL
+!$OMP END DO NOWAIT
+!$OMP END PARALLEL
   END SUBROUTINE cells2verts_scalar_ri_lib
 END MODULE mo_lib_interpolation_scalar
 MODULE mo_model_domain
@@ -293,6 +360,17 @@ CONTAINS
     rl_end = -5
     i_startblk = ptr_patch%verts%start_block(2)
     i_endblk = ptr_patch%verts%end_block(-5)
+! Upstream: icon-model/externals/iconmath/src/horizontal/mo_lib_divrot.F90:2441-2442, verbatim:
+!     !$OMP PARALLEL
+!     !$OMP DO PRIVATE(jb,i_startidx,i_endidx,jv,jk), ICON_OMP_RUNTIME_SCHEDULE
+! ADAPTED: macro body written out (omp_definitions.inc:39, SCHEDULE(runtime)). ICON's
+! mo_math_divrot.f90:1265 rot_vertex_ri is a thin wrapper that calls rot_vertex_ri_lib; the
+! reprint inlined the callee, so this jb loop IS the upstream rot_vertex_ri_lib jb loop.
+! Dependence argument for THIS loop: iteration jb writes only rot_vec(:,:,jb) over disjoint jb
+! ranges. The stencil reads vec_e at neighbour edge blocks, but vec_e is INTENT(IN) and never
+! written here, so the cross-block traffic is read-only; geofac_rot is likewise read-only.
+!$OMP PARALLEL
+!$OMP DO PRIVATE(jb,i_startidx,i_endidx,jv,jk), SCHEDULE(runtime)
     DO jb = i_startblk, i_endblk
       CALL get_indices_v(ptr_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 2, -5)
       DO jk = slev, elev
@@ -301,6 +379,11 @@ CONTAINS
         END DO
       END DO
     END DO
+! Upstream mo_lib_divrot.F90:2476-2477, verbatim:
+!     !$OMP END DO NOWAIT
+!     !$OMP END PARALLEL
+!$OMP END DO NOWAIT
+!$OMP END PARALLEL
   END SUBROUTINE rot_vertex_ri
 END MODULE mo_math_divrot
 MODULE mo_real_timer
@@ -433,11 +516,32 @@ CONTAINS
     END IF
     IF (.NOT. lvn_only) CALL cells2verts_scalar_ri(p_prog % w, p_patch, p_int % cells_aw_verts, z_w_v, opt_rlend = -5, opt_acc_async = .TRUE.)
     CALL rot_vertex_ri(p_prog%vn, p_patch, p_int, zeta, opt_rlend=-5, opt_acc_async=.TRUE.)
+! Upstream mo_velocity_advection.f90:188, verbatim:
+!     !$OMP PARALLEL PRIVATE(rl_start, rl_end, i_startblk, i_endblk, rl_start_2, rl_end_2, i_startblk_2, i_endblk_2)
+! Restored unchanged: every name in the clause exists in this file with the same meaning. The
+! eight loop-bound variables are recomputed redundantly by each thread from thread-invariant
+! expressions inside the region, which is why they are PRIVATE rather than shared. Placement is
+! the upstream placement: after the two vertex interpolations (which parallelise internally) and
+! before the istep==1 block, so nothing nests inside another parallel region.
+! The six worksharing regions below are separated only by the implicit barriers of !$OMP END DO.
+! Those barriers are load-bearing -- later regions read arrays that earlier regions wrote at
+! NEIGHBOUR block indices -- so no NOWAIT is added to any of them (upstream adds none either).
+!$OMP PARALLEL PRIVATE(rl_start, rl_end, i_startblk, i_endblk, rl_start_2, rl_end_2, i_startblk_2, i_endblk_2)
     IF (istep == 1) THEN
       rl_start = 5
       rl_end = -10
       i_startblk = p_patch%edges%start_block(5)
       i_endblk = p_patch%edges%end_block(-10)
+! Upstream mo_velocity_advection.f90:198, verbatim:
+!     !$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header).
+! Dependence argument for THIS loop: iteration jb writes p_diag%vt, p_diag%vn_ie, z_kin_hor_e,
+! z_vt_ie and z_w_concorr_me only at (:,:,jb), over disjoint jb ranges, so blocks neither
+! overwrite nor feed one another. The only cross-block reads are p_prog%vn at quad_idx/quad_blk
+! and vn_ie_ubc, all INTENT(IN)/read-only in this region. The two inner jk loops that read index
+! jk-1 (vn_ie built from vn, z_vt_ie built from vt) read a DIFFERENT array than they write, so
+! the jk dependence they carry runs between loops, not across jb; it does not restrict this loop.
+!$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) SCHEDULE(dynamic,1)
       DO jb = i_startblk, i_endblk
         CALL get_indices_e(p_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 5, -10)
         DO jk = 1, nlev
@@ -479,12 +583,23 @@ CONTAINS
           END DO
         END IF
       END DO
+! Upstream mo_velocity_advection.f90:320, verbatim: !$OMP END DO
+!$OMP END DO
     END IF
     rl_start = 7
     rl_end = -9
     i_startblk = p_patch%edges%start_block(7)
     i_endblk = p_patch%edges%end_block(-9)
     IF (.NOT. lvn_only) THEN
+! Upstream mo_velocity_advection.f90:331, verbatim:
+!     !$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header).
+! Dependence argument for THIS loop: iteration jb writes only z_v_grad_w(:,:,jb). It reads
+! p_diag%vn_ie and z_vt_ie at the same block jb, and p_prog%w / z_w_v at neighbour cell and
+! vertex blocks -- w is INTENT(IN) here and z_w_v was fully written by cells2verts_scalar_ri
+! before the parallel region, so both are read-only. vn_ie was written in the previous region,
+! whose !$OMP END DO barrier makes it visible.
+!$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) SCHEDULE(dynamic,1)
       DO jb = i_startblk, i_endblk
         CALL get_indices_e(p_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 7, -9)
         DO jk = 1, nlev
@@ -493,8 +608,19 @@ CONTAINS
           END DO
         END DO
       END DO
+! Upstream mo_velocity_advection.f90:365, verbatim: !$OMP END DO
+!$OMP END DO
     END IF
     IF (.NOT. lvn_only .AND. ldeepatmo) THEN
+! Upstream mo_velocity_advection.f90:370, verbatim:
+!     !$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header).
+! Dependence argument for THIS loop: iteration jb updates z_v_grad_w(je,jk,jb) in place, reading
+! only z_v_grad_w at that same element plus block-local vn_ie/z_vt_ie and the jk-indexed deep
+! atmosphere profiles. The update is elementwise, so it is a self-dependence within one
+! iteration, not a dependence between jb iterations. The previous region's barrier guarantees
+! z_v_grad_w for this block is complete before any thread rescales it.
+!$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx) SCHEDULE(dynamic,1)
       DO jb = i_startblk, i_endblk
         CALL get_indices_e(p_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 7, -9)
         DO jk = 1, nlev
@@ -503,6 +629,8 @@ CONTAINS
           END DO
         END DO
       END DO
+! Upstream mo_velocity_advection.f90:399, verbatim: !$OMP END DO
+!$OMP END DO
     END IF
     rl_start = 4
     rl_end = -5
@@ -512,6 +640,33 @@ CONTAINS
     rl_end_2 = -4
     i_startblk_2 = p_patch%cells%start_block(5)
     i_endblk_2 = p_patch%cells%end_block(-4)
+! Upstream mo_velocity_advection.f90:414-415, verbatim:
+!     !$OMP DO PRIVATE(jb, jk, jc, i_startidx, i_endidx, i_startidx_2, i_endidx_2, z_w_con_c, &
+!     !$OMP            z_w_concorr_mc, difcoef, vcfl, maxvcfl, cfl_clipping, clip_count) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header). Every name in the clause exists in this file
+! with the same shape and role.
+! Dependence argument for THIS loop, term by term -- this is the region where privatisation, not
+! index disjointness, does the work:
+!   * z_w_con_c(nproma,nlevp1), z_w_concorr_mc(nproma,nlev) and cfl_clipping(nproma,nlevp1) are
+!     declared once for the whole subroutine but used as per-block scratch: each jb fills them
+!     before reading them and nothing survives to the next jb. Without PRIVATE that is a
+!     write-write race across blocks; with PRIVATE each thread owns a copy. They are automatic
+!     arrays with specification-expression bounds, which OpenMP permits in a PRIVATE clause.
+!   * maxvcfl, vcfl, difcoef, clip_count are per-block accumulators/temporaries, same argument.
+!     maxvcfl is folded with MAX inside one block and published as vcflmax(jb); it is NOT an
+!     OpenMP reduction, so no cross-thread combining order exists and the result is bit-stable.
+!   * levmask(jb,jk), vcflmax(jb), z_ekinh(:,:,jb), z_w_con_c_full(:,:,jb),
+!     p_diag%w_concorr_c(:,:,jb) and p_diag%ddt_w_adv_pc(:,:,jb,ntnd) are indexed by jb, so they
+!     stay shared and are written by exactly one block.
+!   * Cross-block reads are z_kin_hor_e / z_w_concorr_me / z_v_grad_w at neighbour EDGE blocks,
+!     all written by earlier regions and separated by their !$OMP END DO barriers, and p_prog%w /
+!     p_int / p_metrics which are read-only here.
+!   * The jk loops that read jk-1 or jk+1 (w_concorr_c from z_w_concorr_mc, z_w_con_c_full from
+!     z_w_con_c, ddt_w_adv_pc from p_prog%w) do so within one block's private or block-local
+!     data; they constrain the ORDER OF THE jk LOOPS, which is preserved verbatim, not the jb
+!     axis being parallelised.
+!$OMP DO PRIVATE(jb, jk, jc, i_startidx, i_endidx, i_startidx_2, i_endidx_2, z_w_con_c, &
+!$OMP            z_w_concorr_mc, difcoef, vcfl, maxvcfl, cfl_clipping, clip_count) SCHEDULE(dynamic,1)
     DO jb = i_startblk, i_endblk
       CALL get_indices_c(p_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 4, -5)
       DO jk = 1, nlev
@@ -600,13 +755,39 @@ CONTAINS
         END DO
       END IF
     END DO
+! Upstream mo_velocity_advection.f90:651, verbatim: !$OMP END DO
+! The barrier here is required, not decorative: the jk loop below reads levmask across the whole
+! block range that the region above wrote one block at a time.
+!$OMP END DO
+! Upstream mo_velocity_advection.f90:656, verbatim: !$OMP DO PRIVATE(jk)
+! Restored unchanged (no schedule clause upstream either).
+! Dependence argument for THIS loop: iteration jk writes only levelmask(jk) and reads only
+! levmask(i_startblk:i_endblk, jk) -- one column of a matrix, disjoint per jk. Distinct jk
+! iterations touch disjoint elements of both arrays, so the loop is fully independent. ANY() is a
+! logical fold, so no floating-point ordering is involved. i_startblk/i_endblk are PRIVATE to the
+! enclosing region and every thread computed the same values from the same expressions above.
+!$OMP DO PRIVATE(jk)
     DO jk = MAX(3, nrdmax_jg - 2), nlev - 3
       levelmask(jk) = ANY(levmask(i_startblk:i_endblk, jk))
     END DO
+! Upstream mo_velocity_advection.f90:660, verbatim: !$OMP END DO
+!$OMP END DO
     rl_start = 10
     rl_end = -8
     i_startblk = p_patch%edges%start_block(10)
     i_endblk = p_patch%edges%end_block(-8)
+! Upstream mo_velocity_advection.f90:669, verbatim:
+!     !$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx, ie, w_con_e, difcoef) ICON_OMP_DEFAULT_SCHEDULE
+! ADAPTED: macro body written out (see file header).
+! Dependence argument for THIS loop: iteration jb writes only p_diag%ddt_vn_apc_pc(:,:,jb,ntnd)
+! and p_diag%ddt_vn_cor_pc(:,:,jb,ntnd) -- disjoint per block, and the lextra_diffu tail updates
+! the first of those in place at the same (je,jk,jb), which is a self-dependence inside one
+! iteration. Everything read at a neighbour block (z_ekinh, z_w_con_c_full, zeta) was written
+! before this region and is separated from it by two !$OMP END DO barriers; levelmask likewise.
+! w_con_e, difcoef and ie are per-iteration temporaries and must be PRIVATE or blocks would
+! clobber each other's scratch. The jk loops that read vn_ie(je,jk+1,jb) read the same block, and
+! vn_ie is not written in this region at all.
+!$OMP DO PRIVATE(jb, jk, je, i_startidx, i_endidx, ie, w_con_e, difcoef) SCHEDULE(dynamic,1)
     DO jb = i_startblk, i_endblk
       CALL get_indices_e(p_patch, jb, i_startblk, i_endblk, i_startidx, i_endidx, 10, -8)
       IF (.NOT. ldeepatmo) THEN
@@ -651,6 +832,13 @@ CONTAINS
         END DO
       END IF
     END DO
+! Upstream mo_velocity_advection.f90:852-853, verbatim:
+!     !$OMP END DO
+!     !$OMP END PARALLEL
+! The region must close here: i_startblk/i_endblk are PRIVATE inside it and undefined afterwards,
+! and the two lines below reassign them for the serial MAXVAL fold.
+!$OMP END DO
+!$OMP END PARALLEL
     i_startblk = p_patch%cells%start_block(4)
     i_endblk = p_patch%cells%end_block(-4)
     max_vcfl_dyn = MAX(p_diag%max_vcfl_dyn, MAXVAL(vcflmax(i_startblk:i_endblk)))
