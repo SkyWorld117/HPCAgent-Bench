@@ -515,8 +515,8 @@ def parse_kernel(numpy_py: pathlib.Path,
     _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
                                                runtime_args=input_args)).apply(fn)
     # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only in
-    # the axis slot, where nothing else can be emitted.
-    _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args)).visit(fn)
+    # the axis slot and a slice STEP, where nothing else can be emitted.
+    _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args)).apply(fn)
     ast.fix_missing_locations(fn)
     # expand_dims/swapaxes first: they become plain indexing, which the tuple pass can then rank.
     _AxisReshapeToIndexing(rank_table(fn, _declared_ranks(shapes_raw)), _scalar_names).visit(fn)
@@ -2692,12 +2692,18 @@ class _FoldStructuralUses(ast.NodeTransformer):
     the iteration count to the manifest. ``np.argmax(x, axis=dim)`` chooses the loop nest, which has
     no runtime form at all, so there the literal is the only thing that can be emitted.
 
-    So this folds ONLY the axis slot of a structural call. Everywhere else the name survives and
-    reaches the ABI, and an axis that is genuinely runtime still meets the refusal downstream.
+    So this folds ONLY the two slots that pick the nest: a structural call's axis, and a slice STEP.
+    Everywhere else the name survives and reaches the ABI, and a slot that is genuinely runtime still
+    meets the refusal downstream.
     """
 
     def __init__(self, const_syms: Dict[str, int]) -> None:
         self.const_syms = const_syms
+        self.rebound: FrozenSet[str] = frozenset()
+
+    def apply(self, fn: ast.FunctionDef) -> None:
+        self.rebound = _rebound_names(fn)
+        self.visit(fn)
 
     def _fold(self, node: Optional[ast.expr]) -> Optional[ast.expr]:
         if isinstance(node, ast.Name) and node.id in self.const_syms:
@@ -2715,6 +2721,26 @@ class _FoldStructuralUses(ast.NodeTransformer):
         slot = AXIS_POSITION.get(name, 1)
         if len(node.args) > slot:
             node.args[slot] = self._fold(node.args[slot])
+        return node
+
+    def visit_Slice(self, node: ast.Slice) -> ast.AST:
+        """A slice STEP picks the nest exactly like an axis does, so it folds on the same terms.
+
+        The conv/pool ports take the stride as a manifest ``init.scalars`` value that is ALSO an ABI
+        argument, then slice with it (``padded[:, :, ky:ky + (oh - 1) * stride + 1:stride]``) inside
+        a helper that inlines into the body. ``_slice_step_const`` has no runtime form for the step
+        -- it reads a non-literal one as 1 and the stride is silently lost -- so the literal is the
+        only emittable value, and ``_reject_unsupported_slices`` refuses the name below otherwise.
+        Bounds are NOT folded: they are ordinary integer expressions a runtime value evaluates fine,
+        and the trip count comes from the target's extent.
+
+        A name the body REBINDS is left alone, for :class:`_FoldConstantSymbols`'s reason: once
+        rebound, the manifest default is no longer what the slice reads, and folding it there is a
+        wrong stride that still compiles. The axis slot above predates this and keeps its own rule.
+        """
+        self.generic_visit(node)
+        if not (isinstance(node.step, ast.Name) and node.step.id in self.rebound):
+            node.step = self._fold(node.step)
         return node
 
 
@@ -2770,6 +2796,18 @@ def _structural_constants(parameters: Dict,
     }
 
 
+def _rebound_names(fn: ast.FunctionDef) -> FrozenSet[str]:
+    """Every name ``fn`` ASSIGNS to (``=`` / ``+=`` / annotated / loop variable), targets unpacked.
+
+    A manifest value is only the artifact's value while the name still HOLDS it, so both folds above
+    consult this before substituting.
+    """
+    return frozenset(leaf.id for node in ast.walk(fn)
+                     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For))
+                     for tgt in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                     for leaf in ast.walk(tgt) if isinstance(leaf, ast.Name))
+
+
 class _FoldConstantSymbols(ast.NodeTransformer):
     """Replace a load of a structural constant with its literal value.
 
@@ -2782,13 +2820,7 @@ class _FoldConstantSymbols(ast.NodeTransformer):
         self.const_syms = const_syms
 
     def apply(self, fn: ast.FunctionDef) -> None:
-        rebound = {
-            leaf.id
-            for node in ast.walk(fn) if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For))
-            for tgt in (node.targets if isinstance(node, ast.Assign) else [node.target]) for leaf in ast.walk(tgt)
-            if isinstance(leaf, ast.Name)
-        }
-        self.const_syms = {k: v for k, v in self.const_syms.items() if k not in rebound}
+        self.const_syms = {k: v for k, v in self.const_syms.items() if k not in _rebound_names(fn)}
         self.visit(fn)
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
