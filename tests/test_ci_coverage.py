@@ -219,3 +219,19 @@ def test_the_coverage_omit_list_and_the_uninstrumented_phase_agree() -> None:
         pattern.startswith("hpcagent_bench/benchmarks")
         for pattern in omit), ("coverage no longer omits hpcagent_bench/benchmarks/, but Phase 2c still runs that tree "
                                "with coverage disabled -- either re-instrument the phase or restore the omit")
+
+
+def test_ci_installs_the_tools_that_fail_silently_when_absent() -> None:
+    """ninja and ccache do not error when missing -- the build just gets slower, which reads as
+    "CI is sluggish" rather than as a defect, so nothing surfaces it.
+
+    ninja is the sharper of the two: DaCe chooses its CMake generator with
+    ``shutil.which('ninja')`` and replays recorded compile commands ONLY when it picked Ninja, so
+    without the package ``compiler.command_cache`` still reports True while every SDFG pays a full
+    CMake configure. A config that reads enabled and does nothing is the same failure shape as a
+    guard that checks one direction of a two-directional error.
+    """
+    setup = (REPO / ".github" / "actions" / "setup" / "action.yml").read_text()
+    for tool in ("ninja-build", "ccache"):
+        assert tool in setup, (f"{tool} is not installed by .github/actions/setup/action.yml; without it the "
+                               f"build silently loses its cache instead of failing")

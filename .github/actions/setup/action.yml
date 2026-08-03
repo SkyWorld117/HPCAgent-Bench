@@ -20,8 +20,17 @@ runs:
         # the default path -- hence `ld: cannot find -lomp` with the package installed.
         # pkg-config + libopenblas-dev: the BLAS optimizer links cblas_*. libfftw3-dev:
         # the vexx port oracle links -lfftw3.
+        # ninja + ccache are BUILD-SPEED dependencies, and both fail SILENTLY when absent rather
+        # than erroring, so they belong here rather than in whichever job noticed first:
+        #   ninja  -- DaCe picks its CMake generator with `shutil.which('ninja')` and only replays
+        #             recorded compile commands when it picked Ninja (codegen/compiler.py). Without
+        #             it, `compiler.command_cache` still reads True, CMake falls back to Make, and
+        #             every SDFG pays a full configure. Nothing reports it; the build is just slow.
+        #   ccache -- DaCe knows nothing about ccache. It helps only through a compiler launcher or
+        #             a PATH shim, so the package has to exist before either can point at it.
         sudo apt-get update
-        sudo apt-get install -y build-essential gfortran clang flang libomp-dev pkg-config libopenblas-dev libfftw3-dev
+        sudo apt-get install -y build-essential gfortran clang flang libomp-dev pkg-config libopenblas-dev libfftw3-dev \
+          ninja-build ccache
 
     - name: Base Python deps (translators + the frameworks every phase shares)
       shell: bash
