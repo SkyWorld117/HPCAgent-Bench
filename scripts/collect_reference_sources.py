@@ -398,11 +398,17 @@ def kernelbench_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+#: The upstream levels the port tree drew from, all sharing the ``<n>_<Name>.py`` shape. ``level4``
+#: is deliberately absent: it holds HuggingFace model+batch+sequence configurations
+#: (``16_gpt2_bs1_seq1023.py``), which nothing here was translated from.
+KERNELBENCH_LEVELS = ("level1", "level2", "level3")
+
+
 def kernelbench_sources(root: pathlib.Path) -> Dict[str, List[pathlib.Path]]:
-    """Upstream ``level{1,2}`` models grouped by :func:`kernelbench_key`, each group ordered by
-    upstream index so a duplicated name resolves the same way on every machine."""
+    """Upstream :data:`KERNELBENCH_LEVELS` models grouped by :func:`kernelbench_key`, each group
+    ordered by upstream index so a duplicated name resolves the same way on every machine."""
     groups: Dict[str, List[Tuple[int, pathlib.Path]]] = {}
-    for level in ("level1", "level2"):
+    for level in KERNELBENCH_LEVELS:
         for src in (root / level).glob("*.py"):
             match = UPSTREAM_INDEX.match(src.stem)
             index, name = (int(match.group(1)), match.group(2)) if match else (0, src.stem)
@@ -778,7 +784,7 @@ def build_report(results: Dict[str, FamilyResult], created: Dict[str, int], poly
         "lulesh": "hpcagent_bench/tests/ports/lulesh/baseline/lulesh_comp_kernels_reference.f90",
         "tsvc_cpp": "TSVC_2 C++ microkernels (tsvc_2{,_5}/.../<name>/<name>_d.cpp, timing removed)",
         "tsvc_cpp_emitted": "NumpyToX reference_source(Task(<kernel>, cpp)); microkernel-less foundation kernels",
-        "kernelbench": "third_party/KernelBench/KernelBench/level{1,2}/<n>_<Name>.py (in-repo submodule)",
+        "kernelbench": "third_party/KernelBench/KernelBench/level{1,2,3}/<n>_<Name>.py (in-repo submodule)",
     }
     # .get, not [], because FAMILY_ORDER is the single source of truth for which families exist and
     # this table is only their description: `kernelbench` was added to the tuple and not here, and
