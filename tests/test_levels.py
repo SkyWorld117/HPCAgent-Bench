@@ -10,6 +10,7 @@ Foundation is loop microkernels only, so it never reaches L3.
 import pytest
 
 from hpcagent_bench.spec import KERNELS, BenchSpec, validate_level, _split_suffix
+from tests.corpus_counts import KERNELBENCH_PORT_COUNT
 
 
 @pytest.mark.parametrize(
@@ -96,7 +97,7 @@ def test_a_label_matches_a_tag_or_a_subtrack():
     """One selector over both, because the corpus records provenance in two places: npbench is a
     manifest tag, kernelbench and polybench are subtracks. Matching only tags would mean stamping
     a redundant tag onto 200 manifests that already say `subtrack: kernelbench`."""
-    assert len(KERNELS.select_keys("all@kernelbench")) == 200
+    assert len(KERNELS.select_keys("all@kernelbench")) == KERNELBENCH_PORT_COUNT
     assert len(KERNELS.select_keys("all@polybench")) > 0
     # npbench spans tracks -- it is not an HPC-only suite, and selecting by track drops the 5 that
     # live under ml/ (lenet, resnet, mlp, conv2d, softmax).

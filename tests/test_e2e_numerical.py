@@ -10,6 +10,7 @@ from hpcagent_bench import paths
 from hpcagent_bench.precision import Precision
 from hpcagent_bench.spec import KERNELS, BenchSpec, validate_min_precision
 from tests.numerical_oracle import FP16_BACKENDS, MISSING_EMIT_FEATURE, OUT_OF_SCOPE, PRECISIONS, run_kernel
+from tests.corpus_counts import KERNELBENCH_PORT_COUNT
 
 #: Backends fed DIRECTLY by the static translators' native emit, so a MISSING_EMIT_FEATURE entry
 #: excuses these and only these. numba/pythran/jax emit independently and must still pass for a
@@ -64,8 +65,14 @@ MIN_PRECISION_KERNELS = ("mandelbrot1", "mandelbrot2")
 #: shrink but never quietly absorb anything else.
 UNGATED_SUBTRACKS = ("kernelbench", )
 
-#: What UNGATED_SUBTRACKS covers today. Lower it as ports start translating; raising it needs a reason.
-UNGATED_COUNT = 200
+#: What UNGATED_SUBTRACKS covers today. Lower it as ports start translating; raising it needs a
+#: reason. The reason it moved 200 -> 239: the exclusion is by SUBTRACK, and the subtrack itself
+#: grew by the 39 level3 networks. No kernel that WAS gated became ungated -- the set is defined by
+#: `spec.subtrack in UNGATED_SUBTRACKS` and that predicate did not change. Deriving it from
+#: KERNELBENCH_PORT_COUNT rather than restating the number is what keeps that true: the two can no
+#: longer disagree, so this stays a pin on the subtrack's size and never becomes a place to park a
+#: kernel that fails.
+UNGATED_COUNT = KERNELBENCH_PORT_COUNT
 
 
 def _ungated_stems():
