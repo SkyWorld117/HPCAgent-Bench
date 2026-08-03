@@ -168,6 +168,34 @@ binding. `Waves Per SM` is waves, with 1.0 the floor below which the grid cannot
 every change that cuts DRAM bytes buys nothing. Read the Memory Throughput Breakdown, which exists
 to name the contributor, before you touch a single access.
 
+## ncu FLUSHES the caches, so a cache-resident kernel reads as DRAM-bound
+
+`--cache-control` defaults to `all`, which invalidates L1 and L2 before EVERY replay pass. The
+point is reproducibility -- pass 3 must see what pass 1 saw -- and the cost is that the kernel is
+measured cold, which is not how it runs.
+
+That is invisible until the working set fits in cache, and then it dominates the headline number.
+Same kernel, same binary, 6 MB of buffers against this part's 24 MB of L2:
+
+| `--cache-control` | `dram__bytes_read` | `DRAM Throughput` |
+| --- | --- | --- |
+| `all` (the DEFAULT) | 4.20 MB | **90.04%** |
+| `none` | 2.05 MB | **0.14%** |
+
+A 640x swing in the one number that decides whether you are memory-bound, from a flag nobody sets.
+Scale the same kernel to a 96 MB working set and the two agree (94.53% against 94.33%), because
+then the data genuinely does not fit and the flush changes nothing.
+
+So: **a high `DRAM Throughput` on a kernel whose working set fits in L2 is an artefact of the
+default.** It is the common shape in a timestep loop, where the same arrays are revisited every
+step and are hot by the second iteration. Re-run with `--cache-control none` before you spend a
+day cutting DRAM traffic that the real run never moves.
+
+This also reconciles ncu against an in-situ counter. PAPI's cuda component does not touch the
+caches, so on that same 6 MB kernel it reported near-zero DRAM traffic while ncu reported 90% of
+peak. Neither is broken. They answer different questions -- cold-start cost against steady-state
+cost -- and which one you want depends on whether your kernel is called once or a thousand times.
+
 ## Read it in this order
 
 NVIDIA ships its own ordering and it is not in prose: each rule in `<install>/sections/*.py`

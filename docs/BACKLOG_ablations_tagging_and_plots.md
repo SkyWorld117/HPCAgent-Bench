@@ -1,0 +1,83 @@
+# Ablation studies, run tagging, and the speed-up plot -- OPEN
+
+Filed 2026-08-03. Seven items, none started. They interlock: the two ablations (1, 2) are the
+CONSUMERS of the tagging work (5) and the plot work (7), so tagging lands first or the ablation
+results are unseparable from ordinary runs.
+
+## 1. Ablation: does a repo PR-and-merge framing improve agent performance?
+
+Build the sample. The question is whether presenting a code-optimization task as a repository pull
+request the agent opens and merges -- rather than as a bare kernel and a submission -- changes the
+score. Same kernels, same budget, two framings.
+
+CONTAINERIZED launch, not native. The framing is the independent variable and the environment has
+to be held fixed, which the native path does not guarantee across two long runs.
+
+## 2. Ablation: do profiling tools help?
+
+Two arms, same kernels, same budget:
+
+- **bare** -- an agent with NO profiling skills in its prompt at all
+- **instrumented** -- an agent with the profiling skills: `linuxperf`, `papi-cpu`, `papi-gpu`,
+  `nsys`, `ncu`, and the AMD set (`rocprofv3`, `rocprof-compute`, `papi-gpu-amd`)
+
+CONTAINERIZED launch, same reason as 1.
+
+This is the ablation the whole skills programme is aimed at, so it is worth stating what would
+make it honest: the bare arm must not be handicapped by anything OTHER than the missing skills.
+`prompt.profiling_guidance` already gates whether the instrument bodies are inlined (that gate cut
+a prompt from 1373 to 284 lines), so the two arms differ by exactly those bodies and nothing else.
+Check the token counts of both arms before believing a result -- if the instrumented arm is also
+the larger-context arm, context length is a confound.
+
+## 3. `samples/scripts`: how to install PAPI 7.2.0 with NVIDIA or AMD support
+
+Neither GPU component is built by default, and a distribution PAPI on a box with a perfectly good
+GPU usually has neither -- which is the single most common reason a `papi-gpu` page produces
+nothing. Two scripted recipes:
+
+- **NVIDIA** -- `./configure --with-components="cuda"` with `PAPI_CUDA_ROOT` set. Verified on this
+  box: PAPI 7.2.0.0 at `/usr/local`, cuda component active, 53782 native events, 30 counters.
+- **AMD** -- `./configure --with-components="rocp_sdk"` with `PAPI_ROCP_SDK_ROOT` set. Note that
+  the older `rocm` component is DEPRECATED from MI300A onward and that the two are mutually
+  exclusive on older parts. Also `AQLPROFILE_READ_API=0` for ROCm >= 6.2.0 or every count is zero.
+
+Include the verification step in each, not just the build: `papi_component_avail` plus one real
+counted region. A build that links and counts nothing is the failure mode.
+
+## 4. README: document the tag system
+
+Users should be able to register and add tags. For now the one tag that must exist is `npbench`.
+
+## 5. DB: a tag on the run, defaulting to `None`
+
+Store it per run. The consuming rule is the point of the feature: **plotting must never mix two
+run tags.** A plot takes a STUDY (run) tag and shows only that study. Without this, an ablation's
+two arms and every unrelated run in the database land on one chart.
+
+Default `None` so existing rows keep working.
+
+## 6. (not filed)
+
+## 7. Speed-up plot: default OFF, and a better one when it is on
+
+The current speed-up table ships on by default; it should not. Replace the plot with a
+median-speed-up chart:
+
+- **X axis: kernels.**
+- **Y axis: signed relative change, not a ratio.** 1.0x (no change) sits at **0**. A kernel 100%
+  faster (2x) is **+1**; 200% faster (3x) is **+2**. Slow-downs go NEGATIVE. This is the part that
+  matters -- a raw ratio axis puts every slow-down in the 0..1 sliver and every speed-up in an
+  unbounded tail, so the eye reads a 0.5x regression as smaller than a 1.5x win when they are the
+  same magnitude.
+- **Three INDEPENDENT y axes by order of magnitude**, so one 100x outlier cannot flatten the rest:
+  - `> 10x`
+  - `2x .. 10x` (and the mirrored slow-down band)
+  - `-2x .. 2x`
+- Ship it as a new plotting script.
+- Then generate a SIMPLIFIED single-order-of-magnitude variant for SVG.
+
+## Order to do them in
+
+5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
+well, or the results get read off the plot that misleads. 3 and 4 are independent.
