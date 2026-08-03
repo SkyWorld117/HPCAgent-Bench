@@ -119,6 +119,16 @@ def finalize_build(cmds, cwd, artifact, *, as_exe: bool) -> "BuildResult":
 SANDBOX_TMPFS_FREE_BYTES = 512 * 1024 * 1024
 
 
+def sandbox_dir_usable(path: str) -> bool:
+    """``path`` is a directory that exists and still has :data:`SANDBOX_TMPFS_FREE_BYTES` free."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        return shutil.disk_usage(path).free >= SANDBOX_TMPFS_FREE_BYTES
+    except OSError:
+        return False
+
+
 def sandbox_parent_dir() -> Optional[str]:
     """Where to put the throwaway sandbox, or ``None`` for the system temp directory.
 
@@ -132,20 +142,17 @@ def sandbox_parent_dir() -> Optional[str]:
     * **Never fill it.** A tmpfs that runs out does not degrade, it fails the build with ENOSPC and
       the failure is attributed to the submission. Checked at every call, not once at import: the
       free space is a property of the moment, and several sandboxes can be live at once.
+
+    The second rule applies to the OPERATOR'S directory too, and it is the one place it matters
+    most: ``HPCAGENT_BENCH_SANDBOX_DIR=/dev/shm/bench`` on a node with 30 MB free there produces the
+    same ENOSPC scored as a broken submission, and a path that does not exist at all would raise
+    inside :meth:`Sandbox.__enter__` instead. An unusable choice falls back to the system temp
+    directory -- slower, always correct -- rather than turning a host misconfiguration into either.
     """
     explicit = os.environ.get("HPCAGENT_BENCH_SANDBOX_DIR", "").strip()
     if explicit:
-        return explicit
-    if not os.environ.get("CI"):
-        return None
-    shm = "/dev/shm"
-    if not os.path.isdir(shm):
-        return None
-    try:
-        usage = shutil.disk_usage(shm)
-    except OSError:
-        return None
-    return shm if usage.free >= SANDBOX_TMPFS_FREE_BYTES else None
+        return explicit if sandbox_dir_usable(explicit) else None
+    return "/dev/shm" if os.environ.get("CI") and sandbox_dir_usable("/dev/shm") else None
 
 
 class Sandbox:
