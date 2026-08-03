@@ -28,8 +28,10 @@ traffic -- every input read once:
 | reads a, 64 FMAs, writes a | 64 MiB | **67.08 MB** | 111.1 MB |
 | reads a and c, divergent | 128 MiB | **134.27 MB** | 126.0 MB |
 
-Start/stop lands on the compulsory traffic to within 0.1% on every row. The read-delta is wrong on
-every row and wrong by **1300x** on the 64 KB one -- and note what that does to a comparison: the
+Start/stop lands on the compulsory traffic to within **0.05% at MiB scale**; the 64 KB row reads
+77.9 KB against 64 KB, which is +18.9% and is the launch overhead of 64 separate dispatches showing
+up at a scale where it is no longer negligible. The read-delta is wrong on every row and wrong by
+**1300x** on that same 64 KB one -- and note what that does to a comparison: the
 true spread across these four kernels is 2100x, and the read-delta reports 1.2x. It does not merely
 add noise, it FLATTENS the ranking you are profiling to find.
 
@@ -188,7 +190,11 @@ check_results();                            /* ALWAYS verify -- a wrong answer m
 nvcc -O2 -arch=native -o probe probe.cu -lpapi -lcudart
 ```
 
-One counter per run, for the reason below. Loop outside the program:
+One counter per run, for the reason below. The last three exist because the reading steps below
+CONSUME them: step 6 divides by `gpu__dram_throughput...`, and the lane-efficiency ratio needs
+`sm__sass_thread_inst_executed` over `smsp__inst_executed`. Collect a counter a later step needs or
+that step has nothing to read. All eleven verified to resolve here with `papi_native_avail -e`.
+Loop outside the program:
 
 ```sh
 for ev in cuda:::sm__cycles_elapsed:stat=sum \
@@ -198,7 +204,10 @@ for ev in cuda:::sm__cycles_elapsed:stat=sum \
           cuda:::smsp__warps_active:stat=sum \
           cuda:::l1tex__t_sector_hit_rate:stat=pct \
           cuda:::lts__t_sectors_lookup_hit:stat=sum \
-          cuda:::lts__t_sectors:stat=sum; do
+          cuda:::lts__t_sectors:stat=sum \
+          cuda:::gpu__dram_throughput.pct_of_peak_sustained_elapsed:stat=avg \
+          cuda:::sm__sass_thread_inst_executed:stat=sum \
+          cuda:::smsp__inst_executed:stat=sum; do
   ./probe "$ev"
 done
 ```

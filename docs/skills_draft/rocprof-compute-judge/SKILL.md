@@ -99,6 +99,11 @@ application repeatedly, a different counter set each time. Three consequences, a
 practical:
 
 - **It is slow.** Expect many multiples of one run. Cut the work before you profile, not after.
+- **Dispatches are SERIALIZED**, independently of replay: kernels that would overlap across HIP
+  streams on the same GPU do not while profiling. So a counted run's concurrency is not your run's
+  concurrency, and this distorts wall clock even on a single pass.
+- **Replay breaks MPI.** Running the application repeatedly means repeated `MPI_Init` /
+  `MPI_Finalize`, which fails. Use `--iteration-multiplexing` for MPI workloads.
 - **The application must be deterministic and re-runnable.** A run whose output depends on wall
   clock, RNG without a fixed seed, or a file it consumes-and-deletes will produce counter rows
   from runs that did different things, and nothing in the merged CSV says so.
@@ -125,10 +130,13 @@ the tool is an explanation of that one number. If nothing is near a roof, the ke
 latency-bound and you are in step 2, not step 4.
 
 **2. Wavefront launch and occupancy -- against the PART.** The wavefront width is the thing you
-must not carry over: **CDNA is 64 lanes, RDNA is 32** with an optional 64-lane mode. Occupancy is
-waves resident per SIMD over the 8 that SIMD holds, or 32 waves scaled to the CU on CDNA. So a CU
-is filled by 256 threads on CDNA and 128 on RDNA, and every "use 256 threads" habit from NVIDIA is
-wrong here by exactly that factor.
+must not carry over: **CDNA is 64 lanes, RDNA is 32** with an optional 64-lane mode.
+
+Occupancy is waves resident per SIMD over the slots that SIMD holds. On CDNA that is 8 per SIMD and
+**32 wavefront slots per CU**, so filling a CU means 32 x 64 = **2048 work-items**; RDNA3 has 16
+slots per SIMD, so 1024. Those are the numbers to size a launch against -- read `sysinfo.csv` for
+the actual part rather than either figure, because this is exactly the arithmetic that differs by
+generation.
 
 Low occupancy has two causes this number cannot separate: too few workgroups for the CUs (fix the
 decomposition), or a full grid capped by VGPRs or LDS per workgroup (fix the resource use). The
@@ -142,14 +150,22 @@ whole hierarchy -- vector L1D, scalar L1D, LDS, L2 (TCC), and the fabric out to 
 traffic on each link. Read it as a flow. The level where the numbers stop shrinking is the level
 your working set does not fit in, and that is the level to tile for.
 
-`L2CacheHit` = `TCC_HIT_sum / (TCC_HIT_sum + TCC_MISS_sum) * 100`. Read it as the EXPLANATION of
-the traffic, never on its own: a rising hit rate with unchanged HBM bytes means you added
-accesses, not locality.
+The L2 panel prints `Hit Rate` as a percentage; the underlying metric is
+`100*reduce(TCC_HIT,sum)/(reduce(TCC_HIT,sum)+reduce(TCC_MISS,sum))` on CDNA, and counts
+`GL2C_HIT`/`GL2C_MISS` on RDNA. Read it as the EXPLANATION of the traffic, never on its own: a
+rising hit rate with unchanged HBM bytes means you added accesses, not locality.
 
 **4. Traffic against the algorithm's minimum.** Needs no peak and no roofline. Count the bytes the
 kernel MUST move -- every input read once, every output written once -- and divide the measured
-`FetchSize + WriteSize` by it. **Both are KILOBYTES on this vendor**, which is the unit trap that
-turns a correct ratio into a 1000x wrong one.
+traffic by it.
+
+**Check the UNIT on the panel in front of you; the two tools disagree.** Verified in the
+sources: `rocprof-compute`'s gfx942 L2 panel declares `Read BW` with `unit: (Bytes + $normUnit)`,
+while ROCm's counter reference defines `FetchSize` as "The total kilobytes fetched from the video
+memory". So the same physical quantity arrives in **BYTES** from one tool and **KILOBYTES** from the
+other. Importing one page's habit into the other tool is a 1024x error in the one number this step
+exists to produce. The same panel also prints `L2-Fabric Read BW` in `GB/s` -- a RATE, not a volume,
+and not interchangeable with either.
 
 - near 1 -- compulsory traffic. Tiling buys nothing; only a different algorithm does.
 - well above 1 -- you are re-reading what should have stayed in cache. This is what tiling and
@@ -159,17 +175,41 @@ turns a correct ratio into a 1000x wrong one.
 
 **5. Which pipe.** Only once memory is excluded.
 
-| metric | formula | what it says |
-| --- | --- | --- |
-| `VALUBusy` | `SQ_ACTIVE_INST_VALU / SQ_BUSY_CU_CYCLES * 100` | the vector ALU was issuing |
-| `SALUBusy` | `SQ_INST_CYCLES_SALU / SQ_BUSY_CU_CYCLES * 100` | scalar work -- high here is usually address arithmetic that should be hoisted |
-| `MemUnitStalled` | `SQ_WAIT_INST_ANY / SQ_BUSY_CU_CYCLES * 100` | the memory unit was stalled |
-| `VALUUtilization` | active LANES in a wave, percent | divergence |
-| `LDSBankConflict` | `SQ_LDS_BANK_CONFLICT / SQ_BUSY_CU_CYCLES * 100` | LDS stride collides |
+**The names differ between the two AMD tools, and one pair means opposite things.** Read the Read the
+column for the tool you are actually running:
 
-`VALUUtilization` is scaled by the wavefront width, so the SAME source branch reads 50% on CDNA
-(32 of 64 lanes) and 100% on RDNA in wave32. Do not compare it across parts, and do not compare it
-to an NVIDIA warp-efficiency number.
+| what you want to know | `rocprof-compute` prints | `rocprofv3 --pmc` name |
+| --- | --- | --- |
+| was the vector ALU busy | `VALU Utilization` | `VALUBusy` |
+| how many LANES were active (DIVERGENCE) | `VALU Active Threads` (work-items) | `VALUUtilization` |
+| scalar pipe busy | `SALU Utilization` | `SALUBusy` |
+| memory unit stalled | `Mem Unit Stalled` | `MemUnitStalled` |
+| LDS bank conflicts | `LDS Bank Conflict` | `LDSBankConflict` |
+
+`VALUUtilization` and `VALU Utilization` are the trap: near-identical spellings, different
+quantities. On `rocprof-compute` the divergence number is **`VALU Active Threads`**, whose unit is
+work-items -- against the wavefront width, so read 32/64 on CDNA rather than a percentage.
+
+The expressions, read out of ROCm's `counter_defs.yaml` for **gfx942** (MI300). They are
+ARCHITECTURE-SPECIFIC -- `LDSBankConflict` uses `SQC_LDS_BANK_CONFLICT / SQC_LDS_IDX_ACTIVE` on
+gfx10, and `L2CacheHit` counts `GL2C_HIT`/`GL2C_MISS` there instead of `TCC_*` -- so ask the tool
+for the metric BY NAME and let it pick, rather than hand-computing from a formula for the wrong
+part:
+
+| metric | expression on gfx942 |
+| --- | --- |
+| `VALUBusy` | `100*reduce(SQ_ACTIVE_INST_VALU,sum)/CU_NUM/reduce(GRBM_GUI_ACTIVE,max)` |
+| `SALUBusy` | `100*reduce(SQ_INST_CYCLES_SALU,sum)/CU_NUM/reduce(GRBM_GUI_ACTIVE,max)` |
+| `MemUnitStalled` | `100*TCP_TCP_TA_DATA_STALL_CYCLES_max/reduce(GRBM_GUI_ACTIVE,max)/SE_NUM` |
+| `VALUUtilization` | `100*reduce(SQ_THREAD_CYCLES_VALU,sum)/(reduce(SQ_ACTIVE_INST_VALU,sum)*MAX_WAVE_SIZE)` |
+| `LDSBankConflict` | `100*reduce(SQ_LDS_BANK_CONFLICT,sum)/reduce(GRBM_GUI_ACTIVE,max)/CU_NUM` |
+| `L2CacheHit` | `100*reduce(TCC_HIT,sum)/(reduce(TCC_HIT,sum)+reduce(TCC_MISS,sum))` |
+| `GPUBusy` | `100*reduce(GRBM_GUI_ACTIVE,max)/reduce(GRBM_COUNT,max)` |
+
+Note what those denominators are NOT: none of them is `SQ_BUSY_CU_CYCLES`. The normaliser is
+`GRBM_GUI_ACTIVE` (GPU active cycles) scaled by a part constant (`CU_NUM`, `SE_NUM`), and
+`VALUUtilization` alone divides by `MAX_WAVE_SIZE`, which is why it is the one that is a lane
+fraction rather than a time fraction.
 
 Matrix work rides a separate pipe: on CDNA the MFMA units are not counted by `VALUBusy`, so a
 GEMM-shaped kernel showing a low `VALUBusy` is not idle, it is on the pipe you did not look at.
@@ -209,7 +249,13 @@ it is latency-bound, and the fix is occupancy or more work in flight, not traffi
 - ROCm Compute Profiler (rocprof-compute), formerly Omniperf -- https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/
 - Profile mode: every flag quoted above -- https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/profile/mode.html
 - The performance model: SOL, memory chart, the per-block panels -- https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/conceptual/performance-model.html
-- MI300/MI200 counters and every derived formula quoted above -- https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi300-mi200-performance-counters.html
+- MI300/MI200 counter DEFINITIONS and units (note: this page gives no expressions) -- https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi300-mi200-performance-counters.html
+- The derived-counter EXPRESSIONS, per architecture -- the authority for every formula above:
+  https://github.com/ROCm/rocprofiler-sdk/blob/amd-staging/source/share/rocprofiler-sdk/counter_defs.yaml
+- rocprof-compute's per-panel metric definitions and UNITS, per part (`gfx942/*.yaml`) --
+  https://github.com/ROCm/rocprofiler-compute/tree/develop/src/rocprof_compute_soc/analysis_configs
+- Occupancy on AMD: 8 wavefront slots per SIMD, 32 per CU on CDNA -- https://gpuopen.com/learn/occupancy-explained/
+- AMD Instinct MI300 (CDNA3) ISA reference, for the hardware numbers -- https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
 - Occupancy on AMD, wave-per-SIMD arithmetic -- https://gpuopen.com/learn/occupancy-explained/
 - AMD's own profiling walkthrough, roofline reading -- https://rocm.blogs.amd.com/software-tools-optimization/profiling-guide/novice/README.html
 - HIP programming model: wavefront, CU, LDS, XCD -- https://rocm.docs.amd.com/projects/HIP/en/latest/understand/programming_model.html

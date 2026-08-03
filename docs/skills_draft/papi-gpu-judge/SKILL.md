@@ -28,8 +28,10 @@ traffic -- every input read once:
 | reads a, 64 FMAs, writes a | 64 MiB | **67.08 MB** | 111.1 MB |
 | reads a and c, divergent | 128 MiB | **134.27 MB** | 126.0 MB |
 
-Start/stop lands on the compulsory traffic to within 0.1% on every row. The read-delta is wrong on
-every row and wrong by **1300x** on the 64 KB one -- and note what that does to a comparison: the
+Start/stop lands on the compulsory traffic to within **0.05% at MiB scale**; the 64 KB row reads
+77.9 KB against 64 KB, which is +18.9% and is the launch overhead of 64 separate dispatches showing
+up at a scale where it is no longer negligible. The read-delta is wrong on every row and wrong by
+**1300x** on that same 64 KB one -- and note what that does to a comparison: the
 true spread across these four kernels is 2100x, and the read-delta reports 1.2x. It does not merely
 add noise, it FLATTENS the ranking you are profiling to find.
 
@@ -255,12 +257,13 @@ Five rules, all load-bearing:
   run** -- a crash, a rep timeout, or the judge's stdout cap (`truncated`). Report it as
   incomplete; never sum it.
 
-`instrumented_ns` is a SYNCHRONISED run's time and belongs to no comparison at all -- the two
-`cudaDeviceSynchronize` calls per bracket are the measurement, and they remove exactly the overlap
-a real run depends on. It is named so it can never be read as a score.
+`instrumented_ns` is a PROFILED run's time and belongs to no comparison at all. `PAPI_stop` closes
+a CUPTI range and synchronises to collect it, and the set is re-armed per region, which removes
+exactly the kernel/copy and kernel/kernel overlap a real run depends on -- about 2x here. It is
+named so it can never be read as a score.
 
 Nothing on this route is scored -- it returns no `speedup` and no `native_ns`, and never calls the
-scorer. Submit the CLEAN source to `/oracle`: the syncs are work inside the timed region, so a
+scorer. Submit the CLEAN source to `/oracle`: the bracket is work inside the timed region, so a
 scored run of instrumented code is a slower run of the wrong program.
 
 ## One region per kernel, and no sync of your own

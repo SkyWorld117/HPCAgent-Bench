@@ -51,8 +51,9 @@ They answer different questions:
 | --- | --- | --- |
 | kernel stats | `*_kernel_stats.csv` | per kernel: `Calls`, `TotalDurationNs`, `AverageNs`, `MinNs`, `MaxNs`, `Percentage` |
 | memory copy stats | `*_memory_copy_stats.csv` | per operation: how long H2D / D2H took. **NO byte volume** |
-| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_*`, `Grid_Size_*` (in WORK-ITEMS), `Group_Segment_Size` (LDS bytes) |
+| kernel trace | `*_kernel_trace.csv` | per dispatch: `Workgroup_Size_*`, `Grid_Size_*` (in WORK-ITEMS), `LDS_Block_Size` (LDS bytes, rounded up to the allocation granule) |
 | agent info | `*_agent_info.csv` | the PART: `Wave_Front_Size`, `Num_Xcc`, `Cu_Count`, `Simd_Count`, `Max_Waves_Per_Simd`, `Lds_Size_In_Kb` |
+| domain stats | `*_domain_stats.csv` | per API/dispatch DOMAIN totals -- the top-level split before you rank within one |
 
 Find them RECURSIVELY. Some ROCm releases write them flat in the output directory, others under
 `<hostname>/<pid>/`, and a glob that assumes one layout silently finds nothing on the other.
@@ -92,13 +93,19 @@ the span being divided by. AMD has the same hazard in a different place: the fir
 code object pays a load, and `hipMalloc` of a large buffer is not free. Time the STEADY-STATE
 reps, not the process.
 
-## Copies have no byte volume here
+## Copies: the byte volume is there, in the right format
 
-The memory-copy report gives durations, not bytes. That is a real gap versus the NVIDIA tool and
-you cannot close it from the trace -- you have to know your own transfer sizes from the source.
-Divide your known bytes by the reported time to get the achieved rate, then compare against the
-link: a PCIe-attached part and an Infinity-Fabric-attached one differ by an order of magnitude, so
-"is this copy slow" has no answer without knowing which one you are on.
+The memory-copy STATS report gives durations only. The byte count exists -- the buffer-tracing
+record carries a `bytes` field, emitted in the Perfetto, rocpd and JSON outputs -- so ask for a
+format that carries it rather than reconstructing transfer sizes from your source:
+
+```sh
+rocprofv3 --memory-copy-trace --output-format csv json -- ./your_app
+```
+
+Divide bytes by the reported time to get the achieved rate, then compare against the link: a
+PCIe-attached part and an Infinity-Fabric-attached one differ by an order of magnitude, so "is this
+copy slow" has no answer without knowing which one you are on.
 
 The actionable findings are almost always structural rather than rate-related: a copy inside the
 timestep loop that could be hoisted, a H2D of data the device already had, or pageable host memory
@@ -113,14 +120,23 @@ packages, and it is the right tool when you want ONE number rather than a whole 
 rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE TCC_HIT_sum TCC_MISS_sum -- ./your_app
 ```
 
-Results land in `pmc_<n>/counter_collection.csv`, one directory per pass.
+Results land in `pmc_<n>/<pid>_counter_collection.csv`, one directory per pass. The file is PID-prefixed, so glob (`pmc_*/*_counter_collection.csv`) rather than naming it.
 
 **The counter budget is hardware, and exceeding it costs runs.** Too many counters in one row and
-the kernel is executed multiple times to collect them all. Multiple `--pmc` flags request that
-explicitly, one pass each:
+the kernel is executed multiple times to collect them all.
+
+**Repeating `--pmc` does NOT give you two passes -- it silently DISCARDS the first.** The option
+is declared `nargs="*"` with no `append` action, so the second occurrence overwrites the first and
+only the survivor is collected. Nothing warns. Multi-pass comes from an INPUT FILE with one `pmc`
+row per pass:
+
+```
+pmc: SQ_WAVES SQ_BUSY_CU_CYCLES
+pmc: TCC_HIT_sum TCC_MISS_sum
+```
 
 ```sh
-rocprofv3 --pmc SQ_WAVES SQ_BUSY_CU_CYCLES --pmc TCC_HIT_sum TCC_MISS_sum -- ./your_app
+rocprofv3 -i counters.txt -- ./your_app
 ```
 
 Which means the same rule as every other counter instrument: **two counters from two different
@@ -138,9 +154,11 @@ NVIDIA, resolved in the opposite direction: here the aggregate is the default.
 rocprof --stats --timestamp on -o prof/run.csv ./your_app
 ```
 
-No `--` (its wrapper stops at the first non-option token). One `*.stats.csv`. No per-kernel
-min/max, no launch geometry, no memory report at all. If half the columns above are missing, this
-is why -- check which binary you actually ran before concluding the data is broken.
+No `--` (its wrapper stops at the first non-option token), and one `*.stats.csv` with no per-kernel
+min/max and no memory report. It DOES print launch geometry (`grd`, `wgr`, `lds`, `scr`,
+`arch_vgpr`, `sgpr`, `wave_size`), so that column survives the fallback even though most do not. If
+half the fields above are missing, this is why -- check which binary you actually ran before
+concluding the data is broken.
 
 ## Traps
 
