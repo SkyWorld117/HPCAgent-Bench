@@ -37,8 +37,10 @@ DRAFTS = paths.ROOT / "docs" / "skills_draft"
 #: instruments its own source and the JUDGE runs the artifact (variant 2). A compile-time tool has
 #: one page, because its verdict is the same wherever it runs.
 VARIANT_PAIRS: Tuple[Tuple[str, str],
-                     ...] = (("linuxperf", "linuxperf-judge"), ("papi-cpu", "papi-cpu-judge"),
-                             ("papi-gpu", "papi-gpu-judge"), ("nsys", "nsys-judge"), ("ncu", "ncu-judge"))
+                     ...] = (("linuxperf", "linuxperf-judge"), ("papi-cpu", "papi-cpu-judge"), ("papi-gpu",
+                                                                                                "papi-gpu-judge"),
+                             ("nsys", "nsys-judge"), ("ncu", "ncu-judge"), ("papi-gpu-amd", "papi-gpu-amd-judge"),
+                             ("rocprofv3", "rocprofv3-judge"), ("rocprof-compute", "rocprof-compute-judge"))
 
 #: The ONE heading a pair is allowed to disagree about: who presses the button. Where to bracket,
 #: how to read an IPC, which direction is better and why two counts need a shared denominator are
