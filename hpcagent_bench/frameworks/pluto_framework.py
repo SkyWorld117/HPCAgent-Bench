@@ -33,40 +33,57 @@ class PlutoFramework(NativeFramework):
         so that pet sees affine references. A VLA parameter's extents are themselves parameters and C
         requires them to be declared FIRST, so the signature is symbols, then arrays, then scalars --
         while every other native column uses the canonical ABI order (sorted pointers, then sorted
-        scalars). The translator already writes that order out as ``<base>_pluto_binding.json``
-        (``numpyto_c.bindings.emit_pluto_binding``); this reads it rather than re-deriving it, so the
-        two cannot disagree.
+        scalars). The translator already writes that order out as ``<base>_fpNN_pluto_binding.json``
+        (``numpyto_c.bindings.emit_pluto_binding``); this reads the ORDER from it rather than
+        re-deriving it, so the two cannot disagree.
+
+        Only the order comes from that file. Every VALUE -- shape, dtype, which arguments are output
+        pointers -- comes from :meth:`NativeFramework._abi_args`, the manifest-derived binding every
+        other native column allocates against. That is not tidiness: the pluto binding is emitted
+        PER PRECISION and this one call has no way to say which precision is running, so reading a
+        dtype out of it would be reading fp64's declaration during an fp32 run half the time.
 
         A positional ctypes call cannot detect a permuted argument list -- it would run and produce
         numbers -- so falling back to the base order when the binding is missing would be the same
         class of silent wrong answer this column was rebuilt to stop telling. Decline instead.
         """
-        args = self._pluto_abi_args(bench)
-        if args is None:
+        order = self._pluto_arg_names(bench)
+        if order is None:
             raise NotSupportedByFramework(
                 pluto_transform.FRAMEWORK, bench.bname,
-                "no <base>_pluto_binding.json: polycc's signature orders arguments "
+                "no <base>_fpNN_pluto_binding.json: polycc's signature orders arguments "
                 "symbols/arrays/scalars and a positional call cannot detect the "
                 "difference, so there is no safe default to fall back to")
+        declared = {a.name: a for a in (self._abi_args(bench) or [])}
         out: List[Any] = []
-        for arg in args:
-            name = arg["name"]
+        for name in order:
             if name in resolved:
                 out.append(resolved[name])
             elif name in bdata:
                 out.append(bdata[name])
-            elif arg.get("kind") == "ptr":
-                out.append(self._alloc_output(_ArgView(arg), bdata))
             else:
-                raise KeyError(f"{bench.bname}: pluto ABI argument {name!r} has no value in resolved/bdata")
+                arg = declared.get(name)
+                if arg is None or arg.kind != "ptr":
+                    raise KeyError(f"{bench.bname}: pluto ABI argument {name!r} has no value in resolved/bdata "
+                                   f"and no output declaration to allocate from")
+                out.append(self._alloc_output(arg, bdata))
         return out, {}
 
-    def _pluto_abi_args(self, bench: Benchmark) -> Optional[List[Dict[str, Any]]]:
-        """polycc's argument list from ``<base>_pluto_binding.json``, or ``None`` when absent."""
-        path = self._cpp_backend(bench) / f"{self._native_base(bench)}_pluto_binding.json"
-        if not path.is_file():
-            return None
-        return json.loads(path.read_text()).get("args") or None
+    def _pluto_arg_names(self, bench: Benchmark) -> Optional[List[str]]:
+        """polycc's argument ORDER, from any ``<base>_fpNN_pluto_binding.json``; ``None`` when none
+        was emitted.
+
+        Any of them: the precision changes the declared dtypes and never the order, since the order
+        is a property of polycc's VLA signature. Globbing rather than naming one is also what stops
+        this from looking for ``<base>_pluto_binding.json`` -- a file the emitter has never written,
+        which made the column decline on every kernel with the binding sitting right there.
+        """
+        paths = sorted(self._cpp_backend(bench).glob(f"{self._native_base(bench)}_fp*_pluto_binding.json"))
+        for path in paths:
+            args = json.loads(path.read_text()).get("args")
+            if args:
+                return [a["name"] for a in args]
+        return None
 
     def opt_report(self, program: Any, bench: Benchmark) -> Optional[str]:
         """Pluto's polyhedral transformation report, followed by the C compiler's vectorization report.
@@ -93,7 +110,9 @@ class PlutoFramework(NativeFramework):
         whose output nothing compiled. The report and the build now share one invocation
         (:data:`pluto_transform.POLYCC_REPORT_ARGS` extends :data:`pluto_transform.POLYCC_ARGS`), so
         the two are structurally incapable of describing different transforms -- the report adds
-        ``--debug`` verbosity and nothing else.
+        ``--debug`` verbosity and nothing else. Writing to the SAME path the build compiles is what
+        makes the echoed command copy-pasteable; a run that fails leaves nothing behind for the
+        build to pick up, because :func:`pluto_transform.run_polycc` deletes its own partial output.
         """
         if pluto_transform.polycc_exe() is None:
             return None
@@ -110,15 +129,10 @@ class PlutoFramework(NativeFramework):
                 chunks.append(f"---- {scop.name} ----\nskipped: {exc}")
                 continue
             out = pluto_transform.transformed_path(scop)
-            proc = pluto_transform.run_polycc(scop, out, pluto_transform.POLYCC_REPORT_ARGS)
+            cmd, proc = pluto_transform.run_polycc(scop, out, pluto_transform.POLYCC_REPORT_ARGS)
             if proc.returncode != 0:
                 chunks.append(f"---- {scop.name} ----\nskipped: polycc rejected the scop\n{proc.stderr}")
                 continue
-            cmd = [
-                pluto_transform.polycc_exe() or "polycc", *pluto_transform.POLYCC_REPORT_ARGS,
-                str(scop), "-o",
-                str(out)
-            ]
             chunks.append(f"---- {scop.name} ----\n$ {shlex.join(cmd)}\n{proc.stdout}{proc.stderr}")
         return "\n\n".join(chunks)
 
@@ -131,16 +145,3 @@ class PlutoFramework(NativeFramework):
         framework the same way the build does.
         """
         return cpp_runtime.generated_source_text(self._cpp_backend(bench), self._native_base(bench), self.fname)
-
-
-class _ArgView:
-    """Adapts one ``*_pluto_binding.json`` argument dict to the attribute access
-    :meth:`NativeFramework._alloc_output` expects (``shape``, ``dtype``)."""
-
-    __slots__ = ("name", "kind", "shape", "dtype")
-
-    def __init__(self, arg: Dict[str, Any]) -> None:
-        self.name = arg["name"]
-        self.kind = arg.get("kind")
-        self.shape = arg.get("shape") or ()
-        self.dtype = arg.get("dtype")

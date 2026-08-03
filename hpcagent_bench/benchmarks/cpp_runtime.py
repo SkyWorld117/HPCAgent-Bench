@@ -134,14 +134,21 @@ def assert_autopar_capable(framework: str, short: str) -> None:
 
 
 def _ensure_built(cpp_backend: pathlib.Path, short: str, framework: str) -> pathlib.Path:
-    """Lazily compile + link ``lib<short>_<framework>.so`` from the framework's per-precision sources."""
+    """Lazily compile + link ``lib<short>_<framework>.so`` from the framework's per-precision sources.
+
+    The cached ``.so`` is reused only while it is NEWER than every source that composes it. An
+    existence check alone made the artifact unfalsifiable: the ``.so`` name says which framework
+    built it and nothing about WHICH sources it compiled, so a tree holding a ``lib<short>_pluto.so``
+    from before that column started compiling polycc's output would be returned, timed, and recorded
+    as a Pluto number while being a clang one. Which sources a column compiles is a property of the
+    column (see :func:`_native_sources`), so freshness has to be checked against those sources rather
+    than assumed from the file name.
+    """
     assert_autopar_capable(framework, short)
     lang = FRAMEWORK_LANG[framework]
     so_name = f"lib{short}_{framework}.so"
     bd = cpp_backend / "build"
     so = bd / so_name
-    if so.exists():
-        return so
     from hpcagent_bench.languages import build_kernel_lib_commands
     sources: List[Tuple[str, pathlib.Path]] = [(lang, p) for p in _native_sources(cpp_backend, short, framework)
                                                if p.exists()]
@@ -149,6 +156,8 @@ def _ensure_built(cpp_backend: pathlib.Path, short: str, framework: str) -> path
     if not sources:
         raise FileNotFoundError(f"{short}: no {lang} sources under {cpp_backend} to build "
                                 f"{so_name} (generation from {short}_numpy.py did not run or failed)")
+    if so.exists() and so.stat().st_mtime >= max(p.stat().st_mtime for _, p in sources):
+        return so
     bd.mkdir(exist_ok=True)
     extra = _framework_extra_flags(framework)
     for cmd in build_kernel_lib_commands(sources,

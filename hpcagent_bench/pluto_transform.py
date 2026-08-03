@@ -72,17 +72,33 @@ def transformed_path(scop: pathlib.Path) -> pathlib.Path:
     return scop.with_name(f"{scop.name[:-len('_pluto_input.c')]}_pluto.c")
 
 
-def run_polycc(scop: pathlib.Path, out: pathlib.Path, args: Sequence[str] = POLYCC_ARGS) -> subprocess.CompletedProcess:
-    """Transform one scop with ``polycc``, writing ``out``.
+def run_polycc(scop: pathlib.Path,
+               out: pathlib.Path,
+               args: Sequence[str] = POLYCC_ARGS) -> Tuple[List[str], subprocess.CompletedProcess]:
+    """Transform one scop with ``polycc``, writing ``out``. Returns ``(argv, result)``.
 
     Runs in a throwaway cwd because polycc drops a ``<stem>.pluto.cloog`` intermediate beside
-    the working directory; ``out`` is absolute, so only the litter is confined."""
+    the working directory; ``out`` is absolute, so only the litter is confined.
+
+    A FAILED run's partial ``out`` is deleted. polycc writes as it goes, so a run that dies
+    mid-emit leaves a truncated translation unit whose mtime is NEWER than the scop's -- which is
+    exactly the "fresh enough, reuse it" condition :func:`transformed_sources` tests, so the next
+    build would compile half a kernel and time it. Removing it here rather than in each caller is
+    what keeps that true for both of them.
+
+    The argv is RETURNED rather than reconstructed by the caller: the transformation report echoes
+    the command it ran, and a second copy built from a second ``shutil.which`` can print something
+    that was never executed.
+    """
     exe = polycc_exe()
     if exe is None:
         raise NotSupportedByFramework(FRAMEWORK, scop.stem, "polycc is not installed on this host")
     with tempfile.TemporaryDirectory(prefix="pluto_transform_") as scratch:
         cmd = [exe, *args, str(scop), "-o", str(out)]
-        return subprocess.run(cmd, cwd=scratch, capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=scratch, capture_output=True, text=True)
+    if proc.returncode != 0:
+        out.unlink(missing_ok=True)
+    return cmd, proc
 
 
 def assert_affine(scop: pathlib.Path, kernel: str) -> None:
@@ -118,7 +134,7 @@ def transformed_sources(cpp_backend: pathlib.Path, base: str) -> List[pathlib.Pa
         assert_affine(scop, base)
         dst = transformed_path(scop)
         if not dst.exists() or dst.stat().st_mtime < scop.stat().st_mtime:
-            proc = run_polycc(scop, dst)
+            _, proc = run_polycc(scop, dst)
             if proc.returncode != 0 or not dst.is_file():
                 raise NotSupportedByFramework(FRAMEWORK, base,
                                               f"polycc rejected {scop.name}: {proc.stderr.strip()[-500:]}")
