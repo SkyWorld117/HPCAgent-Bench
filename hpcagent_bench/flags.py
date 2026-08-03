@@ -223,9 +223,33 @@ GCC_AUTOPAR = ("-ftree-parallelize-loops={n} -floop-parallelize-all "
                "-fgraphite-identity -floop-nest-optimize -fopenmp")
 
 #: Pluto pre-processes the source; only OpenMP is added at compile time.
-#: ``-fopenmp=libgomp`` for the same reason as ``POLLY_PAR`` -- both build with
-#: clang, whose default ``libomp`` is often missing on CI; GNU ``libgomp`` is not.
-PLUTO_PAR = _OPENMP_CLANG
+#:
+#: This is the ONE clang column that does NOT take :data:`_OPENMP_CLANG`, and it cannot:
+#: ``polycc --parallel`` emits ``#pragma omp parallel for``, and clang ACCEPTS
+#: ``-fopenmp=libgomp`` while generating no OpenMP for it AT ALL. Measured on Ubuntu clang
+#: 21.1.8, one ``#pragma omp parallel for`` loop, ``nm -u`` on the object::
+#:
+#:     -fopenmp=libgomp            GOMP=0 kmpc=0     <- pragma silently dropped, loop is serial
+#:     -fopenmp                    GOMP=0 kmpc=3
+#:     -fopenmp=libgomp -fopenmp   GOMP=0 kmpc=0     <- the `=<lib>` form wins in EITHER order,
+#:     -fopenmp -fopenmp=libgomp   GOMP=0 kmpc=0        so appending cannot rescue the baseline
+#:
+#: clang implements OpenMP only against its own ``libomp``; ``=libgomp`` selects a runtime it has
+#: no codegen for and says nothing. Building Pluto's parallel output with it would time a SERIAL
+#: binary under a parallel label -- the precise class of bug this column was rebuilt to stop
+#: telling -- so the Pluto leg pins the spelling that emits OpenMP and
+#: :func:`pluto_capability` gates the column on the object actually referencing a runtime.
+#:
+#: The other clang columns keep ``libgomp`` deliberately and are NOT changed here: their sources
+#: carry no OpenMP pragma (measured: 0 of 45 emitted ``*_fp64.cpp``), so the spelling cannot
+#: change their codegen, and ``tests/test_fork_openmp_safety.py`` pins libgomp as the runtime
+#: whose fork() behaviour the isolation layer is tested against.
+PLUTO_PAR = "-fopenmp"
+
+#: The Pluto column's clang baseline: :data:`CPU_BASELINE_CLANG` with the OpenMP spelling
+#: swapped for the one that works (see :data:`PLUTO_PAR`). Written as a substitution rather than
+#: a second literal so the two baselines cannot drift in any flag EXCEPT the one that must differ.
+CPU_BASELINE_CLANG_PLUTO = CPU_BASELINE_CLANG.replace(_OPENMP_CLANG, PLUTO_PAR)
 
 #: NVHPC pure-source CPU auto-parallelization (analogue of GCC ``-ftree-parallelize-loops``).
 NVHPC_CONCUR = "-Mconcur"
@@ -275,8 +299,32 @@ void mm(double *restrict C, const double *restrict A, const double *restrict B, 
 }
 """
 
+#: A loop the source ALREADY marks parallel -- for probing whether a compiler honours an explicit
+#: ``#pragma omp parallel for`` at all, rather than whether it finds parallelism on its own. This is
+#: what a source-to-source column needs: ``polycc --parallel`` writes the pragma itself, so the
+#: question is never "did the compiler autoparallelize" but "did it generate OpenMP for what Pluto
+#: already decided". Answered by the same ``nm`` evidence -- an object with no runtime call ran the
+#: loop serially, whatever the pragma said (see :data:`PLUTO_PAR` for the measured case).
+_OPENMP_PROBE_SOURCE = """\
+#include <omp.h>
+void ax(double *restrict y, const double *restrict x, double a, int n) {
+#pragma omp parallel for
+  for (int i = 0; i < n; i++) y[i] += a * x[i];
+}
+"""
+
+#: Undefined references that ARE a call into an OpenMP runtime: GNU ``libgomp`` spells them
+#: ``GOMP_*``, LLVM ``libomp`` spells them ``__kmpc_*``. Both count -- the probe asks whether a
+#: runtime is entered, not which vendor's.
+_OMP_RUNTIME_CALL = re.compile(r"GOMP_|__kmpc_")
+
 #: Polly's outlined parallel body, e.g. ``mm_polly_subfn.0``.
 POLLY_OUTLINE_PATTERN = r"polly_subfn"
+
+#: Matches no symbol at all -- for a probe whose only evidence is the OpenMP runtime call, because
+#: the parallelism came from the SOURCE (a pragma) rather than from the compiler inventing an
+#: outlined body it would then have to be recognised by name.
+NO_OUTLINE_PATTERN = r"(?!)"
 
 #: GCC Graphite / ``-ftree-parallelize-loops``'s outlined body, e.g. ``mm._loopfn.0`` or
 #: ``mm._omp_fn.0`` (naming has varied across gcc versions; both are matched).
@@ -295,17 +343,22 @@ def _nm(nm_exe: str, args: List[str], obj: pathlib.Path) -> Optional[str]:
 
 
 @lru_cache(typed=True)
-def probe_autopar(compiler: str, flags: str, outline_pattern: str) -> AutoparProbe:
+def probe_autopar(compiler: str, flags: str, outline_pattern: str, source: str = _AUTOPAR_PROBE_SOURCE) -> AutoparProbe:
     """Does ``compiler flags`` genuinely outline a parallel loop, or merely accept the flags?
 
-    Compiles :data:`_AUTOPAR_PROBE_SOURCE` to an object in a fresh temp dir with ``compiler``
-    and ``flags`` (the column's REAL flags -- baseline + autopar delta, e.g. from
-    :func:`compose_autopar`), then inspects the object with ``nm``. Nothing else counts as
-    evidence: not the compiler's exit code beyond compiling, not whether a benchmark kernel
-    later validates. ``outline_pattern`` is a regex matched against ``nm``'s defined-symbol
-    output (:data:`POLLY_OUTLINE_PATTERN` / :data:`GCC_AUTOPAR_OUTLINE_PATTERN`); an undefined
-    ``GOMP_*`` reference (either compiler's call into the OpenMP runtime) is independently
-    sufficient, since a compiler could name its outlined body anything.
+    Compiles ``source`` to an object in a fresh temp dir with ``compiler`` and ``flags`` (the
+    column's REAL flags -- baseline + autopar delta, e.g. from :func:`compose_autopar`), then
+    inspects the object with ``nm``. Nothing else counts as evidence: not the compiler's exit
+    code beyond compiling, not whether a benchmark kernel later validates. ``outline_pattern``
+    is a regex matched against ``nm``'s defined-symbol output (:data:`POLLY_OUTLINE_PATTERN` /
+    :data:`GCC_AUTOPAR_OUTLINE_PATTERN`); an undefined :data:`_OMP_RUNTIME_CALL` reference (a
+    call into EITHER OpenMP runtime) is independently sufficient, since a compiler could name
+    its outlined body anything.
+
+    ``source`` defaults to :data:`_AUTOPAR_PROBE_SOURCE` -- a plain nest the compiler must find
+    parallelism in by itself. A source-to-source column passes :data:`_OPENMP_PROBE_SOURCE`
+    instead, which already carries the pragma, so the question becomes whether the compiler
+    honours it (see :func:`pluto_capability`).
 
     Parameterised by ``(compiler, flags, outline_pattern)`` rather than hardcoded per column,
     so a future autopar backend (Pluto, NVHPC ``-Mconcur``, ...) reuses this function instead
@@ -323,7 +376,7 @@ def probe_autopar(compiler: str, flags: str, outline_pattern: str) -> AutoparPro
     with tempfile.TemporaryDirectory(prefix="hpcagent_bench_autopar_probe_") as tmp:
         src = pathlib.Path(tmp) / "probe.c"
         obj = pathlib.Path(tmp) / "probe.o"
-        src.write_text(_AUTOPAR_PROBE_SOURCE)
+        src.write_text(source)
         argv = [exe, *shlex.split(flags), "-c", str(src), "-o", str(obj)]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
@@ -340,10 +393,10 @@ def probe_autopar(compiler: str, flags: str, outline_pattern: str) -> AutoparPro
         if undefined is None or defined is None:
             return AutoparProbe(AutoparVerdict.VACUOUS, "nm invocation failed on this host -- cannot confirm outlining")
 
-        gomp = sum(1 for line in undefined.splitlines() if "GOMP" in line)
+        omp_calls = sum(1 for line in undefined.splitlines() if _OMP_RUNTIME_CALL.search(line))
         outlined = sum(1 for line in defined.splitlines() if re.search(outline_pattern, line))
-        detail = f"GOMP={gomp} outlined={outlined}"
-        if gomp > 0 or outlined > 0:
+        detail = f"omp_calls={omp_calls} outlined={outlined}"
+        if omp_calls > 0 or outlined > 0:
             return AutoparProbe(AutoparVerdict.OK, detail)
         return AutoparProbe(AutoparVerdict.VACUOUS, f"flags accepted, nothing outlined ({detail})")
 
@@ -360,6 +413,22 @@ def gcc_autopar_capability() -> AutoparProbe:
     real column's baseline+autopar flags (:func:`compose_autopar`)."""
     composed = compose_autopar(CPU_BASELINE_GCC, GCC_AUTOPAR, Mode.MULTI_CORE)
     return probe_autopar("gcc", composed, GCC_AUTOPAR_OUTLINE_PATTERN)
+
+
+def pluto_capability() -> AutoparProbe:
+    """The measured :class:`AutoparProbe` for THIS host's clang at the Pluto column's REAL build
+    flags (:data:`CPU_BASELINE_CLANG_PLUTO` + :data:`PLUTO_PAR`).
+
+    Asks a different question than :func:`polly_capability`, because the Pluto column is
+    source-to-source: polycc has ALREADY written ``#pragma omp parallel for`` into the code that
+    gets compiled, so nothing needs to be auto-discovered. What must be true is that clang turns
+    that pragma into a runtime call -- and the measured answer is not automatic (see
+    :data:`PLUTO_PAR`: the shared clang baseline's OpenMP spelling drops the pragma in silence).
+    Hence :data:`_OPENMP_PROBE_SOURCE` and no outline pattern to match: the OpenMP runtime call
+    IS the evidence, and a host that produces none must not run this column at all rather than
+    time Pluto's parallel output single-threaded under a parallel label."""
+    composed = f"{CPU_BASELINE_CLANG_PLUTO} {PLUTO_PAR}"
+    return probe_autopar("clang", composed, NO_OUTLINE_PATTERN, _OPENMP_PROBE_SOURCE)
 
 
 # ---------------------------------------------------------------------------

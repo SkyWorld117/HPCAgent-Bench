@@ -103,6 +103,36 @@ Audit this corpus for the same pattern rather than porting the diff: find every 
 `np.empty_like` in `hpcagent_bench/benchmarks/` whose buffer is not fully written before it is
 read, and check the CNF `declare-then-fill` invariant already covers the rest.
 
+## 9. Unit-test the KernelBench NumPy ports against PyTorch
+
+The 239 ports under `hpcagent_bench/benchmarks/ml/` are translations of upstream PyTorch models, and
+**nothing currently checks that they compute the same thing.** `scripts/collect_reference_sources.py`
+resolves each port to its upstream file for PROVENANCE only -- the collected original "is never
+imported (it needs torch) and never graded", per `handle_kernelbench`. So the mapping is verified and
+the semantics are not.
+
+What is needed: per port, run the upstream PyTorch model and the NumPy port on the same inputs and
+compare. Points to settle when doing it:
+
+- **Where torch lives.** It is deliberately not a harness dependency, so this is an opt-in suite --
+  its own marker and its own CI job, skipped (loudly, with a reason) where torch is absent. It must
+  never silently pass by not running; see the three-case skip table rule.
+- **Tolerance, not bitwise.** This is the one comparison in the repo that CANNOT be bitwise: torch
+  and numpy differ in accumulation order, and torch may use different BLAS. Pick per-dtype
+  tolerances and state them.
+- **Feature coverage, not just outputs.** The ask is the ports' FEATURES too: conv stride/padding,
+  pooling, batchnorm in train vs eval, softmax axis, broadcasting, and the depthwise/grouped conv
+  cases. A port that matches on one input shape can still have the stride wired wrong -- which is
+  exactly the class of bug the structural slice-step fold just touched, where two convs in one
+  kernel take different strides.
+- **Ordering.** Do this AFTER the emit gap is closed (see below), or a passing NumPy-vs-torch test
+  still says nothing about what the translator produces.
+
+Related open defect found 2026-08-03: `efficientnet_mb_conv` and `resnet_basic_block` now PARSE and
+LOWER (commit `6efe7665`) but still fail at EMIT with `NotImplementedError: expression Tuple`, from a
+local `np.zeros((n, hidden, h, w))` whose dims come from tuple-unpacked `.shape`. Separate gap,
+downstream of the fold.
+
 ## Order to do them in
 
 5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
