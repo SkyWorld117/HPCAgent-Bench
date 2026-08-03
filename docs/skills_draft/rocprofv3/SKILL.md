@@ -25,6 +25,10 @@ program's name**, not the profiler's, because the library is injected into the c
 links and runs fine standalone, so this reads as a bug in your code and is not one. `apt install
 hsa-amd-aqlprofile`.
 
+The COUNTER half could not be exercised here at all -- see "Counters" below for why, which is a
+measured result rather than a gap. Everything this page says about `--pmc` SEMANTICS (pass
+splitting, the budget, cross-pass ratios) is read from the rocprofv3 source, not run.
+
 The READING RULE in "rank by the right column" is not vendor folklore -- it was measured on the
 NVIDIA twin of this page, where the fixture's launch-bound kernel owns **67.3%** of device time by
 total and ranks **DEAD LAST** by mean. That arithmetic is vendor-independent.
@@ -131,6 +135,29 @@ where pinned would let the copy overlap.
 
 `--pmc` collects hardware counters per dispatch. It is the raw form of what `rocprof-compute`
 packages, and it is the right tool when you want ONE number rather than a whole analysis.
+
+**FIRST check that your part HAS counters, because the failure mode is a crash, not a refusal.**
+Measured on gfx1103 (RDNA3 integrated, ROCm 7.2.4, rocprofiler-sdk 1.1.0), every `--pmc` run ends:
+
+```
+rocprofiler_iterate_agent_supported_counters failed for agent 1 (gfx1103)
+  :: Agent HW architecture is not supported, no counter metrics found.
+terminate called after throwing an instance of 'std::out_of_range'
+  what():  unordered_map::at
+[rocprofv3_error_signal_handler] rocprofv3 caught signal 6
+```
+
+The unsupported-agent line is a WARNING and the run continues, so the tool aborts on the empty
+counter map several seconds later. It then hangs in `queue.cpp` ("Timeout while waiting for queue
+sync: 1 kernels still active") for a further 10s+ before finalizing. So the observable is a SIGABRT
+and a hang in a program that runs clean without the profiler -- the same trap as the missing
+aqlprofile library above, and it will read as your kernel faulting.
+
+Two consequences. Run every `--pmc` invocation under a `timeout`, since it can fail by hanging
+rather than by exiting. And treat counter support as a per-ARCHITECTURE question: the trace side of
+this page works on the same part where the counter side aborts, so "rocprofv3 works here" says
+nothing about whether `--pmc` does. Consumer and integrated RDNA parts are the ones to check first;
+the CDNA datacenter parts these counter names are documented for are where the support is.
 
 ```sh
 rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE TCC_HIT_sum TCC_MISS_sum -- ./your_app
