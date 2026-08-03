@@ -242,9 +242,13 @@ Three things differ on AMD, and all three are reported rather than papered over:
   size; a raw `Grid_Size_X` would overstate the block count by the workgroup width.
 * a wavefront is a warp, but its width is not fixed (64 on CDNA/MI300, 32 on RDNA), so it is read
   from `*_agent_info.csv` rather than assumed;
-* fields AMD does not record come back `null`, never `0` -- `registers_per_thread` (no VGPR/SGPR
-  count in a kernel trace), the transfer `total`/`unit` (rocprofv3 times copies without sizing
-  them), and `min_ns`/`max_ns` under legacy `rocprof`. In the rendered text they read `--`.
+* fields AMD does not record come back `null`, never `0` -- the transfer `total`/`unit` (rocprofv3
+  times copies without sizing them), `min_ns`/`max_ns` under legacy `rocprof`, and `shared_memory`
+  on a trace carrying neither LDS column spelling (`LDS_Block_Size` on rocprofiler-sdk 1.1.0,
+  `Group_Segment_Size` before it; both are matched, and a 0 there would say the workgroup used no
+  LDS). `registers_per_thread` is `VGPR_Count`, which the kernel trace DOES carry -- `SGPR_Count`
+  is a per-wavefront scalar file with no NVIDIA counterpart and so no field in this shared row. In
+  the rendered text a `null` reads `--`.
 
 `rocprofv3` is a counter/trace CLI -- architecturally `ncu`+CUPTI's sibling, not Nsight Systems'.
 The real analogues, neither used here: **`rocprof-sys`** (formerly Omnitrace) is the `nsys` one and
