@@ -50,7 +50,12 @@ NO_SCALE = ("distribution_search", "gpt2_block", "raman_fitting", "seissol_batch
 #: The band is a judgement, not a derivation: no finite band is provably safe under 200 doublings.
 #: 1e-4 sits between the 5e-06 observed here and the O(1) a wrong axis, escape test or formula
 #: produces, so it still fails every structural defect. ``test_a_chaotic_band_cannot_hide_a_wrong
-#: _answer`` pins that reasoning. Applied with ``max``, never tightening a looser precision's band.
+#: _answer`` pins that reasoning.
+#:
+#: mandelbrot1 declares ``min_precision: fp64`` and is SKIPPED below it, so this entry only ever
+#: replaces fp64's 1e-9 -- there is no fp32 or fp16 run of it to widen or narrow. The ``max`` at the
+#: use site is therefore inert today; it is the rule for an entry that carries no such floor, whose
+#: fp32 band (1e-3) is already looser than anything sensible here and must not be tightened.
 CHAOTIC_FLOAT_TOLERANCE: Dict[str, Tuple[float, float]] = {"mandelbrot1": (1e-4, 1e-4)}
 
 #: Kernels out of scope for the static translators (control-flow search, not array math) -> documented skip.
@@ -424,9 +429,10 @@ def run_kernel(short: str,
     # Grade at the precision the kernel actually computes in (a declared float32 survives the fp64
     # sweep untouched) -- see _grading_precision. Tolerance only, not what is built/run.
     rtol, atol = PRECISIONS[_grading_precision(spec, precision)][3:5]
-    # A chaotic kernel's float band, never TIGHTER than the precision's own -- fp32's 1e-3 already
-    # absorbs more than this and must keep it. See CHAOTIC_FLOAT_TOLERANCE for why loosening here
-    # cannot weaken the integer output that carries the answer.
+    # A chaotic kernel's float band, never TIGHTER than the precision's own. For today's only entry
+    # this is fp64's 1e-9 and nothing else -- mandelbrot1 is fp64-only by manifest, so no coarser
+    # run of it exists to compare. See CHAOTIC_FLOAT_TOLERANCE for why loosening here cannot weaken
+    # the integer output that carries the answer.
     chaotic = CHAOTIC_FLOAT_TOLERANCE.get(short)
     if chaotic is not None:
         rtol, atol = max(rtol, chaotic[0]), max(atol, chaotic[1])
