@@ -55,10 +55,12 @@ inline int nbfpIndex(const int typeI, const int typeJ, const int param, const in
 }
 
 void inner4x4(const int ci, const int ciSh, const int cj, const std::uint16_t exclMask, const bool checkExclusions,
-              const bool doLJ, const bool doCoul, const bool halfLJ, const double *xi, const double *qi, double *fi,
-              double *f, const double *x, const double *q, const std::int32_t *atomType, const double *nbfp,
-              const int numTypes, const double *coulombTableF, const int coulombTableLength, const double tabCoulScale,
-              const double rcut2, const double minDistanceSquared) {
+              const bool doLJ, const bool doCoul, const bool halfLJ, const double *__restrict__ xi,
+              const double *__restrict__ qi, double *__restrict__ fi, double *__restrict__ f,
+              const double *__restrict__ x, const double *__restrict__ q, const std::int32_t *__restrict__ atomType,
+              const double *__restrict__ nbfp, const int numTypes, const double *__restrict__ coulombTableF,
+              const int coulombTableLength, const double tabCoulScale, const double rcut2,
+              const double minDistanceSquared) {
   for (int i = 0; i < UNROLLI; ++i) {
     const int ai = ci * UNROLLI + i;
     const int typeI = atomType[ai];
@@ -134,11 +136,14 @@ void inner4x4(const int ci, const int ciSh, const int cj, const std::uint16_t ex
 
 extern "C" int gromacs_ref_nbnxm_4x4_qstab_lj_force(
     const int natoms, const int numTypes, const int nci, const int ncj, const int nshift, const int coulombTableLength,
-    const double *x, const double *q, const std::int32_t *atomType, const double *nbfp, const std::int32_t *ciCluster,
-    const std::int32_t *ciShift, const std::int32_t *ciCjStart, const std::int32_t *ciCjEnd,
-    const std::int32_t *ciFlags, const std::int32_t *cjCluster, const std::uint16_t *cjExcl, const double *shiftVec,
-    const double *coulombTableF, const double epsfac, const double rcut, const double tabCoulScale,
-    const double minDistanceSquared, double *f, double *fshift) {
+    const double *__restrict__ x, const double *__restrict__ q, const std::int32_t *__restrict__ atomType,
+    const double *__restrict__ nbfp, const std::int32_t *__restrict__ ciCluster,
+    const std::int32_t *__restrict__ ciShift, const std::int32_t *__restrict__ ciCjStart,
+    const std::int32_t *__restrict__ ciCjEnd, const std::int32_t *__restrict__ ciFlags,
+    const std::int32_t *__restrict__ cjCluster, const std::uint16_t *__restrict__ cjExcl,
+    const double *__restrict__ shiftVec, const double *__restrict__ coulombTableF, const double epsfac,
+    const double rcut, const double tabCoulScale, const double minDistanceSquared, double *__restrict__ f,
+    double *__restrict__ fshift) {
   if (natoms < 0 || numTypes <= 0 || nci < 0 || ncj < 0 || nshift <= 0 || coulombTableLength < 2 || x == nullptr ||
       q == nullptr || atomType == nullptr || nbfp == nullptr || ciCluster == nullptr || ciShift == nullptr ||
       ciCjStart == nullptr || ciCjEnd == nullptr || ciFlags == nullptr || cjCluster == nullptr || cjExcl == nullptr ||

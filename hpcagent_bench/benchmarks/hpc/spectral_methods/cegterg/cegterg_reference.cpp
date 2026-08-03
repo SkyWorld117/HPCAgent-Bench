@@ -78,11 +78,11 @@ public:
   std::span<double> col_re(std::size_t j) noexcept { return {re_.data() + j * ld_, ld_}; }
   std::span<double> col_im(std::size_t j) noexcept { return {im_.data() + j * ld_, ld_}; }
 
-  void load(const double *src_re, const double *src_im, std::size_t cols) {
+  void load(const double *__restrict__ src_re, const double *__restrict__ src_im, std::size_t cols) {
     std::copy_n(src_re, ld_ * cols, re_.begin());
     std::copy_n(src_im, ld_ * cols, im_.begin());
   }
-  void store(double *dst_re, double *dst_im, std::size_t cols) const {
+  void store(double *__restrict__ dst_re, double *__restrict__ dst_im, std::size_t cols) const {
     std::copy_n(re_.begin(), ld_ * cols, dst_re);
     std::copy_n(im_.begin(), ld_ * cols, dst_im);
   }
@@ -475,8 +475,8 @@ static int diaghg(const CxSoA &hc, const CxSoA &sc, int n, int nvec, std::span<d
 
 // ------------------------------ gate check ----------------------------------
 // Mirrors cegterg_numpy's _unsupported list byte-for-byte. Returns 1 + fills msg if gated.
-static int gate(char *msg, bool exx_active, bool lspinorb, bool real_space, bool is_meta, bool noncolin, bool domag,
-                bool scissor, bool gamma_only, bool lda_plus_u, bool lelfield, int lda_plus_u_kind,
+static int gate(char *__restrict__ msg, bool exx_active, bool lspinorb, bool real_space, bool is_meta, bool noncolin,
+                bool domag, bool scissor, bool gamma_only, bool lda_plus_u, bool lelfield, int lda_plus_u_kind,
                 bool is_hubbard_back) {
   msg[0] = '\0';
   if (exx_active) {
@@ -513,13 +513,19 @@ static int gate(char *msg, bool exx_active, bool lspinorb, bool real_space, bool
 extern "C" int cegterg_run(int npw_k, int npwx, int nvec, int nvecx, int npol, int n1, int n2, int n3, int nkb,
                            int nwfcU, int nspin_mag, int uspp, int lrot, int is_meta, int lda_plus_u, int noncolin,
                            int domag, double ethr, int gamma_only, int lspinorb, int real_space, int scissor,
-                           int exx_active, int lelfield, int lda_plus_u_kind, int is_hubbard_back, const double *g2,
-                           const double *vrs, const int *gmap, const double *vkb_re, const double *vkb_im,
-                           const double *deeq, const double *qq, const double *deeq_nc_re, const double *deeq_nc_im,
-                           const double *h_diag, const double *s_diag, const double *wfcu_re, const double *wfcu_im,
-                           const double *vhub, const double *kedtau, const double *kplusg, double *evc_re,
-                           double *evc_im, double *e, const int *btype, int *notcnv_out, int *dav_iter_out,
-                           int *nhpsi_out, char *gate_msg) {
+                           int exx_active, int lelfield, int lda_plus_u_kind, int is_hubbard_back,
+                           const double *__restrict__ g2, const double *__restrict__ vrs,
+                           const int *__restrict__ gmap, const double *__restrict__ vkb_re,
+                           const double *__restrict__ vkb_im, const double *__restrict__ deeq,
+                           const double *__restrict__ qq, const double *__restrict__ deeq_nc_re,
+                           const double *__restrict__ deeq_nc_im, const double *__restrict__ h_diag,
+                           const double *__restrict__ s_diag, const double *__restrict__ wfcu_re,
+                           const double *__restrict__ wfcu_im, const double *__restrict__ vhub,
+                           const double *__restrict__ kedtau, const double *__restrict__ kplusg,
+                           double *__restrict__ evc_re, double *__restrict__ evc_im, double *__restrict__ e,
+                           const int *__restrict__ btype, int *__restrict__ notcnv_out,
+                           int *__restrict__ dav_iter_out, int *__restrict__ nhpsi_out,
+                           char *__restrict__ gate_msg) {
   if (gate(gate_msg, exx_active, lspinorb, real_space, is_meta, noncolin, domag, scissor, gamma_only, lda_plus_u,
            lelfield, lda_plus_u_kind, is_hubbard_back))
     return 1;
