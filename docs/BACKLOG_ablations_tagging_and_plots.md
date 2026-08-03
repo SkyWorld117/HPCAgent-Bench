@@ -77,6 +77,32 @@ median-speed-up chart:
 - Ship it as a new plotting script.
 - Then generate a SIMPLIFIED single-order-of-magnitude variant for SVG.
 
+## 8. Follow npbench's 0-init change
+
+https://github.com/spcl/npbench/pull/47 -- `np.empty` / `np.empty_like` -> `np.zeros` /
+`np.zeros_like`, 256 sites across 132 files, every backend (numpy, dace, numba, cupy, dpnp,
+pythran, legate, jax).
+
+The reason is a correctness one and it applies to this corpus verbatim: **a kernel that writes an
+`empty` buffer only PARTIALLY leaves stale memory in its output.** Those kernels are read-
+nondeterministic -- the same input yields different outputs on different runs and the comparison
+against the reference flakes. This repo grades BITWISE, so it is worse here than upstream: a stale
+byte is not a tolerance question, it is a failed verification that looks like a flake.
+
+Two things ride along in that PR and are worth taking together:
+
+- **Gram-Schmidt input conditioning.** The reject-sampling loop (`while np.linalg.matrix_rank(A) <
+  N`) is replaced by deterministic diagonal dominance, `A[:N, :N] += N * np.eye(N, dtype=datatype)`,
+  giving `cond(A) ~= 1.5` every time. A plain random matrix is only full-rank probabilistically and
+  can be conditioned badly enough that harmless FMA contraction changes the answer -- which reads
+  as a translator bug and is not one.
+- **`dace_canonicalize_cpu` / `dace_canonicalize_gpu`** framework variants, exercising the
+  canonicalize pipeline with WCR array reductions enabled.
+
+Audit this corpus for the same pattern rather than porting the diff: find every `np.empty` /
+`np.empty_like` in `hpcagent_bench/benchmarks/` whose buffer is not fully written before it is
+read, and check the CNF `declare-then-fill` invariant already covers the rest.
+
 ## Order to do them in
 
 5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
