@@ -897,14 +897,16 @@ jobs:
           # `omit` stops LINE tracing, not the per-call dispatch: sys.settrace fires on every call
           # event even for files it will not record. This phase is call-dominated (the cloudsc
           # branch test alone makes 4.4M calls), so it pays that dispatch 4.4M times for data that
-          # is then discarded. Measured locally: 8.28 s bare, >120 s instrumented. In CI the same
+          # is then discarded. Measured locally: 8.28 s bare against >1500 s instrumented -- killed
+          # at 1500 s without finishing, so >181x and a floor, not a figure. In CI the same
           # 745 tests went from 183.57 s to 736 s once coverage landed, pushing the heaviest test
           # past --timeout=600 -- which is why this job has been red for three consecutive runs.
           #
           # COVERAGE_CORE=sysmon is NOT the way out here: coverage 7.13.5 refuses it whenever
           # `branch = true` on Python < 3.14 ("sys.monitoring can't measure branches in this
           # version") and again for concurrency=, then warns and silently falls back to the C
-          # tracer. It reads as a fix and changes nothing.
+          # tracer. Measured, not assumed: COVERAGE_CORE=sysmon on that same test ran 1500 s and was
+          # killed -- identical to the unset run. It reads as a fix and changes nothing.
           PYTEST_ADDOPTS: ""
         run: |
           # Discover the whole tree rather than listing files: the xsbench / gromacs / lavamd

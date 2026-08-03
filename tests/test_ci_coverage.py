@@ -188,7 +188,8 @@ def test_the_corpus_reference_phase_is_not_instrumented() -> None:
     And the cost is not small. ``omit`` stops LINE tracing, not the per-call dispatch: sys.settrace
     fires on every call event even for a file it will never record. This phase is call-dominated
     (one cloudsc test makes 4.4M calls), so it pays that dispatch millions of times to discard the
-    result. Measured: 8.28 s bare against >120 s instrumented, and in CI the same 745 tests went
+    result. Measured: 8.28 s bare against >1500 s instrumented (killed, not finished -- >181x), and in
+    CI the same 745 tests went
     183.57 s -> 736 s when coverage landed, which is what pushed the heaviest test past
     ``--timeout=600`` and made the job red for three consecutive runs.
 
