@@ -969,16 +969,26 @@ jobs:
         with:
           pattern: coverage-*
           path: coverage-data
-          merge-multiple: true
+          # NOT merge-multiple: every job uploads its data as `.coverage`, so flattening them into
+          # one directory makes seven files race for one path. The winner became the "total" and
+          # the other six were discarded -- 59.96% on one green run, 13.44% on the next. Here two
+          # extractions interleaved instead and left a torn SQLite file, which is the only reason
+          # the defect ever announced itself. One subdirectory per artifact, so no collision.
       - name: Combine and report
         run: |
           shopt -s nullglob dotglob
-          files=(coverage-data/.coverage*)
+          files=(coverage-data/*/.coverage*)
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::no coverage data was uploaded by any job -- the total cannot be computed"
             exit 1
           fi
-          coverage combine "${files[@]}"
+          coverage combine "${files[@]}" 2>&1 | tee combine.log
+          # Silent partial combines are what hid the collision through every green run: a total
+          # built from one job of seven still prints a plausible percentage.
+          grep -q "Combined ${#files[@]} file" combine.log || {
+            echo "::error::combine consumed fewer than ${#files[@]} files -- the total is not a total"
+            exit 1
+          }
           coverage report --precision=2 | tee coverage.txt
           coverage xml -o coverage.xml
           coverage html -d htmlcov

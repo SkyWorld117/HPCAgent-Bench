@@ -149,3 +149,32 @@ def test_asking_for_skip_reasons_does_not_hide_the_failures() -> None:
     ]
     assert not offenders, (f"tests.yml lines {offenders} ask for skip reasons without keeping failures in the "
                            "report set; use -rfEs so a failing test is still named in the short summary")
+
+
+def test_the_combined_total_is_built_from_every_job_not_one_of_them() -> None:
+    """Seven jobs each upload their coverage data as a file literally named ``.coverage``.
+    ``merge-multiple: true`` flattens them into ONE directory, so seven artifacts race for one
+    path: six are discarded and whichever wins becomes the published "total".
+
+    That is measured, not theorised. Two consecutive GREEN runs reported ``Combined 1 file`` and a
+    total of 59.96% and 13.44% -- the same repo, the swing being purely which job won. The defect
+    only ever announced itself when two extractions interleaved and left a torn SQLite file, which
+    surfaced as ``database disk image is malformed`` against the repo-root path (coverage's
+    ATTACH-based combine misattributes the error to the main db, so the message names the wrong
+    file). A wrong total that stays green is the worse half of this bug.
+
+    Two things have to hold: artifacts land in per-artifact subdirectories, and the combine
+    REFUSES a partial merge rather than reporting a plausible fraction of the project.
+    """
+    text = WORKFLOW.read_text()
+    combine = [i + 1 for i, line in enumerate(text.splitlines()) if "coverage combine" in line]
+    assert combine, "no `coverage combine` step -- the combined total is not being built at all"
+    assert "merge-multiple: true" not in text, (
+        "an artifact download uses merge-multiple: true; every job's data file is named `.coverage`, "
+        "so flattening them makes six of seven silently disappear into one contested path")
+    assert "coverage-data/*/.coverage*" in text, (
+        "the combine glob must reach into the per-artifact subdirectories that dropping "
+        "merge-multiple creates, or it finds nothing at all")
+    assert 'Combined ${#files[@]} file' in text, (
+        "nothing checks that combine consumed every uploaded file; a partial combine prints a "
+        "perfectly plausible percentage and stays green, which is how this went unnoticed")
