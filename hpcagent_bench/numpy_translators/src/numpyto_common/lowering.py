@@ -1073,6 +1073,30 @@ def _const_int_index(node: ast.AST) -> Optional[int]:
     return None
 
 
+def _is_newaxis_result_axis(sub: ast.Subscript, k: int) -> bool:
+    """True when result axis ``k`` of ``sub`` is a ``np.newaxis``, whatever the base's rank.
+
+    ``X[:, None, :].shape[1]`` is 1 for every ``X``: a newaxis inserts a unit axis and consumes
+    no source axis. That makes the rank of an ``np.expand_dims`` operand irrelevant, which is
+    what lets the extent resolve before the operand's own shape is harvested.
+
+    Restricted to an all-``:``/newaxis subscript and a non-negative ``k``, so result axis ``k`` IS
+    element ``k``: a scalar index, a gather, an Ellipsis, or an unnamed trailing axis each shift
+    that correspondence by an amount only the base's rank fixes.
+    """
+    if k < 0:
+        return False
+    elts = list(sub.slice.elts) if isinstance(sub.slice, ast.Tuple) else [sub.slice]
+    if k >= len(elts) or not all(isinstance(e, ast.Slice) or _is_newaxis(e) for e in elts):
+        return False
+    return _is_newaxis(elts[k])
+
+
+def _is_newaxis(elt: ast.expr) -> bool:
+    """``np.newaxis`` in a subscript, which parses as a ``None`` constant."""
+    return isinstance(elt, ast.Constant) and elt.value is None
+
+
 class _ShapeMidExpressionRewriter(ast.NodeTransformer):
     """Replace ``arr.shape[k]`` (and bare ``arr.shape``) anywhere in
     the body with the matching shape symbol from the IR's shape table.
@@ -1116,6 +1140,10 @@ class _ShapeMidExpressionRewriter(ast.NodeTransformer):
                 ext = _iter_extent_of(node.value.value, self.arrays_shapes)
                 if ext is not None and -len(ext) <= k < len(ext):
                     return copy.deepcopy(ext[k])
+                # The base's own shape is not knowable everywhere this runs (the first pass
+                # has only the DECLARED arrays), but a newaxis is 1 at every rank.
+                if _is_newaxis_result_axis(node.value.value, k):
+                    return ast.Constant(value=1)
         self.generic_visit(node)
         return node
 
@@ -1168,6 +1196,40 @@ class _ShapeMidExpressionRewriter(ast.NodeTransformer):
         # ``arr.dtype`` -- leave intact; downstream emit drops the dtype
         # kwarg via the builtin-cast / math rewriters as appropriate.
         return node
+
+
+def _fold_shape_reads_in_table(shapes: Dict[str, object]) -> None:
+    """Fold ``<expr>.shape[k]`` inside the shape TABLE's own tokens, exactly as
+    :class:`_ShapeMidExpressionRewriter` folds them in the body.
+
+    Inlining substitutes a helper's argument EXPRESSION at every use, so an
+    ``np.expand_dims(x, 1)`` argument (already rewritten to ``x[:, None, :]``) leaves the
+    helper's output shape as ``('x[:, None, :].shape[0]', 'x[:, None, :].shape[1]', ...)``.
+    The regex resolver only matches a Name base, so those tokens survive; the body's copies
+    of them get folded but the table's do not, and the two then disagree. Anything reading
+    the table for a CONSTANT sees source text: ``expand_squeeze`` asked to drop axis 1 finds
+    ``'x[:, None, :].shape[1]'`` instead of ``'1'``, cannot prove the axis is a unit axis,
+    and declines -- leaving ``np.squeeze`` for the emitter to reject.
+
+    Never-worse: a token is replaced only when the fold resolves every ``.shape`` read in
+    it, so a self-referential or unknown base keeps the original text for the downstream
+    source-order resolvers.
+    """
+    rewriter = _ShapeMidExpressionRewriter(shapes)
+    for name in list(shapes):
+        tokens = shapes[name]
+        folded = []
+        for tok in tokens:
+            text = str(tok)
+            if ".shape" in text:
+                try:
+                    new = ast.unparse(rewriter.visit(ast.parse(text, mode="eval").body))
+                except SyntaxError:
+                    new = text
+                if ".shape" not in new:
+                    text = new
+            folded.append(text)
+        shapes[name] = folded if isinstance(tokens, list) else tuple(folded)
 
 
 class _BuiltinCastRewriter(ast.NodeTransformer):
@@ -2238,10 +2300,16 @@ class _CollapseChainedSubscripts(ast.NodeTransformer):
     access uniformly, instead of mis-mapping a loop iterator onto the inner ``:``
     (which corrupts the fancy-scatter store and the dot-product operand).
 
-    Conservative: only collapses when the base is a known-shape array, every inner
-    index is a scalar or a FULL ``:`` slice, and the outer indices fit the
-    surviving (slice + trailing) axes -- any partial slice, strided slice, gather,
-    or ``newaxis`` in the inner subscript is left untouched.
+    Conservative: every inner index must be a scalar or a FULL ``:`` slice, and the
+    outer indices must fit the surviving (slice + trailing) axes -- any partial slice,
+    strided slice, gather, or ``newaxis`` in the inner subscript is left untouched.
+
+    The base's shape is only needed to count the axes the inner subscript did NOT name,
+    which the outer indices reach only after exhausting the inner ``:`` positions. When
+    they do not (``A[:, :, :, 0][:, :, 0]``, what a double ``np.squeeze(.., axis=-1)``
+    rewrites to), the mapping is the same at every rank, so an unknown base collapses too
+    -- which is what lets this run BEFORE the shape harvest, early enough for the SSA
+    rank-rebind rename to see the real result rank.
     """
 
     def __init__(self, shape_table: Dict[str, Tuple[str, ...]]):
@@ -2253,8 +2321,6 @@ class _CollapseChainedSubscripts(ast.NodeTransformer):
         if not isinstance(inner, ast.Subscript) or not isinstance(inner.value, ast.Name):
             return node
         base_shape = self.shape_table.get(inner.value.id)
-        if not base_shape:
-            return node
         inner_idx = _slice_dims(inner)
         outer_idx = _slice_dims(node)
         # A newaxis or ellipsis in either subscript shifts the axis alignment by an
@@ -2281,10 +2347,15 @@ class _CollapseChainedSubscripts(ast.NodeTransformer):
                 return node
             else:
                 new_idx.append(ix)
-        # Base axes the inner subscript did not name are trailing result axes.
-        trailing = len(base_shape) - len(new_idx)
-        if trailing < 0:
-            return node
+        # Base axes the inner subscript did not name are trailing result axes. Unknown base
+        # -> none can be named here; the outer indices then have to fit the inner's own ``:``
+        # positions, where the mapping does not depend on the rank.
+        if not base_shape:
+            trailing = 0
+        else:
+            trailing = len(base_shape) - len(new_idx)
+            if trailing < 0:
+                return node
         for _ in range(trailing):
             result_axes.append(len(new_idx))
             new_idx.append(ast.Slice())
@@ -2433,9 +2504,6 @@ class _PadImplicitTrailingSlices(ast.NodeTransformer):
         # :, :, :]`` on a 4-D array still leaves one trailing source axis
         # implicit (conv2d's ``weights[np.newaxis, :, :, :]`` -> 5-D result
         # over a 4-D operand). Count only source-axis-consuming positions.
-        def _is_newaxis(e):
-            return isinstance(e, ast.Constant) and e.value is None
-
         n_index = sum(1 for e in elts if not _is_newaxis(e))
         if n_index >= rank:
             return node
@@ -5515,9 +5583,6 @@ class _SubscriptifyNames(ast.NodeTransformer):
             def _is_full(e):
                 return (isinstance(e, ast.Slice) and e.lower is None and e.upper is None and e.step is None)
 
-            def _is_newaxis(e):
-                return isinstance(e, ast.Constant) and e.value is None
-
             if (elts0 and all(_is_full(e) or _is_newaxis(e) for e in elts0) and any(_is_full(e) for e in elts0)
                     and len(elts0) <= len(self.iters)):
                 offset = len(self.iters) - len(elts0)
@@ -6178,6 +6243,10 @@ def _lp_normalize_index_access(ctx: LoweringContext) -> None:
     # subscript base folds to concrete dims BEFORE the reshape / LibNode expander
     # bakes the (otherwise unresolved) token into a loop bound.
     _ShapeMidExpressionRewriter(shapes).visit(tree)
+    # ...and fold the same reads inside the table's own tokens, so the table agrees with the
+    # body it describes. A shape an expander reads as a CONSTANT (squeeze's unit axis) is only
+    # a constant once this runs.
+    _fold_shape_reads_in_table(shapes)
     # Re-run the tuple splitter for the same reason the fold above re-runs: its first pass
     # (normalize-calls) only had the DECLARED-array shapes, so ``n, c, oh, ow = x.shape`` on an
     # inlined local stayed a tuple and reached the emitter as a value -- "expression Tuple", the
