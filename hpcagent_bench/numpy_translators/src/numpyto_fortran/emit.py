@@ -2345,6 +2345,11 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
             _safe_full(k): v
             for k, v in kir.local_dtypes.items()
         },
+        # int_locals holds NAMES, so it needs the same rename as every other side-table: it feeds
+        # both the integer decl block and the body emitter's int-ness lookup, and a name left in
+        # its Python form misses BOTH -- the decl is emitted verbatim (gfortran rejects a leading
+        # underscore) and the renamed body Name no longer matches, so it is typed as real.
+        int_locals=[_safe_full(n) for n in kir.int_locals],
     )
 
     sym_by_name = {s.name: s for s in kir.symbols}
