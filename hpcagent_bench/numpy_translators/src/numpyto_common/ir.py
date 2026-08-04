@@ -231,3 +231,19 @@ class KernelIR:
         refs = sorted(names)
         scalars = sorted([s.name for s in self.symbols] + [s.name for s in self.scalars])
         return refs + scalars
+
+    def abi_param_order(self) -> List[str]:
+        """:meth:`param_order` when it accounts for every declared parameter, else declaration order.
+
+        A helper can take a parameter that is neither an array, a scalar nor a symbol -- kl_div's
+        ``reduction`` is a config flag carried in ``input_args`` alone. ``param_order`` is built from
+        the typed descriptor lists, so it cannot see such a name: it would drop ``reduction`` from the
+        signature while the body still reads it.
+
+        Reordering only buys one consistent spelling. Losing a parameter is a miscompile. So a helper
+        the canonical order cannot fully describe keeps the order it was declared in -- and since the
+        call site reads this same method, both sides still agree, which is the property that has to
+        hold.
+        """
+        order = self.param_order()
+        return order if set(order) == set(self.input_args) else list(self.input_args)

@@ -2535,7 +2535,10 @@ def _reorder_helper_call_args(trees: List[ast.AST], helpers: List[KernelIR]) -> 
     """
     perms: Dict[str, List[int]] = {}
     for h in helpers:
-        order = h.param_order()
+        # abi_param_order, not param_order: a helper carrying a parameter the descriptor lists do not
+        # cover (kl_div's `reduction` config flag) falls back to declaration order rather than losing
+        # it. The emitters read the same method, so definition and call stay in step.
+        order = h.abi_param_order()
         if order == h.input_args:
             continue
         slot = {name: i for i, name in enumerate(h.input_args)}

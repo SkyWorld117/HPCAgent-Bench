@@ -2920,7 +2920,9 @@ def _helper_abi_order(hkir: KernelIR) -> Tuple[List[str], str]:
     """
     if hkir.return_kind == "scalar":
         return hkir.param_order(extra_ref=_HELPER_RET), _HELPER_RET
-    return hkir.param_order(), hkir.return_kind
+    # abi_param_order: a helper carrying a parameter the descriptor lists do not cover keeps
+    # declaration order rather than losing it -- same rule the C emitter and the call site apply.
+    return hkir.abi_param_order(), hkir.return_kind
 
 
 def _rename_helper_to_fortran_safe(hkir: KernelIR) -> KernelIR:
