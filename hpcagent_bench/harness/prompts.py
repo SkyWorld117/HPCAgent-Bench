@@ -370,7 +370,17 @@ INSTRUMENT_SKILLS = frozenset({
     "papi-gpu-amd",
     "papi-gpu-amd-judge",
     # Compile-time tool, same shape as opt-reports: you run it, it reports, you read the report.
-    "static-analysis"
+    "static-analysis",
+    # One per submission language, named for the language so a task can look its page up by
+    # ``task.language`` instead of a mapping table. Six gates each, the same shape as
+    # static-analysis: you run the tool, it reports, you read the report, and none of it means
+    # anything to a reader without clang-tidy or gfortran on the box. Gating also keeps a sanitizer
+    # build out of every prompt -- in restricted mode the harness compiles the submission itself, so
+    # wall clock taken off an ASan build measures nothing that is scored.
+    "lang-c",
+    "lang-cpp",
+    "lang-fortran",
+    "lang-python"
 })
 
 #: Manual-sized pages that are deliberately NOT gated, with the reason. A page this long costs real
