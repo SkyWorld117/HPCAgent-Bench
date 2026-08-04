@@ -21,10 +21,15 @@ Two distinct failure modes, asserted separately because they need different fixe
 
 All three lists below are ratchets, asserted in BOTH directions: a kernel that starts
 disagreeing fails, and a kernel that is fixed but left in the list also fails. Neither can
-rot silently. **Every kernel in the corpus lowers, and every one of them agrees exactly, so
-all three lists are EMPTY** -- any entry appearing again is a regression, not a backlog. The
-third list is different in kind: a kernel there does not lower at all, so it has no emitted
-ABI to compare, and a REFUSAL is the wanted outcome rather than a defect to waive.
+rot silently. **Every kernel that lowers agrees exactly, so both DISAGREEMENT lists are
+EMPTY** -- any entry appearing there is a regression, not a backlog.
+
+The third list is different in kind: a kernel there does not lower at all, so it has no
+emitted ABI to compare, and a REFUSAL is the wanted outcome rather than a defect to waive.
+It holds 5 of 631 kernels, all one root cause (a matmul reaching slice fusion un-hoisted).
+Read that number as five kernels that USED to emit silently-wrong elementwise products and
+now decline instead -- the list grew because a miscompile was found, not because the
+translator regressed.
 
 Marked ``integration``: it lowers the whole registry, far too slow for the default suite.
 """
@@ -50,10 +55,22 @@ KNOWN_NAME_DISAGREEMENTS: Dict[str, str] = {}
 #: the other two: a kernel that starts refusing fails here, and one that is fixed but left behind
 #: fails too. A refusal is not a waiver -- it is the translator declining to emit something it
 #: cannot emit correctly, which is the outcome we want over a silently wrong loop nest.
-#: EMPTY: the two instance-norm kernels pinned here (np.mean over an unfolded ``axes`` tuple inside
-#: a non-inlined helper) now lower, and their emitted ABI matches the binding exactly -- so they are
-#: gated by the two lists above like every other kernel, not skipped by this one.
-KNOWN_NON_LOWERING: Dict[str, str] = {}
+#:
+#: These five are ONE root cause, not five: a matmul reaches slice fusion un-hoisted, and the
+#: fusion rewrite would replace both operands with scalar subscripts and emit ``*`` -- dropping the
+#: contraction and computing an elementwise product that compiles clean and returns wrong numbers.
+#: ``lowering._refuse_scalarising_a_contraction`` catches it at the one point the difference is
+#: still visible. Before that guard these five kernels EMITTED, and what they emitted was wrong; the
+#: guard did not break them, it stopped them lying. Fix = teach the matmul hoister the shapes it
+#: currently declines (the ``batch`` vs ``batch_size`` shape-token aliasing is one known cause), NOT
+#: relax the guard.
+KNOWN_NON_LOWERING: Dict[str, str] = {
+    "ml/netvlad_no_ghost_clusters/netvlad_no_ghost_clusters": "matmul '__cb8 @ x' reaches slice fusion un-hoisted",
+    "ml/netvlad_with_ghost_clusters/netvlad_with_ghost_clusters": "matmul '__cb8 @ x' reaches slice fusion un-hoisted",
+    "ml/relu_self_attention/relu_self_attention": "matmul 'fmax(scores, 0.0) @ v' reaches slice fusion un-hoisted",
+    "ml/swin_transformer_v2/swin_transformer_v2": "matmul '__hcall43 @ __cb34' reaches slice fusion un-hoisted",
+    "ml/vision_attention/vision_attention": "matmul 'tokens @ __cb3' reaches slice fusion un-hoisted",
+}
 
 #: Names line up but a slot's DTYPE disagrees -- just as fatal, since SysV/AAPCS64 allocate INTEGER
 #: and SSE arguments from independent register sequences. EMPTY: an entry here is a regression.
@@ -85,6 +102,26 @@ def classify(short: str) -> Optional[str]:
     if emitted == binding:
         return None
     return "NAMES" if [n for n, _ in emitted] != [n for n, _ in binding] else "DTYPE"
+
+
+def lowered_or_none(short: str):
+    """The lowered IR, or ``None`` when the translator refuses to lower this kernel.
+
+    The two ordering tests below check a property OF an emitted signature, so a kernel with no
+    emitted signature is not a pass or a fail there -- it is out of scope. They used to express
+    that by consulting :data:`KNOWN_NON_LOWERING`, which made a NEW refusal raise
+    ``NotImplementedError`` out of the middle of the sweep: the run aborted on the first refusing
+    kernel, reported it as an error rather than a finding, and hid every kernel after it.
+
+    Catching the refusal here is not a waiver. The refusal SET is owned by
+    :func:`test_emitted_abi_matches_the_binding_the_harness_calls`, which ratchets it in both
+    directions -- so a kernel that starts refusing still fails the suite, in the one test whose
+    job that is, with the full list instead of whichever name sorted first.
+    """
+    try:
+        return kir_for(short, do_lower=True)
+    except NotImplementedError:
+        return None
 
 
 def ratchet(observed: Dict[str, str], pinned: Dict[str, str], label: str) -> None:
@@ -122,9 +159,11 @@ def test_param_order_is_references_then_scalars_corpus_wide() -> None:
     ordering -- which is exactly how a positional call gets permuted."""
     bad: List[str] = []
     for short in sorted(KERNELS):
-        if short in KNOWN_NAME_DISAGREEMENTS or short in KNOWN_NON_LOWERING:
+        if short in KNOWN_NAME_DISAGREEMENTS:
             continue
-        kir = kir_for(short, do_lower=True)
+        kir = lowered_or_none(short)
+        if kir is None:
+            continue
         order = kir.param_order()
         arrays = {a.name for a in kir.arrays}
         refs = [n for n in order if n in arrays]
@@ -139,9 +178,12 @@ def test_no_duplicate_or_empty_abi_names() -> None:
     """A repeated name silently drops one argument's value; an empty one is unaddressable."""
     bad: List[str] = []
     for short in sorted(KERNELS):
-        if short in KNOWN_NAME_DISAGREEMENTS or short in KNOWN_NON_LOWERING:
+        if short in KNOWN_NAME_DISAGREEMENTS:
             continue
-        order = kir_for(short, do_lower=True).param_order()
+        kir = lowered_or_none(short)
+        if kir is None:
+            continue
+        order = kir.param_order()
         if len(set(order)) != len(order) or not all(order):
             bad.append(f"{short}: {order}")
     assert not bad, "ABI names must be unique and non-empty:\n  " + "\n  ".join(bad)
