@@ -2506,10 +2506,11 @@ def _build_callsite_stmts(lhs, name, pnames, kept_args, extra_syms, param_info, 
         else:
             call_srcs.append(ast.unparse(arg))
     call_srcs.extend(extra_syms)
-    # The out-param is the last call arg -- a BARE call statement (not ``tmp =
-    # h(...)``, which would be seen as a whole-array reassignment and lowered
-    # element-wise). A bare-array target is written in place; a slice target fills
-    # a fresh temp, then a normal slice copy stores it.
+    # Built in ``input_args`` order; :func:`_reorder_helper_call_args` permutes the whole call into
+    # ABI order once every helper KernelIR exists. A BARE call statement (not ``tmp = h(...)``,
+    # which would be seen as a whole-array reassignment and lowered element-wise). A bare-array
+    # target is written in place; a slice target fills a fresh temp, then a normal slice copy
+    # stores it.
     if isinstance(lhs, ast.Name):
         call_srcs.append(lhs.id)
         return ast.parse("\n".join(pre + [f"{name}({', '.join(call_srcs)})"])).body
@@ -2520,6 +2521,38 @@ def _build_callsite_stmts(lhs, name, pnames, kept_args, extra_syms, param_info, 
         f"{ast.unparse(lhs)} = {tmp}"
     ]
     return ast.parse("\n".join(lines)).body
+
+
+def _reorder_helper_call_args(trees: List[ast.AST], helpers: List[KernelIR]) -> None:
+    """Permute every surviving-helper call from source order into ``KernelIR.param_order()`` order.
+
+    This is the only place a helper's parameter NAMES and its call-site argument EXPRESSIONS are
+    both in hand -- downstream every emitter sees positional AST nodes with the names gone. Doing
+    it here makes the definition (which reads ``param_order()`` too) and the call read one
+    ordering function, and reaches C, C++, Fortran, Pluto and DaCe at once since all five render
+    this same tree. Two transposed same-typed pointers compile clean, so a second implementation
+    of the order would not be caught by any compiler.
+    """
+    perms: Dict[str, List[int]] = {}
+    for h in helpers:
+        order = h.param_order()
+        if order == h.input_args:
+            continue
+        slot = {name: i for i, name in enumerate(h.input_args)}
+        if set(order) != set(slot):
+            raise ValueError(f"helper {h.kernel_name}: ABI order {order} is not a permutation of {h.input_args}")
+        perms[h.kernel_name] = [slot[name] for name in order]
+    if not perms:
+        return
+    for tree in trees:
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            perm = perms.get(node.func.id)
+            # An arity mismatch means definition and call already disagree; leave it for the
+            # compiler rather than index out of range here.
+            if perm is not None and len(node.args) == len(perm):
+                node.args = [node.args[i] for i in perm]
 
 
 class _ReplaceStmts(ast.NodeTransformer):
@@ -2695,6 +2728,9 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
     if callsite_rewrites:
         _ReplaceStmts(callsite_rewrites).visit(kernel_fn)
         ast.fix_missing_locations(kernel_fn)
+    # Last, so every helper KernelIR (hence every param_order()) is final and the rewritten
+    # call sites above are in the tree. Helper bodies too: a helper may call a sibling helper.
+    _reorder_helper_call_args([kernel_fn] + [h.tree for h in out], out)
     return out
 
 

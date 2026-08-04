@@ -52,17 +52,23 @@ rule holds without a per-kernel exception.
 
 The same rule applies **one level down**: a helper function that NumpyToX emits
 alongside the kernel is also `void` and also takes its result through a
-caller-allocated buffer passed as its **last** parameter -- the result's shape for
-an array result, a **1-element** buffer written at index `0` for a scalar result.
-Pointers are `restrict` as everywhere else. Only the NumPy reference's top-level
-kernel is allowed to return, and that return is promoted away as above.
+caller-allocated buffer -- the result's shape for an array result, a **1-element**
+buffer written at index `0` for a scalar result. Pointers are `restrict` as
+everywhere else. Only the NumPy reference's top-level kernel is allowed to return,
+and that return is promoted away as above.
 
-Internal helpers do **NOT** take the Sec. 4 canonical argument order. They are
-`static` (C/C++) or `contains`ed (Fortran), never appear in the binding JSON and
-never cross the `.so` boundary, so there is no second party to agree with -- and a
-global alphabetical sort cannot coexist with a trailing out-param. Their order is:
-the author's parameters in source order, then the shape symbols their array
-parameters need, then the out-param. **Sec. 4 governs the exported symbol only.**
+Internal helpers take the **same Sec. 4 canonical argument order** as the exported
+symbol: all pointers sorted by name, then all scalars and shape symbols sorted by
+name. The result buffer has **no reserved position** -- it sorts by its own name
+like any other pointer, exactly as a promoted output does in Sec. 1. There is one
+way to pass a pointer in this ABI, and it does not change with nesting depth.
+
+Helpers are `static` (C/C++) or `contains`ed (Fortran) and never appear in the
+binding JSON, so no external party checks them -- which is precisely why they need
+one rule and one implementation of it. Two same-typed pointers transposed between a
+generated definition and its generated call compile clean, link clean and return
+wrong numbers; the emitters therefore derive both from a single
+`KernelIR.param_order()`, and the numerical helper tests are the gate.
 
 Not covered by this rule: the emitters' own arithmetic prelude (`__npb_*`, the fp8
 conversions). Those are `static inline`, carry a reserved name prefix, are not
@@ -72,11 +78,12 @@ This clause binds the **emitters** (party 1 in the table above), not the agent:
 an implementer's own internal helpers are their business, since only the exported
 symbol crosses the ABI.
 
-> **Status.** Array-returning helpers already follow this rule. A *scalar*-returning
-> helper is still emitted returning by value in C and Fortran, and the DaCe backend
-> emits no helper bodies at all -- so this paragraph is the contract being converged
-> on, not a description of every emitter today. Removing those two exceptions is
-> tracked work; until it lands, treat a scalar-returning helper as the known gap.
+> **Status.** The argument ORDER above holds in C, C++ and Fortran, for both
+> array-returning and scalar-returning helpers. Two gaps remain in how a *scalar*
+> result comes back: C and C++ still return it by value rather than through a
+> 1-element buffer (Fortran already uses an out-param dummy, name-sorted like any
+> other pointer). And the DaCe and Pluto backends emit helper CALLS but no helper
+> bodies at all. Both are tracked work.
 
 The reserved `workspace` / `workspace_size` scratch pair (Sec. 11) is **always
 present** as the trailing args; it is `NULL` / `0` unless the submission

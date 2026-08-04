@@ -205,19 +205,29 @@ class KernelIR:
     #: default dtype for a temp not in ``local_dtypes``. ``None`` = natural fp64.
     float_precision: Optional[str] = None
 
-    def param_order(self) -> List[str]:
+    def param_order(self, extra_ref: Optional[str] = None) -> List[str]:
         """Return the argument names in **ABI order**.
 
-        One source of truth for both the emitted C/Fortran signature and the
-        binding JSON the harness calls through: all **references** (array /
-        pointer params) sorted alphabetically, then all **scalars** (shape
-        ``symbols`` + value ``scalars``) sorted alphabetically.
+        One source of truth for the emitted C/Fortran signature, the binding
+        JSON the harness calls through, AND the emitted call to an internal
+        helper: all **references** (array / pointer params) sorted
+        alphabetically, then all **scalars** (shape ``symbols`` + value
+        ``scalars``) sorted alphabetically. No parameter has a reserved
+        position -- a result buffer sorts by its own name like any other
+        pointer.
 
         Ignores ``input_args`` for ordering (it still defines membership), so
         order depends only on each param's ABI kind -- stable and
         caller-independent. :meth:`Framework.call_args` reads the same order,
         keeping the positional ctypes call aligned.
+
+        ``extra_ref`` is a reference param the descriptor lists do not carry
+        (Fortran's synthesized scalar-helper result dummy); it joins the ref
+        sort so that case obeys the same one rule.
         """
-        refs = sorted(a.name for a in self.arrays)
+        names = [a.name for a in self.arrays]
+        if extra_ref is not None:
+            names.append(extra_ref)
+        refs = sorted(names)
         scalars = sorted([s.name for s in self.symbols] + [s.name for s in self.scalars])
         return refs + scalars

@@ -119,13 +119,13 @@ def _array_signature(arr: ArrayDesc) -> str:
     return f"{qual}{base} *restrict {arr.name}"
 
 
-def _emit_signature(kir: KernelIR, fn_name: str, order: Optional[List[str]] = None) -> str:
-    """Emit the C signature in ABI (kir.param_order()) order, or an explicit order (helpers pass input_args)."""
+def _emit_signature(kir: KernelIR, fn_name: str) -> str:
+    """Emit the C signature in ABI (kir.param_order()) order -- kernels and internal helpers alike."""
     parts: List[str] = []
     sym_by_name = {s.name: s for s in kir.symbols}
     arr_by_name = {a.name: a for a in kir.arrays}
     sca_by_name = {s.name: s for s in kir.scalars}
-    for name in (order if order is not None else kir.param_order()):
+    for name in kir.param_order():
         if name in sym_by_name:
             parts.append(f"{dtypes.c_type('int')} {name}")  # int64_t (canonical)
         elif name in arr_by_name:
@@ -1762,7 +1762,7 @@ def _helper_return_ctype(hkir: KernelIR) -> str:
 def _emit_c_helper(hkir: KernelIR, cpp: bool = False) -> str:
     """Emit one non-inlinable helper as a static C/C++ function; an array return becomes a void fn with an out-param."""
     rettype = "void" if hkir.return_kind != "scalar" else _helper_return_ctype(hkir)
-    signature = _emit_signature(hkir, hkir.kernel_name, order=hkir.input_args).replace("void ", f"{rettype} ", 1)
+    signature = _emit_signature(hkir, hkir.kernel_name).replace("void ", f"{rettype} ", 1)
     if cpp:
         signature = signature.replace("*restrict ", "*__restrict__ ")
     body = _emit_body(hkir, indent="    ", return_mode=hkir.return_kind)

@@ -570,8 +570,10 @@ class _FortranBodyEmitter(BaseEmitter):
         #: Set while emitting a loop already marked parallel, so nested loops aren't also tagged.
         self.parallel_active: bool = False
         #: name -> out-param name for each non-inlinable helper called here, so
-        #: X = helper(args) lowers to call helper(args, X).
+        #: X = helper(args) lowers to a call that passes X through that dummy.
         self._helper_out: Dict[str, str] = {}
+        #: name -> ABI position of that out-param dummy (see :func:`_helper_abi_order`).
+        self._helper_ret_slot: Dict[str, int] = {}
         self.array_names: Set[str] = {a.name for a in kir.arrays}
         zeros = kir.zeros_locals
         self.local_arrays: Dict[str, List[str]] = {
@@ -803,12 +805,13 @@ class _FortranBodyEmitter(BaseEmitter):
         if len(node.targets) != 1:
             raise NotImplementedError("chained assignment not supported")
         target = node.targets[0]
-        # ``X = helper(args)`` where helper is emitted as a subroutine with a
-        # trailing out-param -> ``call helper(args, X)``.
+        # ``X = helper(args)`` where helper is emitted as a subroutine taking its result through
+        # an out-param -> ``call helper(...)`` with X spliced into the result dummy's ABI slot
+        # (it sorts among the pointer params, it is not pinned last).
         if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
                 and node.value.func.id in self._helper_out):
             call_args = [self.emit_expr(a) for a in node.value.args]
-            call_args.append(self.emit_expr(target))
+            call_args.insert(self._helper_ret_slot[node.value.func.id], self.emit_expr(target))
             return f"{indent}call {node.value.func.id}({', '.join(call_args)})"
         # The __hpcagent_bench_zeros__ marker may have been renamed by the
         # leading-underscore-strip pass to ``x_hpcagent_bench_zeros__``.
@@ -2387,8 +2390,12 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
 
     body_emitter = _FortranBodyEmitter(kir)
     body_emitter.parallel = parallel
-    # Non-inlinable helpers -> call helper(args, X) at each X = helper(args) site.
+    # Non-inlinable helpers -> a subroutine call at each X = helper(args) site, X going into the
+    # result dummy's ABI slot. Same _helper_abi_order the subroutine itself is emitted from.
     body_emitter._helper_out = {_fortran_safe(h.kernel_name): h.return_kind for h in kir.helpers}
+    for h in kir.helpers:
+        h_order, h_ret = _helper_abi_order(h)
+        body_emitter._helper_ret_slot[_fortran_safe(h.kernel_name)] = h_order.index(h_ret)
     # Pre-compute implicit-local int kinds before emit_block so the body emitter
     # can apply kind-matched bitwise literal suffixes.
     _pre_implicit = _collect_implicit_locals(kir)
@@ -2899,6 +2906,23 @@ def _helper_returns_int(hkir: KernelIR) -> bool:
         isinstance(v, ast.Constant) and isinstance(v.value, int) and not isinstance(v.value, bool) for v in rets)
 
 
+#: Dummy that carries a scalar-returning helper's result back (Fortran has no by-value return here).
+_HELPER_RET = "hret_"
+
+
+def _helper_abi_order(hkir: KernelIR) -> Tuple[List[str], str]:
+    """A helper's ABI parameter order plus its result dummy, on the ORIGINAL (pre-rename) names.
+
+    Both the emitted subroutine and every call site to it read this, so the two cannot drift.
+    Sorting must happen before :func:`_rename_helper_to_fortran_safe`: ``__hret_0`` and its
+    renamed ``x_hret_0`` land in different sort slots, and the call site was ordered by the
+    frontend on the original names.
+    """
+    if hkir.return_kind == "scalar":
+        return hkir.param_order(extra_ref=_HELPER_RET), _HELPER_RET
+    return hkir.param_order(), hkir.return_kind
+
+
 def _rename_helper_to_fortran_safe(hkir: KernelIR) -> KernelIR:
     """Fortran-safe rename of a captured helper KIR, mirroring the kernel-level rename so body and decl names match."""
     htree = copy.deepcopy(hkir.tree)
@@ -2950,20 +2974,19 @@ def _emit_fortran_helper(hkir: KernelIR, parent: Optional["_FortranBodyEmitter"]
     ``parent`` is the host's body emitter; the helper's own emitter merges what it used into it so the
     host emits the shared contained procedures and libm interface the helper body calls.
     """
+    abi_order, ret_orig = _helper_abi_order(hkir)
     hkir = _rename_helper_to_fortran_safe(hkir)
     name = _fortran_safe(hkir.kernel_name)
     sym_by = {s.name: s for s in hkir.symbols}
     arr_by = {a.name: a for a in hkir.arrays}
     sca_by = {s.name: s for s in hkir.scalars}
+    # One order for definition and call; only the SPELLING is Fortran-specific.
+    ret_name = _fortran_safe(ret_orig)
+    param_names = [_fortran_safe(p) for p in abi_order]
+    ret_decl = None
     if hkir.return_kind == "scalar":
-        ret_name = "hret_"
         ret_dtype = "int64" if _helper_returns_int(hkir) else "float64"
         ret_decl = f"{_fortran_type(ret_dtype)}, intent(out) :: {ret_name}"
-        param_names = [_fortran_safe(p) for p in hkir.input_args] + [ret_name]
-    else:
-        ret_name = _fortran_safe(hkir.return_kind)
-        ret_decl = None
-        param_names = [_fortran_safe(p) for p in hkir.input_args]
     # Names the helper body reassigns need their intent(in) relaxed, same rule as
     # the top-level kernel; collect from the already-safe-renamed helper tree.
     hassigned: set = set()

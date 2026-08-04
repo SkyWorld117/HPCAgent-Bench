@@ -73,6 +73,36 @@ def test_array_return_bare_target():
     assert ok, res
 
 
+def test_array_return_helper_pointer_params_sort_against_source_order():
+    # Three same-typed pointers (zz, aa and the synthesized out buffer) whose ABI order
+    # (__hret_0, aa, zz) is a non-trivial permutation of the source order. Transposing two of them
+    # compiles and links clean in C, so only numerics can catch a definition/call-site drift; the
+    # body is asymmetric in zz and aa so a swap changes the answer.
+    src = ("import numpy as np\n"
+           "def mix(zz, aa, s):\n"
+           " if s > 0.0:\n"
+           "  return zz * 2.0 + aa\n"
+           " return zz - aa\n"
+           "def f(x, y, s, out):\n"
+           " out[:] = mix(x, y, s)\n")
+    x = np.linspace(-3.0, 3.0, 12).astype(np.float64)
+    y = np.linspace(4.0, -1.0, 12).astype(np.float64)
+    ok, res = _all_ok(
+        run_op(src,
+               "f", {
+                   "x": x,
+                   "y": y,
+                   "s": 2.0
+               }, {"out": (12, )}, {"n": 12},
+               shapes={
+                   "x": "(n,)",
+                   "y": "(n,)",
+                   "out": "(n,)"
+               },
+               backends=_ALL))
+    assert ok, res
+
+
 def test_array_return_specialized_config_flag():
     # A ``g2_convolution``-shaped helper: a config flag (``use_alt``) is a
     # compile-time ``False`` at the call site, so its early-return branch folds
@@ -203,6 +233,8 @@ def test_array_helper_emitted_as_outparam_c_function():
     kir = lower(parse_kernel(d / "k_numpy.py", d / "bi.json"))
     assert len(kir.helpers) == 1 and kir.helpers[0].return_kind == "__hret_0"
     c = emit_c(kir, fn_name="f")
-    assert "static void clamp_row(" in c and "__hret_0" in c
+    # Helper ABI == kernel ABI (abi_contract.md Sec. 4): pointers by name, then scalars by name,
+    # the out buffer sorting like any other pointer (``__hret_0`` < ``v``).
+    assert "static void clamp_row(double *restrict __hret_0, const double *restrict v, double lo, int64_t n)" in c
     # a single call statement, not ``__hret_tmp_0[..] = clamp_row(..)`` per element
-    assert "clamp_row(__harg_0_0, thr, n, __hret_tmp_0);" in c
+    assert "clamp_row(__hret_tmp_0, __harg_0_0, thr, n);" in c
