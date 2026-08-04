@@ -1,6 +1,7 @@
 """C99 / C++ / Pluto-input emitters via a hand-rolled Python AST -> C walker (1D pointers always, no ast.unparse)."""
 
 import ast
+import copy
 import math
 import pathlib
 import re
@@ -150,6 +151,131 @@ _BINOP = operators.BINOP["c"]
 _CMPOP = operators.CMPOP["c"]
 _BOOLOP = operators.BOOLOP["c"]
 
+# --- cpp_isopar: loop shapes that have a faithful <algorithm> / <numeric> spelling ---
+
+#: The execution policy every converted call carries. ``par_unseq`` is the strongest one: element
+#: access functions may run on another thread AND be interleaved (vectorized) with each other on
+#: one thread. That permission is what makes this backend the C++ analogue of a Fortran array
+#: intrinsic rather than a restatement of the loop -- an unpolicied algorithm is specified as
+#: sequential, so it licenses nothing the loop did not already license.
+#:
+#: Its preconditions are real and every shape converted here is gated on them: the emitted callable
+#: must not allocate, lock, synchronize, throw, or depend on another element. See
+#: :meth:`_CBodyEmitter._isopar_lambda` for the one case that is refused (a call into a kernel
+#: helper, whose body may ``malloc``), and the per-shape reasoning in :func:`emit_cpp_isopar`.
+_ISOPAR_POLICY = "std::execution::par_unseq"
+
+#: The policy for ``inclusive_scan`` ALONE, and not for want of preconditions -- the scan meets them.
+#: libstdc++'s PARALLEL scan pattern is wrong for any combine whose identity is not zero: it seeds a
+#: block with a value-initialized element instead of the init, so a prefix PRODUCT comes back all
+#: zeros. Measured on g++ 15.2 across sizes 6 .. 262144 and both float and double: ``seq`` and
+#: ``unseq`` give the loop's answer, ``par`` and ``par_unseq`` give zeros. (``plus`` survives only
+#: because zero happens to be its identity, which is not a property to emit code against.)
+#:
+#: ``unseq`` is not a fallback to sequential-and-nothing: it still licenses vectorization -- the
+#: interleaving a SIMD scan uses -- and it reaches the same serial-recurrence pattern the plain loop
+#: does, so it is correct by construction rather than by luck. Threads are what is given up, on the
+#: one shape whose parallel form this toolchain implements incorrectly.
+_ISOPAR_SCAN_POLICY = "std::execution::unseq"
+
+
+class _IsoparRef(NamedTuple):
+    """One contiguous element range a converted loop reads or writes.
+
+    ``key``/``const`` split the range's START into a symbolic part (the OUTER axis indices plus the
+    non-constant part of the fastest-varying offset) and an integer part, so two references to the
+    same array are the same range iff both match, and adjacent (the scan shape) iff ``key`` matches
+    and ``const`` differs by one. The outer axes belong in ``key``: ``rows[2*i, j]`` and
+    ``rows[2*i+1, j]`` sweep the same last axis but two DIFFERENT rows.
+    """
+    name: str  # array name
+    ptr: str  # pointer to the range's first element
+    prev: str  # the element one BEFORE that (a scan's init), as an lvalue
+    key: str  # canonical form of the range's symbolic start
+    const: int  # integer part of the fastest-varying offset
+    dtype: str  # element dtype
+
+
+def _isopar_elem_ok(dtype: Optional[str]) -> bool:
+    """True when an element of ``dtype`` READS as its own stored value.
+
+    A narrow int promotes to int64 and an fp8 byte decodes to float on every read (_promote_read),
+    so handing such an element to a lambda by value would compute in a different type than the loop
+    body does. Complex is excluded because the ``double _Complex`` extension type is not what
+    ``std::plus`` and friends are instantiated on here.
+    """
+    if not dtype:
+        return False
+    try:
+        ct = dtypes.c_type(dtype)
+    except KeyError:
+        return False  # unrecognised dtype: _c_type would silently call it double
+    return not (_is_narrow_int(dtype) or _fp8_fns(dtype) is not None or "_Complex" in ct)
+
+
+def _join_offset(inner: Tuple[Optional[ast.AST], int], node: ast.AST, op) -> Tuple[Optional[ast.AST], int]:
+    """Fold one more ``+ node`` / ``- node`` term into an ``(offset, const)`` split."""
+    off, const = inner
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return off, (const + node.value if op is ast.Add else const - node.value)
+    if off is None:
+        term = node if op is ast.Add else ast.UnaryOp(op=ast.USub(), operand=node)
+    else:
+        term = ast.BinOp(left=off, op=op(), right=node)
+    return ast.copy_location(term, node), const
+
+
+def _unit_stride_offset(expr: ast.AST, idx: str):
+    """``(offset, const)`` when ``expr`` is ``idx + offset + const`` with ``offset`` free of ``idx``,
+    else None.
+
+    That is the only index form whose iteration walks memory one element at a time, which is what a
+    standard algorithm's iterator range is. A scaled (``2*i``), reversed (``n-i``) or gathered
+    (``p[i]``) index is not, and returns None so the loop stays a loop.
+    """
+    if isinstance(expr, ast.Name):
+        return (None, 0) if expr.id == idx else None
+    if not (isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub))):
+        return None
+    left_has = parallelism.reads_name(expr.left, idx)
+    right_has = parallelism.reads_name(expr.right, idx)
+    if left_has == right_has:
+        return None  # idx on both sides (or neither): not a unit shift of the index
+    if right_has:
+        if isinstance(expr.op, ast.Sub):
+            return None  # ``c - i`` walks backwards
+        inner = _unit_stride_offset(expr.right, idx)
+        return None if inner is None else _join_offset(inner, expr.left, ast.Add)
+    inner = _unit_stride_offset(expr.left, idx)
+    return None if inner is None else _join_offset(inner, expr.right, type(expr.op))
+
+
+def _reduction_operand(value: ast.AST, acc: str) -> Optional[ast.AST]:
+    """The non-accumulator operand of a combine :func:`parallelism.reduction_op` already accepted."""
+    if isinstance(value, ast.BinOp):
+        return value.right if (isinstance(value.left, ast.Name) and value.left.id == acc) else value.left
+    if isinstance(value, ast.Call):
+        rest = [a for a in value.args if not (isinstance(a, ast.Name) and a.id == acc)]
+        return rest[0] if len(rest) == 1 else None
+    return None
+
+
+class _ElementSubst(ast.NodeTransformer):
+    """Replace each recorded element read with the lambda parameter standing in for it.
+
+    Only the recorded subscripts are rewritten; nothing else is, so an invariant element read
+    (``bias[oc]``) survives into the lambda body as itself.
+    """
+
+    def __init__(self, by_id: Dict[int, str]):
+        self.by_id = by_id
+
+    def visit_Subscript(self, node: ast.Subscript):  # noqa: N802 -- NodeTransformer dispatch name
+        name = self.by_id.get(id(node))
+        if name is None:
+            return node
+        return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+
 
 class _CBodyEmitter(BaseEmitter):
     """Walk a Python AST function body and emit C99 statements, flattening multi-D subscripts to 1D arithmetic."""
@@ -170,6 +296,14 @@ class _CBodyEmitter(BaseEmitter):
         self.parallel: bool = False
         #: Set while emitting a loop already marked parallel, so nested loops aren't also tagged.
         self.parallel_active: bool = False
+        #: ISO-algorithm emit variant: spell a convertible loop as a <algorithm>/<numeric> call.
+        self.isopar: bool = False
+        #: isopar: lambda parameter name -> dtype of the array element it stands in for.
+        self.isopar_param_dtypes: Dict[str, str] = {}
+        #: Scalar local / by-value param -> its declared C type (an isopar accumulator's type).
+        self.scalar_ctypes: Dict[str, str] = {}
+        #: Serial number for the per-loop trip-count local an isopar call declares.
+        self.isopar_counts: int = 0
         #: Pluto: name -> "[d1][d2]" trailing-dim string for a pointer-to-array local's deferred-malloc cast.
         self.md_trailing: Dict[str, str] = {}
         self.array_shapes: Dict[str, List[str]] = {a.name: list(a.shape) for a in kir.arrays}
@@ -207,6 +341,13 @@ class _CBodyEmitter(BaseEmitter):
         # parallelised at all; it still runs correctly in serial.
         step_node = args[2] if len(args) == 3 else None
         sign = self.static_step_sign(step_node)
+
+        # ISO algorithms: a forward unit-stride loop over a contiguous element range is a map /
+        # reduce / scan, and says so directly. Anything else keeps the loop below.
+        if self.isopar and step == "1":
+            algo = self._isopar_loop(node, indent, lo, hi)
+            if algo is not None:
+                return algo
 
         # OpenMP: tag the outermost eligible loop -- independent map -> parallel for; reduction -> add reduction(op:acc).
         omp_prefix = ""
@@ -248,6 +389,322 @@ class _CBodyEmitter(BaseEmitter):
         return (f"{omp_prefix}{indent}for ({_c_type('int')} {var} = {lo}; {cond}; {inc}) {{\n"
                 f"{body}\n"
                 f"{indent}}}")
+
+    # ----- ISO standard-algorithm forms (cpp_isopar) ----------------------
+
+    def _isopar_loop(self, node: ast.For, indent: str, lo: str, hi: str) -> Optional[str]:
+        """``node`` spelled as a standard-algorithm call, or None when no faithful spelling exists.
+
+        The body must be ONE statement: that is what makes the loop a single map / reduce / scan
+        rather than a schedule of several. The statement is deep-copied because the lambda body is
+        built by rewriting it, and the KernelIR tree is shared with the other C-family emits.
+        """
+        if len(node.body) != 1:
+            return None
+        idx = node.target.id
+        stmt = copy.deepcopy(node.body[0])
+        if isinstance(stmt, ast.AugAssign):
+            op = {ast.Add: "+", ast.Mult: "*"}.get(type(stmt.op))
+            if op is None:
+                return None
+            acc = self._isopar_acc(stmt.target, idx)
+            if acc is None or parallelism.reads_name(stmt.value, acc[2]):
+                return None
+            return self._isopar_reduce(acc, op, stmt.value, idx, indent, lo, hi)
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1):
+            return None
+        target = stmt.targets[0]
+        if isinstance(target, ast.Subscript) and parallelism.reads_name(target, idx):
+            return self._isopar_map(target, stmt.value, idx, indent, lo, hi)
+        acc = self._isopar_acc(target, idx)
+        if acc is None:
+            return None
+        # A reduction into a fixed CELL (``out[0] = out[0] + ...``) is the same shape as one into a
+        # scalar; standing the cell in for a name lets one classifier see both.
+        value = stmt.value
+        if isinstance(target, ast.Subscript):
+            cell = ast.unparse(target)  # a structural key: unparse ignores the Load/Store context
+            hits = [n for n in ast.walk(value) if isinstance(n, ast.Subscript) and ast.unparse(n) == cell]
+            if not hits:
+                return None
+            value = _ElementSubst({id(n): "__acc" for n in hits}).visit(value)
+            if parallelism.reads_name(value, acc[2]):
+                return None  # the accumulator's array is read elsewhere too: not a plain reduction
+        name = "__acc" if isinstance(target, ast.Subscript) else target.id
+        # reduction_op admits only the associative combines (+, *, max, min) and only when the
+        # accumulator appears exactly once, so ``s = s + s*x`` (a recurrence) is refused there.
+        op = parallelism.reduction_op(value, name)
+        other = None if op is None else _reduction_operand(value, name)
+        if other is None:
+            return None
+        return self._isopar_reduce(acc, op, other, idx, indent, lo, hi)
+
+    def _isopar_acc(self, target: ast.AST, idx: str) -> Optional[Tuple[str, str, str]]:
+        """``(lvalue, C type, owning name)`` of a reduction accumulator -- a scalar, or an array cell
+        that does not move with ``idx``. The owning name is the array's (the scalar's own, for a
+        scalar): reading it anywhere else in the combine is what disqualifies a plain reduction."""
+        if isinstance(target, ast.Name):
+            ctype = self.scalar_ctypes.get(target.id)
+            return None if ctype is None else (target.id, ctype, target.id)
+        if not (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)):
+            return None
+        if parallelism.reads_name(target, idx):
+            return None  # moves with the loop: a store, not an accumulator
+        dtype = self._dtype_for_name(target.value.id)
+        if not _isopar_elem_ok(dtype):
+            return None
+        return self.emit_expr(target), _c_type(dtype), target.value.id
+
+    def _isopar_ref(self, sub: ast.Subscript, idx: str, lo: str) -> Optional[_IsoparRef]:
+        """The contiguous range ``sub`` sweeps as ``idx`` runs from ``lo``, or None if it sweeps none."""
+        self._normalize_negative_indices(sub)  # a[-1] -> a[N-1], as _emit_subscript does
+        axes: List[ast.AST] = []
+        cur: ast.AST = sub
+        while isinstance(cur, ast.Subscript):
+            sl = cur.slice
+            axes = (list(sl.elts) if isinstance(sl, ast.Tuple) else [sl]) + axes
+            cur = cur.value
+        if not isinstance(cur, ast.Name) or any(isinstance(a, ast.Slice) for a in axes):
+            return None
+        name = cur.id
+        shape = self.array_shapes.get(name)
+        # rank must match the index count for the row-major flatten to be defined, and the loop index
+        # must sit on the LAST axis -- only there is one iteration one element.
+        if shape is None or len(shape) != len(axes) or name in self.multidim_arrays:
+            return None
+        dtype = self._dtype_for_name(name)
+        if not _isopar_elem_ok(dtype):
+            return None
+        if any(parallelism.reads_name(a, idx) for a in axes[:-1]):
+            return None
+        split = _unit_stride_offset(axes[-1], idx)
+        if split is None:
+            return None
+        off, const = split
+        head = [self.emit_expr(a) for a in axes[:-1]]
+        base = []
+        if off is not None:
+            base.append(f"({self.emit_expr(off)})")
+        if lo != "0":
+            base.append(f"({lo})")
+
+        def _flat(shift: int) -> str:
+            """Flat index of the range's element ``shift`` places before its first."""
+            total = const + shift
+            text = " + ".join(base)
+            if not base:
+                text = str(total)
+            elif total > 0:
+                text = f"{text} + {total}"
+            elif total < 0:
+                text = f"{text} - {-total}"
+            return self._flatten_indices(shape, head + [text])
+
+        flat = _flat(0)
+        ptr = name if flat == "0" else f"{name} + ({flat})"
+        key = "|".join((*head, "" if off is None else ast.dump(off)))
+        return _IsoparRef(name, ptr, f"{name}[{_flat(-1)}]", key, const, dtype)
+
+    def _isopar_sources(self, expr: ast.AST, idx: str, lo: str):
+        """``[(node, ref)]`` for every ``idx``-varying element read in ``expr``, in source order, or
+        None when one of them is not a contiguous range -- or when ``idx`` is read as a VALUE, which
+        no algorithm can supply (it hands the callable elements, not indices)."""
+        found: List[Tuple[ast.Subscript, _IsoparRef]] = []
+        stack = [expr]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, ast.Subscript):
+                if not parallelism.reads_name(cur, idx):
+                    continue  # loop-invariant element read: stays inline in the lambda body
+                ref = self._isopar_ref(cur, idx, lo)
+                if ref is None:
+                    return None
+                found.append((cur, ref))
+                continue
+            if isinstance(cur, ast.Name) and cur.id == idx:
+                return None
+            stack.extend(reversed(list(ast.iter_child_nodes(cur))))
+        return found
+
+    def _isopar_count(self, indent: str, lo: str, hi: str) -> Tuple[str, str]:
+        """``(declaration, name)`` of this call's trip count, clamped at 0: a range whose end runs
+        before its start is undefined for an algorithm, where the loop just runs zero times."""
+        name = f"__n{self.isopar_counts}"
+        self.isopar_counts += 1
+        span = f"({hi})" if lo == "0" else f"({hi}) - ({lo})"
+        test = f"({hi}) > 0" if lo == "0" else f"({hi}) > ({lo})"
+        return f"{indent}const {_c_type('int')} {name} = {test} ? {span} : 0;", name
+
+    def _isopar_lambda(self, expr: ast.AST, by_id: Dict[int, str], param_dtypes: Dict[str, str],
+                       cast_to: str) -> Optional[str]:
+        """The element-wise callable for ``expr``: its element reads become parameters, and the
+        result is cast to the type the loop's assignment would have converted it to anyway.
+
+        None when the body calls a kernel HELPER. A helper is emitted from the same IR as the kernel
+        and may therefore ``malloc`` a local array; allocating inside an element access function is
+        exactly what ``par_unseq`` forbids. Everything else that can appear here -- arithmetic, the
+        prelude's ``max`` / ``int_floor`` / ``python_mod`` templates, libm -- is pure, non-throwing
+        and lock-free.
+        """
+        helpers = {h.kernel_name for h in self.kir.helpers}
+        if helpers and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in helpers
+                for c in ast.walk(expr)):
+            return None
+        new = _ElementSubst(by_id).visit(expr)
+        self.isopar_param_dtypes = param_dtypes
+        try:
+            body = self.emit_expr(new)
+        finally:
+            self.isopar_param_dtypes = {}
+        params = ", ".join(f"{_c_type(param_dtypes[nm])} {nm}" for nm in sorted(param_dtypes))
+        called = {c.func.id for c in ast.walk(new) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        free = {n.id for n in ast.walk(new) if isinstance(n, ast.Name)} - set(param_dtypes) - called
+        return f"[{'&' if free else ''}]({params}) {{ return static_cast<{cast_to}>({body}); }}"
+
+    @staticmethod
+    def _isopar_params(found, distinct) -> Tuple[Dict[int, str], Dict[str, str]]:
+        """``(node id -> parameter name, parameter name -> dtype)`` for one callable's elements."""
+        pos = {(r.name, r.key, r.const): k for k, r in enumerate(distinct)}
+        by_id = {id(nd): f"__v{pos[(r.name, r.key, r.const)]}" for nd, r in found}
+        return by_id, {f"__v{k}": r.dtype for k, r in enumerate(distinct)}
+
+    @staticmethod
+    def _isopar_distinct(found) -> List[_IsoparRef]:
+        """The distinct ranges among ``found``, first appearance first (the callable's parameter order)."""
+        out: List[_IsoparRef] = []
+        for _nd, r in found:
+            if all((r.name, r.key, r.const) != (d.name, d.key, d.const) for d in out):
+                out.append(r)
+        return out
+
+    def _isopar_map(self, target: ast.Subscript, rhs: ast.AST, idx: str, indent: str, lo: str,
+                    hi: str) -> Optional[str]:
+        """One store per iteration over a contiguous range: fill / copy / transform, or a scan when
+        the destination reads its own PREVIOUS element."""
+        dst = self._isopar_ref(target, idx, lo)
+        if dst is None:
+            return None
+        found = self._isopar_sources(rhs, idx, lo)
+        if found is None:
+            return None
+        # A read of the destination array that does NOT move with the loop (``out[i] = a[i] +
+        # out[0]``) observes elements this same call is writing. The loop reads them in its own
+        # order; std::transform specifies no order at all, so it is not the same computation.
+        for node in ast.walk(rhs):
+            if isinstance(node, ast.Subscript) and not parallelism.reads_name(node, idx):
+                base = node.value
+                while isinstance(base, ast.Subscript):
+                    base = base.value
+                if isinstance(base, ast.Name) and base.id == dst.name:
+                    return None
+        alias = [r for _nd, r in found if r.name == dst.name]
+        if any((r.key, r.const) != (dst.key, dst.const) for r in alias):
+            # The destination reads a DIFFERENT element of itself: a recurrence. Only the scan shape
+            # has an algorithm; a shifted map (``a[i] = a[i+1]``) would be overlapping ranges, which
+            # std::transform leaves undefined.
+            return self._isopar_scan(dst, rhs, found, indent, lo, hi)
+        distinct = self._isopar_distinct(found)
+        if len(distinct) > 2:
+            return None  # no standard n-ary transform
+        decl, count = self._isopar_count(indent, lo, hi)
+        dst_ct = _c_type(dst.dtype)
+        if not distinct:
+            # The value is evaluated ONCE, at the call site, and bound to a temporary: it is not an
+            # element access function, so a helper call in it is still fine under par_unseq.
+            value = self.emit_expr(rhs)  # loop-invariant right-hand side
+            return (f"{decl}\n{indent}std::fill({_ISOPAR_POLICY}, {dst.ptr}, {dst.ptr} + {count}, "
+                    f"static_cast<{dst_ct}>({value}));")
+        src = distinct[0]
+        if (len(distinct) == 1 and isinstance(rhs, ast.Subscript) and src.name != dst.name
+                and _c_type(src.dtype) == dst_ct):
+            return f"{decl}\n{indent}std::copy({_ISOPAR_POLICY}, {src.ptr}, {src.ptr} + {count}, {dst.ptr});"
+        by_id, param_dtypes = self._isopar_params(found, distinct)
+        lam = self._isopar_lambda(rhs, by_id, param_dtypes, dst_ct)
+        if lam is None:
+            return None
+        second = f", {distinct[1].ptr}" if len(distinct) == 2 else ""
+        return (f"{decl}\n{indent}std::transform({_ISOPAR_POLICY}, {src.ptr}, {src.ptr} + {count}{second}, "
+                f"{dst.ptr}, {lam});")
+
+    def _isopar_scan(self, dst: _IsoparRef, rhs: ast.AST, found, indent: str, lo: str, hi: str) -> Optional[str]:
+        """``dst[j] = dst[j-1] <+|*> src[j]`` -> ``std::inclusive_scan``.
+
+        Only the bare associative combine converts: ``dst[j-1]*0.9 + src[j]`` is a first-order
+        recurrence whose scan form is over affine maps, not over the element type, and computing it
+        that way would change the arithmetic rather than just its association.
+        """
+        if not (isinstance(rhs, ast.BinOp) and isinstance(rhs.op, (ast.Add, ast.Mult)) and len(found) == 2):
+            return None
+        operands = {id(rhs.left), id(rhs.right)}
+        for (prev_node, prev), (src_node, src) in (found, found[::-1]):
+            if (prev.name, prev.key, prev.const) != (dst.name, dst.key, dst.const - 1):
+                continue
+            if src.name == dst.name or _c_type(src.dtype) != _c_type(dst.dtype):
+                continue
+            if {id(prev_node), id(src_node)} != operands:
+                continue
+            combine = "std::plus" if isinstance(rhs.op, ast.Add) else "std::multiplies"
+            decl, count = self._isopar_count(indent, lo, hi)
+            # Guarded: the init reads the element before the range, which an empty range never has.
+            # That element is OUTSIDE the written range and is passed by value, so the algorithm's
+            # writes cannot race it; the carried dependence itself is the algorithm's, and
+            # inclusive_scan is specified over any association of the combine (unlike partial_sum).
+            # The weaker policy here is a toolchain bug, not a precondition -- see _ISOPAR_SCAN_POLICY.
+            return (f"{decl}\n{indent}if ({count} > 0) {{\n"
+                    f"{indent}  std::inclusive_scan({_ISOPAR_SCAN_POLICY}, {src.ptr}, {src.ptr} + {count}, "
+                    f"{dst.ptr}, {combine}<{_c_type(dst.dtype)}>{{}}, {dst.prev});\n"
+                    f"{indent}}}")
+        return None
+
+    def _isopar_reduce(self, acc: Tuple[str, str, str], op: str, other: ast.AST, idx: str, indent: str, lo: str,
+                       hi: str) -> Optional[str]:
+        """One value accumulated under an associative, commutative combine -> ``std::reduce`` /
+        ``std::transform_reduce``.
+
+        Never ``std::accumulate``: that one is specified strictly left-to-right, which is exactly the
+        ordering this backend exists to stop stating. The combine may therefore reassociate, so the
+        float sum can differ in its last bits from the loop's -- but not in its value.
+        """
+        acc_lvalue, acc_ct, acc_name = acc
+        found = self._isopar_sources(other, idx, lo)
+        if not found:  # None: unconvertible. []: nothing swept, so there is no range to reduce over.
+            return None
+        distinct = self._isopar_distinct(found)
+        if len(distinct) > 2 or any(r.name == acc_name for r in distinct):
+            return None  # no n-ary transform; and a range that includes the accumulator's own cell
+        decl, count = self._isopar_count(indent, lo, hi)
+        src = distinct[0]
+        first, last = src.ptr, f"{src.ptr} + {count}"
+        # max/min propagate NaN in both the ``max`` template and the ``__npb_fmax`` np.maximum form,
+        # so either source spelling is the same commutative combine; emit the template one.
+        binary = {
+            "+": f"std::plus<{acc_ct}>{{}}",
+            "*": f"std::multiplies<{acc_ct}>{{}}",
+        }.get(op, f"[]({acc_ct} __a, {acc_ct} __b) {{ return {op}(__a, __b); }}")
+        uniform = all(_c_type(r.dtype) == acc_ct for r in distinct)
+        # The accumulator is read ONCE here, as the by-value init, and written ONCE when the call
+        # returns -- the algorithm never touches it, and the swept ranges are refused above if they
+        # live in its array. So a cell accumulator (``out[0] = out[0] + ...``) is as safe as a
+        # scalar one: there is no shared accumulator during the call to race on.
+        # The element is accumulated as-is: no transform needed, and no conversion to spell.
+        if uniform and len(distinct) == 1 and isinstance(other, ast.Subscript):
+            extra = "" if op == "+" else f", {binary}"
+            return (f"{decl}\n{indent}{acc_lvalue} = std::reduce({_ISOPAR_POLICY}, {first}, {last}, "
+                    f"{acc_lvalue}{extra});")
+        # ``acc + a[i]*b[i]``: transform_reduce's default multiplies/plus IS this expression.
+        if (uniform and len(distinct) == 2 and op == "+" and isinstance(other, ast.BinOp)
+                and isinstance(other.op, ast.Mult)
+                and {id(other.left), id(other.right)} == {id(found[0][0]), id(found[1][0])}):
+            return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({_ISOPAR_POLICY}, {first}, {last}, "
+                    f"{distinct[1].ptr}, {acc_lvalue});")
+        by_id, param_dtypes = self._isopar_params(found, distinct)
+        lam = self._isopar_lambda(other, by_id, param_dtypes, acc_ct)
+        if lam is None:
+            return None
+        second = f"{distinct[1].ptr}, " if len(distinct) == 2 else ""
+        return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({_ISOPAR_POLICY}, {first}, {last}, "
+                f"{second}{acc_lvalue}, {binary}, {lam});")
 
     def _emit_while(self, node: ast.While, indent: str) -> str:
         body = self.emit_block(node.body, indent + "  ")
@@ -609,12 +1066,17 @@ class _CBodyEmitter(BaseEmitter):
                 f"cannot flatten a {len(indices)}-D index of {base_node.id!r}: its shape is "
                 f"{'unknown' if shape is None else shape} (rank {0 if shape is None else len(shape)}). "
                 f"Declare init.shapes[{base_node.id!r}] with the matching rank.")
+        return self._promote_read(node, f"{base}[{self._flatten_indices(shape, indices)}]")
+
+    @staticmethod
+    def _flatten_indices(shape, indices: List[str]) -> str:
+        """Row-major flat index over already-emitted per-axis index texts: ((i0)*d1 + i1)*d2 + i2 ..."""
         flat = indices[0]
         for k in range(1, len(indices)):
             # Parenthesise the stride: a compound extent like J+3-1 used bare would mis-associate (the hdiff 3-D-stencil OOB).
             dim = f"({_c_shape_token(shape[k])})"
             flat = f"({flat})*{dim} + ({indices[k]})"
-        return self._promote_read(node, f"{base}[{flat}]")
+        return flat
 
     def _promote_read(self, node: ast.Subscript, access: str) -> str:
         """Promote an array element on READ to the type it's computed in: narrow int -> int64, fp8 -> float."""
@@ -811,6 +1273,10 @@ class _CBodyEmitter(BaseEmitter):
             return False
         if isinstance(node, ast.Name):
             n = node.id
+            # An isopar lambda parameter is an array element: integer iff that array is.
+            param = self.isopar_param_dtypes.get(n)
+            if param is not None:
+                return dtypes.is_integer(param)
             # Kernel symbols are always int.
             for s in self.kir.symbols:
                 if s.name == n:
@@ -937,6 +1403,10 @@ class _CBodyEmitter(BaseEmitter):
         return fn
 
     def _dtype_for_name(self, name: str):
+        # An isopar lambda parameter stands in for an array element and carries that element's dtype.
+        param = self.isopar_param_dtypes.get(name)
+        if param is not None:
+            return param
         local_dtypes = self.kir.local_dtypes
         dt = local_dtypes.get(name)
         if dt is None:
@@ -1194,11 +1664,13 @@ def _emit_body(kir: KernelIR,
                pluto: bool = False,
                return_parts: bool = False,
                return_mode: Optional[str] = None,
-               parallel: bool = False):
+               parallel: bool = False,
+               isopar: bool = False):
     emitter = _CBodyEmitter(kir, multidim_arrays=multidim_arrays)
     emitter.pluto = pluto
     emitter.return_mode = return_mode
     emitter.parallel = parallel
+    emitter.isopar = isopar
     zeros = kir.zeros_locals
     zeros_fills = kir.zeros_fills
     int_locals = kir.int_locals
@@ -1268,6 +1740,18 @@ def _emit_body(kir: KernelIR,
     for name in (*fn_top_locals, *deferred_malloc_locals, *inline_locals):
         local_dtypes.setdefault(name, default_float)
     kir.local_dtypes = local_dtypes
+    # The scalar declaration table, so an isopar reduction knows the type its accumulator is kept in.
+    emitter.scalar_ctypes = {
+        **{
+            name: _c_type("int")
+            for name in int_locals
+        },
+        **dict(implicit),
+        **{
+            s.name: _c_type(s.dtype)
+            for s in kir.scalars
+        },
+    }
     decls: List[str] = []
     frees: List[str] = []
     for name in int_locals:
@@ -1644,6 +2128,18 @@ _CPP_ARITH = ('#include <cstdint>\n#include <cmath>\n'
 _CPP_HEADER = _CPP_ARITH + '\nextern "C" {\n'
 _CPP_FOOTER = '} // extern "C"\n'
 
+#: cpp_isopar prologue. The library headers come FIRST, ahead of the ``max`` / ``min`` function
+#: templates below them: a same-named declaration visible while libstdc++ is being parsed is what
+#: detonates inside <algorithm> (the polycc ``#define min`` failure, one step milder).
+#:
+#: <execution> needs no compile flag. libstdc++ picks its parallel backend per translation unit --
+#: ``_GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)`` in <bits/c++config.h> -- so with TBB
+#: installed the policies dispatch to it (and the LINK then needs it; see
+#: languages.stdpar_link_flags), and without it they degrade to the serial backend and link against
+#: nothing. Either way the source says the same thing.
+_CPP_ISOPAR_HEADER = ('#include <algorithm>\n#include <execution>\n#include <numeric>\n#include <functional>\n' +
+                      _CPP_ARITH + '\nextern "C" {\n')
+
 # Timing is owned by the harness bracket externally (abi_contract.md Sec. 6); the kernel neither self-times nor
 # takes a timer arg.
 _C_PRELUDE = ""
@@ -1803,7 +2299,7 @@ def _helper_return_ctype(hkir: KernelIR) -> str:
     return _c_type("float64")
 
 
-def _emit_c_helper(hkir: KernelIR, cpp: bool = False) -> str:
+def _emit_c_helper(hkir: KernelIR, cpp: bool = False, isopar: bool = False) -> str:
     """Emit one non-inlinable helper as a static C/C++ function; an array return becomes a void fn with an out-param."""
     rettype = "void" if hkir.return_kind != "scalar" else _helper_return_ctype(hkir)
     # abi_param_order: a helper the canonical order cannot fully describe keeps declaration
@@ -1811,7 +2307,7 @@ def _emit_c_helper(hkir: KernelIR, cpp: bool = False) -> str:
     signature = _emit_signature(hkir, hkir.kernel_name, order=hkir.abi_param_order()).replace("void ", f"{rettype} ", 1)
     if cpp:
         signature = signature.replace("*restrict ", "*__restrict__ ")
-    body = _emit_body(hkir, indent="    ", return_mode=hkir.return_kind)
+    body = _emit_body(hkir, indent="    ", return_mode=hkir.return_kind, isopar=isopar)
     return f"static {signature} {{\n{body}\n}}\n\n"
 
 
@@ -1831,6 +2327,48 @@ def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     signature = signature.replace("*restrict ", "*__restrict__ ")
     body = _emit_body(kir, indent="        ")
     return (f"{_CPP_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
+            f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
+
+
+def emit_cpp_isopar(kir: KernelIR, fn_name: Optional[str] = None) -> str:
+    """C++ that states the kernel's STRUCTURE through <algorithm> / <numeric> instead of raw loops,
+    the way Fortran array intrinsics and ``do concurrent`` do; same symbol as :func:`emit_cpp`.
+
+    Every converted call carries :data:`_ISOPAR_POLICY` (``par_unseq``), so the implementation is
+    PERMITTED to thread and to vectorize it. An unpolicied algorithm is specified as sequential and
+    would license nothing the loop did not already license.
+
+    ``par_unseq``'s preconditions hold per shape:
+
+    * **transform / fill / copy** -- one element in, one element out, no cross-element read. The
+      destination range is either disjoint from every source range or EXACTLY equal to one (the
+      in-place map), which [alg.transform] allows; a shifted self-read is refused as a recurrence,
+      and an invariant read of the destination array is refused outright, so no callable ever
+      observes an element the same call writes.
+    * **reduce / transform_reduce** -- the accumulator is read once (by-value init) before the call
+      and written once after it, so it is not shared state during the call. That holds whether it is
+      a scalar or a fixed array cell, and a sweep whose range lives in the accumulator's own array
+      is refused.
+    * **inclusive_scan** -- the carried dependence belongs to the algorithm, not to the callable:
+      inclusive_scan is specified over any association of an associative combine (which is why it,
+      and not ``partial_sum``, is what a parallel prefix uses). Source and destination are always
+      different arrays here, and the init is the element BEFORE the output range, passed by value.
+      It nonetheless carries the WEAKER :data:`_ISOPAR_SCAN_POLICY`, because libstdc++'s parallel
+      scan computes the wrong answer for a non-``plus`` combine -- a measured toolchain defect, not
+      a precondition this backend fails to meet.
+    * the callable itself never allocates, locks, synchronizes or throws -- it is arithmetic over
+      by-value parameters plus loop-invariant reads. The one exception, a call into a kernel helper
+      (which may ``malloc``), is refused in :meth:`_CBodyEmitter._isopar_lambda`.
+
+    A loop with no faithful algorithm spelling stays a loop, so this is always a superset-correct
+    variant of :func:`emit_cpp` rather than a partial backend; a kernel where nothing converts emits
+    the same code emit_cpp does.
+    """
+    name = fn_name or f"{kir.kernel_name}_d"
+    helpers = "".join(_emit_c_helper(h, cpp=True, isopar=True) for h in kir.helpers)
+    signature = _emit_signature(kir, name).replace("*restrict ", "*__restrict__ ")
+    body = _emit_body(kir, indent="        ", isopar=True)
+    return (f"{_CPP_ISOPAR_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
             f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
 
 

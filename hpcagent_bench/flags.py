@@ -155,6 +155,24 @@ FLANG_BASELINE = f"-O3 {_ARCH_NATIVE} -fopenmp -fPIC"
 WARNINGS_BASIC = "-Wall -Wextra"
 
 # ---------------------------------------------------------------------------
+# C++ parallel algorithms (<execution>). LINK-side only, and only for the source that
+# uses them -- see languages.stdpar_link_flags for when it is appended.
+# ---------------------------------------------------------------------------
+
+#: The runtime libstdc++ implements ``std::execution::par`` / ``par_unseq`` over. Nothing is needed
+#: at COMPILE time: ``<execution>`` and the policy overloads are always available. The backend is
+#: chosen per translation unit inside ``<bits/c++config.h>``:
+#:
+#:     #define _GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)
+#:
+#: so with the TBB headers installed the policies dispatch into libtbb and the link needs this;
+#: with them absent every policy degrades to libstdc++'s SERIAL backend, which needs nothing (and
+#: appending this anyway is a hard ``cannot find -ltbb`` link error, which is why
+#: :func:`languages.stdpar_link_flags` asks the compiler the same ``__has_include`` question rather
+#: than assuming either way).
+STDPAR_LINK_TBB = "-ltbb"
+
+# ---------------------------------------------------------------------------
 # Multi-core autopar deltas. Each is appended on top of the CPU baseline.
 # ``GCC_AUTOPAR`` and similar carry a ``{n}`` placeholder that
 # :func:`compose_autopar` substitutes with the resolved core count.
