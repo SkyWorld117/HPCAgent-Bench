@@ -44,7 +44,12 @@ on:
 
 concurrency:
   group: ${{github.workflow}}-${{github.ref}}
-  cancel-in-progress: true
+  # Cancel superseded runs on a branch, never on the default branch. A push to main that lands while
+  # the previous run is still going used to kill it, and a killed run takes its FINDINGS with it: a
+  # -std= break on the mpi wrapper had already been reported by one run and was discarded before
+  # anyone read it, so the same breakage had to be rediscovered a push later. Branch runs keep the
+  # old behaviour, where the newer commit is the only one anybody wants an answer about.
+  cancel-in-progress: ${{github.ref != 'refs/heads/main'}}
 
 jobs:
   # ===========================================================================================
@@ -976,12 +981,14 @@ jobs:
   # report per job, because eight partial percentages are not a coverage figure and reading them
   # as one is the mistake this job exists to prevent.
   #
-  # if: always() so the total is still produced when a job went red -- a red run's coverage is the
-  # most useful moment to look at it. `coverage combine` needs relative_files (pyproject) since the
-  # container job's paths differ from the runner's.
+  # Runs when a job went RED -- a red run's coverage is the most useful moment to look at it -- but
+  # not when the run was CANCELLED. always() fires on cancellation too, and then no job has uploaded
+  # anything, so the combine step hard-errors with "no coverage data was uploaded" and the run page
+  # shows a coverage FAILURE whose actual cause was somebody pushing again. `coverage combine` needs
+  # relative_files (pyproject) since the container job's paths differ from the runner's.
   # ===========================================================================================
   coverage:
-    if: always()
+    if: ${{!cancelled()}}
     name: coverage (combined total)
     needs: [unit, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi]
     runs-on: ubuntu-latest
