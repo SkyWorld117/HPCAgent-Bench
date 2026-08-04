@@ -16,7 +16,7 @@ import pathlib
 import posixpath
 import re
 import shlex
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import jinja2
 import yaml
@@ -371,17 +371,22 @@ INSTRUMENT_SKILLS = frozenset({
     "papi-gpu-amd-judge",
     # Compile-time tool, same shape as opt-reports: you run it, it reports, you read the report.
     "static-analysis",
-    # One per submission language, named for the language so a task can look its page up by
-    # ``task.language`` instead of a mapping table. Six gates each, the same shape as
-    # static-analysis: you run the tool, it reports, you read the report, and none of it means
-    # anything to a reader without clang-tidy or gfortran on the box. Gating also keeps a sanitizer
-    # build out of every prompt -- in restricted mode the harness compiles the submission itself, so
-    # wall clock taken off an ASan build measures nothing that is scored.
-    "lang-c",
-    "lang-cpp",
-    "lang-fortran",
-    "lang-python"
 })
+
+#: The language pages, gated on the SUBMISSION LANGUAGE rather than on a profiling knob.
+#:
+#: They were briefly in INSTRUMENT_SKILLS -- they have an instrument's shape (six gates: you run the
+#: tool, it reports, you read the report) -- but that set means one specific thing: "inline only when
+#: profiling guidance is on". A page describing the language the agent is REQUIRED to write in has no
+#: business being reachable only through a profiling framing, and making it so is how a reader ends
+#: up without the rules for the one language they are allowed to use.
+#:
+#: So the selection is :func:`language_skills_for`: one page under ``restricted`` (the language is
+#: fixed, the other three are dead weight), all of them under ``any`` (the agent may pick, so
+#: withholding one withholds the rules for a language it is allowed to choose). The size gate
+#: accepts membership here the same way it accepts INSTRUMENT_SKILLS -- these pages ARE gated, just
+#: on a different axis.
+LANGUAGE_SKILLS = frozenset({"lang-c", "lang-cpp", "lang-fortran", "lang-python"})
 
 #: Manual-sized pages that are deliberately NOT gated, with the reason. A page this long costs real
 #: tokens in EVERY prompt, so leaving one ungated has to be a decision somebody made on purpose --
@@ -399,6 +404,34 @@ ALWAYS_INLINE_MANUALS = frozenset({
     # into the instrument set while that decision is still open.
     "pytorch-to-numpy",
 })
+
+#: Submission language -> the page that governs writing it. cuda and hip map to the C++ page: both
+#: are C++ dialects, the host half IS C++, and there is no separate page for either.
+LANGUAGE_SKILL: Dict[str, str] = {
+    "c": "lang-c",
+    "cpp": "lang-cpp",
+    "fortran": "lang-fortran",
+    "cuda": "lang-cpp",
+    "hip": "lang-cpp",
+}
+
+
+def language_skills_for(task) -> FrozenSet[str]:
+    """The lang-* pages to inline for ``task``.
+
+    ``restricted`` fixes the submission language, so exactly one page can apply and the other three
+    are dead weight in the prompt. ``any`` lets the agent deliver a C-ABI ``.so`` built from whatever
+    it likes, so withholding a page would be withholding the rules for a language it is allowed to
+    choose -- all of them ship.
+
+    These pages are in INSTRUMENT_SKILLS, which normally means "indexed, inlined only when profiling
+    guidance is on". That gate is about tool manuals nobody asked for; the language you are REQUIRED
+    to write in is not that, so this selection inlines it regardless.
+    """
+    if task.source_mode == "any":
+        return LANGUAGE_SKILLS
+    page = LANGUAGE_SKILL.get(task.language)
+    return frozenset({page}) if page else frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -751,6 +784,7 @@ def build_context(task: Task,
     # it is a manual for hardware the reader does not have. profile_first is the strategy that
     # exists to reach for them, so it turns them on without anyone configuring it.
     inline_instruments = prompt_config.profiling_guidance or prompt_config.strategy == "profile_first"
+    language_skills = language_skills_for(task)
     symbol = binding.symbols.get(task.language, f"{spec.short_name}_{task.language}_auto")
     ext = languages.LANG_EXT.get(task.language, task.language)
     resources = available_resources()
@@ -891,6 +925,10 @@ def build_context(task: Task,
         # description so the prompt points at them without inlining all of them.
         "general_skill": general_skill,
         "other_skills": other_skills,
+        # Which lang-* pages to INLINE for this task, and the full set so the template can tell a
+        # language page from an ordinary one (see language_skills_for).
+        "language_skills": sorted(language_skills),
+        "all_language_skills": sorted(LANGUAGE_SKILLS),
         # Which of those get their BODY inlined; the rest appear in the index only.
         "inline_instruments": inline_instruments,
         "instrument_skills": sorted(INSTRUMENT_SKILLS),
