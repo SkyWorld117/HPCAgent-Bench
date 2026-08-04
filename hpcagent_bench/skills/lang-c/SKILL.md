@@ -1,15 +1,15 @@
 ---
 name: lang-c
-description: "Writing correct C23 for this harness: explicit casts, const/restrict, and the six gates that check it."
+description: "Writing correct C17 for this harness: explicit casts, const/restrict, and the six gates that check it."
 ---
 
 # lang-c
 
 Two jobs: (A) QUALITY-CHECK an existing C file through six gates; (B) enforce
-modern C23 idioms when WRITING C. `<file>.c` is the placeholder for the target
+C17 idioms when WRITING C. `<file>.c` is the placeholder for the target
 throughout -- swap in the real path. Every command is copy-pasteable. This is C,
-not C++: compile with `gcc`/`clang` (not `g++`), `-std=c23`, `--language=c`.
-gcc 15+ and clang 19+ accept `-std=c23` with native `constexpr`/`static_assert`.
+not C++: compile with `gcc`/`clang` (not `g++`), `-std=c17`, `--language=c`.
+`-std=c17` is what the harness builds with; `languages.std_flag("c")` is the source of truth.
 
 ## Golden rule
 
@@ -46,22 +46,22 @@ clang-tidy \
   --checks='-*,bugprone-*,cert-*,clang-analyzer-*,performance-*,portability-*,readability-*' \
   --header-filter='.*' \
   --warnings-as-errors='*' \
-  <file>.c -- -std=c23 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wbad-function-cast
+  <file>.c -- -std=c17 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wbad-function-cast
 ```
 `--header-filter=.*` so the file's own headers are checked too. Prefer
-`clang-tidy-21` if installed (needed for full C23 parsing). If a CMake compile DB
+`clang-tidy-21` if installed. If a CMake compile DB
 exists, add `-p <build-dir>` so includes/macros resolve (configure it with
 `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <build-dir>`).
 
 GENERATED-code variant (narrow set, analyzer only):
 ```bash
-clang-tidy --checks='-*,clang-analyzer-*' --header-filter='$^' <generated>.c -- -std=c23
+clang-tidy --checks='-*,clang-analyzer-*' --header-filter='$^' <generated>.c -- -std=c17
 ```
 
 ### 3. cppcheck
 ```bash
 cppcheck --enable=warning,performance,portability,style \
-  --std=c23 --language=c \
+  --std=c17 --language=c \
   --inline-suppr --error-exitcode=1 --quiet \
   --suppress=preprocessorErrorDirective \
   --suppress=missingIncludeSystem \
@@ -75,7 +75,7 @@ prefer `--project=<build-dir>/compile_commands.json` over the bare file.
 
 ### 4. gcc static analyzer (syntax-only, no build)
 ```bash
-gcc -std=c23 -fsyntax-only -fanalyzer -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wbad-function-cast <file>.c
+gcc -std=c17 -fsyntax-only -fanalyzer -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wbad-function-cast <file>.c
 ```
 `-fanalyzer` turns on the whole `-Wanalyzer-*` family (double-free, use-after-free,
 null-deref, malloc/file leaks, mismatched dealloc, tainted-array-index, write-to-const).
@@ -86,7 +86,7 @@ use `-O2 -c -o /dev/null` instead if you want the optimizer's extra reach.
 ### 5. AddressSanitizer -- build and RUN once
 Static analysis is not enough; the file must actually run under ASan.
 ```bash
-gcc -std=c23 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.c -o /tmp/cq_asan
+gcc -std=c17 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.c -o /tmp/cq_asan
 ASAN_OPTIONS=detect_leaks=1 /tmp/cq_asan   # exercise the real entry point / test
 ```
 Catches heap/stack/global overflows, use-after-free, use-after-return, leaks.
@@ -97,48 +97,55 @@ when you do. For a `dlopen`'d object, build it with the same flags and
 
 ### 6. UndefinedBehaviorSanitizer -- build and RUN once
 ```bash
-gcc -std=c23 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.c -o /tmp/cq_ubsan
+gcc -std=c17 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.c -o /tmp/cq_ubsan
 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 /tmp/cq_ubsan
 ```
 `halt_on_error=1` so the first UB aborts with a trace -- any hit is a bug. Catches
 signed-overflow, out-of-range shifts, null-deref, misalignment, bad float<->int
-casts, integer div-by-zero, invalid `bool`/enum loads, and `unreachable()` reached.
+casts, integer div-by-zero, and invalid `bool`/enum loads.
 `-fno-sanitize-recover=all` also aborts on first hit if you prefer it baked into the
 binary. ASan and UBSan can share one build (`-fsanitize=address,undefined`); keeping
 them separate isolates which sanitizer fired.
 
 **Report** each gate's status. Only "clean" when all six pass with zero output.
 
-## B. Writing modern C23 (lean, use the new keywords)
+## B. Writing C17 (lean, and only what C17 actually has)
 
-Prefer plain functions + small concrete structs + tight scope. C23 narrows the gap
-to C++ but still has NO templates, NO concepts, NO `constexpr` FUNCTIONS, NO
-`consteval` -- for generic code use `_Generic`, `typeof`, or macros. Use C23's new
-native features in preference to the old C11/C17 workarounds:
+Prefer plain functions + small concrete structs + tight scope. C has NO templates, NO
+concepts, NO overloading -- for generic code use `_Generic` or macros.
 
-- **`constexpr` objects** for true compile-time constants (over `enum`/`static const`):
-  `constexpr double PI = 3.141592653589793;`, `constexpr size_t CAP = 256;`. Typed,
-  scoped, usable in constant expressions. (`constexpr` applies to objects only; there
-  are still no `constexpr` functions -- use `static inline`.)
-- **`static_assert`, `bool`/`true`/`false`, `nullptr` are now KEYWORDS.** Drop
-  `#include <stdbool.h>` and the `<assert.h>` `static_assert` macro. Use
-  `static_assert(sizeof(T) == 8, "ABI");` and `nullptr`/`nullptr_t` over `NULL`.
-- **`[[nodiscard]]` / `[[maybe_unused]]` / `[[fallthrough]]` / `[[deprecated]]` /
-  `[[noreturn]]`** standard attributes over `__attribute__((...))`. Put
-  `[[nodiscard]]` on any must-check return (allocators, parse/IO results).
-- **`typeof` / `typeof_unqual`** for type-generic locals and macros (drops GNU
-  `__typeof__`): `typeof(*p) tmp = *p;`. `typeof_unqual` strips `const`/`volatile`.
-- **`_BitInt(N)`** for exact-width integers when `<stdint.h>` widths don't fit
-  (e.g. `_BitInt(24)`, `unsigned _BitInt(3)`); otherwise keep `int32_t`/`uint64_t`/
-  `size_t`/`ptrdiff_t` from `<stdint.h>` for portable widths.
-- **`enum E : underlying_type { ... }`** to fix an enum's underlying type
-  (`enum Op : uint8_t { OP_ADD, OP_MUL };`) -- stable size, no int promotion surprises.
-- **`auto`** type inference for obvious local types (`auto it = find(...);`) -- keep
-  it for locals whose type is noise, not for public signatures.
-- **`unreachable()`** (from `<stddef.h>`) to mark truly impossible branches; pairs
-  with UBSan, which traps if one is actually reached.
-- **`#embed "data.bin"`** to inline binary/asset data instead of an `xxd`-generated array.
-- **Binary literals `0b1010`** for bitmasks/flags where hex is less readable.
+**This section is C17, not C23, because that is what the harness compiles with.** C23
+adds `constexpr` objects, `nullptr`, `typeof`, `_BitInt(N)`, `auto`, `unreachable()`,
+`#embed`, `enum E : uint8_t` and the `[[...]]` attribute syntax -- **none of them are
+available here**, and reaching for one gets you a compile error, not a nicer kernel.
+Check `hpcagent_bench/languages.py::std_flag("c")` before assuming otherwise; it is the
+single source of truth and this page follows it rather than restating a standard.
+
+The C17 spellings of the same intents:
+
+- **Compile-time constants**: `enum { CAP = 256 };` for integers (typed, scoped, usable
+  in array bounds and `case` labels) and `static const double PI = 3.14159...;` for
+  non-integers. A `static const` is not a constant expression in C, so it cannot size an
+  array at file scope -- that is the one place `enum` or a macro is still required.
+- **`static_assert`**: `_Static_assert(sizeof(T) == 8, "ABI");` is a C11 keyword and
+  needs no header; `#include <assert.h>` also gives the `static_assert` spelling.
+- **`bool` / `true` / `false`**: `#include <stdbool.h>`. They are macros here, not
+  keywords -- so do not `#undef` them and do not assume `sizeof(bool) == 1` in an ABI.
+- **Null pointer**: `NULL` from `<stddef.h>`. There is no `nullptr` / `nullptr_t`.
+- **Attributes**: `__attribute__((warn_unused_result))`, `((unused))`, `((noreturn))`,
+  `((fallthrough))` -- gcc and clang both take them, and `_Noreturn` is standard C11.
+  Put `warn_unused_result` on any must-check return (allocators, parse/IO results).
+- **Type-generic locals/macros**: GNU `__typeof__(*p) tmp = *p;`. Not portable C17, but
+  both compilers this repo uses accept it; say so where you rely on it.
+- **Exact widths**: `int32_t` / `uint64_t` / `size_t` / `ptrdiff_t` from `<stdint.h>` and
+  `<stddef.h>`. There is no `_BitInt(N)`, so a 24-bit field is a bitfield or manual
+  masking.
+- **Enums**: an enum's underlying type is implementation-defined and promotes to `int`.
+  If a fixed size matters (an ABI struct, a packed array), use an explicit `uint8_t` and
+  named `enum` constants, not the enum type itself.
+- **Impossible branches**: `__builtin_unreachable()`, or better, an `assert(0)` in debug
+  builds -- there is no standard `unreachable()`.
+- **Binary literals** `0b1010` are a GNU extension, not C17. Use hex.
 - **No silent implicit conversions -- cast EXPLICITLY.** C has no `static_cast`, so
   write every lossy / narrowing / sign-changing / int<->float conversion as a deliberate
   `(type)` cast so the intent (and the truncation) is visible at the call site. Watch
@@ -149,7 +156,7 @@ native features in preference to the old C11/C17 workarounds:
   at the source, never by silencing the warning. Keep casts rare and intentional; a
   cast you cannot justify is usually a type or design bug.
 
-Still-valid C guidance (unchanged by C23):
+The rest, which C23 would not have changed anyway:
 - **`const` and `restrict` correctness** -- `const` on non-written pointees; `restrict`
   on non-aliasing pointer params in hot paths (only when aliasing is truly impossible).
 - **Designated initializers** with `= {0}` zeroing the rest: never leave fields indeterminate.
@@ -175,5 +182,4 @@ Consulted 2026-08-04:
 - Clang UndefinedBehaviorSanitizer -- https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html
 - "A gentle introduction to static analyzers for C" (nrk) -- https://nrk.neocities.org/articles/c-static-analyzers
 - Chris Wellons / nullprogram, modern C practices -- https://nullprogram.com/blog/2023/10/08/
-- C23 language changes (canonical feature list) -- https://en.cppreference.com/w/c/23
-- C23 status / gcc & clang support -- https://gcc.gnu.org/c99status.html and https://clang.llvm.org/c_status.html
+- C17/C11 library and language reference -- https://en.cppreference.com/w/c

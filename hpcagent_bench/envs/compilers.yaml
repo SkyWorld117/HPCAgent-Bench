@@ -25,10 +25,10 @@ gcc:
   autopar_ref: GCC_AUTOPAR
   report_ref: GCC_OPT_REPORT
   warnings_ref: WARNINGS_BASIC
-  # Strict ISO C23 (no gnu extensions). The reference C kernels self-time with
+  # Strict ISO C17 (no gnu extensions). The reference C kernels self-time with
   # POSIX clock_gettime/struct timespec, so request POSIX the standard-compliant
   # way -- the _POSIX_C_SOURCE feature-test macro -- instead of the gnu dialect.
-  compile: ["{cc}", "{baseline}", "-std=c23", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c17", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
 # C++23 everywhere. Parity with dace's own codegen is kept by dace_framework.pin_cpp_standard,
@@ -72,7 +72,7 @@ clang:
   autopar_ref: POLLY_PAR
   report_ref: CLANG_OPT_REPORT
   warnings_ref: WARNINGS_BASIC
-  compile: ["{cc}", "{baseline}", "-std=c23", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c17", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
 # clang++ ships inside the same `clang` apt package -- the C++ leg of the LLVM
@@ -94,7 +94,7 @@ clangpp:
 #     C: rank>=2 arrays arrive as VLA parameters (`const double A[restrict NI][NK]`) -- neither
 #     variably-modified types nor the `restrict` KEYWORD exist in C++ -- and polycc prepends its
 #     own `#define min(x,y)`, which detonates inside libstdc++ (`max_size_type.h:800: too few
-#     arguments provided to function-like macro invocation`). Measured both ways: clang -std=c23
+#     arguments provided to function-like macro invocation`). Measured both ways: clang -std=c17
 #     compiles it clean, clang++ -std=c++23 does not compile it at all.
 # (2) CPU_BASELINE_CLANG_PLUTO, not CPU_BASELINE_CLANG -- identical except the OpenMP spelling,
 #     which here has to be one clang actually generates code for. See flags.PLUTO_PAR for the
@@ -111,7 +111,7 @@ clang-pluto:
   autopar_ref: null
   report_ref: CLANG_OPT_REPORT
   warnings_ref: WARNINGS_BASIC
-  compile: ["{cc}", "{baseline}", "-std=c23", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c17", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
 # LLVM Fortran. On recent LLVM (Ubuntu 26.04) the driver is `flang`; older
@@ -175,7 +175,7 @@ mpicc:
   install: {apt: libmpich-dev, spack: mpich}
   cc: mpicc.mpich
   baseline_ref: CPU_BASELINE_GCC
-  compile: ["{cc}", "{baseline}", "-std=c23", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c17", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "{objs}", "-o", "{exe}"]
   link_extra: ["-lm"]
 
