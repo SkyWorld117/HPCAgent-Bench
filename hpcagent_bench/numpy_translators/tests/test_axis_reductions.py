@@ -10,13 +10,23 @@ Each test parses the source AST, drives ``_expand_axis_reduction``
 through ``expand_sum`` (a thin wrapper that supplies the addition
 op_fn and 0.0 init), and inspects the resulting statement list for the
 expected loop structure -- iteration count and inner ``+=`` form.
+
+Section D covers the OPERAND side of the same reductions: an instance norm reduces over
+``np.expand_dims(np.expand_dims(z, 1), 1)``, whose newaxis rewrite used to leave a chained
+subscript no shape resolver could size.
 """
 
 import ast
+from typing import Dict
 
+import numpy as np
 import pytest
+from _op_oracle import run_op
 
+from numpyto_common.frontend import _AxisReshapeToIndexing
 from numpyto_common.lib_nodes import _read_axis_keepdims, expand_sum
+
+_ALL = ("c", "cpp", "fortran", "numba", "pythran", "jax")
 
 
 def _call_args(src: str):
@@ -167,3 +177,82 @@ def test_sum_axis_tuple_rejects_duplicates():
     args, kws = _call_args("np.sum(arr, axis=(1, 1))")
     with pytest.raises(NotImplementedError, match="duplicate"):
         expand_sum(_target("out"), args, {"arr": ("N", "M", "K")}, kws)
+
+
+# --------------------------------------------------------------------------- #
+# D. Reducing over an expand_dims / squeeze operand                           #
+# --------------------------------------------------------------------------- #
+
+
+def _reshape_to_index(src: str, ranks: Dict[str, int]) -> str:
+    tree = _AxisReshapeToIndexing(ranks).visit(ast.parse(src, mode="eval").body)
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+
+def test_nested_expand_dims_is_one_subscript():
+    """Two ``expand_dims`` merge into ONE newaxis subscript, not ``z[:, None, :][:, None, :, :]``.
+
+    The chain is what broke the reduction over it: ``_iter_extent_of`` sizes a subscript of a
+    NAME, so a subscript of a subscript came back unsized, the reduction operand was never
+    hoisted to a temp, and ``np.mean`` reached the emitter unlowered.
+    """
+    assert _reshape_to_index("np.expand_dims(np.expand_dims(z, axis=1), axis=1)", {"z": 2}) == "z[:, None, None, :]"
+
+
+def test_nested_squeeze_is_one_subscript():
+    """The undo side merges the same way: two ``squeeze`` calls index one subscript."""
+    assert _reshape_to_index("np.squeeze(np.squeeze(t, axis=1), axis=1)", {"t": 4}) == "t[:, 0, 0, :]"
+
+
+def test_expand_dims_of_a_partial_slice_is_left_chained():
+    """A partial slice keeps an offset an outer index would drop, so it is NOT merged."""
+    assert _reshape_to_index("np.expand_dims(a[1:3], axis=0)", {"a": 1}) == "a[1:3][None, :]"
+
+
+def test_mean_over_nested_expand_dims():
+    """``np.mean(np.expand_dims(np.expand_dims(z, 1), 1), axis=(2, 3), keepdims=True)`` --
+    the instance-norm operand shape, reduced over a tuple axis."""
+    z = np.linspace(-3.0, 5.0, 12).reshape(3, 4)
+    src = ("import numpy as np\n"
+           "def f(z, out):\n"
+           "    t = np.expand_dims(np.expand_dims(z, axis=1), axis=1)\n"
+           "    m = np.mean(t, axis=(2, 3), keepdims=True)\n"
+           "    out[:] = np.squeeze(np.squeeze(m, axis=1), axis=1)\n")
+    res = run_op(src,
+                 "f", {"z": z}, {"out": (3, 1)}, {
+                     "NB": 3,
+                     "NC": 4
+                 },
+                 shapes={
+                     "z": "(NB, NC)",
+                     "out": "(NB, 1)"
+                 },
+                 backends=_ALL)
+    assert all(v == "ok" or v.startswith("skip") for v in res.values()), res
+
+
+def test_instance_norm_over_expanded_operand():
+    """The whole idiom the ML corpus writes: mean + var over the expanded axes, then squeeze back.
+
+    ``np.var`` shares the reduction operand path with ``np.mean``, and the division by the
+    reduction count is what makes a wrong count show up as a wrong value rather than a wrong shape.
+    """
+    z = np.linspace(-2.0, 6.0, 12).reshape(3, 4)
+    src = ("import numpy as np\n"
+           "def f(z, out):\n"
+           "    t = np.expand_dims(np.expand_dims(z, axis=1), axis=1)\n"
+           "    m = np.mean(t, axis=(2, 3), keepdims=True)\n"
+           "    v = np.var(t, axis=(2, 3), keepdims=True)\n"
+           "    n = (t - m) / np.sqrt(v + 1e-05)\n"
+           "    out[:] = np.squeeze(np.squeeze(n, axis=1), axis=1)\n")
+    res = run_op(src,
+                 "f", {"z": z}, {"out": (3, 4)}, {
+                     "NB": 3,
+                     "NC": 4
+                 },
+                 shapes={
+                     "z": "(NB, NC)",
+                     "out": "(NB, NC)"
+                 },
+                 backends=_ALL)
+    assert all(v == "ok" or v.startswith("skip") for v in res.values()), res

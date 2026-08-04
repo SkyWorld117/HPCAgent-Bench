@@ -35,10 +35,10 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 from numpyto_common import dtypes
 
 from numpyto_common.ir import ArrayDesc, KernelIR, ScalarDesc, SparseArrayDesc, SymbolDesc
-from numpyto_common.lib_nodes import _iter_extent_of, _read_axis_keepdims
+from numpyto_common.lib_nodes import (_const_int, _is_full_slice_elt, _iter_extent_of, _read_axis_keepdims, _slice_axes)
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
-                                          _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive,
+                                          _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS, _eigh_alias_names,
                                           expr_rank, rank_table, rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
@@ -114,12 +114,12 @@ class _AxisReshapeToIndexing(ast.NodeTransformer):
             return node
         if name == "expand_dims":
             axis = axes[0] % (rank + 1)
-            index = ", ".join(["None" if d == axis else ":" for d in range(rank + 1)])
-            return self._rewrite(f"({ast.unparse(node.args[0])})[{index}]", node)
+            return self._index(node.args[0],
+                               [ast.Constant(value=None) if d == axis else ast.Slice() for d in range(rank + 1)], node)
         if name == "squeeze":
             axis = axes[0] % rank
-            index = ", ".join(["0" if d == axis else ":" for d in range(rank)])
-            return self._rewrite(f"({ast.unparse(node.args[0])})[{index}]", node)
+            return self._index(node.args[0], [ast.Constant(value=0) if d == axis else ast.Slice() for d in range(rank)],
+                               node)
         i, j = (a % rank for a in axes[:2])
         perm = list(range(rank))
         perm[i], perm[j] = perm[j], perm[i]
@@ -164,6 +164,61 @@ class _AxisReshapeToIndexing(ast.NodeTransformer):
             else:
                 return None
         return out or None
+
+    def _index(self, operand: ast.expr, entries: List[ast.expr], node: ast.Call) -> ast.AST:
+        """``operand[entries]``, merged into the operand's OWN index list when that is a basic one.
+
+        Nested ``expand_dims`` / ``squeeze`` -- every instance-norm port reduces over
+        ``np.expand_dims(np.expand_dims(z, 1), 1)`` -- otherwise builds the CHAIN
+        ``z[:, None, :][:, None, :, :]``, and no shape resolver reads the extent of a subscript
+        whose base is itself sliced. The reduction over it is then never sized, never hoisted to a
+        temp, and reaches the emitter as an unlowered ``np.mean``.
+        """
+        merged = self._merge_index(operand, entries)
+        subscript = ast.Subscript(value=operand if merged is None else operand.value,
+                                  slice=self._slot(entries if merged is None else merged),
+                                  ctx=ast.Load())
+        return ast.fix_missing_locations(ast.copy_location(subscript, node))
+
+    def _merge_index(self, operand: ast.expr, entries: List[ast.expr]) -> Optional[List[ast.expr]]:
+        """``entries`` applied to ``operand``'s own index list, or ``None`` when they cannot merge.
+
+        numpy basic indexing associates: an outer entry lands on the axis the inner subscript left
+        (a scalar entry consumes its source axis and leaves none), and an outer newaxis inserts a
+        fresh size-1 axis ahead of the axis it precedes. Only full slices, newaxes and int entries
+        qualify -- a PARTIAL slice carries an offset an outer scalar index would drop
+        (``a[2:5][0]`` is ``a[2]``, not ``a[0]``), and an Ellipsis or an index ARRAY does not map
+        one entry to one axis. ``entries`` is this pass's own list, so it holds ``:`` / ``None`` /
+        ``0`` and nothing else.
+        """
+        if not isinstance(operand, ast.Subscript):
+            return None
+        inner = _slice_axes(operand)
+        if not all(_is_full_slice_elt(e) or _is_newaxis(e) or _const_int(e) is not None for e in inner):
+            return None
+        if sum(1 for e in inner if _const_int(e) is None) != sum(1 for e in entries if not _is_newaxis(e)):
+            return None  # the inner leaves source axes unspelled, so the positions do not line up
+        merged: List[ast.expr] = []
+        pos = 0
+        for axis in inner:
+            if _const_int(axis) is not None:
+                merged.append(axis)
+                continue
+            while _is_newaxis(entries[pos]):
+                merged.append(entries[pos])
+                pos += 1
+            outer = entries[pos]
+            pos += 1
+            if _is_full_slice_elt(outer):
+                merged.append(axis)
+            elif not _is_newaxis(axis):
+                merged.append(outer)  # ``x[None][0]`` drops the inserted axis instead
+        merged.extend(entries[pos:])
+        return merged
+
+    @staticmethod
+    def _slot(entries: List[ast.expr]) -> ast.expr:
+        return entries[0] if len(entries) == 1 else ast.Tuple(elts=entries, ctx=ast.Load())
 
     def _rewrite(self, source: str, node: ast.Call) -> ast.AST:
         return ast.copy_location(ast.parse(source, mode="eval").body, node)
