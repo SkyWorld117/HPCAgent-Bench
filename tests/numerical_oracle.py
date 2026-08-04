@@ -178,9 +178,11 @@ PLUTO = "pluto"
 _PLUTO_EXTRA_FLAGS = ["-D_POSIX_C_SOURCE=199309L", "-fopenmp"]
 
 #: ISO standard-algorithm C++ backend: the same kernel emitted over ``<algorithm>``/``<numeric>``
-#: (see :func:`_run_isopar`). Opt-in via ``only_backends`` like :data:`PLUTO`, and compiled with the
-#: plain ``cpp`` line -- no execution policy is emitted, so it needs no extra flag or library.
+#: with ``std::execution::par_unseq`` (see :func:`_run_isopar`). Opt-in via ``only_backends`` like
+#: :data:`PLUTO`. Built with the plain ``cpp`` line plus whatever the host's parallel-algorithm
+#: backend needs to LINK -- which is nothing at all when that backend is the serial one.
 ISOPAR = "cpp_isopar"
+_ISOPAR_LINK = list(languages.stdpar_link_flags("cpp"))
 
 
 def _all_backend_status(reason: str) -> Dict[str, str]:
@@ -1133,10 +1135,10 @@ def _run_pluto(tdp, short, fptype, binding, by, syms, expected, compare, rtol, a
 
 
 def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected, compare, rtol, atol) -> str:
-    """ISO standard-algorithm backend: emit ``<base>_isopar.cpp``, compile it as ordinary C++20, and
+    """ISO standard-algorithm backend: emit ``<base>_isopar.cpp``, compile it as ordinary C++, and
     call it through the SAME binding as ``cpp`` -- the variant keeps the symbol and the ABI, only the
-    body's spelling changes. A reassociating ``std::reduce`` is why this is graded on the same
-    tolerance as every other backend rather than bit-exactly against ``cpp``."""
+    body's spelling changes. ``par_unseq`` licenses reassociation, which is why this is graded on the
+    same tolerance as every other backend rather than bit-exactly against ``cpp``."""
     ok, diag = _emit(short, info, tdp, precision=emit_prec, mods=("numpyto_c.cli", ), extra=("--isopar", ))
     if not ok:
         return "FAIL:emit" + diag
@@ -1145,7 +1147,7 @@ def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected
         return "FAIL:no-source"
     so = tdp / f"lib{short}_isopar.so"
     try:
-        c = subprocess.run(COMPILE["cpp"] + [str(matches[0]), "-o", str(so)],
+        c = subprocess.run(COMPILE["cpp"] + [str(matches[0]), "-o", str(so)] + _ISOPAR_LINK,
                            capture_output=True,
                            text=True,
                            timeout=_cfg("compile_timeout_s", short))

@@ -194,8 +194,9 @@ def run_op(src: str,
                     status[b] = "skip:no-compiler"
                     continue
                 so = tdp / f"lib{base}_{b}.so"
+                link = _no._ISOPAR_LINK if b == _no.ISOPAR else []
                 cc = subprocess.run(_no.COMPILE["cpp" if b == _no.ISOPAR else b] +
-                                    [str(tdp / f"{base}{ext[b]}"), "-o", str(so)],
+                                    [str(tdp / f"{base}{ext[b]}"), "-o", str(so)] + link,
                                     capture_output=True,
                                     text=True)
                 if cc.returncode:

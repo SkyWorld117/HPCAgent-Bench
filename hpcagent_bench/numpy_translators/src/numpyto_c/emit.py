@@ -149,6 +149,31 @@ _BOOLOP = operators.BOOLOP["c"]
 
 # --- cpp_isopar: loop shapes that have a faithful <algorithm> / <numeric> spelling ---
 
+#: The execution policy every converted call carries. ``par_unseq`` is the strongest one: element
+#: access functions may run on another thread AND be interleaved (vectorized) with each other on
+#: one thread. That permission is what makes this backend the C++ analogue of a Fortran array
+#: intrinsic rather than a restatement of the loop -- an unpolicied algorithm is specified as
+#: sequential, so it licenses nothing the loop did not already license.
+#:
+#: Its preconditions are real and every shape converted here is gated on them: the emitted callable
+#: must not allocate, lock, synchronize, throw, or depend on another element. See
+#: :meth:`_CBodyEmitter._isopar_lambda` for the one case that is refused (a call into a kernel
+#: helper, whose body may ``malloc``), and the per-shape reasoning in :func:`emit_cpp_isopar`.
+_ISOPAR_POLICY = "std::execution::par_unseq"
+
+#: The policy for ``inclusive_scan`` ALONE, and not for want of preconditions -- the scan meets them.
+#: libstdc++'s PARALLEL scan pattern is wrong for any combine whose identity is not zero: it seeds a
+#: block with a value-initialized element instead of the init, so a prefix PRODUCT comes back all
+#: zeros. Measured on g++ 15.2 across sizes 6 .. 262144 and both float and double: ``seq`` and
+#: ``unseq`` give the loop's answer, ``par`` and ``par_unseq`` give zeros. (``plus`` survives only
+#: because zero happens to be its identity, which is not a property to emit code against.)
+#:
+#: ``unseq`` is not a fallback to sequential-and-nothing: it still licenses vectorization -- the
+#: interleaving a SIMD scan uses -- and it reaches the same serial-recurrence pattern the plain loop
+#: does, so it is correct by construction rather than by luck. Threads are what is given up, on the
+#: one shape whose parallel form this toolchain implements incorrectly.
+_ISOPAR_SCAN_POLICY = "std::execution::unseq"
+
 
 class _IsoparRef(NamedTuple):
     """One contiguous element range a converted loop reads or writes.
@@ -506,9 +531,22 @@ class _CBodyEmitter(BaseEmitter):
         test = f"({hi}) > 0" if lo == "0" else f"({hi}) > ({lo})"
         return f"{indent}const {_c_type('int')} {name} = {test} ? {span} : 0;", name
 
-    def _isopar_lambda(self, expr: ast.AST, by_id: Dict[int, str], param_dtypes: Dict[str, str], cast_to: str) -> str:
+    def _isopar_lambda(self, expr: ast.AST, by_id: Dict[int, str], param_dtypes: Dict[str, str],
+                       cast_to: str) -> Optional[str]:
         """The element-wise callable for ``expr``: its element reads become parameters, and the
-        result is cast to the type the loop's assignment would have converted it to anyway."""
+        result is cast to the type the loop's assignment would have converted it to anyway.
+
+        None when the body calls a kernel HELPER. A helper is emitted from the same IR as the kernel
+        and may therefore ``malloc`` a local array; allocating inside an element access function is
+        exactly what ``par_unseq`` forbids. Everything else that can appear here -- arithmetic, the
+        prelude's ``max`` / ``int_floor`` / ``python_mod`` templates, libm -- is pure, non-throwing
+        and lock-free.
+        """
+        helpers = {h.kernel_name for h in self.kir.helpers}
+        if helpers and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in helpers
+                for c in ast.walk(expr)):
+            return None
         new = _ElementSubst(by_id).visit(expr)
         self.isopar_param_dtypes = param_dtypes
         try:
@@ -568,16 +606,21 @@ class _CBodyEmitter(BaseEmitter):
         decl, count = self._isopar_count(indent, lo, hi)
         dst_ct = _c_type(dst.dtype)
         if not distinct:
+            # The value is evaluated ONCE, at the call site, and bound to a temporary: it is not an
+            # element access function, so a helper call in it is still fine under par_unseq.
             value = self.emit_expr(rhs)  # loop-invariant right-hand side
-            return f"{decl}\n{indent}std::fill({dst.ptr}, {dst.ptr} + {count}, static_cast<{dst_ct}>({value}));"
+            return (f"{decl}\n{indent}std::fill({_ISOPAR_POLICY}, {dst.ptr}, {dst.ptr} + {count}, "
+                    f"static_cast<{dst_ct}>({value}));")
         src = distinct[0]
         if (len(distinct) == 1 and isinstance(rhs, ast.Subscript) and src.name != dst.name
                 and _c_type(src.dtype) == dst_ct):
-            return f"{decl}\n{indent}std::copy({src.ptr}, {src.ptr} + {count}, {dst.ptr});"
+            return f"{decl}\n{indent}std::copy({_ISOPAR_POLICY}, {src.ptr}, {src.ptr} + {count}, {dst.ptr});"
         by_id, param_dtypes = self._isopar_params(found, distinct)
         lam = self._isopar_lambda(rhs, by_id, param_dtypes, dst_ct)
+        if lam is None:
+            return None
         second = f", {distinct[1].ptr}" if len(distinct) == 2 else ""
-        return (f"{decl}\n{indent}std::transform({src.ptr}, {src.ptr} + {count}{second}, "
+        return (f"{decl}\n{indent}std::transform({_ISOPAR_POLICY}, {src.ptr}, {src.ptr} + {count}{second}, "
                 f"{dst.ptr}, {lam});")
 
     def _isopar_scan(self, dst: _IsoparRef, rhs: ast.AST, found, indent: str, lo: str, hi: str) -> Optional[str]:
@@ -600,9 +643,13 @@ class _CBodyEmitter(BaseEmitter):
             combine = "std::plus" if isinstance(rhs.op, ast.Add) else "std::multiplies"
             decl, count = self._isopar_count(indent, lo, hi)
             # Guarded: the init reads the element before the range, which an empty range never has.
+            # That element is OUTSIDE the written range and is passed by value, so the algorithm's
+            # writes cannot race it; the carried dependence itself is the algorithm's, and
+            # inclusive_scan is specified over any association of the combine (unlike partial_sum).
+            # The weaker policy here is a toolchain bug, not a precondition -- see _ISOPAR_SCAN_POLICY.
             return (f"{decl}\n{indent}if ({count} > 0) {{\n"
-                    f"{indent}  std::inclusive_scan({src.ptr}, {src.ptr} + {count}, {dst.ptr}, "
-                    f"{combine}<{_c_type(dst.dtype)}>{{}}, {dst.prev});\n"
+                    f"{indent}  std::inclusive_scan({_ISOPAR_SCAN_POLICY}, {src.ptr}, {src.ptr} + {count}, "
+                    f"{dst.ptr}, {combine}<{_c_type(dst.dtype)}>{{}}, {dst.prev});\n"
                     f"{indent}}}")
         return None
 
@@ -632,21 +679,28 @@ class _CBodyEmitter(BaseEmitter):
             "*": f"std::multiplies<{acc_ct}>{{}}",
         }.get(op, f"[]({acc_ct} __a, {acc_ct} __b) {{ return {op}(__a, __b); }}")
         uniform = all(_c_type(r.dtype) == acc_ct for r in distinct)
+        # The accumulator is read ONCE here, as the by-value init, and written ONCE when the call
+        # returns -- the algorithm never touches it, and the swept ranges are refused above if they
+        # live in its array. So a cell accumulator (``out[0] = out[0] + ...``) is as safe as a
+        # scalar one: there is no shared accumulator during the call to race on.
         # The element is accumulated as-is: no transform needed, and no conversion to spell.
         if uniform and len(distinct) == 1 and isinstance(other, ast.Subscript):
             extra = "" if op == "+" else f", {binary}"
-            return f"{decl}\n{indent}{acc_lvalue} = std::reduce({first}, {last}, {acc_lvalue}{extra});"
+            return (f"{decl}\n{indent}{acc_lvalue} = std::reduce({_ISOPAR_POLICY}, {first}, {last}, "
+                    f"{acc_lvalue}{extra});")
         # ``acc + a[i]*b[i]``: transform_reduce's default multiplies/plus IS this expression.
         if (uniform and len(distinct) == 2 and op == "+" and isinstance(other, ast.BinOp)
                 and isinstance(other.op, ast.Mult)
                 and {id(other.left), id(other.right)} == {id(found[0][0]), id(found[1][0])}):
-            return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({first}, {last}, "
+            return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({_ISOPAR_POLICY}, {first}, {last}, "
                     f"{distinct[1].ptr}, {acc_lvalue});")
         by_id, param_dtypes = self._isopar_params(found, distinct)
         lam = self._isopar_lambda(other, by_id, param_dtypes, acc_ct)
+        if lam is None:
+            return None
         second = f"{distinct[1].ptr}, " if len(distinct) == 2 else ""
-        return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({first}, {last}, {second}"
-                f"{acc_lvalue}, {binary}, {lam});")
+        return (f"{decl}\n{indent}{acc_lvalue} = std::transform_reduce({_ISOPAR_POLICY}, {first}, {last}, "
+                f"{second}{acc_lvalue}, {binary}, {lam});")
 
     def _emit_while(self, node: ast.While, indent: str) -> str:
         body = self.emit_block(node.body, indent + "  ")
@@ -2024,8 +2078,14 @@ _CPP_FOOTER = '} // extern "C"\n'
 #: cpp_isopar prologue. The library headers come FIRST, ahead of the ``max`` / ``min`` function
 #: templates below them: a same-named declaration visible while libstdc++ is being parsed is what
 #: detonates inside <algorithm> (the polycc ``#define min`` failure, one step milder).
-_CPP_ISOPAR_HEADER = ('#include <algorithm>\n#include <numeric>\n#include <functional>\n' + _CPP_ARITH +
-                      '\nextern "C" {\n')
+#:
+#: <execution> needs no compile flag. libstdc++ picks its parallel backend per translation unit --
+#: ``_GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)`` in <bits/c++config.h> -- so with TBB
+#: installed the policies dispatch to it (and the LINK then needs it; see
+#: languages.stdpar_link_flags), and without it they degrade to the serial backend and link against
+#: nothing. Either way the source says the same thing.
+_CPP_ISOPAR_HEADER = ('#include <algorithm>\n#include <execution>\n#include <numeric>\n#include <functional>\n' +
+                      _CPP_ARITH + '\nextern "C" {\n')
 
 # Timing is owned by the harness bracket externally (abi_contract.md Sec. 6); the kernel neither self-times nor
 # takes a timer arg.
@@ -2216,12 +2276,34 @@ def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
 
 
 def emit_cpp_isopar(kir: KernelIR, fn_name: Optional[str] = None) -> str:
-    """C++20 that states the kernel's STRUCTURE through <algorithm> / <numeric> instead of raw loops,
+    """C++ that states the kernel's STRUCTURE through <algorithm> / <numeric> instead of raw loops,
     the way Fortran array intrinsics and ``do concurrent`` do; same symbol as :func:`emit_cpp`.
 
-    No execution policy is emitted, deliberately. ISO specifies an unpolicied algorithm as sequential,
-    so this buys no guaranteed parallelism -- what it buys is a source that says "map" / "reduce" /
-    "scan" instead of "here is one schedule of it", and leaves the choice to the toolchain.
+    Every converted call carries :data:`_ISOPAR_POLICY` (``par_unseq``), so the implementation is
+    PERMITTED to thread and to vectorize it. An unpolicied algorithm is specified as sequential and
+    would license nothing the loop did not already license.
+
+    ``par_unseq``'s preconditions hold per shape:
+
+    * **transform / fill / copy** -- one element in, one element out, no cross-element read. The
+      destination range is either disjoint from every source range or EXACTLY equal to one (the
+      in-place map), which [alg.transform] allows; a shifted self-read is refused as a recurrence,
+      and an invariant read of the destination array is refused outright, so no callable ever
+      observes an element the same call writes.
+    * **reduce / transform_reduce** -- the accumulator is read once (by-value init) before the call
+      and written once after it, so it is not shared state during the call. That holds whether it is
+      a scalar or a fixed array cell, and a sweep whose range lives in the accumulator's own array
+      is refused.
+    * **inclusive_scan** -- the carried dependence belongs to the algorithm, not to the callable:
+      inclusive_scan is specified over any association of an associative combine (which is why it,
+      and not ``partial_sum``, is what a parallel prefix uses). Source and destination are always
+      different arrays here, and the init is the element BEFORE the output range, passed by value.
+      It nonetheless carries the WEAKER :data:`_ISOPAR_SCAN_POLICY`, because libstdc++'s parallel
+      scan computes the wrong answer for a non-``plus`` combine -- a measured toolchain defect, not
+      a precondition this backend fails to meet.
+    * the callable itself never allocates, locks, synchronizes or throws -- it is arithmetic over
+      by-value parameters plus loop-invariant reads. The one exception, a call into a kernel helper
+      (which may ``malloc``), is refused in :meth:`_CBodyEmitter._isopar_lambda`.
 
     A loop with no faithful algorithm spelling stays a loop, so this is always a superset-correct
     variant of :func:`emit_cpp` rather than a partial backend; a kernel where nothing converts emits

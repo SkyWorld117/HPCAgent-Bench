@@ -363,6 +363,56 @@ def std_flag(lang: str) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=None, typed=True)
+def _stdpar_backend_is_tbb(cc: str) -> bool:
+    """Does ``cc``'s standard library implement the ``<execution>`` policies over TBB?
+
+    Asked, not assumed, and asked the way libstdc++ itself asks it -- ``__has_include(<tbb/tbb.h>)``
+    in ``<bits/c++config.h>`` -- because the answer is a HOST property that flips the link
+    requirement in both directions: with TBB present, omitting its library is an undefined-symbol
+    link failure; with TBB absent, adding it is a ``cannot find -ltbb`` link failure. A compiler we
+    cannot run at all answers False, the choice that links.
+    """
+    probe = "#if __has_include(<tbb/tbb.h>)\n__NPB_STDPAR_TBB__\n#endif\n"
+    try:
+        r = subprocess.run([cc, "-x", "c++", "-E", "-"],
+                           input=probe,
+                           capture_output=True,
+                           text=True,
+                           timeout=_STDPAR_PROBE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and "__NPB_STDPAR_TBB__" in r.stdout
+
+
+#: Seconds allowed for the one-shot ``__has_include`` preprocess above (cached per compiler).
+_STDPAR_PROBE_TIMEOUT_S = 30
+
+
+def stdpar_link_flags(lang: str) -> Tuple[str, ...]:
+    """Extra LINK arguments a source using ``<execution>`` policies needs on this host.
+
+    ``()`` unless the block declares a ``stdpar_link_ref`` AND this toolchain's parallel-algorithm
+    backend really is the one it names. Only the ISO-algorithm emit (``numpyto --target
+    cpp_isopar``) links with these; a plain C++ build is unaffected, which is why they live in
+    their own key instead of the block's ``link:`` line.
+
+    Nothing is needed at compile time: ``<execution>`` and the policy overloads are always
+    available, and when the backend is absent the policies degrade to the serial implementation --
+    slower than promised, never wrong, and never a link error.
+    """
+    _cname, block = _compiler_for_lang(_load_compilers(), lang)
+    ref = block.get("stdpar_link_ref")
+    if not ref:
+        return ()
+    flag_vars = vars(flags)
+    if ref not in flag_vars:
+        raise KeyError(f"stdpar_link_ref {ref!r} is not a constant in hpcagent_bench.flags")
+    if not _stdpar_backend_is_tbb(block["cc"]):
+        return ()
+    return tuple(shlex.split(flag_vars[ref]))
+
+
 def report_flags(lang: str, *, compiler: Optional[str] = None) -> str:
     """The optimization-report flags for ``lang`` (or an explicit ``compiler`` block).
 

@@ -7,8 +7,10 @@ recurrence as ``std::inclusive_scan``, a constant store as ``std::fill``, a plai
 ``std::copy``. The source then states the kernel's STRUCTURE and leaves the schedule to the
 toolchain, the way Fortran array intrinsics and ``do concurrent`` do.
 
-No execution policy is emitted, deliberately: ISO specifies an unpolicied algorithm as sequential,
-so this backend buys structure, not threads.
+Every converted call carries an execution policy -- ``par_unseq`` everywhere except
+``inclusive_scan``, which carries ``unseq`` because libstdc++'s PARALLEL scan miscomputes any
+combine whose identity is not zero (see ``_ISOPAR_SCAN_POLICY``). Without a policy at all, ISO
+specifies the algorithm as sequential and the emitted source would license nothing the loop did not.
 
 Two halves, both on real output:
 
@@ -124,16 +126,51 @@ def test_library_headers_precede_the_arithmetic_prelude():
     """<algorithm> must be parsed BEFORE the prelude's ``max``/``min`` templates are declared: a
     same-named global visible while libstdc++ is being parsed is what detonates inside it."""
     text = _emit("    for i in range(N):\n        out[i] = a[i] + b[i]\n")
-    for header in ("<algorithm>", "<numeric>", "<functional>"):
+    for header in ("<algorithm>", "<execution>", "<numeric>", "<functional>"):
         assert text.index(f"#include {header}") < text.index("constexpr auto max("), header
 
 
-def test_no_execution_policy_anywhere():
-    """The backend states structure and leaves the schedule to the toolchain -- it never asks for
-    threads, so no policy and no <execution> may appear."""
+#: Map / reduce shapes: the strongest policy, on every call.
+_PAR_UNSEQ_BODIES = [
+    "    for i in range(N):\n        out[i] = a[i] + b[i]\n",
+    "    for i in range(N):\n        out[i] = a[i]\n",
+    "    for i in range(N):\n        out[i] = 1.0\n",
+    "    s = 0.0\n    for i in range(N):\n        s = s + a[i]\n    out[0] = s\n",
+    "    s = 0.0\n    for i in range(N):\n        s = s + a[i] * b[i]\n    out[0] = s\n",
+    "    s = 0.0\n    for i in range(N):\n        s = s + np.abs(a[i])\n    out[0] = s\n",
+]
+
+
+@pytest.mark.parametrize("body", _PAR_UNSEQ_BODIES, ids=range(len(_PAR_UNSEQ_BODIES)))
+def test_map_and_reduce_calls_carry_par_unseq(body):
+    """The policy is the point. Without one, ISO specifies the algorithm as sequential and the
+    emitted source licenses nothing the loop did not already license; ``par_unseq`` is what permits
+    both threading and vectorization, which is what makes this the analogue of an array intrinsic."""
+    text = _body(_emit(body))
+    calls = _calls(text)
+    assert calls, body
+    assert text.count("std::execution::par_unseq, ") == len(calls), (calls, text)
+    for weaker in ("std::execution::par,", "std::execution::seq", "std::execution::unseq"):
+        assert weaker not in text, (weaker, body)
+
+
+def test_scan_carries_unseq_because_the_parallel_scan_is_wrong_here():
+    """libstdc++'s parallel scan seeds a block with a value-initialized element instead of the init,
+    so a prefix PRODUCT under ``par``/``par_unseq`` comes back all zeros -- measured on g++ 15.2 at
+    every size, both float and double. ``unseq`` reaches the same serial recurrence the loop does
+    (still vectorizable), so it is correct by construction rather than by the accident that zero is
+    ``plus``'s identity. Both scan combines take it, so the emitter never depends on that accident."""
+    for body in ("    for i in range(1, N):\n        out[i] = out[i - 1] + a[i]\n",
+                 "    for i in range(1, N):\n        out[i] = out[i - 1] * a[i]\n"):
+        text = _body(_emit(body))
+        assert _calls(text) == ["std::inclusive_scan("], text
+        assert "std::inclusive_scan(std::execution::unseq, " in text, text
+        assert "par_unseq" not in text, text
+
+
+def test_execution_header_precedes_the_arithmetic_prelude():
     text = _emit("    for i in range(N):\n        out[i] = a[i] + b[i]\n")
-    for token in ("std::execution", "<execution>", "par_unseq", "seq)"):
-        assert token not in text, token
+    assert text.index("#include <execution>") < text.index("constexpr auto max(")
 
 
 def test_never_std_accumulate():
@@ -149,7 +186,7 @@ def test_never_std_accumulate():
 
 def test_binary_elementwise_map_is_one_transform():
     text = _body(_emit("    for i in range(N):\n        out[i] = a[i] + b[i]\n"))
-    assert ("std::transform(a, a + __n0, b, out, "
+    assert ("std::transform(std::execution::par_unseq, a, a + __n0, b, out, "
             "[](double __v0, double __v1) { return static_cast<double>((__v0 + __v1)); });") in text
     assert _calls(text) == ["std::transform("]
 
@@ -158,23 +195,23 @@ def test_in_place_map_reuses_the_destination_range():
     """``out[i] = out[i] + b[i]``: std::transform explicitly allows result == first1, and the ranges
     here are exactly equal -- not merely overlapping."""
     text = _body(_emit("    for i in range(N):\n        out[i] = out[i] + b[i]\n", args="b, out"))
-    assert "std::transform(out, out + __n0, b, out, [](double __v0, double __v1)" in text
+    assert "std::transform(std::execution::par_unseq, out, out + __n0, b, out, [](double __v0, double __v1)" in text
 
 
 def test_unary_map_carries_the_call_into_the_lambda():
     text = _body(_emit("    for i in range(N):\n        out[i] = np.sqrt(a[i]) * 2.0\n"))
-    assert "std::transform(a, a + __n0, out, [](double __v0) { return static_cast<double>((sqrt(__v0) * 2.0)); });" \
+    assert "std::transform(std::execution::par_unseq, a, a + __n0, out, [](double __v0) { return static_cast<double>((sqrt(__v0) * 2.0)); });" \
         in text
 
 
 def test_plain_move_is_a_copy_not_a_transform():
     text = _body(_emit("    for i in range(N):\n        out[i] = a[i]\n"))
-    assert "std::copy(a, a + __n0, out);" in text
+    assert "std::copy(std::execution::par_unseq, a, a + __n0, out);" in text
 
 
 def test_constant_store_is_a_fill_with_an_explicit_cast():
     text = _body(_emit("    for i in range(N):\n        out[i] = 0.0\n"))
-    assert "std::fill(out, out + __n0, static_cast<double>(0.0));" in text
+    assert "std::fill(std::execution::par_unseq, out, out + __n0, static_cast<double>(0.0));" in text
 
 
 def test_shifted_read_shifts_the_input_range():
@@ -182,7 +219,7 @@ def test_shifted_read_shifts_the_input_range():
     destination is a DIFFERENT array, so the ranges cannot overlap."""
     text = _body(_emit("    for i in range(1, N):\n        out[i] = a[i - 1] + b[i]\n"))
     assert "const int64_t __n0 = (N) > (1) ? (N) - (1) : 0;" in text
-    assert "std::transform(a + ((1) - 1), a + ((1) - 1) + __n0, b + ((1)), out + ((1))," in text
+    assert "std::transform(std::execution::par_unseq, a + ((1) - 1), a + ((1) - 1) + __n0, b + ((1)), out + ((1))," in text
 
 
 def test_invariant_read_of_the_destination_stays_a_loop():
@@ -195,7 +232,7 @@ def test_invariant_operand_is_captured_not_parameterised():
     """A loop-invariant read stays inline in the lambda body, which then captures; only the element
     reads become parameters."""
     text = _body(_emit("    for i in range(N):\n        out[i] = a[i] * b[0]\n"))
-    assert "std::transform(a, a + __n0, out, [&](double __v0) { return static_cast<double>((__v0 * b[0])); });" in text
+    assert "std::transform(std::execution::par_unseq, a, a + __n0, out, [&](double __v0) { return static_cast<double>((__v0 * b[0])); });" in text
 
 
 def test_trip_count_is_clamped_so_an_empty_range_is_never_inverted():
@@ -216,7 +253,7 @@ def test_row_of_a_2d_array_converts_on_the_contiguous_axis():
                   "out": "(N, N)"
               }))
     assert "for (int64_t i = 0; i < N; ++i) {" in text
-    assert "std::transform(a + ((i)*(N) + (0)), a + ((i)*(N) + (0)) + __n0, out + ((i)*(N) + (0))," in text
+    assert "std::transform(std::execution::par_unseq, a + ((i)*(N) + (0)), a + ((i)*(N) + (0)) + __n0, out + ((i)*(N) + (0))," in text
 
 
 def test_two_reads_on_different_outer_rows_are_two_ranges():
@@ -233,7 +270,7 @@ def test_two_reads_on_different_outer_rows_are_two_ranges():
                 "a": "(N, N)",
                 "out": "(N, N)"
             }))
-    assert "std::transform(a + (((2 * i))*(N) + (0)), a + (((2 * i))*(N) + (0)) + __n0, " \
+    assert "std::transform(std::execution::par_unseq, a + (((2 * i))*(N) + (0)), a + (((2 * i))*(N) + (0)) + __n0, " \
            "a + ((((2 * i) + 1))*(N) + (0)), out + ((i)*(N) + (0)), " \
            "[](double __v0, double __v1) { return static_cast<double>(((__v0 + __v1) * 0.5)); });" in text
 
@@ -257,36 +294,36 @@ def test_sum_reduction_is_std_reduce_seeded_with_the_live_accumulator():
     """The accumulator's current value is the init, so no pattern-match of the preceding
     ``s = 0.0`` is needed and a pre-seeded accumulator stays correct."""
     text = _body(_emit("    s = 0.0\n    for i in range(N):\n        s = s + a[i]\n    out[0] = s\n"))
-    assert "s = std::reduce(a, a + __n0, s);" in text
+    assert "s = std::reduce(std::execution::par_unseq, a, a + __n0, s);" in text
 
 
 def test_product_reduction_names_its_combine():
     text = _body(_emit("    s = 1.0\n    for i in range(N):\n        s = s * a[i]\n    out[0] = s\n"))
-    assert "s = std::reduce(a, a + __n0, s, std::multiplies<double>{});" in text
+    assert "s = std::reduce(std::execution::par_unseq, a, a + __n0, s, std::multiplies<double>{});" in text
 
 
 def test_max_reduction_uses_the_nan_propagating_combine():
     """numpy's maximum propagates NaN, and so does the prelude's ``max`` -- which makes it
     commutative and associative, hence a legal std::reduce combine."""
     text = _body(_emit("    s = a[0]\n    for i in range(N):\n        s = max(s, a[i])\n    out[0] = s\n"))
-    assert "s = std::reduce(a, a + __n0, s, [](double __a, double __b) { return max(__a, __b); });" in text
+    assert "s = std::reduce(std::execution::par_unseq, a, a + __n0, s, [](double __a, double __b) { return max(__a, __b); });" in text
 
 
 def test_dot_product_is_the_default_transform_reduce():
     text = _body(_emit("    s = 0.0\n    for i in range(N):\n        s = s + a[i] * b[i]\n    out[0] = s\n"))
-    assert "s = std::transform_reduce(a, a + __n0, b, s);" in text
+    assert "s = std::transform_reduce(std::execution::par_unseq, a, a + __n0, b, s);" in text
 
 
 def test_transformed_reduction_keeps_the_combine_in_the_accumulator_type():
     text = _body(_emit("    s = 0.0\n    for i in range(N):\n        s = s + a[i] * a[i]\n    out[0] = s\n"))
-    assert ("s = std::transform_reduce(a, a + __n0, s, std::plus<double>{}, "
+    assert ("s = std::transform_reduce(std::execution::par_unseq, a, a + __n0, s, std::plus<double>{}, "
             "[](double __v0) { return static_cast<double>((__v0 * __v0)); });") in text
 
 
 def test_reduction_into_an_output_cell_converts_too():
     """``out[0] = out[0] + ...`` is the same reduction with the accumulator living in a buffer."""
     text = _body(_emit("    for i in range(N):\n        out[0] = out[0] + a[i] * b[i]\n"))
-    assert "out[0] = std::transform_reduce(a, a + __n0, b, out[0]);" in text
+    assert "out[0] = std::transform_reduce(std::execution::par_unseq, a, a + __n0, b, out[0]);" in text
 
 
 def test_reduction_over_its_own_array_stays_a_loop():
@@ -306,7 +343,7 @@ def test_index_valued_body_stays_a_loop():
 
 def test_prefix_sum_is_an_inclusive_scan_seeded_from_the_preceding_element():
     text = _body(_emit("    for i in range(1, N):\n        out[i] = out[i - 1] + a[i]\n"))
-    assert ("std::inclusive_scan(a + ((1)), a + ((1)) + __n0, out + ((1)), "
+    assert ("std::inclusive_scan(std::execution::unseq, a + ((1)), a + ((1)) + __n0, out + ((1)), "
             "std::plus<double>{}, out[(1) - 1]);") in text
     # The init READS the element before the range, which an empty range does not have.
     assert "if (__n0 > 0) {" in text
@@ -314,7 +351,7 @@ def test_prefix_sum_is_an_inclusive_scan_seeded_from_the_preceding_element():
 
 def test_prefix_product_scans_under_multiplies():
     text = _body(_emit("    for i in range(1, N):\n        out[i] = out[i - 1] * a[i]\n"))
-    assert ("std::inclusive_scan(a + ((1)), a + ((1)) + __n0, out + ((1)), "
+    assert ("std::inclusive_scan(std::execution::unseq, a + ((1)), a + ((1)) + __n0, out + ((1)), "
             "std::multiplies<double>{}, out[(1) - 1]);") in text
 
 
@@ -327,7 +364,8 @@ def test_per_row_scan_of_a_2d_array_converts():
                 "a": "(N, N)",
                 "out": "(N, N)"
             }))
-    assert "std::inclusive_scan(a + ((i)*(N) + ((1))), a + ((i)*(N) + ((1))) + __n0, out + ((i)*(N) + ((1)))," in text
+    assert ("std::inclusive_scan(std::execution::unseq, a + ((i)*(N) + ((1))), "
+            "a + ((i)*(N) + ((1))) + __n0, out + ((i)*(N) + ((1))),") in text
     assert "std::plus<double>{}, out[(i)*(N) + ((1) - 1)]);" in text
 
 
@@ -410,6 +448,36 @@ def test_multi_statement_body_stays_a_loop():
 
 def test_conditional_body_stays_a_loop():
     assert _stayed_a_loop(_emit("    for i in range(N):\n        if a[i] > 0.0:\n            out[i] = a[i]\n"))
+
+
+def test_body_calling_a_kernel_helper_stays_a_loop():
+    """``par_unseq`` forbids allocation inside an element access function. A kernel HELPER is
+    emitted from the same IR as the kernel, so its body may ``malloc`` a local array -- which a
+    lambda calling it would then do once per element, on an unspecified thread. Refused."""
+    # The early return is what stops the frontend inlining it, so it survives as a real function.
+    src = ("import numpy as np\n\n\n"
+           "def scratch(v, N):\n"
+           "    if v < 0.0:\n"
+           "        return 0.0\n"
+           "    t = np.zeros((N,))\n"
+           "    for k in range(N):\n"
+           "        t[k] = v\n"
+           "    return t[N - 1]\n\n\n"
+           "def k(a, b, out, N):\n"
+           "    for i in range(N):\n"
+           "        out[i] = scratch(a[i], N)\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td)
+        (d / "k_numpy.py").write_text(src)
+        (d / "bi.json").write_text(json.dumps(_bench_info("k", ["a", "b"], ["out"], dict(_SHAPE_1D), _SYMS, None)))
+        kir = lower(parse_kernel(d / "k_numpy.py", d / "bi.json"))
+        text = emit_cpp_isopar(kir, fn_name="k")
+    # It really did survive as its own function, and it really does allocate.
+    assert "static double scratch(" in text and "malloc(" in text, text[-900:]
+    # So the loop that CALLS it stays a loop. (The helper's own body still converts -- a call
+    # there is an ordinary call site, not an element access function.)
+    kernel = text[text.index("void k("):]
+    assert not _calls(kernel), kernel
 
 
 def test_narrow_int_elements_stay_a_loop():
