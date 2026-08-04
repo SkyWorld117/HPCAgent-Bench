@@ -520,7 +520,7 @@ def parse_kernel(numpy_py: pathlib.Path,
         _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
                                                    runtime_args=input_args)).apply(target)
         # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only
-        # in the axis slot and a slice STEP, where nothing else can be emitted.
+        # in a slice STEP, the one structural slot with no runtime form.
         _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw,
                                                   keep_only=input_args)).apply(target)
         ast.fix_missing_locations(target)
@@ -541,9 +541,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     # An axis the ABI supplies has no single nest, but the operand's RANK is known, so the honest
     # emission is every nest it could pick plus the run-time choice between them -- never the
     # manifest default, which the harness need not pass.
-    _dispatch = _runtime_axis_dispatch(
-        fn, _scalar_names, rank_table(fn, _declared_ranks(shapes_raw)),
-        _structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args))
+    _dispatch = _runtime_axis_dispatch(fn, _scalar_names, rank_table(fn, _declared_ranks(shapes_raw)))
     if _dispatch is None:
         _resolve_axes(fn)
     else:
@@ -2845,17 +2843,20 @@ AXIS_POSITION: Dict[str, int] = {
 
 
 class _FoldStructuralUses(ast.NodeTransformer):
-    """Fold a RUNTIME argument's constant value, but only where it picks the loop nest.
+    """Fold a RUNTIME argument's constant value into a slice STEP, the one slot with no runtime form.
 
-    ``max_iter`` and ``dim`` are declared the same way -- an ``init.scalars`` default that is also an
-    ABI argument -- so no rule about the DECLARATION can separate them. The USE does: gmres computes
-    ``m = min(max_iter, N)``, a plain expression a runtime value evaluates fine, and folding it pins
-    the iteration count to the manifest. ``np.argmax(x, axis=dim)`` chooses the loop nest, which has
-    no runtime form at all, so there the literal is the only thing that can be emitted.
+    ``max_iter`` and ``stride`` are declared the same way -- an ``init.scalars`` default that is also
+    an ABI argument -- so no rule about the DECLARATION can separate them. The USE does: gmres
+    computes ``m = min(max_iter, N)``, a plain expression a runtime value evaluates fine, and folding
+    it pins the iteration count to the manifest. ``_slice_step_const`` has no such form for a step --
+    it reads a non-literal one as 1 and the stride is silently lost -- so a literal is the only thing
+    emittable there.
 
-    So this folds ONLY the two slots that pick the nest: a structural call's axis, and a slice STEP.
-    Everywhere else the name survives and reaches the ABI, and a slot that is genuinely runtime still
-    meets the refusal downstream.
+    The AXIS slot is NOT folded, even though it picks the nest just as hard. It has a runtime form:
+    :func:`_specialize_runtime_axis` emits one nest per axis of the operand and chooses between them
+    at run time. Folding it instead produced a signature that took ``dim`` and ignored it -- the
+    caller promised a knob the code had baked in -- for fourteen kernels. An axis that cannot
+    dispatch meets the refusal downstream; it is never quietly pinned to the manifest.
     """
 
     def __init__(self, const_syms: Dict[str, int]) -> None:
@@ -2869,41 +2870,25 @@ class _FoldStructuralUses(ast.NodeTransformer):
     def _fold(self, node: Optional[ast.expr]) -> Optional[ast.expr]:
         """The manifest value, but only for a name that still HOLDS it.
 
-        The rebound check lives here rather than at one call site because both slots need it for the
-        same reason: once the body reassigns the name, the manifest default is no longer what the
-        slot reads, and substituting it is a wrong axis or a wrong stride THAT STILL COMPILES. When
-        the name is genuinely runtime the honest outcome is the refusal downstream, not a fold.
+        Once the body reassigns the name, the manifest default is no longer what the slot reads, and
+        substituting it is a wrong stride THAT STILL COMPILES. When the name is genuinely runtime the
+        honest outcome is the refusal downstream, not a fold.
         """
         if isinstance(node, ast.Name) and node.id in self.const_syms and node.id not in self.rebound:
             return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
         return node
 
-    def visit_Call(self, node: ast.Call) -> ast.AST:
-        self.generic_visit(node)
-        name = _np_attr_name(node)
-        if name not in AXIS_STRUCTURAL_FNS:
-            return node
-        for kw in node.keywords:
-            if kw.arg in ("axis", "axes"):
-                kw.value = self._fold(kw.value)
-        slot = AXIS_POSITION.get(name, 1)
-        if len(node.args) > slot:
-            node.args[slot] = self._fold(node.args[slot])
-        return node
-
     def visit_Slice(self, node: ast.Slice) -> ast.AST:
-        """A slice STEP picks the nest exactly like an axis does, so it folds on the same terms.
+        """A slice STEP picks the nest, and unlike an axis it has no run-time form to pick it with.
 
-        The conv/pool ports take the stride as a manifest ``init.scalars`` value that is ALSO an ABI
-        argument, then slice with it (``padded[:, :, ky:ky + (oh - 1) * stride + 1:stride]``) inside
-        a helper that inlines into the body. ``_slice_step_const`` has no runtime form for the step
-        -- it reads a non-literal one as 1 and the stride is silently lost -- so the literal is the
-        only emittable value, and ``_reject_unsupported_slices`` refuses the name below otherwise.
-        Bounds are NOT folded: they are ordinary integer expressions a runtime value evaluates fine,
-        and the trip count comes from the target's extent.
+        A helper that slices with a stride (``padded[:, :, ky:ky + (oh - 1) * stride + 1:stride]``)
+        inlines into the body with whatever the call site passed. ``_slice_step_const`` returns
+        ``None`` for a non-literal step and every consumer reads that as step 1, so the stride is
+        silently gone; the literal is the only emittable value, and ``_reject_unsupported_slices``
+        refuses the name otherwise. Bounds are NOT folded: they are ordinary integer expressions a
+        runtime value evaluates fine, and the trip count comes from the target's extent.
 
-        A name the body REBINDS is left alone -- see :meth:`_fold`, which is where that rule lives
-        for both slots.
+        A name the body REBINDS is left alone -- see :meth:`_fold`.
         """
         self.generic_visit(node)
         node.step = self._fold(node.step)
@@ -2943,8 +2928,10 @@ def _structural_constants(parameters: Dict,
     the harness passes a value that need not be the default, and baking the default in is a
     miscompile. gmres declares ``max_iter`` in ``init.scalars`` AND takes it as an argument -- folding
     it turned the derived symbol ``m = min(max_iter, N)`` into ``min(100, N)``, pinning the iteration
-    count to the manifest's value for every run. When such a name IS used as an axis, the honest
-    outcome is the refusal downstream, not a fold: a runtime axis has no static loop nest.
+    count to the manifest's value for every run. When such a name is an AXIS,
+    :func:`_specialize_runtime_axis` emits the nest for each axis and picks at run time; when it is a
+    slice STEP, :class:`_FoldStructuralUses` folds it (``keep_only``), which is sound only for a
+    kernel whose manifest does not offer the step as an argument at all.
     """
     extent_names: Set[str] = set()
     for shape in (shapes_raw or {}).values():
@@ -3146,12 +3133,22 @@ def _axis_index_spaces(fn: ast.FunctionDef, ranks: Dict[str, int]) -> Dict[int, 
     return out
 
 
-def _runtime_axis_dispatch(fn: ast.FunctionDef, scalars: FrozenSet[str], ranks: Dict[str, int],
-                           foldable: Dict[str, int]) -> Optional[Tuple[str, int]]:
+#: What a dispatch is: the axis ARGUMENT's name, and the RANK of the operand it indexes -- which is
+#: also the branch count and what a negative axis resolves against.
+AxisChoice = Tuple[str, int]
+
+
+def _runtime_axis_dispatch(fn: ast.FunctionDef, scalars: FrozenSet[str], ranks: Dict[str, int]) -> Optional[AxisChoice]:
     """``(name, rank)`` of the one runtime axis to specialise over, or ``None``.
 
-    Every condition is a precondition for substituting a literal axis into a clone of the whole
-    body, not a convenience:
+    What the manifest happens to set the axis to is deliberately NOT a condition. An argument that
+    crosses the ABI is one the caller chooses, so a preset-constant default is a default and not a
+    compile-time fact; a kernel for which it IS a fact says so by keeping the value out of
+    ``input_args`` entirely (a keyword-only default the reference declares), and then there is no
+    runtime axis here to dispatch on.
+
+    Every remaining condition is a precondition for substituting a literal axis into a clone of the
+    whole body, not a convenience:
 
     * ONE name only -- the branch count is ``rank`` per dispatched name, so two would multiply.
     * Every use of it is an AXIS: an axis slot, or an index into ``x.shape`` / a per-axis list.
@@ -3160,9 +3157,6 @@ def _runtime_axis_dispatch(fn: ast.FunctionDef, scalars: FrozenSet[str], ranks: 
     * Every use that reveals an axis COUNT reveals the same one. That count is the branch count and
       what a negative axis resolves against, so a body mixing two rank spaces has no single
       dispatch and keeps the refusal.
-    * The name is not one :class:`_FoldStructuralUses` already resolves at every use. Where the
-      manifest pins an axis-only argument, folding it is the existing policy and a dispatch would
-      duplicate a body for nothing.
     * The kernel writes through its parameters. A RETURNED output is promoted from the body's
       trailing statement (:func:`_synthesize_return_temps`), which a dispatch buries inside a
       branch -- the kernel would then emit with no output at all.
@@ -3186,8 +3180,6 @@ def _runtime_axis_dispatch(fn: ast.FunctionDef, scalars: FrozenSet[str], ranks: 
     index_spaces = _axis_index_spaces(fn, ranks)
     uses = [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == name]
     if not all(id(u) in axis_spaces or id(u) in index_spaces for u in uses):
-        return None
-    if name in foldable and all(id(u) in axis_spaces for u in uses):
         return None
     # An operand whose rank the table does not know reveals nothing and is skipped; one that
     # disagrees is a second rank space and refuses the dispatch.
