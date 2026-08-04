@@ -2630,6 +2630,29 @@ class _FlattenChainedSubscripts(ast.NodeTransformer):
             ast.Subscript(value=ast.Name(id=inner.value.id, ctx=ast.Load()), slice=sl, ctx=node.ctx), node)
 
 
+def _refuse_scalarising_a_contraction(value: ast.expr) -> None:
+    """Raise if ``value`` still holds an array-level ``@``.
+
+    Scalarising a contraction changes what it means: ``C[:] = A @ B`` becomes ``C[i, j] = A[i, j] *
+    B[i, j]``, which drops the sum over k entirely and reads both operands at the OUTPUT's extents.
+    It compiles, it runs, and it returns wrong numbers -- netvlad's
+    ``np.swapaxes(assignment, 1, 2) @ x`` did exactly that.
+
+    The emitter has a guard for a surviving ``@``, but it cannot catch this one: by the time it runs
+    the rewrite has already replaced both operands with scalar subscripts, so the guard's
+    "are the operands scalar" test passes and ``*`` is emitted. The only place the difference is
+    still visible is here, BEFORE the rewrite.
+
+    Reaching this means the matmul hoister declined -- normally a shape it could not resolve. That is
+    a gap to fix, and a refusal names it; the silent product does not.
+    """
+    for sub in ast.walk(value):
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.MatMult):
+            raise NotImplementedError(f"matmul '{ast.unparse(sub)}' was not lowered before slice fusion; "
+                                      f"scalarising it would drop the contraction and silently "
+                                      f"compute an elementwise product")
+
+
 class SliceFusion(ast.NodeTransformer):
     """Rewrite slice-bearing assignments into a single fused loop.
 
@@ -2677,6 +2700,7 @@ class SliceFusion(ast.NodeTransformer):
             return None
         if not isinstance(target, ast.Subscript):
             return None
+        _refuse_scalarising_a_contraction(value)
         lhs_name = _name_of_subscript(target)
         if lhs_name is None:
             return None
