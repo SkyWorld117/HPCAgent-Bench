@@ -306,6 +306,14 @@ class _CBodyEmitter(BaseEmitter):
         self.isopar_counts: int = 0
         #: Pluto: name -> "[d1][d2]" trailing-dim string for a pointer-to-array local's deferred-malloc cast.
         self.md_trailing: Dict[str, str] = {}
+        #: Branch-scoped local -> (size, C type, fill kind): declared + malloc'd at its marker inside
+        #: the one branch that uses it, freed at that branch's end (see :func:`_branch_scoped_locals`).
+        self.branch_local_decls: Dict[str, Tuple[str, str, Optional[str]]] = {}
+        #: Branch-scoped local -> id() of the statement list that owns it.
+        self.branch_local_owner: Dict[str, int] = {}
+        #: Branch-scoped locals whose declaration has actually been emitted, so a free is only ever
+        #: appended for a pointer that exists on that path.
+        self._branch_declared: Set[str] = set()
         self.array_shapes: Dict[str, List[str]] = {a.name: list(a.shape) for a in kir.arrays}
         zeros = kir.zeros_locals
         for name, shape in zeros.items():
@@ -732,11 +740,12 @@ class _CBodyEmitter(BaseEmitter):
         return f"{self._emit_assign(assign, indent)}\n{indent}return;"
 
     def _emit_if(self, node: ast.If, indent: str) -> str:
-        then = self.emit_block(node.body, indent + "  ")
+        then = self._branch_block(node.body, indent + "  ")
         chained = bool(node.orelse) and len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If)
         else_str = ""
         if node.orelse:
-            else_str = self._emit_if(node.orelse[0], indent) if chained else self.emit_block(node.orelse, indent + "  ")
+            else_str = (self._emit_if(node.orelse[0], indent) if chained else self._branch_block(
+                node.orelse, indent + "  "))
         # A guard whose branches are both empty (a dropped validation raise) has no effect; drop the whole if.
         if not then.strip() and not else_str.strip():
             return ""
@@ -750,6 +759,22 @@ class _CBodyEmitter(BaseEmitter):
                 out.append(else_str)
                 out.append(f"{indent}}}")
         return "\n".join(out)
+
+    def _branch_block(self, stmts: List[ast.stmt], indent: str) -> str:
+        """Emit one ``if`` branch, then free the buffers that branch declared.
+
+        The free sits on the SAME path as the malloc, so a branch that never runs neither allocates
+        nor frees, and nothing is freed twice. Only a name whose declaration was actually emitted is
+        freed -- an empty branch the emitter drops has no pointer to release.
+        """
+        body = self.emit_block(stmts, indent)
+        owned = [
+            name for name, branch in self.branch_local_owner.items()
+            if branch == id(stmts) and name in self._branch_declared
+        ]
+        if not owned:
+            return body
+        return "\n".join([body] + [f"{indent}free({name});" for name in owned])
 
     def _emit_assign(self, node: ast.Assign, indent: str) -> str:
         if len(node.targets) != 1:
@@ -785,6 +810,16 @@ class _CBodyEmitter(BaseEmitter):
                     # Pluto: cast to the multidimensional pointer-to-array type matching the declaration; else flat T*.
                     cast = (f"({c_type} (*){self.md_trailing[t]})" if t in self.md_trailing else f"({c_type} *)")
                     lines.append(f"{indent}{t} = {cast}malloc({_byte_count(size, c_type)});")
+                    if fill is not None:
+                        lines.append(_zero_fill_stmt(t, size, c_type, fill, indent))
+                    return "\n".join(lines)
+                # Branch-scoped local: declare and allocate it HERE, inside the branch that owns it,
+                # so the branches that never run allocate nothing. C99 onward permits a declaration
+                # anywhere in a block; the matching free is appended by ``_emit_if``.
+                if t in self.branch_local_decls and t not in self._branch_declared:
+                    self._branch_declared.add(t)
+                    size, c_type, fill = self.branch_local_decls[t]
+                    lines = [f"{indent}{c_type} *{t} = ({c_type} *)malloc(({size}) * sizeof({c_type}));"]
                     if fill is not None:
                         lines.append(_zero_fill_stmt(t, size, c_type, fill, indent))
                     return "\n".join(lines)
@@ -1658,6 +1693,85 @@ def _md_trailing(shape) -> str:
     return "".join(f"[{_c_shape_token(d)}]" for d in shape[1:])
 
 
+def _alloc_marker_target(stmt: ast.stmt) -> Optional[str]:
+    """Name a ``__hpcagent_bench_zeros__()`` marker allocates, or ``None`` for any other statement."""
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+        return None
+    value = stmt.value
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "__hpcagent_bench_zeros__"):
+        return stmt.targets[0].id
+    return None
+
+
+def _branch_scoped_locals(tree: ast.FunctionDef, candidates: Set[str]) -> Dict[str, int]:
+    """``name -> id()`` of the ``if`` branch that OWNS each local, for the locals one branch owns.
+
+    A local qualifies when every reference to it in the function is inside that one branch AND the
+    branch carries its allocation marker -- then its declaration, its malloc and its free all fit
+    there, and the branches it does not belong to allocate nothing. A runtime-axis dispatch emits
+    one nest per axis and runs exactly one, so at function top it would allocate ``rank`` buffers
+    per call to use one; C99 onward allows the declaration at any point in a block.
+
+    Two exclusions, both about not trading memory for something worse:
+
+    * a branch under a LOOP -- allocating per iteration puts a malloc in the hot path;
+    * the ``orelse`` of an ``elif`` chain, which is emitted by recursing into the inner ``if``:
+      there is no statement list of its own to append the free to, so a local owned there would
+      leak.
+    """
+    total: Dict[str, int] = {}
+    markers_total: Dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in candidates:
+            total[node.id] = total.get(node.id, 0) + 1
+        marked = _alloc_marker_target(node) if isinstance(node, ast.stmt) else None
+        if marked is not None:
+            markers_total[marked] = markers_total.get(marked, 0) + 1
+    branches: List[List[ast.stmt]] = []
+
+    def collect(stmts: List[ast.stmt], in_loop: bool) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                chained = len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], ast.If)
+                if not in_loop:
+                    branches.append(stmt.body)
+                    if stmt.orelse and not chained:
+                        branches.append(stmt.orelse)
+                collect(stmt.body, in_loop)
+                collect(stmt.orelse, in_loop)
+            elif isinstance(stmt, (ast.For, ast.While)):
+                collect(stmt.body, True)
+                collect(stmt.orelse, True)
+
+    collect(tree.body, False)
+
+    owner: Dict[str, Tuple[int, int]] = {}
+    for stmts in branches:
+        counts: Dict[str, int] = {}
+        markers: Set[str] = set()
+        size = 0
+        for stmt in stmts:
+            marker = _alloc_marker_target(stmt)
+            if marker is not None:
+                markers.add(marker)
+            for sub in ast.walk(stmt):
+                size += 1
+                if isinstance(sub, ast.Name) and sub.id in candidates:
+                    counts[sub.id] = counts.get(sub.id, 0) + 1
+        for name, seen in counts.items():
+            # ONE marker, and it is a statement of this branch: a second marker nested in a loop
+            # inside it would be reached first and put the declaration in a scope that ends before
+            # the free.
+            if seen != total.get(name) or name not in markers or markers_total.get(name) != 1:
+                continue
+            # Innermost wins: an enclosing branch contains every use too, but the tighter scope
+            # frees the buffer sooner.
+            if name not in owner or size < owner[name][1]:
+                owner[name] = (id(stmts), size)
+    return {name: branch_id for name, (branch_id, _) in owner.items()}
+
+
 def _emit_body(kir: KernelIR,
                indent: str = "  ",
                multidim_arrays: Optional[Set[str]] = None,
@@ -1723,6 +1837,12 @@ def _emit_body(kir: KernelIR,
             deferred_malloc_locals[name] = shape
         else:
             fn_top_locals[name] = shape
+    # A buffer only one branch touches is allocated in that branch, not at function top: a runtime
+    # axis dispatch emits one nest per axis, and allocating all of them means every call heap-
+    # allocates rank buffers to use one of them. Pluto keeps the function-top form -- its
+    # allocations must sit outside ``#pragma scop``.
+    branch_owner: Dict[str, int] = {} if pluto else _branch_scoped_locals(kir.tree, set(fn_top_locals))
+    branch_locals = {name: fn_top_locals.pop(name) for name in list(branch_owner)}
     emitter.inline_local_decls = inline_locals
     emitter.local_dtypes_for_inline = local_dtypes
     # Pluto only: local rank>=2 arrays declare as pointer-to-array so the scop indexes them affinely; empty for pluto=False.
@@ -1737,7 +1857,7 @@ def _emit_body(kir: KernelIR,
     # Default dtype for a float temp not listed in local_dtypes follows the kernel's float precision.
     default_float = _default_float_dtype(kir)
     # Register each local array's resolved dtype so _is_float_operand can prove float-ness (setdefault keeps explicit tags).
-    for name in (*fn_top_locals, *deferred_malloc_locals, *inline_locals):
+    for name in (*fn_top_locals, *deferred_malloc_locals, *inline_locals, *branch_locals):
         local_dtypes.setdefault(name, default_float)
     kir.local_dtypes = local_dtypes
     # The scalar declaration table, so an isopar reduction knows the type its accumulator is kept in.
@@ -1786,6 +1906,22 @@ def _emit_body(kir: KernelIR,
             continue
         zeros_refill[name] = (size, c_type, kind)
         decls.append(_zero_fill_stmt(name, size, c_type, kind, indent))
+    # Branch-scoped locals: declaration, malloc and free all inside the one branch that uses them,
+    # so a dispatch allocates only the nest it runs. The free is appended by ``_emit_if``.
+    branch_specs: Dict[str, Tuple[str, str, Optional[str]]] = {}
+    for name, shape in branch_locals.items():
+        size_tokens = [f"({_c_shape_token(s)})" for s in shape] if shape else []
+        size = " * ".join(size_tokens) if size_tokens else "1"
+        c_type = _c_type(local_dtypes.get(name, default_float))
+        kind = zeros_fills.get(name)
+        fill = None if (kind is None or kind in ("empty", "empty_like", "ndarray")) else kind
+        branch_specs[name] = (size, c_type, fill)
+        # A later marker in the same branch is a RESET, not a second declaration -- same rule the
+        # function-top locals follow.
+        if fill is not None:
+            zeros_refill[name] = (size, c_type, fill)
+    emitter.branch_local_decls = branch_specs
+    emitter.branch_local_owner = branch_owner
     # Deferred-malloc locals: NULL pointer at fn-top, malloc emitted at the marker once the scalar is in scope.
     deferred_specs: Dict[str, Tuple[str, str, Optional[str]]] = {}
     for name, shape in deferred_malloc_locals.items():

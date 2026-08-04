@@ -40,14 +40,19 @@ helper machinery is what put the temp there.
 The same gap shows up independently in the Fortran corpus sweep, so the lowering pays for itself
 twice.
 
-**RESOLVED** (2026-08-04, pending merge from `worktree-agent-ad0dd5e950ccb2784`). The decision was
-run-time specialisation, not folding: `dim` is a genuine ABI argument, and `_structural_constants`
-excludes ABI arguments on purpose after the gmres `min(max_iter, N)` -> `min(100, N)` miscompile.
-The rank is known at compile time, so the emitter now writes one nest per axis value and selects at
-run time -- `if ((dim == 0) || (dim == -2)) ... else if ((dim == 1) || (dim == -1))`, with no
-trailing `else`, because making the last axis the fallthrough is the silent clamp. An out-of-range
-axis matches nothing and writes nothing. Verified on ONE compiled artifact called with dim in
-{0, 1, -1, -2}: exact agreement with numpy; `KNOWN_NON_LOWERING` stayed `{}`.
+**RESOLVED** (2026-08-04) -- specialised, not folded. `dim` reaches the ABI, so the manifest's value is not the
+value the harness passes; the emitted kernel carries one loop nest per axis and picks between them
+at run time (`frontend._specialize_runtime_axis`). Scope is the whole body: `dim` also drives the
+narrow, the take, the expand_dims and the concatenate, and the temporaries between them have a
+different shape per axis. Each branch declares, allocates and frees its OWN scratch
+(`numpyto_c.emit._branch_scoped_locals`), so a dispatch does not heap-allocate every axis's nest on
+every call to use one of them. A negative axis shares its branch with `axis + rank`, numpy-style; an
+out-of-range one matches no branch and the kernel writes nothing (numpy raises there, and a void
+kernel cannot). `KNOWN_NON_LOWERING` stays empty.
+
+The `_structural_constants` reasoning that led here is worth keeping: it excludes ABI arguments on
+purpose, after the gmres `min(max_iter, N)` -> `min(100, N)` miscompile. The dispatch has no
+trailing `else`, because making the last axis the fallthrough is the silent clamp.
 
 ## 2. The `unit` job no longer fits in 1h30m
 

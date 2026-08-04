@@ -6,22 +6,18 @@ level: 1
 parameters:
   S:
     batch_size: 4
-    dim: 1
     dim1: 4
     dim2: 5
   M:
     batch_size: 256
-    dim: 1
     dim1: 1024
     dim2: 1024
   L:
     batch_size: 724
-    dim: 1
     dim1: 1023
     dim2: 1023
   XL:
     batch_size: 2047
-    dim: 1
     dim1: 1023
     dim2: 1023
 init:

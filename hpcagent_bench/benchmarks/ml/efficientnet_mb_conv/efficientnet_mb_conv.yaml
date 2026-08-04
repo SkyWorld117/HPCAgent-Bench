@@ -67,7 +67,6 @@ init:
       (width + 2 * ((kernel_size - 1) // 2) - kernel_size) // 2 + 1)
   scalars:
     # Must stay in step with the ' // 2' in the out shape above.
-    stride: 2
     bn_eps: 1.0e-05
 output_args:
 - out

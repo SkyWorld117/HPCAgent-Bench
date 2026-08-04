@@ -54,7 +54,6 @@ init:
       dist: lognormal
     out: (batch_size, out_channels, height, width)
   scalars:
-    conv_stride: 1
     bn_eps: 1.0e-05
 output_args:
 - out

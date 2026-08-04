@@ -61,10 +61,13 @@ def _batch_norm(x, weight, bias, running_mean, running_var, eps, out):
     out[:, :, :, :] = (x - mean4) / std4 * weight4 + bias4
 
 
+# ``out``'s declared extent spells the stride out as ``// 2``, and the harness allocates from that
+# expression whatever a caller passes -- so the stride is a constant of this artifact and must not be
+# an argument. Keyword-only and defaulted keeps it out of ``input_args``, hence out of the ABI.
 def efficientnet_mb_conv(x, expand_conv_weight, expand_bn_weight, expand_bn_bias, expand_bn_running_mean,
                          expand_bn_running_var, depthwise_conv_weight, depthwise_bn_weight, depthwise_bn_bias,
                          depthwise_bn_running_mean, depthwise_bn_running_var, project_conv_weight, project_bn_weight,
-                         project_bn_bias, project_bn_running_mean, project_bn_running_var, stride, bn_eps, out):
+                         project_bn_bias, project_bn_running_mean, project_bn_running_var, bn_eps, out, *, stride=2):
     n, _, h, w = x.shape
     hidden = expand_conv_weight.shape[0]
     oh = out.shape[2]
