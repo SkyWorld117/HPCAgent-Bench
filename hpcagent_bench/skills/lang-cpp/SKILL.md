@@ -1,12 +1,12 @@
 ---
 name: lang-cpp
-description: "Writing correct C++20 for this harness: static_cast over silent conversion, and the six gates that check it."
+description: "Writing correct C++23 for this harness: static_cast over silent conversion, and the six gates that check it."
 ---
 
 # lang-cpp
 
 Two jobs: (A) QUALITY-CHECK an existing C++ file through six gates; (B) enforce
-modern C++20 idioms when WRITING C++. `<file>.cpp` is the placeholder for the
+modern C++23 idioms when WRITING C++. `<file>.cpp` is the placeholder for the
 target throughout -- swap in the real path. Every command is copy-pasteable.
 
 ## Golden rule
@@ -49,7 +49,7 @@ if git -C "$(dirname <file>.cpp)" ls-files --error-unmatch .clang-format >/dev/n
    || find "$(dirname <file>.cpp)" -name .clang-format | grep -q .; then
   clang-format -i --style=file <file>.cpp
 else
-  clang-format -i --style='{BasedOnStyle: LLVM, Standard: c++20, ColumnLimit: 120}' <file>.cpp
+  clang-format -i --style='{BasedOnStyle: LLVM, Standard: c++23, ColumnLimit: 120}' <file>.cpp
 fi
 ```
 
@@ -59,7 +59,7 @@ clang-tidy \
   --checks='-*,bugprone-*,cppcoreguidelines-*,modernize-*,performance-*,portability-*,readability-*,clang-analyzer-*' \
   --header-filter='.*' \
   --warnings-as-errors='*' \
-  <file>.cpp -- -std=c++20 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast
+  <file>.cpp -- -std=c++23 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast
 ```
 `-header-filter=.*` so the file's own headers are checked too. Prefer `clang-tidy-21`
 if installed (`clang-tidy-21 ...`). If a CMake compile DB exists, add `-p <build-dir>`
@@ -74,7 +74,7 @@ clang-tidy --checks='-*,clang-analyzer-*' --header-filter='$^' -p <build-dir> <g
 ### 3. cppcheck
 ```bash
 cppcheck --enable=warning,performance,portability,style \
-  --std=c++20 --language=c++ \
+  --std=c++23 --language=c++ \
   --inline-suppr --error-exitcode=1 --quiet \
   --suppress=preprocessorErrorDirective \
   --suppress=missingIncludeSystem \
@@ -87,7 +87,7 @@ DB exists, prefer `--project=<build-dir>/compile_commands.json` over the bare fi
 
 ### 4. gcc static analyzer (syntax-only, no build)
 ```bash
-g++ -std=c++20 -fsyntax-only -fanalyzer -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast <file>.cpp
+g++ -std=c++23 -fsyntax-only -fanalyzer -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast <file>.cpp
 ```
 `-fanalyzer` turns on the `-Wanalyzer-*` family (double-free, use-after-free,
 null-deref, leaks, taint). Treat every `-Wanalyzer-*` line as a defect to fix.
@@ -96,7 +96,7 @@ Add `-Werror` to make it hard-fail.
 ### 5. AddressSanitizer -- build and RUN once
 Static analysis is not enough; the file must actually run under ASan.
 ```bash
-g++ -std=c++20 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_asan
+g++ -std=c++23 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_asan
 ASAN_OPTIONS=detect_leaks=1 /tmp/cppq_asan   # exercise the real entry point / test
 ```
 `detect_leaks=1` by default. Use `detect_leaks=0` ONLY when the process is
@@ -107,7 +107,7 @@ into the host process (use the matching clang RT if the code is built with clang
 
 ### 6. UndefinedBehaviorSanitizer -- build and RUN once
 ```bash
-g++ -std=c++20 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_ubsan
+g++ -std=c++23 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_ubsan
 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 /tmp/cppq_ubsan
 ```
 `halt_on_error=1` so the first UB aborts with a trace -- any hit is a bug.
@@ -116,7 +116,7 @@ convenient; keeping them separate isolates which sanitizer fired.
 
 **Report** each gate's status. Only "clean" when all six pass with zero output.
 
-## B. Writing modern C++20/23 (no OO bloat)
+## B. Writing modern C++23 (no OO bloat)
 
 Prefer plain functions + small concrete data types + RAII. Do NOT invent class
 hierarchies, factories, or indirection layers that aren't needed (YAGNI). Apply:
