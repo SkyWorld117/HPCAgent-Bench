@@ -44,7 +44,9 @@ twice.
 value the harness passes; the emitted kernel carries one loop nest per axis and picks between them
 at run time (`frontend._specialize_runtime_axis`). Scope is the whole body: `dim` also drives the
 narrow, the take, the expand_dims and the concatenate, and the temporaries between them have a
-different shape per axis. A negative axis shares its branch with `axis + rank`, numpy-style; an
+different shape per axis. Each branch declares, allocates and frees its OWN scratch
+(`numpyto_c.emit._branch_scoped_locals`), so a dispatch does not heap-allocate every axis's nest on
+every call to use one of them. A negative axis shares its branch with `axis + rank`, numpy-style; an
 out-of-range one matches no branch and the kernel writes nothing (numpy raises there, and a void
 kernel cannot). `KNOWN_NON_LOWERING` stays empty.
 
