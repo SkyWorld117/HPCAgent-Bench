@@ -6851,13 +6851,13 @@ class _CallHoister(ast.NodeTransformer):
         # otherwise the whole-array roll stays buried in the broadcast BinOp
         # and the per-element scalarizer mangles it into a scalar-arg roll.
         key = self._key_of(node)
-        if (key in (
-            {("np", k)
-             for k in {
-                 "sum", "max", "min", "mean", "prod", "std", "var", "median", "any", "all", "count_nonzero", "argmax",
-                 "argmin", "repeat", "transpose", "reshape", "triu", "tril", "flip", "roll", "copy", "cumsum", "cumprod"
-             }}
-                | {("np", "fft.fftn"), ("np", "fft.ifftn"), ("np", "fft.fft"), ("np", "fft.ifft")}) and node.args
+        if (key in ({("np", k)
+                     for k in {
+                         "sum", "max", "min", "mean", "prod", "std", "var", "median", "any", "all", "count_nonzero",
+                         "argmax", "argmin", "repeat", "transpose", "reshape", "triu", "tril", "flip", "roll", "copy",
+                         "cumsum", "cumprod", "swapaxes", "expand_dims", "squeeze"
+                     }}
+                    | {("np", "fft.fftn"), ("np", "fft.ifftn"), ("np", "fft.fft"), ("np", "fft.ifft")}) and node.args
                 and not isinstance(node.args[0], ast.Name)):
             first = node.args[0]
             ext = _iter_extent_of(first, self.shape_table)
@@ -7097,6 +7097,17 @@ class _CallHoister(ast.NodeTransformer):
             shape = self.shape_table.get(args[0].id)
             if shape:
                 return tuple(shape)
+        # ``swapaxes`` / ``expand_dims`` / ``squeeze`` -- the operand's extent with axes swapped or a
+        # unit axis inserted / dropped. ``_iter_extent_of`` already computes all three, so route to
+        # it rather than restating the axis arithmetic; without a branch here they fall through to
+        # the elementwise case, which skips them (they are NON_ELEMENTWISE), and the None return
+        # silently DECLINES to hoist -- leaving ``q @ np.swapaxes(k, -1, -2)`` for the emitter.
+        if op in {"swapaxes", "expand_dims", "squeeze"} and args:
+            call = _attr_call("np", op, list(args))
+            call.keywords = list(keywords or [])
+            ext = _iter_extent_of(call, self.shape_table)
+            if ext is not None:
+                return tuple(self._extent_to_shape_token(e) for e in ext)
         # ``np.reshape(a, shape)`` -- output extents are the shape arg, with a
         # single ``-1`` resolved to prod(source) / prod(other dims). Lets the
         # flattened-dot idiom ``a.ravel() @ a.ravel()`` (lowered to reshape)
