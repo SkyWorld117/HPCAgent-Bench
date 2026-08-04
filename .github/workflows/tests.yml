@@ -564,7 +564,9 @@ jobs:
 
       # The KernelBench subtrack is EXCLUDED from the sweep above (test_e2e_numerical's
       # UNGATED_SUBTRACKS), so without this nothing in CI would notice a translator change halving
-      # what those 200 ports lower to. It asserts a floor on the COUNT, not per kernel.
+      # what those 250 ports lower to. It asserts a floor on the COUNT, not per kernel -- so the
+      # floor being STALE is the same blind spot: it sat at 121 while 192 actually lowered, leaving
+      # 71 kernels free to regress green. Raise it whenever a measurement says it moved.
       - name: Phase 5c -- kernelbench translation ratchet [c] @ S
         if: ${{ !cancelled() }}
         timeout-minutes: 45
