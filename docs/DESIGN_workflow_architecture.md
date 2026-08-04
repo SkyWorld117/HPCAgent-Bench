@@ -69,11 +69,12 @@ Consequences, and they are the point:
 |---|-----|------|
 | -- | runtimes / optimization reports | `harness/recording.py` (results DB + shards), `perf_reports.py` |
 | 11 | Statistics | `stats.py` (outlier rejection, median CI), `inference.py` (normality verdict, Mann-Whitney, BH-FDR) |
-| 12 | Scoring | `harness/scoring.py` (one submission), `plotting.py` (the speedup heatmap + the per-kernel distribution grid) |
+| 12 | Scoring | `harness/scoring.py` (one submission), `scripts/plot_speedup.py` (the signed speed-up chart), `plotting.py` (the per-kernel distribution grid + the opt-in speedup heatmap) |
 
 Filtering happens BEFORE scoring: a difference that does not survive the significance test
-is not a speedup. `plotting.py` renders exactly the two figures the box shows -- the
-per-kernel violin/box distribution and the agent-vs-baseline heatmap.
+is not a speedup. `plotting.py` renders the per-kernel violin/box distribution and the
+agent-vs-baseline heatmap; the heatmap is opt-in, because the speed-up figure a run plots is
+`scripts/plot_speedup.py`'s banded signed-change chart (see `docs/measurement_statistics.md`).
 
 ## Gate
 

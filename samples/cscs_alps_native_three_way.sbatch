@@ -127,9 +127,11 @@ done
 echo "=== merging the rank DBs ==="
 hpcagent-bench aggregate-db
 
-# --no-usetex because a compute node rarely has LaTeX.
-echo "=== speedup table ==="
-hpcagent-bench plot --benchmark "${BENCH}" --preset "${PRESET}" --no-usetex \
+# Signed relative change (0 = no change, +1 = 2x faster, -1 = 2x slower), banded by order of
+# magnitude. NOT the old ratio-axis table, which reads a 0.5x regression as smaller than a 1.5x
+# win; that one is opt-in now (`hpcagent-bench plot`). --no-usetex: a compute node rarely has LaTeX.
+echo "=== speed-up chart ==="
+python "${REPO}/scripts/plot_speedup.py" --benchmark "${BENCH}" --preset "${PRESET}" --no-usetex \
     --output "results/plots/alps-native-three-way-${SLURM_JOB_ID:-local}.pdf"
 
 if (( ${#failed[@]} )); then

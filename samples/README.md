@@ -225,11 +225,13 @@ Merging is automatic — no step to forget:
 The aggregate is always rebuilt from scratch, so merging twice cannot double the rows.
 
 Both DaCe samples end by forcing the merge (`hpcagent-bench aggregate-db`, so the one file to copy
-off the cluster exists whether or not anything reads it) and then rendering the **speedup table**
-with `hpcagent-bench plot` — the CLI verb, not `scripts/plot_results.py`, which is a shim over the
-same verb and on its way out. `plot` folds `flavor` and `build` back into one series name
-(`dace_cpu/autoopt/main`) exactly as it folds `variant` into the benchmark name, and it re-runs the
-merge itself if a shard moved, so the two steps cannot disagree.
+off the cluster exists whether or not anything reads it) and then rendering the **speed-up chart**
+with `scripts/plot_speedup.py` — signed relative change, banded by order of magnitude. The old
+NPBench-style **table** is opt-in (`hpcagent-bench plot`) and no job runs it for you: on its ratio
+axis a 0.5x regression reads as a smaller event than a 1.5x win. Both go through the one loader, so
+both fold `flavor` and `build` back into one series name (`dace_cpu/autoopt/main`) exactly as
+`variant` folds into the benchmark name, and both re-run the merge if a shard moved, so the two
+steps cannot disagree.
 
 ## Submitting
 

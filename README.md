@@ -259,7 +259,7 @@ container the same `pip` line runs in the image. Native toolchains
 the `curl` examples want bash/zsh or the WSL2 shell -- native PowerShell/cmd are not targeted).
 
 ```sh
-hpcagent-bench quickstart && hpcagent-bench plot     # smoke-run a few benchmarks + plot
+hpcagent-bench quickstart && python scripts/plot_speedup.py   # smoke-run a few benchmarks + plot
 ```
 
 ---

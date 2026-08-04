@@ -8,7 +8,9 @@ written by the collection sweeps in :mod:`hpcagent_bench.support.collect`), shar
 selector / filter path (:func:`load_results`), and lay their rows out with the one ordering
 scheme (:mod:`hpcagent_bench.reporting_order`): HPC grouped by dwarf, then foundation, then ML.
 
-* :func:`plot_heatmap` -- the NPBench-style ``RdYlGn_r`` speedup table. The per-cell median
+* :func:`plot_heatmap` -- the NPBench-style ``RdYlGn_r`` speedup table, now OPT-IN: no default
+  flow emits it, because its ratio axis reads a 0.5x regression as a smaller event than a 1.5x
+  win (``scripts/plot_speedup.py`` is the speed-up figure a run plots). The per-cell median
   used for best-selection AND the bootstrap-CI superscript both come from OUTLIER-CLEANED
   samples via :func:`hpcagent_bench.stats.median_ci` (which warns, naming the cell, on every
   dropped sample); NumPy's own column shows absolute runtimes.
@@ -61,9 +63,11 @@ CI_SEED: int = 0
 BASELINE: str = "numpy"
 
 #: Fixed categorical palette (colorblind-safe), one stable hue per framework slot; cycled if
-#: more frameworks than colors. A framework keeps its colour across every panel of the grid.
-_PALETTE: Tuple[str, ...] = ("#2a78d6", "#e07a2b", "#1baf7a", "#d64550", "#7a5cc0", "#b5892b", "#4aada6", "#c65b9b",
-                             "#6b8f3a", "#8a8a86", "#3f6fb0", "#c0522b")
+#: more frameworks than colors. A framework keeps its colour across every panel of the grid --
+#: and across every figure, which is why the speed-up chart (scripts/plot_speedup.py) reads it
+#: from here rather than picking its own.
+PALETTE: Tuple[str, ...] = ("#2a78d6", "#e07a2b", "#1baf7a", "#d64550", "#7a5cc0", "#b5892b", "#4aada6", "#c65b9b",
+                            "#6b8f3a", "#8a8a86", "#3f6fb0", "#c0522b")
 
 
 def set_usetex(usetex: bool) -> None:
@@ -492,7 +496,7 @@ def distribution_figure(data: pd.DataFrame, kind: str, order: str, output: str, 
     ordered, _spans = _reorder_rows(kernels, order)
 
     slots = _framework_slots(data)  # FIXED slot per framework, shared by every panel
-    colors = {fw: _PALETTE[i % len(_PALETTE)] for i, fw in enumerate(slots)}
+    colors = {fw: PALETTE[i % len(PALETTE)] for i, fw in enumerate(slots)}
     nslots = len(slots)
 
     nrows, ncols = _grid_shape(len(ordered))

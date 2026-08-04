@@ -80,11 +80,14 @@ bash "${REPO}/scripts/submit_deterministic.sbatch" || status=$?
 echo "=== merging the ${RANKS_PER_NODE} rank DBs ==="
 hpcagent-bench aggregate-db
 
-# The speedup table, against numpy. `plot` is the CLI entry point (scripts/plot_results.py is a shim
-# over this same verb and is on its way out); it re-runs the merge above if a shard moved, so the two
-# steps cannot disagree. --no-usetex because a compute node rarely has LaTeX.
-echo "=== speedup table ==="
-hpcagent-bench plot --benchmark "${BENCH}" --preset "${PRESET}" --no-usetex \
+# The speed-up chart, against numpy: signed relative change (0 = no change, +1 = 2x faster, -1 = 2x
+# slower) banded by order of magnitude. NOT the old NPBench-style table -- on its ratio axis a 0.5x
+# regression reads as a smaller event than a 1.5x win, and this job exists to compare two trees. The
+# table is still one `hpcagent-bench plot` away when someone wants it. Reads through the same loader
+# as everything else, so it re-runs the merge above if a shard moved and the two steps cannot
+# disagree. --no-usetex because a compute node rarely has LaTeX.
+echo "=== speed-up chart ==="
+python "${REPO}/scripts/plot_speedup.py" --benchmark "${BENCH}" --preset "${PRESET}" --no-usetex \
     --output "results/plots/hpc-dace-vs-pluto-${SLURM_JOB_ID:-local}.pdf"
 
 exit "${status}"
