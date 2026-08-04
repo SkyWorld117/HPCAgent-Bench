@@ -574,9 +574,23 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                 return tuple(out) if out else (_const(1), )
             if attr == "take" and len(expr.args) >= 2:
                 base = _iter_extent_of(expr.args[0], shape_table)
-                idx_ext = _iter_extent_of(expr.args[1], shape_table)
-                if base is None or idx_ext is None or len(idx_ext) != 1:
+                # A LITERAL index takes one element off the axis, so numpy drops that axis
+                # entirely -- distinct from an unresolvable index, which is what ``None`` from
+                # ``_iter_extent_of`` otherwise means. Conflating the two left the enclosing
+                # ``np.expand_dims`` / ``np.concatenate`` unsized and refused.
+                lit_index = _const_int(expr.args[1])
+                idx_ext = None if lit_index is not None else _iter_extent_of(expr.args[1], shape_table)
+                if base is None or (lit_index is None and (idx_ext is None or len(idx_ext) != 1)):
                     return None
+                if lit_index is not None:
+                    axis_node = _kwarg_or_pos(expr.args, expr.keywords, 2, "axis")
+                    if axis_node is None:
+                        return None  # flat take on an N-D source: numpy ravels first
+                    axis = _const_axis(axis_node, len(base))
+                    if axis is None:
+                        return None
+                    out = [e for k, e in enumerate(base) if k != axis]
+                    return tuple(out) or None
                 axis_node = _kwarg_or_pos(expr.args, expr.keywords, 2, "axis")
                 if axis_node is None:
                     return idx_ext if len(base) == 1 else None  # flat take on a 1-D source
@@ -694,6 +708,13 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # residual shape so the outer axes below index it -- not yet flattened
             # to a single Name subscript at harvest time.
             shape = _chained_base_shape(expr.value, shape_table)
+            if shape is None:
+                # Any other sized base: a CALL result indexed directly, which is what
+                # ``np.expand_dims(np.take(x, 0, axis=k), axis=k)`` becomes once the frontend
+                # rewrites expand_dims to a newaxis index. Its own extent is the shape the
+                # axes below index against.
+                base_ext = _iter_extent_of(expr.value, shape_table)
+                shape = tuple(ast.unparse(e) for e in base_ext) if base_ext is not None else None
         axes = _slice_axes(expr)
         ext: List[ast.expr] = []
         src_axis = 0  # source-axis pointer -- advances on Slice / scalar
@@ -1167,12 +1188,37 @@ def _scalarize_at_iters(expr: ast.expr, iters: List[ast.expr], shape_table: Dict
                          body=_scalarize_at_iters(expr.body, iters, shape_table),
                          orelse=_scalarize_at_iters(expr.orelse, iters, shape_table))
     if isinstance(expr, ast.Call):
+        # An array CONSTRUCTOR is not elementwise: every element of ``np.zeros_like(a)`` is 0,
+        # whatever ``a`` is. Recursing into the args instead emitted a per-element call to the
+        # constructor itself (``__t[i, j] = np.zeros_like(...)``), which no backend can render.
+        fill = _ctor_fill_element(expr)
+        if fill is not None:
+            return fill
         # Math intrinsics on array values fall through; the args are
         # array expressions to scalarize.
         return ast.Call(func=expr.func,
                         args=[_scalarize_at_iters(a, iters, shape_table) for a in expr.args],
                         keywords=expr.keywords)
     return expr
+
+
+#: Element value of an array constructor, for the constructors whose fill is DEFINED. ``empty`` /
+#: ``empty_like`` / ``ndarray`` are absent on purpose: their contents are whatever the allocation
+#: held, and naming a value for them would put an invented number into the emitted kernel.
+_CTOR_FILL: Dict[str, float] = {"zeros": 0.0, "zeros_like": 0.0, "ones": 1.0, "ones_like": 1.0}
+
+
+def _ctor_fill_element(expr: ast.Call) -> Optional[ast.expr]:
+    """The scalar every element of ``np.zeros(...)`` / ``np.ones_like(...)`` / ``np.full(...)``
+    holds, or ``None`` when the call is not such a constructor."""
+    if not (isinstance(expr.func, ast.Attribute) and isinstance(expr.func.value, ast.Name)
+            and expr.func.value.id in ("np", "numpy")):
+        return None
+    attr = expr.func.attr
+    if attr in ("full", "full_like") and len(expr.args) >= 2:
+        return copy.deepcopy(expr.args[1])
+    value = _CTOR_FILL.get(attr)
+    return None if value is None else _const(value)
 
 
 def _eval_axes(node) -> Optional[List[int]]:

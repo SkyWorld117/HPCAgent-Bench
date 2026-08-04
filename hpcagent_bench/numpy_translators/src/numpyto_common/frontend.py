@@ -30,7 +30,7 @@ import json
 import os
 import pathlib
 import re
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 
@@ -509,29 +509,45 @@ def parse_kernel(numpy_py: pathlib.Path,
     # parameters (every KernelBench conv/pool port normalises a knob to ``(s, s)``) is folded
     # against the values the call site actually passed.
     _scalar_names = frozenset(input_args) - frozenset(array_args)
-    # A structural constant becomes a literal BEFORE anything reads it: an axis, a repeat count and
-    # a slice bound all pick the loop nest, and none of them can be built from a runtime scalar.
     _init_scalars = info.get("init", {}).get("scalars", {}) or {}
-    _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
-                                               runtime_args=input_args)).apply(fn)
-    # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only in
-    # the axis slot and a slice STEP, where nothing else can be emitted.
-    _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args)).apply(fn)
-    ast.fix_missing_locations(fn)
-    # expand_dims/swapaxes first: they become plain indexing, which the tuple pass can then rank.
-    _AxisReshapeToIndexing(rank_table(fn, _declared_ranks(shapes_raw)), _scalar_names).visit(fn)
-    ast.fix_missing_locations(fn)
-    desugar_tuples(fn,
-                   int_scalars=_scalar_names - frozenset(_float_preset_names),
-                   float_scalars=frozenset(_float_preset_names) & _scalar_names,
-                   arrays=frozenset(array_args),
-                   ranks=rank_table(fn, _declared_ranks(shapes_raw)))
 
-    # Whatever axis did not become a literal above has no emittable loop nest. Refuse it here rather
-    # than let a downstream reader mistake it for "no axis at all". A slice step and a negative
-    # slice start pick the nest the same way, so they are refused on the same pass.
-    _reject_symbolic_axis(fn)
-    _reject_unsupported_slices(fn)
+    def _resolve_axes(target: ast.FunctionDef) -> None:
+        """Put every structural position into the literal form the nest is built from, then refuse
+        whatever is left symbolic. Applied to the body -- or, when the axis itself is a runtime
+        argument, to each specialised clone of it."""
+        # A structural constant becomes a literal BEFORE anything reads it: an axis, a repeat count
+        # and a slice bound all pick the loop nest, none buildable from a runtime scalar.
+        _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
+                                                   runtime_args=input_args)).apply(target)
+        # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only
+        # in the axis slot and a slice STEP, where nothing else can be emitted.
+        _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw,
+                                                  keep_only=input_args)).apply(target)
+        ast.fix_missing_locations(target)
+        # expand_dims/swapaxes first: they become plain indexing, which the tuple pass can then rank.
+        _AxisReshapeToIndexing(rank_table(target, _declared_ranks(shapes_raw)), _scalar_names).visit(target)
+        ast.fix_missing_locations(target)
+        desugar_tuples(target,
+                       int_scalars=_scalar_names - frozenset(_float_preset_names),
+                       float_scalars=frozenset(_float_preset_names) & _scalar_names,
+                       arrays=frozenset(array_args),
+                       ranks=rank_table(target, _declared_ranks(shapes_raw)))
+        # Whatever axis did not become a literal above has no emittable loop nest. Refuse it here
+        # rather than let a downstream reader mistake it for "no axis at all". A slice step and a
+        # negative slice start pick the nest the same way, so they are refused on the same pass.
+        _reject_symbolic_axis(target)
+        _reject_unsupported_slices(target)
+
+    # An axis the ABI supplies has no single nest, but the operand's RANK is known, so the honest
+    # emission is every nest it could pick plus the run-time choice between them -- never the
+    # manifest default, which the harness need not pass.
+    _dispatch = _runtime_axis_dispatch(
+        fn, _scalar_names, rank_table(fn, _declared_ranks(shapes_raw)),
+        _structural_constants(parameters, _init_scalars, shapes_raw, keep_only=input_args))
+    if _dispatch is None:
+        _resolve_axes(fn)
+    else:
+        _specialize_runtime_axis(fn, _dispatch[0], _dispatch[1], frozenset(input_args), _resolve_axes)
 
     _rename_rebound_parameters(fn, frozenset(array_args) - frozenset(output_args))
 
@@ -2996,20 +3012,33 @@ class _FoldConstantSymbols(ast.NodeTransformer):
         return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
 
 
+def _axis_argument(call: ast.Call) -> Optional[ast.expr]:
+    """The node sitting in ``call``'s axis slot, or ``None`` when it names no axis (or is not a
+    call whose axis picks the loop nest)."""
+    name = _np_attr_name(call)
+    if name not in AXIS_STRUCTURAL_FNS:
+        return None
+    kw = {k.arg: k.value for k in call.keywords}
+    slot = AXIS_POSITION.get(name, 1)
+    return kw.get("axis") or kw.get("axes") or (call.args[slot] if len(call.args) > slot else None)
+
+
 def _reject_symbolic_axis(fn: ast.FunctionDef) -> None:
     """Refuse a reduction / scan whose axis is present but not a literal.
 
     Not pedantry: ``_read_axis_keepdims`` reports an unreadable axis as ``None``, which is the SAME
     value it reports for ``np.sum(x)`` -- so ``np.sum(x, axis=dim)`` used to lower as a FULL
     reduction over every axis and compile cleanly. A wrong answer is worse than no answer.
+
+    Reached only for an axis :func:`_specialize_runtime_axis` could not dispatch on -- a runtime
+    axis with a known operand rank is emitted as one specialised nest per axis, chosen at run time.
     """
     for node in ast.walk(fn):
         name = _np_attr_name(node) if isinstance(node, ast.Call) else None
         if name not in AXIS_STRUCTURAL_FNS:
             continue
         kw = {k.arg: k.value for k in node.keywords}
-        slot = AXIS_POSITION.get(name, 1)
-        axis = kw.get("axis") or kw.get("axes") or (node.args[slot] if len(node.args) > slot else None)
+        axis = _axis_argument(node)
         if axis is not None and not _is_literal_axis(axis):
             raise NotImplementedError(f"{ast.unparse(node)}: axis must be a compile-time integer "
                                       f"(got {ast.unparse(axis)!r}); the emitted loop nest is chosen by it")
@@ -3055,6 +3084,187 @@ def _is_literal_axis(node: ast.expr) -> bool:
 def _np_attr_name(node: ast.Call) -> Optional[str]:
     """``np.sum(...)`` / ``x.sum(...)`` -> ``"sum"``, else ``None``."""
     return node.func.attr if isinstance(node.func, ast.Attribute) else None
+
+
+#: Ceiling on the rank a runtime axis may dispatch over. The body is duplicated once per axis, and
+#: every branch's temporaries are allocated whether or not that branch runs, so the cost is linear
+#: in the rank. Past this the refusal -- which names the axis -- is the better answer.
+_MAX_DISPATCH_RANK = 4
+
+
+def _sequence_length(value: ast.expr, ranks: Dict[str, int]) -> Optional[int]:
+    """Element count of a compile-time sequence, or ``None`` when it is not one.
+
+    Covers the literal and the ``[<elt>] * <array>.ndim`` repeat the ports build a per-axis index
+    list with; that count is what makes ``slices[dim]`` an AXIS index rather than a data index.
+    """
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return len(value.elts)
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mult):
+        for seq, count in ((value.left, value.right), (value.right, value.left)):
+            if not isinstance(seq, (ast.List, ast.Tuple)):
+                continue
+            if isinstance(count, ast.Constant) and isinstance(count.value, int):
+                return len(seq.elts) * count.value
+            if (isinstance(count, ast.Attribute) and count.attr == "ndim" and isinstance(count.value, ast.Name)
+                    and count.value.id in ranks):
+                return len(seq.elts) * ranks[count.value.id]
+    return None
+
+
+#: Calls whose ``axis`` addresses the RESULT's axes -- one more than the operand's, since the call
+#: inserts one. Reading their axis against the operand's rank would size the dispatch one short.
+_AXIS_INSERTS = frozenset({"expand_dims", "stack"})
+
+
+def _axis_index_spaces(fn: ast.FunctionDef, ranks: Dict[str, int]) -> Dict[int, int]:
+    """``id(index node) -> how many AXES that index selects among``, for the two sequences an axis
+    may legitimately index: ``x.shape`` and a rank-length per-axis list.
+
+    A negative axis and its normalised form pick the same element only in a sequence with one entry
+    per axis. Indexing anything else with ``dim`` is a DATA read, where ``-1`` means "last element"
+    and substituting ``rank - 1`` would read a different one -- so this is what decides both the
+    axis count and whether substituting into a use is legitimate at all.
+    """
+    out: Dict[int, int] = {}
+    bound: Dict[str, List[ast.expr]] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            bound.setdefault(node.targets[0].id, []).append(node.value)
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Subscript):
+            continue
+        base = node.value
+        if (isinstance(base, ast.Attribute) and base.attr == "shape" and isinstance(base.value, ast.Name)
+                and base.value.id in ranks):
+            out[id(node.slice)] = ranks[base.value.id]
+        elif isinstance(base, ast.Name) and bound.get(base.id):
+            lengths = {_sequence_length(v, ranks) for v in bound[base.id]}
+            length = lengths.pop() if len(lengths) == 1 else None
+            if length is not None:
+                out[id(node.slice)] = length
+    return out
+
+
+def _runtime_axis_dispatch(fn: ast.FunctionDef, scalars: FrozenSet[str], ranks: Dict[str, int],
+                           foldable: Dict[str, int]) -> Optional[Tuple[str, int]]:
+    """``(name, rank)`` of the one runtime axis to specialise over, or ``None``.
+
+    Every condition is a precondition for substituting a literal axis into a clone of the whole
+    body, not a convenience:
+
+    * ONE name only -- the branch count is ``rank`` per dispatched name, so two would multiply.
+    * Every use of it is an AXIS: an axis slot, or an index into ``x.shape`` / a per-axis list.
+      Only there do ``-1`` and ``rank - 1`` denote the same thing, which is what lets one branch
+      serve both spellings.
+    * Every use that reveals an axis COUNT reveals the same one. That count is the branch count and
+      what a negative axis resolves against, so a body mixing two rank spaces has no single
+      dispatch and keeps the refusal.
+    * The name is not one :class:`_FoldStructuralUses` already resolves at every use. Where the
+      manifest pins an axis-only argument, folding it is the existing policy and a dispatch would
+      duplicate a body for nothing.
+    * The kernel writes through its parameters. A RETURNED output is promoted from the body's
+      trailing statement (:func:`_synthesize_return_temps`), which a dispatch buries inside a
+      branch -- the kernel would then emit with no output at all.
+    """
+    if any(isinstance(node, ast.Return) and node.value is not None for node in ast.walk(fn)):
+        return None
+    axis_names: OrderedSet = OrderedSet()
+    axis_spaces: Dict[int, Optional[int]] = {}
+    for node in ast.walk(fn):
+        axis = _axis_argument(node) if isinstance(node, ast.Call) else None
+        if axis is None:
+            continue
+        operand = expr_rank(node.args[0], ranks) if node.args else None
+        insert = 1 if _np_attr_name(node) in _AXIS_INSERTS else 0
+        axis_spaces[id(axis)] = None if operand is None else operand + insert
+        if isinstance(axis, ast.Name) and axis.id in scalars:
+            axis_names.add(axis.id)
+    if len(axis_names) != 1:
+        return None
+    name = next(iter(axis_names))
+    index_spaces = _axis_index_spaces(fn, ranks)
+    uses = [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == name]
+    if not all(id(u) in axis_spaces or id(u) in index_spaces for u in uses):
+        return None
+    if name in foldable and all(id(u) in axis_spaces for u in uses):
+        return None
+    # An operand whose rank the table does not know reveals nothing and is skipped; one that
+    # disagrees is a second rank space and refuses the dispatch.
+    counts = {index_spaces[id(u)] for u in uses if id(u) in index_spaces}
+    counts |= {axis_spaces[id(u)] for u in uses if id(u) in axis_spaces and axis_spaces[id(u)] is not None}
+    if len(counts) != 1:
+        return None
+    rank = counts.pop()
+    return (name, rank) if 1 <= rank <= _MAX_DISPATCH_RANK else None
+
+
+def _specialize_runtime_axis(fn: ast.FunctionDef, name: str, rank: int, params: FrozenSet[str],
+                             resolve: Callable[[ast.FunctionDef], None]) -> None:
+    """Emit one specialised body per axis, selected at run time by ``name``.
+
+    Scope is the WHOLE body, not the one call whose axis is symbolic: the axis reaches the narrow
+    slice, the take, the expand_dims and the concatenate alike, and the temporaries between them
+    have a different SHAPE per axis (``(N-1, M)`` against ``(N, M-1)``). A per-op dispatch would
+    have to agree on one shape for each of those, so the branch has to contain every statement that
+    produces or consumes an axis-dependent value -- which is all of them.
+
+    Each branch is a full clone with the axis substituted, then run through ``resolve`` (the
+    structural-axis stage) as if it were the whole kernel, so its nest is chosen exactly as a
+    literal-axis kernel's is. Locals are prefixed per branch because one name cannot carry two
+    shapes in the emitter's declaration table.
+
+    An OUT-OF-RANGE axis matches no branch, so the kernel writes nothing and leaves every output
+    buffer as the caller passed it. numpy raises ``AxisError`` here and a void kernel has no way to
+    report that; declining to write is the one behaviour that is neither a wrong answer nor a
+    silent one, since the harness compares against a reference that raised.
+    """
+    branches: List[List[ast.stmt]] = []
+    for axis in range(rank):
+        clone = copy.deepcopy(fn)
+        _SubstituteAxisLiteral(name, axis).visit(clone)
+        rename = {n: f"__ax{axis}_{n}" for n in _rebound_names(clone) - params}
+        _RenameLocals(rename).visit(clone)
+        ast.fix_missing_locations(clone)
+        resolve(clone)
+        branches.append(clone.body)
+    chain: List[ast.stmt] = []
+    for axis in reversed(range(rank)):
+        # Both spellings of the same axis share a branch; nothing else may enter one.
+        test = ast.BoolOp(op=ast.Or(),
+                          values=[
+                              ast.Compare(left=ast.Name(id=name, ctx=ast.Load()),
+                                          ops=[ast.Eq()],
+                                          comparators=[ast.Constant(value=value)]) for value in (axis, axis - rank)
+                          ])
+        chain = [ast.If(test=test, body=branches[axis], orelse=chain)]
+    fn.body = chain
+    ast.fix_missing_locations(fn)
+
+
+class _SubstituteAxisLiteral(ast.NodeTransformer):
+    """Replace every read of the dispatched axis with the literal that branch stands for."""
+
+    def __init__(self, name: str, axis: int) -> None:
+        self.name = name
+        self.axis = axis
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id != self.name or not isinstance(node.ctx, ast.Load):
+            return node
+        return ast.copy_location(ast.Constant(value=self.axis), node)
+
+
+class _RenameLocals(ast.NodeTransformer):
+    """Give one branch's locals their own names, so two branches can size the same source-level
+    temp differently."""
+
+    def __init__(self, rename: Dict[str, str]) -> None:
+        self.rename = rename
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        new = self.rename.get(node.id)
+        return node if new is None else ast.copy_location(ast.Name(id=new, ctx=node.ctx), node)
 
 
 def _static_flag_params(tree: ast.Module) -> Dict[str, FrozenSet[str]]:

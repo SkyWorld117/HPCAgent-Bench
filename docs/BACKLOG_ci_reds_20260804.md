@@ -40,9 +40,13 @@ helper machinery is what put the temp there.
 The same gap shows up independently in the Fortran corpus sweep, so the lowering pays for itself
 twice.
 
-Blocked on: deciding whether a symbolic scan axis is lowered by specialising the loop nest per axis
-value, or refused with a message that names the kernel. Either is defensible; silently emitting the
-wrong nest is not.
+**RESOLVED** -- specialised, not folded. `dim` reaches the ABI, so the manifest's value is not the
+value the harness passes; the emitted kernel carries one loop nest per axis and picks between them
+at run time (`frontend._specialize_runtime_axis`). Scope is the whole body: `dim` also drives the
+narrow, the take, the expand_dims and the concatenate, and the temporaries between them have a
+different shape per axis. A negative axis shares its branch with `axis + rank`, numpy-style; an
+out-of-range one matches no branch and the kernel writes nothing (numpy raises there, and a void
+kernel cannot). `KNOWN_NON_LOWERING` stays empty.
 
 ## 2. The `unit` job no longer fits in 1h30m
 
