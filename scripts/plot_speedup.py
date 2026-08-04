@@ -285,26 +285,32 @@ def mini_figure(points: Sequence[Point], kernels: Sequence[str], output: str) ->
     """The MINI variant (SVG): the banded layout at embed size, with the chrome that does not
     survive there removed.
 
-    Kept, because without them the figure says nothing: the band title (which order of magnitude),
-    the sign (above or below the zero line) and the y ticks (how big). Dropped: the framework
-    legend, the axis description, and the kernel NAMES -- at this size a real short_name is an
-    unreadable smear, so the ticks are ``K1..Kn`` in the plotted order and the names are read off
-    the full-size figure.
+    Kept, because without them the figure says nothing: the band title (which order of magnitude)
+    and the sign (above or below the zero line). Dropped: the framework legend, the kernel NAMES --
+    at this size a real short_name is an unreadable smear, so the ticks are ``K1..Kn`` in the
+    plotted order and the names are read off the full-size figure -- and the y tick NUMBERS, whose
+    order of magnitude the band title above them already states. One ``Speedup`` label stands in
+    for them, and the column they cost goes to the panels.
     """
     x_of = {kernel: i for i, kernel in enumerate(kernels)}
     colors = framework_colors(points)
     present = [band for band in BANDS if any(point.band == band for point in points)]
-    fig, axes = plt.subplots(len(present), 1, sharex=True, figsize=(3.4, max(1.2, 0.85 * len(present))), squeeze=False)
+    fig, axes = plt.subplots(len(present), 1, sharex=True, figsize=(3.4, max(1.3, 0.95 * len(present))), squeeze=False)
     for row, band in zip(axes, present):
         ax = row[0]
         draw_band(ax, band, [point for point in points if point.band == band], x_of, colors)
-        ax.title.set_fontsize(5)
-        ax.tick_params(axis="y", labelsize=4)
-        ax.set_ylabel("speedup", fontsize=5)
+        ax.title.set_fontsize(6)
+        ax.set_yticks([])  # takes the numbers, their marks and their gridlines with it
+        # band_limits closes ON the extreme point. Here a marker is 3pt on a panel ~40pt tall, so
+        # that point straddles the spine and reads as a clipped half-disc; pad the panel off it.
+        low, high = ax.get_ylim()
+        pad = 0.06 * (high - low)
+        ax.set_ylim(low - pad, high + pad)
     bottom = axes[-1][0]
     bottom.set_xticks(range(len(kernels)))
-    bottom.set_xticklabels([f"K{i + 1}" for i in range(len(kernels))], fontsize=4)
+    bottom.set_xticklabels([f"K{i + 1}" for i in range(len(kernels))], fontsize=5)
     bottom.set_xlim(-0.6, len(kernels) - 0.4)
+    fig.supylabel("Speedup", fontsize=7)
     plt.tight_layout()
     return plotting.save_figure(output, fig)
 

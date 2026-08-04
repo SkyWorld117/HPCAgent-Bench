@@ -11,7 +11,7 @@ rendering anything.
 import importlib.util
 import math
 import pathlib
-from typing import List
+from typing import List, Tuple
 
 import pandas as pd
 import pytest
@@ -190,6 +190,31 @@ def test_the_simplified_figure_shows_the_band_with_the_most_points(tmp_path: pat
     blob = pathlib.Path(out).read_bytes()
     assert blob.lstrip().startswith(b"<?xml"), "the simplified variant must be a real SVG"
     assert b"<svg" in blob
+
+
+def test_the_mini_variant_prunes_the_ticks_that_do_not_survive_embed_size(monkeypatch: pytest.MonkeyPatch,
+                                                                          tmp_path: pathlib.Path) -> None:
+    """At 3.4in wide a real kernel name and a y-tick number are both an unreadable smear, so the x
+    ticks are ``K1..Kn`` and the y numbers are gone -- the band title carries the order of magnitude
+    instead. What is left still has to say which axis it is."""
+    seen: List[Tuple[List[str], List[str], List[str]]] = []
+    original = plotting.save_figure
+
+    def spy(path: str, fig) -> str:
+        xticks = [text.get_text() for text in fig.axes[-1].get_xticklabels()]
+        yticks = [text.get_text() for ax in fig.axes for text in ax.get_yticklabels()]
+        seen.append((xticks, yticks, [text.get_text() for text in fig.texts]))
+        return original(path, fig)
+
+    monkeypatch.setattr(plotting, "save_figure", spy)
+    points = speedup.demo_points()
+    kernels = speedup.plotted_kernels(points)
+    speedup.mini_figure(points, kernels, str(tmp_path / "speedup-mini.svg"))
+    assert len(seen) == 1
+    xticks, yticks, texts = seen[0]
+    assert xticks == [f"K{i + 1}" for i in range(len(kernels))]
+    assert yticks == [], "a number this small is clutter, not a reading"
+    assert "Speedup" in texts
 
 
 def test_every_output_is_written_per_machine(tmp_path: pathlib.Path) -> None:
