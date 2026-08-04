@@ -20,6 +20,8 @@ import pytest
 
 import _native_tu as tu
 
+from hpcagent_bench import languages
+
 #: Every conversion diagnostic, as errors. -Wsign-conversion is the one that actually fired (signed
 #: extent into size_t); the rest are here so the gate covers the whole family rather than the one
 #: instance we happened to hit.
@@ -88,7 +90,7 @@ def test_emitted_c_has_no_implicit_conversion(key, rel):
         src, = tu.pathlib.Path(d).glob("*_fp64.c")
         # -Wbad-function-cast is C-only and catches a function result cast away, which is the other
         # way an implicit conversion hides in C.
-        done = _compile("gcc", "-std=c17", src, d, ["-Wbad-function-cast"])
+        done = _compile("gcc", languages.std_flag("c"), src, d, ["-Wbad-function-cast"])
     _assert_ratchet(key, done)
 
 
@@ -102,7 +104,7 @@ def test_emitted_cpp_has_no_implicit_conversion(key, rel):
     with tempfile.TemporaryDirectory() as d:
         tu.emit_cpp_source(key, numpy_py, d)
         src, = tu.pathlib.Path(d).glob("*_fp64.cpp")
-        done = _compile("g++", "-std=c++20", src, d, [])
+        done = _compile("g++", languages.std_flag("cpp"), src, d, [])
     _assert_ratchet(key, done)
 
 
@@ -121,7 +123,7 @@ def test_the_signed_extent_conversion_is_gone_everywhere():
         with tempfile.TemporaryDirectory() as d:
             tu.emit_source(key, numpy_py, "c", d)
             src, = tu.pathlib.Path(d).glob("*_fp64.c")
-            done = _compile("gcc", "-std=c17", src, d, ["-Wbad-function-cast"])
+            done = _compile("gcc", languages.std_flag("c"), src, d, ["-Wbad-function-cast"])
         assert "sign-conversion" not in done.stderr, f"{key}: signed-extent conversion is back\n{done.stderr}"
 
 
@@ -142,5 +144,5 @@ def test_the_gate_fails_on_an_implicit_conversion():
                        "    out[0] = n;\n"  # long -> double
                        "    free(p);\n"
                        "}\n")
-        done = _compile("gcc", "-std=c17", bad, d, ["-Wbad-function-cast"])
+        done = _compile("gcc", languages.std_flag("c"), bad, d, ["-Wbad-function-cast"])
     assert done.returncode != 0, "the conversion flags did not fire on deliberately bad code"

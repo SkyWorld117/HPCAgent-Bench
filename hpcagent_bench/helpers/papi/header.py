@@ -171,7 +171,7 @@ int hpc_papi_finalize(void); /* 0 = a counted report, <0 = a degraded one. NOT a
 #ifndef HPC_PAPI_IMPLEMENTED
 #define HPC_PAPI_IMPLEMENTED
 
-/* Nothing here needs a feature-test macro. The harness compiles C at -std=c17, which hides every
+/* Nothing here needs a feature-test macro. The harness compiles C at -std=c23, which hides every
  * POSIX declaration, so the hostname is READ FROM /proc and the alignment is done by hand rather
  * than reaching for gethostname or posix_memalign. */
 #include <dlfcn.h>

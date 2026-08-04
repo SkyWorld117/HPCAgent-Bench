@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 from numpy.ctypeslib import ndpointer
 
+from hpcagent_bench import languages
+
 from xsbench_numpy import (
     calculate_macro_xs_unionized,
     calculate_micro_xs_unionized,
@@ -37,7 +39,7 @@ def build_c_reference():
             [
                 "gcc",
                 "-O3",
-                "-std=c17",
+                languages.std_flag("c"),
                 "-shared",
                 "-fPIC",
                 str(C_SOURCE),
