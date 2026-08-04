@@ -6154,6 +6154,14 @@ def _lp_normalize_index_access(ctx: LoweringContext) -> None:
     # subscript base folds to concrete dims BEFORE the reshape / LibNode expander
     # bakes the (otherwise unresolved) token into a loop bound.
     _ShapeMidExpressionRewriter(shapes).visit(tree)
+    # Re-run the tuple splitter for the same reason the fold above re-runs: its first pass
+    # (normalize-calls) only had the DECLARED-array shapes, so ``n, c, oh, ow = x.shape`` on an
+    # inlined local stayed a tuple and reached the emitter as a value -- "expression Tuple", the
+    # single largest emit failure in the corpus. Extends int_locals rather than replacing it; the
+    # first pass's names are still live.
+    tuple_rewriter = _TupleAssignRewriter(shapes)
+    tuple_rewriter.visit(tree)
+    ctx.kir.int_locals += [n for n in tuple_rewriter.int_locals if n not in ctx.kir.int_locals]
     _TupleLocalPropagator().run(tree)
     _TupleSubscriptFolder().visit(tree)
     ast.fix_missing_locations(tree)
