@@ -323,8 +323,7 @@ class _CBodyEmitter(BaseEmitter):
                         lines.append(f"{indent}free({t});")
                     # Pluto: cast to the multidimensional pointer-to-array type matching the declaration; else flat T*.
                     cast = (f"({c_type} (*){self.md_trailing[t]})" if t in self.md_trailing else f"({c_type} *)")
-                    lines.append(f"{indent}{t} = {cast}malloc(({size}) "
-                                 f"* sizeof({c_type}));")
+                    lines.append(f"{indent}{t} = {cast}malloc({_byte_count(size, c_type)});")
                     if fill is not None:
                         lines.append(_zero_fill_stmt(t, size, c_type, fill, indent))
                     return "\n".join(lines)
@@ -1122,12 +1121,22 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     return out
 
 
+def _byte_count(size: str, c_type: str) -> str:
+    """``size`` elements of ``c_type`` as a byte count for malloc / memset.
+
+    The extent is a signed ``int64_t`` expression and both callees take ``size_t``, so leaving the
+    conversion implicit is exactly the silent sign change the generated code is not allowed to carry
+    (``-Wsign-conversion``). Written once here rather than at each of the five allocation sites.
+    """
+    return f"(size_t)({size}) * sizeof({c_type})"
+
+
 def _zero_fill_stmt(name: str, size: str, c_type: str, kind: str, indent: str) -> str:
     """C statement that fills name[0:size] per the numpy constructor kind: ones -> 1, else memset to 0."""
     if kind in ("ones", "ones_like"):
         return (f"{indent}for (int64_t __zf = 0; __zf < ({size}); ++__zf) "
                 f"{name}[__zf] = 1;")
-    return f"{indent}memset({name}, 0, ({size}) * sizeof({c_type}));"
+    return f"{indent}memset({name}, 0, {_byte_count(size, c_type)});"
 
 
 def _md_trailing(shape) -> str:
@@ -1235,11 +1244,11 @@ def _emit_body(kir: KernelIR,
             # Pluto: pointer-to-array (heap) so name[i][j] is affine.
             tr = emitter.md_trailing[name]
             decls.append(f"{indent}{c_type} (*{name}){tr} = "
-                         f"({c_type} (*){tr})malloc(({size}) * sizeof({c_type}));")
+                         f"({c_type} (*){tr})malloc({_byte_count(size, c_type)});")
             frees.append(f"{indent}free({name});")
         elif any(c.isalpha() for c in size):
             decls.append(f"{indent}{c_type} *{name} = "
-                         f"({c_type} *)malloc(({size}) * sizeof({c_type}));")
+                         f"({c_type} *)malloc({_byte_count(size, c_type)});")
             frees.append(f"{indent}free({name});")
         else:
             decls.append(f"{indent}{c_type} {name}[{size}];")
@@ -1279,7 +1288,7 @@ def _emit_body(kir: KernelIR,
             decls.append(f"{indent}for (int64_t __i = 0; __i < ({size}); ++__i) "
                          f"{name}[__i] = 1;")
         else:  # zeros / zeros_like / default
-            decls.append(f"{indent}memset({name}, 0, ({size}) * sizeof({c_type}));")
+            decls.append(f"{indent}memset({name}, 0, {_byte_count(size, c_type)});")
     body = emitter.emit_block(kir.tree.body, indent)
     if return_parts:
         # Pluto: keep allocations/frees out of the loop body so the caller can place them outside #pragma scop.
