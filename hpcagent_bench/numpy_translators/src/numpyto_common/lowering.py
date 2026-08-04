@@ -1251,7 +1251,7 @@ class _ScalarFloatTagger(ast.NodeVisitor):
 
 class _TrueDivisionPromoter(ast.NodeTransformer):
     """numpy ``/`` is TRUE division: int / int -> float64. C ``/`` and Fortran
-    ``/`` do INTEGER division on integer operands, so wrap the left operand of an
+    ``/`` do INTEGER division on integer operands, so wrap BOTH operands of an
     all-integer division in an ``np.float64(...)`` cast (which both emitters
     render as ``(double)(x)`` / ``REAL(x, kind=c_double)``) to force a floating
     divide -- matching numpy. Float / complex operands are left untouched (the
@@ -1263,20 +1263,31 @@ class _TrueDivisionPromoter(ast.NodeTransformer):
     is only correct while the operands really are integers, though -- hence the dtype
     table this is handed must be complete (see :class:`_ScalarFloatTagger`). Firing on a
     float divide silently promotes the surrounding expression to double, which fp64
-    cannot reveal because there double IS the precision."""
+    cannot reveal because there double IS the precision.
+
+    Casting the RIGHT operand as well is what keeps this case distinguishable downstream:
+    the C emitter narrows an integer divisor to the KERNEL's float type (numpy's mixed
+    float/int rule), and a bare integer left here would read as that case and pull an
+    int/int divide down to float32 on an fp32 emit. It also leaves no implicit int -> double
+    for the conversion gate; the divide's value is unchanged either way."""
 
     def __init__(self, local_dtypes, array_names):
         self.local_dtypes = local_dtypes or {}
         self.array_names = array_names or set()
 
+    @staticmethod
+    def _as_f64(node: ast.expr) -> ast.expr:
+        return ast.copy_location(
+            ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()), attr="float64", ctx=ast.Load()),
+                     args=[node],
+                     keywords=[]), node)
+
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         self.generic_visit(node)
         if (isinstance(node.op, ast.Div) and _is_integer_expr(node.left, self.local_dtypes, self.array_names)
                 and _is_integer_expr(node.right, self.local_dtypes, self.array_names)):
-            node.left = ast.copy_location(
-                ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()), attr="float64", ctx=ast.Load()),
-                         args=[node.left],
-                         keywords=[]), node.left)
+            node.left = self._as_f64(node.left)
+            node.right = self._as_f64(node.right)
         return node
 
 

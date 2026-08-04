@@ -496,6 +496,8 @@ class _CBodyEmitter(BaseEmitter):
                 return f"int_floor({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
             if isinstance(node.op, ast.Mod):
                 return f"python_mod({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
+            if isinstance(node.op, ast.Div):
+                return self._emit_true_divide(node)
             # 0-D @ 0-D is ordinary multiplication -- but ONLY that. Emitting `*` for any surviving
             # MatMult turned a batched matmul the hoister had silently declined into an elementwise
             # product with no contraction at all, which compiles and returns wrong numbers.
@@ -748,6 +750,29 @@ class _CBodyEmitter(BaseEmitter):
                 return f"{self._math_name('hypot')}({self.emit_expr(node.args[0])}, {self.emit_expr(node.args[1])})"
         raise NotImplementedError(f"call to {ast.unparse(node.func)} not supported")
 
+    def _emit_true_divide(self, node: ast.BinOp) -> str:
+        """numpy ``/`` mixing a float and a Python int yields the FLOAT's own precision -- NEP 50
+        reads a Python int as a WEAK scalar, so ``float32_x / k`` is float32, not float64. C reaches
+        the same type by its usual arithmetic conversions, but silently, and a silent conversion is
+        what the conversion gate refuses. Spell it, at the kernel's float type, here where that type
+        is known -- lowering cannot, because precision is applied to the dtype tables after it runs.
+
+        Fires only when one side is PROVABLY float and the other PROVABLY a weak integer; anything
+        it cannot prove is emitted unchanged. Both halves matter. Requiring the float side keeps the
+        rule off integer index arithmetic that later passes synthesize (``idx / stride``), which must
+        stay an integer divide -- the reason the lowering promoter runs early. Requiring the weak
+        integer side (``allow_array=False``) keeps it off an int ARRAY element, which numpy reads as
+        a STRONG operand and widens to float64 -- not the kernel's float type, and not spellable here
+        without also casting at the store.
+        """
+        left, right = node.left, node.right
+        cast = f"({_c_type(_default_float_dtype(self.kir))})"
+        if self._is_int_operand(right, allow_array=False) and self._is_float_operand(left):
+            return f"({self.emit_expr(left)} / {cast}({self.emit_expr(right)}))"
+        if self._is_int_operand(left, allow_array=False) and self._is_float_operand(right):
+            return f"({cast}({self.emit_expr(left)}) / {self.emit_expr(right)})"
+        return f"({self.emit_expr(left)} / {self.emit_expr(right)})"
+
     def _emit_pow(self, left: ast.AST, right: ast.AST) -> str:
         """The ONE real-valued exponentiation route: integer operands take the exact
         int64 binary-exponentiation helper, everything else libm's ``pow``.
@@ -760,14 +785,23 @@ class _CBodyEmitter(BaseEmitter):
             return f"__npb_int_pow({self.emit_expr(left)}, {self.emit_expr(right)})"
         return f"{self._math_name('pow')}({self.emit_expr(left)}, {self.emit_expr(right)})"
 
-    def _is_int_operand(self, node: ast.AST) -> bool:
+    def _is_int_operand(self, node: ast.AST, *, allow_array: bool = True) -> bool:
         """Conservative int-typed operand detection: int Constant, an int-typed Name or
-        array element, or a BinOp/UnaryOp of only those."""
+        array element, or a BinOp/UnaryOp of only those.
+
+        ``allow_array=False`` drops the array-element case, leaving only the integers that
+        come from Python ints in the reference (symbols, loop counters, int locals, literals).
+        numpy's promotion splits exactly there: those are WEAK operands that keep a mixed
+        expression at the float's precision, an int ARRAY element is a STRONG one that widens
+        it to float64. See :meth:`_emit_true_divide`.
+        """
         if isinstance(node, ast.Constant):
             return isinstance(node.value, int) and not isinstance(node.value, bool)
         if isinstance(node, ast.Subscript):
             # An element of an int-typed array is int -- without this ``a[i] ** b[i]``
             # on int64 arrays fell through to the double pow.
+            if not allow_array:
+                return False
             base = node.value
             while isinstance(base, ast.Subscript):
                 base = base.value
@@ -796,9 +830,10 @@ class _CBodyEmitter(BaseEmitter):
                 return True
             return False
         if isinstance(node, ast.BinOp):
-            return (self._is_int_operand(node.left) and self._is_int_operand(node.right))
+            return (self._is_int_operand(node.left, allow_array=allow_array)
+                    and self._is_int_operand(node.right, allow_array=allow_array))
         if isinstance(node, ast.UnaryOp):
-            return self._is_int_operand(node.operand)
+            return self._is_int_operand(node.operand, allow_array=allow_array)
         return False
 
     def _all_int_locals(self) -> Set[str]:
@@ -1092,6 +1127,11 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     # Per-array element-dtype map for Name = Subscript(arr, scalar) inheritance (x = data[i] where data is uint8).
     array_dtypes = {a.name: a.dtype for a in kir.arrays}
     int_valued = _integer_valued_locals(kir)
+    # An untyped float local -- a var/std accumulator, a running max -- follows the KERNEL's float
+    # precision, exactly as a local array already does. A hard-coded double here made an fp32
+    # kernel accumulate at a precision numpy never uses (numpy sums a float32 array in float32),
+    # so the emitted result could not match the reference it is graded against.
+    acc_type = _c_type(dtypes.accumulator_dtype(_default_float_dtype(kir)))
 
     def _ctype_for(name: str, value: Optional[ast.AST] = None) -> str:
         # Highest priority: explicit dtype from the lowering pipeline.
@@ -1110,7 +1150,7 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
         # double loses exactness above 2**53, and unlike a bitwise/`%` use it is silent.
         if name in int_valued:
             return _c_type("int")
-        return "double"
+        return acc_type
 
     for node in ast.walk(kir.tree):
         if isinstance(node, ast.Assign):

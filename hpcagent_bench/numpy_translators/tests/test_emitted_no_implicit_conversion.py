@@ -49,13 +49,11 @@ KERNELS = [
 #: must still fail, so fixing one breaks this test and forces the entry to be deleted rather than
 #: quietly kept. Same shape as KNOWN_NON_LOWERING in test_abi_corpus_agreement.
 #:
-#: The open case is a float divided by an integer expression (``__cb1 / (k * k)``). Unlike the
-#: signed-extent-into-size_t case, this one cannot be fixed in lowering: the correct cast is to the
-#: KERNEL's float type, and precision is applied to the dtype tables after lowering, so an
-#: ``np.float64`` cast baked into the tree would widen an fp32 kernel. It has to be emitted where the
-#: C type is known, and the C emitter deliberately does not infer dtypes from the AST -- doing that
-#: is what once truncated ``int(a[i]) // 2`` instead of flooring it.
-KNOWN_IMPLICIT_CONVERSION = {"average_pooling_2d": "float / integer-expression divisor"}
+#: Empty. The last entry was average_pooling_2d's float divided by an integer expression
+#: (``__cb1 / (k * k)``), now emitted with the cast spelled at the kernel's float type by
+#: ``_CBodyEmitter._emit_true_divide`` -- which is numpy's own rule (NEP 50 reads a Python int as a
+#: weak scalar, so ``float32 / k`` is float32).
+KNOWN_IMPLICIT_CONVERSION: dict[str, str] = {}
 
 
 def numpy_py_for(rel: str) -> pathlib.Path:

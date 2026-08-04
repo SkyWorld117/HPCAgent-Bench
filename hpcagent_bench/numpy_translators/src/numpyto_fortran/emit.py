@@ -2634,13 +2634,10 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
 
 def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     """Return (name, fortran_type) for scalar locals needing a decl; subscript/range uses promote to integer."""
-    # Float locals follow the kernel's precision (real(c_float) at fp32),
-    # else a double local clashes with float32 arrays/values.
-    rk = {
-        "float32": "c_float",
-        "float16": "c_float"
-    }.get(dtypes.compute_dtype(kir.float_precision or "float64"), "c_double")
-    real_t = f"real({rk})"
+    # Float locals follow the kernel's precision (real(c_float) at fp32), else a double local
+    # clashes with float32 arrays/values -- the same rule the C emitter applies, read from the
+    # one place that states it.
+    real_t = _fortran_type(dtypes.accumulator_dtype(kir.float_precision or "float64"))
     ck = {
         "float32": "c_float_complex",
         "float16": "c_float_complex"
