@@ -12,8 +12,10 @@ runs:
       run: |
         # build-essential: make + gcc + g++ (C/C++ backends). gfortran: the GNU Fortran backend.
         # The LLVM half comes from apt.llvm.org in the next step, NOT from the distro -- see there.
-        # pkg-config + libopenblas-dev: the BLAS optimizer links cblas_*. libfftw3-dev:
-        # the vexx port oracle links -lfftw3.
+        # pkg-config + libopenblas-dev: the BLAS optimizer links cblas_*. libfftw3-dev: the vexx
+        # and cegterg port oracles link -lfftw3 and #include <fftw3.h>. Without it cegterg's
+        # toolchain probe fails and 17 port-fidelity cases SKIP; verify_toolchain.py checks the
+        # fftw3 pkg-config module so that provisioning gap is a red setup step, not a quiet skip.
         # ninja + ccache are BUILD-SPEED dependencies, and both fail SILENTLY when absent rather
         # than erroring, so they belong here rather than in whichever job noticed first:
         #   ninja  -- DaCe picks its CMake generator with `shutil.which('ninja')` and only replays
