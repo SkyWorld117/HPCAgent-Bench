@@ -429,3 +429,31 @@ def test_the_square_figure_is_square() -> None:
     """It is specified as a square panel; a drifting aspect would quietly become a wide strip."""
     assert speedup.SQUARE_SIDE > 0
     assert speedup.SQUARE_CELLS == 4
+
+
+def test_the_bare_simple_figure_clears_the_LEFT_title_not_just_the_centre(tmp_path: pathlib.Path) -> None:
+    """Regression. ``draw_band`` sets the band label with ``loc="left"``, which matplotlib keeps as
+    a DIFFERENT artist from the centre title -- so ``set_title("")`` cleared nothing visible and the
+    band label shipped on a figure asked to have no titles."""
+    points = speedup.demo_points()
+    kernels = speedup.plotted_kernels(points)
+    out = tmp_path / "bare.svg"
+    speedup.simple_figure(points, kernels, str(out), boxes=True, bare=True)
+    body = out.read_text()
+    for band in speedup.BANDS:
+        assert band not in body, f"band title {band!r} survived --bare"
+    for framework in speedup.DEMO_FRAMEWORKS:
+        assert framework not in body, f"legend text {framework!r} survived --bare"
+    assert "signed relative change" not in body, "the y label survived --bare"
+    for kernel, _low, _high, _sign in speedup.DEMO_CELLS:
+        assert f">{kernel}<" not in body, f"kernel name {kernel!r} survived --bare"
+
+
+def test_the_unbare_simple_figure_still_states_what_it_hides(tmp_path: pathlib.Path) -> None:
+    """The default figure must keep saying it shows one band of several. --bare drops that
+    statement on purpose, which is only safe because the default does not."""
+    points = speedup.demo_points()
+    kernels = speedup.plotted_kernels(points)
+    out = tmp_path / "titled.svg"
+    speedup.simple_figure(points, kernels, str(out), boxes=True)
+    assert "not shown" in out.read_text(), "the simplification must be stated on the default figure"
