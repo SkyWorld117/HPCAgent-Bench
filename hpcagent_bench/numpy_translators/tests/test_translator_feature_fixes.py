@@ -152,11 +152,11 @@ def test_variadic_minmax_folds_to_nested_2arg(fn):
     C/C++ 2-arg ``max``/``min`` macros accept it (needleman_wunsch)."""
     from numpyto_c.emit import _CBodyEmitter
     from numpyto_common.ir import KernelIR
-    em = _CBodyEmitter.__new__(_CBodyEmitter)  # no shape state needed for scalars
-    em.array_shapes = {}
-    # An empty kernel: emitting a Name resolves its dtype (to decide the fp8 read
-    # promotion), so the emitter needs its parameter tables even for scalars.
-    em.kir = KernelIR(tree=ast.parse("def f(): pass").body[0], kernel_name="f")
+    # Built through __init__, not __new__. The bypass used to set by hand only the two attributes
+    # this call happened to read, so every new attribute the emitter grew broke this test with an
+    # AttributeError from inside emit -- twice already (kir, then isopar_param_dtypes). An empty
+    # kernel gives the constructor everything it needs; the call under test is still scalar-only.
+    em = _CBodyEmitter(KernelIR(tree=ast.parse("def f(): pass").body[0], kernel_name="f"))
     out = em._emit_call(_expr(f"{fn}(a, b, c)"))
     assert out == f"{fn}({fn}(a, b), c)"
 
