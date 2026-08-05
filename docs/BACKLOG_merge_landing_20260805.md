@@ -18,6 +18,8 @@ updated below), [`BACKLOG_skill_page_review_20260803.md`](BACKLOG_skill_page_rev
 | `79a8e6e8` | the emitter under test is built through `__init__`, not `__new__` |
 | `29180570` | `_FullCallHoister`: a nested `np.full` is spilled so `np.triu` can lower |
 | (in `ea59881c`) | `libtbb-dev` installed in all six native CI jobs |
+| `5867cdd7` | PIC asserted as a property of the flags every shared-library build runs with |
+| `fcdefffe` | `lang-cuda` / `lang-hip` skill pages; cuda and hip stop routing at `lang-cpp` |
 
 `ad0dd5e9` was DROPPED as a strict duplicate of `aedb957c` -- proven by identical
 `git patch-id --stable` on both commits (`84107e649d25`, `f9367d7c48a8`), not by reading the diffs.
@@ -167,7 +169,32 @@ about.
 A sweep found no other `__new__` bypasses in the translator tests. If one appears, build through
 `__init__`: an empty kernel is enough for a scalar-only call.
 
-## I. HPTT clone 403 -- unchanged, still intermittent
+## I. The GPU skill pages ship, but nothing in CI ever scores a GPU submission
+
+`fcdefffe` landed `lang-cuda` and `lang-hip` and routed cuda/hip at them instead of
+`lang-cpp`. What the pages CLAIM is pinned by tests -- neither may name a `-std=` the harness does
+not pass, and a cuda/hip task must get its own page plus `lang-cpp` and no other language page. What
+the pages DESCRIBE is not exercised at all: the `gpu (tvm-gpu / triton codegen)` job is
+`[disabled -- no GPU runner]`, so `scoring._determinism_check` has never rejected a real float-atomic
+reduction on this repo's CI, and the null-workspace protocol the pages warn about has never been hit
+by a scored submission here.
+
+That is the correct order to have done it in -- a page that is wrong about the gate is worse than no
+page -- but it means the pages are currently reviewed prose plus two structural invariants, not
+measured behaviour. **Do not treat "the GPU pages are green" as evidence the GPU track works.**
+
+Two consequences worth carrying forward:
+
+- The determinism claim is checkable WITHOUT a GPU: `_determinism_check` is host Python, so a
+  fixture that returns deliberately non-bitwise-identical arrays pins "no float-atomic reduction
+  passes" at the harness level rather than at the prose level.
+- An `any`-mode prompt now inlines six language pages instead of four, ~18 KB more in every such
+  prompt. That is the pre-existing `any` rule ("withholding a page withholds the rules for a
+  language the agent may pick") applied to two more languages, not a new policy -- cuda and hip were
+  already selectable, they just had no rules. Worth measuring if `any` prompts approach a context
+  budget.
+
+## J. HPTT clone 403 -- unchanged, still intermittent
 
 See `BACKLOG_ci_reds_20260804.md` item 4. Repeating only the part that decides scheduling: the
 repository is public and answering (`git ls-remote` returns
