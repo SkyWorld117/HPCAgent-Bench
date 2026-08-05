@@ -225,7 +225,7 @@ def pipeline_canonicalize(sdfg: Any, ctx: Dict[str, Any]) -> None:
     ``auto_optimize``, not a stronger setting of it.
 
     Loop fission and fusion, tiling, wavefront skew, scatter privatization and the semantic lifts
-    are what the foundation track is built to exercise, and none of them are reachable from
+    are what the loop_level_reasoning track is built to exercise, and none of them are reachable from
     ``auto_optimize``'s LICM + MapFusion + vectorize set. ``canonicalize`` deliberately leaves
     library nodes un-expanded (one shape per computation), which codegens to the NAIVE expansion,
     so ``finalize_for_target`` is not optional here -- the documented perf path is the pair, and

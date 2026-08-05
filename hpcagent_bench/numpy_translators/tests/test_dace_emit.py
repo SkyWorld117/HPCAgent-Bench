@@ -32,7 +32,7 @@ def _emit(short):
     return kir, emit_dace(kir)
 
 
-@pytest.mark.skipif(not _KERNELS, reason="no foundation kernels")
+@pytest.mark.skipif(not _KERNELS, reason="no loop_level_reasoning kernels")
 @pytest.mark.parametrize("short", _KERNELS)
 def test_emits_valid_dc_program_with_symbols_dropped(short):
     kir, src = _emit(short)
