@@ -1,6 +1,7 @@
 # Ablation studies, run tagging, and the speed-up plot -- OPEN
 
-Filed 2026-08-03. Seven items, none started. They interlock: the two ablations (1, 2) are the
+Filed 2026-08-03, pruned 2026-08-05 (levels 1-3 of KernelBench are ported; the rocprofv3 schema
+fixes landed). Items 1-5 and 7-9 are unstarted. They interlock: the two ablations (1, 2) are the
 CONSUMERS of the tagging work (5) and the plot work (7), so tagging lands first or the ablation
 results are unseparable from ordinary runs.
 
@@ -147,7 +148,7 @@ read, and check the CNF `declare-then-fill` invariant already covers the rest.
 
 ## 9. Unit-test the KernelBench NumPy ports against PyTorch
 
-The 239 ports under `hpcagent_bench/benchmarks/ml/` are translations of upstream PyTorch models, and
+The 250 ports under `hpcagent_bench/benchmarks/ml/` are translations of upstream PyTorch models, and
 **nothing currently checks that they compute the same thing.** `scripts/collect_reference_sources.py`
 resolves each port to its upstream file for PROVENANCE only -- the collected original "is never
 imported (it needs torch) and never graded", per `handle_kernelbench`. So the mapping is verified and
@@ -170,79 +171,47 @@ compare. Points to settle when doing it:
 - **Ordering.** Do this AFTER the emit gap is closed (see below), or a passing NumPy-vs-torch test
   still says nothing about what the translator produces.
 
-Related open defect found 2026-08-03: `efficientnet_mb_conv` and `resnet_basic_block` now PARSE and
-LOWER (commit `6efe7665`) but still fail at EMIT with `NotImplementedError: expression Tuple`, from a
-local `np.zeros((n, hidden, h, w))` whose dims come from tuple-unpacked `.shape`. Separate gap,
-downstream of the fold.
+## 10. level4 -- decide whether it belongs in the corpus at all
 
-## 10. Port the WHOLE of KernelBench
+Levels 1-3 are DONE: 250 kernels (100 + 100 + 50), `KERNELBENCH_PORT_COUNT = 250`. The vendored
+submodule (`third_party/KernelBench` @ `423217d9`) holds one more level, and it is the only thing
+left of "port the whole of KernelBench".
 
-239 of KernelBench's kernels are in the corpus today: all 100 of level1, all 100 of level2, and 39
-of level3. The vendored submodule (`third_party/KernelBench` @ `423217d9`) holds **level1 100,
-level2 100, level3 50, level4 20** -- so the remaining work is **11 level3 networks and the 20
-level4 entries**, and the target is all 270.
+**level4 is a different KIND of entry.** It holds HuggingFace model + batch + seq configs
+(`16_gpt2_bs1_seq1023.py`), not self-contained kernels. Decide whether those become corpus kernels
+at all, or whether the subtrack is level1-3 by definition. `collect_reference_sources.py` currently
+excludes level4 deliberately, with that reason recorded.
 
-Two things to settle before starting, because they are the reason the tree stopped where it did:
-
-- **level4 is a different KIND of entry.** It holds HuggingFace model + batch + seq configs
-  (`16_gpt2_bs1_seq1023.py`), not self-contained kernels. Decide whether those become corpus
-  kernels at all, or whether the subtrack is level1-3 by definition. `collect_reference_sources.py`
-  currently excludes level4 deliberately, with that reason recorded.
-- **A port that does not EMIT is not done.** `efficientnet_mb_conv` and `resnet_basic_block` parse
-  and lower after `6efe7665` and still fail at emit (`NotImplementedError: expression Tuple`). The
-  translation ratchet accepts non-emitting ports, so "ported" and "usable" are different states and
-  the count should track both.
-
-Each new batch has to move `KERNELBENCH_PORT_COUNT` in `tests/corpus_counts.py` (one constant, four
-consumers), pass the CNF invariants in `docs/canonical_numpy_form.md`, and resolve 1:1 to an
-upstream file. Interacts with item 9: the PyTorch-agreement tests are what make a port trustworthy,
-so grow the two together rather than landing 31 more unverified translations.
+**A port that does not EMIT is not done**, and the translation ratchet accepts non-emitting ports --
+so "ported" and "usable" are different states and the count should track both. Any level4 batch has
+to move `KERNELBENCH_PORT_COUNT` (one constant, four consumers), pass the CNF invariants in
+`docs/canonical_numpy_form.md`, and resolve 1:1 to an upstream file. Interacts with item 9: the
+PyTorch-agreement tests are what make a port trustworthy, so grow the two together.
 
 ## Order to do them in
 
 5 before 1 and 2 (an untagged ablation run cannot be separated afterwards). 7 before 1 and 2 as
 well, or the results get read off the plot that misleads. 3 and 4 are independent.
 
-## 11. The rocprofv3 CSV reader matched an OLD schema -- FIXED, one part still open
+## 11. rocprofv3 reader -- two open pieces, the schema fixes are done
 
-Found by running `rocprofv3` on real hardware (Radeon 780M / gfx1103, ROCm 7.2.4,
-rocprofiler-sdk 1.1.0) rather than reading docs. Two columns the reader expected were not what the
-current tool emits. Both are now read, and the fixtures carry both generations:
+The `LDS_Block_Size` / `VGPR_Count` schema drift is fixed and pinned in fixtures (both generations).
+⛔ The trap that found it is worth carrying: `column()` returns `""` for an unmatched prefix and
+`number("")` is `0.0`, so an unread 16 KB workgroup came back as `shared_memory: 0.0` -- **a
+measurement saying the LDS budget was free**, not a `null`. An agent then sizes a tile against a
+budget it has already spent.
 
-- **LDS size.** The reader matched `Group_Segment_Size`; rocprofiler-sdk 1.1.0 emits
-  **`LDS_Block_Size`**. The symptom was NOT a `null`, which is what made it worth fixing before the
-  rest: `column()` returns `""` for an unmatched prefix and `number("")` is `0.0`, so a 16 KB
-  workgroup came back as `shared_memory: 0.0, shared_memory_unit: "B"` -- a measurement, saying the
-  LDS budget was free. An agent then sizes a tile against a budget it has already spent. Both
-  spellings are pinned now, and a trace carrying NEITHER reports `null`.
-- **Register counts.** `registers_per_thread` was documented as unavailable ("the kernel trace
-  carries no VGPR/SGPR count"). It is available: the trace carries `VGPR_Count`, `Accum_VGPR_Count`
-  and `SGPR_Count`. `VGPR_Count` is now the row's `registers_per_thread`. `SGPR_Count` stays out:
-  the scalar file is per wavefront and has no NVIDIA counterpart, so it has no field in a schema
-  whose whole point is being vendor-independent.
+Still open, both found on real hardware (Radeon 780M / gfx1103, ROCm 7.2.4, rocprofiler-sdk 1.1.0):
 
-Measured header, verbatim (ONE physical line -- `tests/test_gpu_profiling.py`'s `ROCPROF_CSVS`
-entries are exactly this shape, and a wrapped copy pasted into a fixture makes `csv.DictReader`
-read lines 2 and 3 as data):
+- `*_kernel_stats.csv` carries a **`StdDev` column the reader does not surface.** Run-to-run spread
+  per kernel is exactly what a "did this change anything" question needs.
+- **A `rocprofv3` preflight check in the backend.** It requires `hsa-amd-aqlprofile` and does not
+  depend on it; without the package the run dies with `error while loading shared libraries:
+  libhsa-amd-aqlprofile64.so.1` prefixed with the CHILD's name, so it reads as a bug in the profiled
+  program. The AMD sample in item 3 names the package, but the message the harness quotes is still
+  the child's.
 
-```
-Kind,Agent_Id,Queue_Id,Stream_Id,Thread_Id,Dispatch_Id,Kernel_Id,Kernel_Name,Correlation_Id,Start_Timestamp,End_Timestamp,LDS_Block_Size,Scratch_Size,VGPR_Count,Accum_VGPR_Count,SGPR_Count,Workgroup_Size_X,Workgroup_Size_Y,Workgroup_Size_Z,Grid_Size_X,Grid_Size_Y,Grid_Size_Z
-```
-
-Also measured. The first is STILL OPEN; the rest are recorded because they are right and easy to
-un-learn:
-
-- **OPEN:** `*_kernel_stats.csv` carries a `StdDev` column the reader does not surface. Run-to-run
-  spread per kernel is exactly what a "did this change anything" question needs.
-- `*_memory_copy_trace.csv` has NO size field on this version (`Kind, Direction, Stream_Id,
-  Source_Agent_Id, Destination_Agent_Id, Correlation_Id, Start_Timestamp, End_Timestamp`), so the
-  `total`/`unit` nulls are correct for CSV. The buffer-tracing record does define `bytes`, so
-  another emitter (`--output-format json`, rocpd, pftrace) may carry it -- check before promising
-  it.
-- The output layout is FLAT on this version (`<dir>/<prefix>_kernel_stats.csv`), not
-  `<hostname>/<pid>/`. Keep the recursive glob; just do not assume the nested form.
-- **`rocprofv3` requires `hsa-amd-aqlprofile` and does not depend on it.** Without it the run dies
-  with `error while loading shared libraries: libhsa-amd-aqlprofile64.so.1` prefixed with the
-  CHILD's name, so it reads as a bug in the profiled program. The install bullet in the AMD sample
-  above now names the package; a preflight check in the backend is still worth having, since the
-  message the harness quotes is the child's.
+Two things NOT to re-learn: `*_memory_copy_trace.csv` has no size field on this version (so the
+`total`/`unit` nulls are correct for CSV -- the buffer-tracing record does define `bytes`, so a JSON
+/ rocpd / pftrace emitter may carry it), and the output layout is FLAT
+(`<dir>/<prefix>_kernel_stats.csv`), so keep the recursive glob but do not assume the nested form.
