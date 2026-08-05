@@ -13,7 +13,7 @@ from numpyto_common.lib_nodes import (NP_CALL_EXPANDERS, _matmul_result_shape, _
                                       expand_cumsum, expand_diagonal, expand_einsum, expand_inner, expand_linalg_norm,
                                       expand_median, expand_reshape, expand_roll, expand_tensordot, expand_trace,
                                       expand_tril, expand_triu, expand_vdot)
-from numpyto_common.lowering import (_EllipsisExpander, _MatmulCallRewriter, _ReshapeMethodRewriter)
+from numpyto_common.lowering import (_EllipsisExpander, _FullCallHoister, _MatmulCallRewriter, _ReshapeMethodRewriter)
 
 
 def _name(n):
@@ -369,6 +369,29 @@ def test_triu_keeps_upper_triangle():
     assert "__j >= __i" in out
 
 
+def test_nested_full_is_spilled_so_triu_sees_a_name():
+    """The transformer causal mask buries ``np.full`` two calls deep. ``_CallHoister``'s
+    triu first-arg spill is gated on a resolvable extent, and an inline constructor is
+    never sized by the shape harvest, so without this spill the whole ``np.triu`` reached
+    the emitter unlowered ("call to np.triu not supported")."""
+    tree = ast.parse("s = s + np.triu(np.full((n, n), -np.inf), 1)")
+    _FullCallHoister().visit(tree)
+    assert len(tree.body) == 2, "the nested np.full must become its own statement"
+    spilled, rest = tree.body
+    assert isinstance(spilled, ast.Assign) and spilled.targets[0].id.startswith("__full")
+    assert ast.unparse(spilled.value).startswith("np.full(")
+    # triu's first argument is now the spilled Name, which every expander requires.
+    assert f"np.triu({spilled.targets[0].id}, 1)" in ast.unparse(rest)
+
+
+def test_direct_full_assign_is_left_for_the_full_rewriter():
+    """``X = np.full(...)`` is what ``_FullLikeRewriter`` consumes -- spilling it too
+    would interpose a pointless whole-array copy."""
+    tree = ast.parse("mask = np.full((n, n), -np.inf)")
+    _FullCallHoister().visit(tree)
+    assert len(tree.body) == 1 and ast.unparse(tree.body[0]) == "mask = np.full((n, n), -np.inf)"
+
+
 def test_linalg_norm_ord1_inf_vector_and_matrix():
     """np.linalg.norm ord=1 -> sum|v| (vector) / max column abs-sum (matrix),
     ord=inf -> max|v| / max row abs-sum, all without sqrt. A POSITIONAL ord must
@@ -547,6 +570,30 @@ def test_contraction_indexing_ops_e2e(label, src, func, ins, out_shape, syms, sh
             inputs[nm] = rng.random(sh)
     status = no.run_op(src, func, inputs, {"out": out_shape}, syms, shapes=shapes, backends=_ALL)
     _assert_ok(status, label)
+
+
+def test_triu_of_inline_full_mask_e2e():
+    """The transformer causal mask verbatim: an inline ``np.full`` under an inline
+    ``np.triu``, inside a BinOp. Its own test rather than a row in the table above,
+    because adding a row reflows the whole parametrize literal under yapf.
+
+    ``exp`` turns the -inf band into an exact 0, so masking the WRONG triangle (or
+    none at all) is a whole-magnitude disagreement with numpy, not drift."""
+    import numpy as np
+    src = ("import numpy as np\n"
+           "def f(a,out):\n"
+           "    n = a.shape[0]\n"
+           "    out[:] = np.exp(a + np.triu(np.full((n, n), -np.inf), 1))\n")
+    inputs = {"a": np.random.default_rng(0).random((5, 5))}
+    status = _oracle().run_op(src,
+                              "f",
+                              inputs, {"out": (5, 5)}, {"M": 5},
+                              shapes={
+                                  "a": "(M, M)",
+                                  "out": "(M, M)"
+                              },
+                              backends=_ALL)
+    _assert_ok(status, "triu_of_inline_full_mask")
 
 
 # --------------------------------------------------------------------------- #

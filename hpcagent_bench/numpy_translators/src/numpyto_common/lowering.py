@@ -2028,6 +2028,36 @@ def _harvest_local_shapes(tree: ast.AST,
                 shape_table[target.id] = tuple(ast.unparse(e) for e in ext)
 
 
+class _FullCallHoister(_StmtHoister):
+    """Materialise a nested ``np.full(...)`` / ``np.full_like(...)`` call into its own
+    ``__full<k> = <call>`` statement, so the direct-assign :class:`_FullLikeRewriter`
+    can split it into an allocation plus a broadcast fill.
+
+    The causal-mask idiom builds its ``-inf`` band inline --
+    ``scores + np.triu(np.full((n, n), -np.inf, dtype=x.dtype), 1)`` -- where ``np.full``
+    is buried two calls deep. ``_CallHoister``'s triu first-arg spill is gated on a
+    resolvable extent, and an inline constructor is never sized by the harvest, so
+    without this the whole ``np.triu`` reaches the emitter unlowered. Mirrors
+    :class:`_EyeCallHoister`; a call already the direct RHS of an assignment is left
+    for :class:`_FullLikeRewriter` to consume."""
+
+    @staticmethod
+    def _is_full_call(v: ast.AST) -> bool:
+        return (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr in ("full", "full_like")
+                and isinstance(v.func.value, ast.Name) and v.func.value.id in ("np", "numpy") and len(v.args) >= 2)
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if self._is_full_call(node):
+            return self._spill(node, "__full")
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and self._is_full_call(node.value)):
+            return node
+        return self._flush(node)
+
+
 class _FullLikeRewriter(ast.NodeTransformer):
     """``X = np.full_like(src, val)`` -> ``X = np.empty_like(src); X[:] = val`` and
     ``X = np.full(shape, val)`` -> ``X = np.empty(shape); X[:] = val``.
@@ -6022,6 +6052,9 @@ def _lp_normalize_calls(ctx: LoweringContext) -> None:
     # harvester runs, so the conditionally-allocated buffer is seen as a plain local
     # (the backends have no ``None``; reads are guarded by the same ``cond``).
     _ConditionalNoneAllocRewriter().visit(tree)
+    # A nested ``np.full`` (the causal mask's ``np.triu(np.full(..., -inf), 1)``) is spilled
+    # to a temp first, so the direct-assign rewriter below sees it.
+    _FullCallHoister().visit(tree)
     _FullLikeRewriter().visit(tree)
     # ``np.eye`` / ``np.identity`` -> zeros + diagonal fill, BEFORE the zeros
     # harvest so the resulting ``np.zeros((n, n))`` is picked up normally. A nested
