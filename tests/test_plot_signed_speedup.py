@@ -280,3 +280,106 @@ def test_a_db_with_only_the_baseline_fails_loudly(tmp_path: pathlib.Path) -> Non
     with pytest.warns(UserWarning, match="no kernel has a plottable speed-up"):
         with pytest.raises(RuntimeError, match="no speed-up to plot"):
             speedup.plot_signed_speedup(db=str(db), preset="S", output=str(tmp_path / "speedup.pdf"), usetex=False)
+
+
+# --- the boxes -----------------------------------------------------------------------------------
+
+
+def test_a_boxs_samples_are_divided_by_a_fixed_baseline_not_paired_elementwise() -> None:
+    """The load-bearing claim of the box: it is the CANDIDATE's spread, not a ratio distribution.
+
+    Repetition i of a candidate and repetition i of the baseline are independent timings of
+    different code, so dividing them elementwise would manufacture a spread out of two unrelated
+    ones. Holding the divisor at the baseline's cleaned median keeps the box's width a property of
+    the candidate alone -- which is what pins it here: identical candidate samples must produce a
+    box of ZERO width no matter what the baseline's own samples did.
+    """
+    flat = speedup.cell_changes([5.0, 5.0, 5.0, 5.0, 5.0], base_time=10.0)
+    assert len(flat) == 5
+    assert min(flat) == pytest.approx(max(flat)), "identical candidate times cannot produce a spread"
+    assert flat[0] == pytest.approx(1.0), "10 ms baseline over a 5 ms candidate is a 2x win, i.e. +1"
+    spread = speedup.cell_changes([4.0, 5.0, 6.0], base_time=10.0)
+    assert min(spread) < max(spread), "differing candidate times must produce one"
+
+
+def test_a_cell_whose_baseline_is_unusable_yields_no_samples() -> None:
+    """No divisor means no speed-up, and a box drawn at 0 would claim 'measured, nothing changed'."""
+    assert speedup.cell_changes([1.0, 2.0, 3.0], base_time=0.0) == ()
+    assert speedup.cell_changes([1.0, 2.0, 3.0], base_time=math.nan) == ()
+
+
+def test_points_carry_their_repetitions_only_when_asked() -> None:
+    """``speedup_points`` must not change the POSITIONS it computes by being asked for spread --
+    the median and the band come from the summary either way, and only ``samples`` is added."""
+    cells = [("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 5.0)]
+    rows = pd.DataFrame(
+        [dict(benchmark=k, domain="Physics", framework=f, time=t) for k, f, ms in cells for t in [ms] * 5])
+    frame = plotting.cell_summary(rows)
+    without = speedup.speedup_points(frame)
+    with_samples = speedup.speedup_points(frame, data=rows)
+    assert without[0].samples == ()
+    assert len(with_samples[0].samples) == 5
+    assert without[0].change == pytest.approx(with_samples[0].change), "asking for boxes moved the median"
+    assert without[0].band == with_samples[0].band
+
+
+def test_a_thinly_sampled_cell_keeps_its_marker_instead_of_faking_quartiles(tmp_path: pathlib.Path) -> None:
+    """A box over two points draws a quartile range nobody measured. Such a cell must come BACK
+    from ``draw_boxes`` so the caller still plots it -- dropping it would silently shrink the
+    figure's population, which is the worse of the two errors."""
+    import matplotlib.pyplot as plt
+
+    thin = speedup.Point("heat3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1))
+    fat = speedup.Point("jacobi2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, tuple([1.0] * speedup.MIN_BOX_SAMPLES))
+    fig, ax = plt.subplots()
+    left = speedup.draw_boxes(ax, [thin, fat], {"heat3d": 0, "jacobi2d": 1}, {"dace_cpu": "#1f77b4"})
+    plt.close(fig)
+    assert [point.kernel for point in left] == ["heat3d"], "the thin cell must fall back to a marker"
+
+
+def test_every_cell_is_drawn_exactly_once_whichever_way_it_is_drawn(tmp_path: pathlib.Path) -> None:
+    """Boxes and markers coexist in one panel, so the risk is a cell drawn twice or not at all."""
+    import matplotlib.pyplot as plt
+
+    points = [
+        speedup.Point("heat3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1)),
+        speedup.Point("jacobi2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.0, 1.1, 1.2, 1.05)),
+    ]
+    fig, ax = plt.subplots()
+    speedup.draw_band(ax, speedup.BAND_MID, points, {"heat3d": 0, "jacobi2d": 1}, {"dace_cpu": "#1f77b4"}, boxes=True)
+    markers = [line for line in ax.get_lines() if line.get_marker() == "o"]
+    drawn = sum(len(line.get_xdata()) for line in markers)
+    plt.close(fig)
+    assert drawn == 1, f"expected the one thin cell as a marker, got {drawn}"
+
+
+def test_dodged_frameworks_do_not_share_an_x_position() -> None:
+    """Two frameworks' boxes at one kernel must not sit on top of each other, and a single
+    framework must stay ON its kernel's tick -- where the marker figure puts it."""
+    assert speedup.dodge_offsets(1) == [0.0]
+    two = speedup.dodge_offsets(2)
+    assert two[0] < 0.0 < two[1]
+    assert sum(two) == pytest.approx(0.0), "the group must stay centred on the tick"
+    assert max(speedup.dodge_offsets(4)) - min(speedup.dodge_offsets(4)) <= 0.8, "the group must stay in its slot"
+
+
+def test_compact_weights_panel_heights_by_population_and_is_otherwise_the_equal_split() -> None:
+    """``--compact`` is a LAYOUT knob. Without it the panels keep matplotlib's equal split, and with
+    it a band holding one outlier stops costing the same height as one holding forty kernels."""
+    points = ([speedup.Point(f"k{i}", "dace_cpu", 2.0, 1.0, speedup.BAND_MID)
+               for i in range(9)] + [speedup.Point("solo", "dace_cpu", 20.0, 19.0, speedup.BAND_HIGH)])
+    present = [speedup.BAND_HIGH, speedup.BAND_MID]
+    assert speedup.panel_heights(points, present, compact=False) is None
+    heights = speedup.panel_heights(points, present, compact=True)
+    assert heights[1] > heights[0], "the crowded band must get the taller panel"
+    assert min(heights) >= 0.18, "a sparse band must stay readable, not collapse to a rule"
+
+
+def test_the_demo_draws_enough_repetitions_for_a_box() -> None:
+    """The demo exists to be looked at, and with --boxplot that means it must actually produce
+    boxes. A demo whose cells fell under the threshold would render as the marker figure while
+    claiming to show spread."""
+    points = speedup.demo_points()
+    assert all(len(point.samples) >= speedup.MIN_BOX_SAMPLES for point in points)
+    assert any(len(set(point.samples)) > 1 for point in points), "jitter must actually vary"
+    assert speedup.demo_points() == points, "the demo seed must keep the boxes reproducible too"
