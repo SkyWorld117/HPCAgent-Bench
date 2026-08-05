@@ -190,6 +190,73 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 tests/test_e2e_numerical.py
 
+      # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
+
+      # if: always() -- a job that went red still covered lines on the way, and the total is more
+      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # ===========================================================================================
+  # integration -- the @pytest.mark.integration tests, which BUILD AND RUN real artifacts.
+  #
+  # Its own job because it is the only phase here with that cost profile, and sharing a budget
+  # with the unit phases is what made it fail: as a step of `unit` it hit the 25-minute STEP
+  # ceiling (run 30990017840), which is a step FAILURE, so the job went red and dragged the
+  # downstream `coverage` job red with it -- three reds on the run page, one cause, zero test
+  # failures. Splitting gives it the whole job budget instead of the tail of somebody else's.
+  #
+  # Deliberately NOT `needs: [unit]`: a Phase 1 unit failure must not hide what the integration
+  # tests would have said. Only the PUBLISH step is gated on both (see hf-export).
+  # ===========================================================================================
+  integration:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    name: integration (build/run real artifacts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Same ccache + TBB rationale as `unit`; the key is namespaced by github.job, so this job
+      # warms its own cache rather than contending for that one.
+      - name: Setup -- ccache + TBB
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+      - name: Setup -- restore the compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+      - name: Setup -- reset the ccache counters
+        run: ccache --zero-stats
+
+      - uses: ./.github/actions/setup
+
       - name: Phase 6 -- integration-marked tests (build/run real artifacts)
         if: ${{ !cancelled() }}
         # -m integration auto-collects EVERY @pytest.mark.integration test (present and
@@ -197,16 +264,53 @@ jobs:
         # marked -- but only if it lives in one of them. Both suites are listed because the
         # translators tree has its own conftest and is otherwise never scanned by this job.
         # `make test` excludes this marker for a fast local loop; CI is where they must run.
-        timeout-minutes: 25
+        #
+        # Capped well under the job ceiling so a wedged build still fails as a STEP, leaving the
+        # coverage upload below to run -- the cap is a hang detector, not the budget it used to be.
+        timeout-minutes: 70
         run: |
           python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 -m integration \
             tests/ hpcagent_bench/numpy_translators/tests/
 
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # ===========================================================================================
+  # hf-export -- build (and, on a main push, publish) the HuggingFace dataset.
+  #
+  # A job rather than a step so its success() gate still means what it said when Phase 6 lived
+  # beside it: never publish a dataset from a run where a phase went red. `needs` both test jobs,
+  # so a red in either skips this entirely -- which is the same guarantee `if: success()` gave
+  # inside the single job, restored across the split rather than quietly narrowed to `unit`.
+  # ===========================================================================================
+  hf-export:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    name: hf-export (HuggingFace dataset)
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/setup
+
       - name: Phase 7 -- export (+ publish on a main push) the HuggingFace dataset
-        # Gated on success() (NOT !cancelled()): never build/publish a dataset from a run where
-        # a phase went red. export-hf always writes the parquet artifact and PUBLISHES the same
-        # rows only on a push to main with HF_TOKEN + HF_DATASET_REPO set.
-        if: ${{ success() }}
+        # export-hf always writes the parquet artifact and PUBLISHES the same rows only on a push
+        # to main with HF_TOKEN + HF_DATASET_REPO set.
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
@@ -220,32 +324,16 @@ jobs:
           python -m hpcagent_bench.cli export-hf --selector all --out hpcagent_bench_hf.parquet $PUSH
 
       - name: Phase 7 -- upload the HF dataset as a workflow artifact
-        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: hpcagent_bench-hf-dataset
           path: hpcagent_bench_hf.parquet
           if-no-files-found: ignore
 
-      # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
-      - name: ccache statistics
-        if: always()
-        run: ccache --show-stats
   # ===========================================================================================
   # translators -- the numpyto_* translator's own suite (~640 tests), sharded three ways by file.
   # Port fidelity + the benchmark reference validators moved to the mpi runner (see BALANCE above).
   # ===========================================================================================
-
-      # if: always() -- a job that went red still covered lines on the way, and the total is more
-      # honest with them than without. if-no-files-found: ignore for a job that failed before pytest.
-      - name: Upload coverage data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-unit
-          path: .coverage*
-          include-hidden-files: true
-          if-no-files-found: ignore
 
   translators:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
@@ -1026,7 +1114,7 @@ jobs:
   coverage:
     if: ${{!cancelled()}}
     name: coverage (combined total)
-    needs: [unit, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi]
+    needs: [unit, integration, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
