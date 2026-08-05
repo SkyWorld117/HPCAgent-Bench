@@ -25,10 +25,9 @@ with the shipped ordering (:mod:`hpcagent_bench.reporting_order`) -- no second d
 PARTITIONED per machine for the same reason every other figure partitions them: a candidate timed
 on one node over a baseline timed on another is a hardware comparison wearing a software label.
 
-Run tags (BACKLOG item 5) do not exist yet: the ``results`` table has no tag column, so nothing
-here can filter on one. When it lands, the filter belongs in ``load_results`` -- the one reader --
-so every figure inherits the "never mix two run tags" rule at once; this script must not grow its
-own.
+Run tags do not exist yet: the ``results`` table has no tag column, so nothing here can filter on
+one. When it lands, the filter belongs in ``load_results`` -- the one reader -- so every figure
+inherits the "never mix two run tags" rule at once; this script must not grow its own.
 
 Usage::
 
