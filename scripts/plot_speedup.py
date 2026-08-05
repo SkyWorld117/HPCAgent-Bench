@@ -471,6 +471,79 @@ def mini_figure(points: Sequence[Point], kernels: Sequence[str], output: str, bo
     return plotting.save_figure(output, fig)
 
 
+#: How many cells the square figure shows. Four boxes is what fits one small square panel while
+#: still reading as a distribution rather than a bar; past that the boxes narrow faster than the
+#: figure gains meaning.
+SQUARE_CELLS: int = 4
+
+#: The square figure's side, in inches. Sized for an embed (a slide corner, a README header), which
+#: is why everything optional is stripped rather than shrunk -- text that has to be scaled down to
+#: fit is text that will not be read at this size.
+SQUARE_SIDE: float = 2.4
+
+
+def square_cells(points: Sequence[Point], cells: int = SQUARE_CELLS) -> List[Point]:
+    """The ``cells`` points the square figure shows: well sampled, and on ONE order of magnitude.
+
+    Two constraints, and the second is what makes the figure legible. A single ``> 10x`` cell sets
+    a y range in which every other box collapses to a line -- the same "one outlier flattens
+    everything" problem the banded layout exists to solve, except a square panel has no second band
+    to move it to. So the widest band that can supply enough cells wins, and the rest are left out.
+
+    Within that band the best-sampled cells win, so the boxes drawn are the ones with the most
+    measurement behind them rather than whichever sorted first.
+    """
+    by_samples = sorted(points, key=lambda point: (len(point.samples), point.kernel), reverse=True)
+    for band in (BAND_MID, BAND_LOW, BAND_HIGH):
+        inside = [point for point in by_samples if point.band == band]
+        if len(inside) >= cells:
+            return inside[:cells]
+    return by_samples[:cells]
+
+
+def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELLS) -> str:
+    """One square panel, ``cells`` boxes, NO title and no legend.
+
+    A deliberately different figure from the banded one: it answers "what does the spread look
+    like" at embed size, not "which kernel did what". So it drops everything the banded figure
+    spends height on -- band titles, the legend, the kernel names, the supylabel -- and keeps only
+    what a box cannot be read without: the zero line (the boundary between a win and a loss) and a
+    few y numbers saying how far from it the boxes sit.
+
+    Everything here is sized for the figure being SMALL. Three y ticks rather than matplotlib's
+    default seven, because at 120 px seven labels are a grey smear; larger type than the banded
+    figure uses, for the same reason; and wide boxes, since a box thinner than its own outline
+    stops reading as a distribution. Each cell gets its own hue -- with no legend the colours only
+    have to separate the boxes.
+    """
+    chosen = square_cells(points, cells)
+    if not chosen:
+        raise RuntimeError("the square figure needs at least one point")
+    fig, ax = plt.subplots(figsize=(SQUARE_SIDE, SQUARE_SIDE))
+    artists = ax.boxplot([list(point.samples) or [point.change] for point in chosen],
+                         positions=range(len(chosen)),
+                         widths=0.66,
+                         patch_artist=True,
+                         manage_ticks=False,
+                         showfliers=False,
+                         medianprops=dict(color="0.1", linewidth=1.4))
+    for index, box in enumerate(artists["boxes"]):
+        color = plotting.PALETTE[index % len(plotting.PALETTE)]
+        box.set(facecolor=color, edgecolor=color, alpha=0.7, linewidth=1.1)
+        for side in (2 * index, 2 * index + 1):
+            artists["whiskers"][side].set(color=color, linewidth=1.1)
+            artists["caps"][side].set(color=color, linewidth=1.1)
+    ax.axhline(0.0, color="0.35", linewidth=1.0)
+    ax.set_xticks([])  # with four boxes and no legend, a name per box is more ink than signal
+    ax.set_xlim(-0.6, len(chosen) - 0.4)
+    ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=3))
+    ax.tick_params(axis="y", labelsize=11, length=2, pad=1.5)
+    ax.grid(axis="y", color="0.88", linewidth=0.7)
+    for side in ("top", "right", "bottom"):
+        ax.spines[side].set_visible(False)
+    return plotting.save_figure(output, fig)
+
+
 def variant_output(output: str, variant: str) -> str:
     """``plots/speedup.pdf`` -> ``plots/speedup-<variant>.svg``. Both SVG variants are always
     written beside the banded figure; which formats exist is the spec's answer, not a knob."""
@@ -600,7 +673,8 @@ def plot_demo(output: str,
               usetex: bool = True,
               seed: int = DEMO_SEED,
               boxes: bool = False,
-              compact: bool = False) -> List[str]:
+              compact: bool = False,
+              square: bool = False) -> List[str]:
     """Render the three figures from :func:`demo_points`; returns the paths written.
 
     No machine label in the names: synthetic data was measured on no machine, and a label that
@@ -609,6 +683,8 @@ def plot_demo(output: str,
     """
     plotting.set_usetex(usetex)
     points = demo_points(seed)
+    if square:
+        return [square_figure(points, output)]
     kernels = plotted_kernels(points, order)
     return [
         banded_figure(points, kernels, output, boxes=boxes, compact=compact),
@@ -657,6 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
                    default=False,
                    help="shorter banded figure for a paper column: panel heights weighted by band population "
                    "instead of split equally. Layout only -- no cell is dropped")
+    p.add_argument("--square",
+                   action="store_true",
+                   default=False,
+                   help=f"write ONLY a square {SQUARE_SIDE}x{SQUARE_SIDE}in panel of {SQUARE_CELLS} boxes with no "
+                   "title, legend or kernel names, for an embed. Implies --boxplot")
     p.add_argument("--output",
                    default=PLOTS_DIR + "/speedup.pdf",
                    help=f"PDF path family for the banded figure (default {PLOTS_DIR}/speedup.pdf); the two SVG "
@@ -671,8 +752,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for path in plot_demo(args.output,
                               order=args.order,
                               usetex=not args.no_usetex,
-                              boxes=args.boxplot,
-                              compact=args.compact):
+                              boxes=args.boxplot or args.square,
+                              compact=args.compact,
+                              square=args.square):
             print(path)
         return 0
     for path in plot_signed_speedup(benchmark=args.benchmark,

@@ -383,3 +383,49 @@ def test_the_demo_draws_enough_repetitions_for_a_box() -> None:
     assert all(len(point.samples) >= speedup.MIN_BOX_SAMPLES for point in points)
     assert any(len(set(point.samples)) > 1 for point in points), "jitter must actually vary"
     assert speedup.demo_points() == points, "the demo seed must keep the boxes reproducible too"
+
+
+# --- the square embed figure ---------------------------------------------------------------------
+
+
+def test_the_square_figure_keeps_its_cells_on_one_order_of_magnitude() -> None:
+    """A single ``> 10x`` cell would set a y range that collapses every other box to a line -- the
+    same problem the banded layout exists to solve, except a square panel has no second band to
+    move the outlier to. So the cells must come from ONE band, never a mix."""
+    crowded = [
+        speedup.Point(f"k{i}", "dace_cpu", 3.0, 2.0, speedup.BAND_MID, tuple([2.0] * 12))
+        for i in range(speedup.SQUARE_CELLS)
+    ]
+    outlier = speedup.Point("huge", "dace_cpu", 90.0, 89.0, speedup.BAND_HIGH, tuple([89.0] * 40))
+    chosen = speedup.square_cells([outlier] + crowded)
+    assert len(chosen) == speedup.SQUARE_CELLS
+    assert {point.band for point in chosen} == {speedup.BAND_MID}
+    assert "huge" not in {point.kernel for point in chosen}, "the outlier would flatten the others"
+
+
+def test_the_square_figure_falls_back_rather_than_drawing_nothing() -> None:
+    """Too few cells in any one band must still produce a figure -- fewer boxes beats no file."""
+    points = [
+        speedup.Point("a", "dace_cpu", 3.0, 2.0, speedup.BAND_MID, tuple([2.0] * 12)),
+        speedup.Point("b", "dace_cpu", 90.0, 89.0, speedup.BAND_HIGH, tuple([89.0] * 12)),
+    ]
+    assert len(speedup.square_cells(points)) == 2
+
+
+def test_the_square_svg_carries_no_title_and_four_boxes(tmp_path: pathlib.Path) -> None:
+    """The embed figure is asked for with no titles at all, and a title that crept back would only
+    be noticed by someone opening the SVG. Four boxes, no text but the y numbers."""
+    out = tmp_path / "square.svg"
+    written = speedup.square_figure(speedup.demo_points(), str(out))
+    assert pathlib.Path(written).exists()
+    body = out.read_text()
+    for band in speedup.BANDS:
+        assert band not in body, f"band title {band!r} leaked into the embed figure"
+    for framework in speedup.DEMO_FRAMEWORKS:
+        assert framework not in body, f"legend text {framework!r} leaked into the embed figure"
+
+
+def test_the_square_figure_is_square() -> None:
+    """It is specified as a square panel; a drifting aspect would quietly become a wide strip."""
+    assert speedup.SQUARE_SIDE > 0
+    assert speedup.SQUARE_CELLS == 4
