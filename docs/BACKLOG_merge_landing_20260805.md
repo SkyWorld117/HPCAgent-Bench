@@ -123,31 +123,72 @@ unchanged: **split Phase 6 into its own job.** It is the only phase that builds 
 artifacts, so it has a different cost profile from the rest of the job and no reason to share a
 budget with it. Do not fix it by dropping integration tests from the sweep.
 
-## C. Shape-token aliasing keeps five kernels refusing -- the root fix
+## C. Shape-token aliasing keeps five kernels refusing -- RESOLVED, and it was TWO causes
 
-`KNOWN_NON_LOWERING` in `test_abi_corpus_agreement.py` holds exactly five kernels, and they are ONE
-root cause, not five:
+`KNOWN_NON_LOWERING` is now **empty**: all 631 kernels lower. The entry above said the five were
+ONE root cause. Instrumenting `_matmul_result_shape` at each decline showed **two**, and the second
+was invisible from the refusal message because it never reached that function at all.
 
-```
-ml/netvlad_no_ghost_clusters      matmul '__cb8 @ x' reaches slice fusion un-hoisted
-ml/netvlad_with_ghost_clusters    matmul '__cb8 @ x' reaches slice fusion un-hoisted
-ml/relu_self_attention            matmul 'fmax(scores, 0.0) @ v' reaches slice fusion un-hoisted
-ml/swin_transformer_v2            matmul '__hcall43 @ __cb34' reaches slice fusion un-hoisted
-ml/vision_attention               matmul 'tokens @ __cb3' reaches slice fusion un-hoisted
-```
+**Cause 1 -- two vocabularies for one extent (4 kernels).** A kernel names its own dimensions off a
+parameter (`batch, channels, h, w = x.shape`), which the tuple desugar folds to `batch = batch_size`
+/ `channels = embed_dim`. The `init.shapes` side keeps the symbol. So the contraction dim arrived
+spelled `channels` on one operand and `embed_dim` on the other, and a string `==` declined it. The
+`batch` vs `batch_size` case named above was real but was only netvlad; vision_attention was
+`channels` vs `embed_dim`, and swin's inlined stages spell theirs as a read off a LOCAL array
+(`__inl91_c = __inl8_y.shape[3]`) that no alias resolves without the shape table.
 
-Read the list as five kernels that USED to emit silently-wrong elementwise products and now decline
-instead. The refusal (`lowering._refuse_scalarising_a_contraction`) is correct and must not be
-relaxed; it fires at the one point where the difference between a contraction and a product is still
-visible, because the fusion rewrite replaces both operands with scalar subscripts and emits `*`.
+Fixed by replacing the token `==` with `lib_nodes.dims_agree`: literal equality, then equality after
+substituting dimension aliases to a fixpoint, then a symbolic compare -- cheapest rung first,
+because the first settles nearly every call, and the last is what recognises swin's
+`4 * (4 * embed_dim)` against `16 * embed_dim`. Unresolvable answers FALSE, never True: a wrong True
+contracts over two different extents, which is a miscompile, while a wrong False only declines.
+`lowering.collect_dim_aliases` builds the map, filtering out the ARRAY expressions
+`_collect_inlined_scalar_defs` over-collects (a BinOp of Names looks structurally like a dimension).
 
-**The fix is one rung down:** `_matmul_result_shape` compares shape TOKENS as strings, so a batch
-dimension spelled `batch` in one operand and `batch_size` in the other reads as a mismatch and the
-hoister declines a shape it should accept. Teach the hoister those shapes and all five lower.
+**Cause 2 -- a call-valued operand (1 kernel).** `relu_self_attention` writes
+`np.maximum(scores, 0.0) @ v`. The extent is well defined but the loop nest indexes its operands by
+NAME, so the hoister bailed before any shape comparison. `_MatmulHoister` now spills a `Call`
+operand to a temp via `_materialise_dense_operand`, generalised from 1-D to any rank (the sparse
+callers pass `max_rank=1` to keep failing loudly on the SpMM-with-sliced-RHS shape they do not
+support). `Subscript` operands are untouched -- they have their own slice-aware path.
 
-Corpus survey for context: **5 refusals of 631 kernels, zero non-refusal errors.**
+The refusal guard `lowering._refuse_scalarising_a_contraction` is **unchanged**. It is simply never
+reached now.
 
-## D. `cpp_isopar` still has no capability gate
+Gates: ABI corpus **5 passed / 555.85 s** with the ratchet empty in both directions, and all five
+kernels verified numerically against numpy on c/cpp/fortran at preset S -- `{'c': 'ok', 'cpp':
+'ok', 'fortran': 'ok'}` for four of them. swin's fortran is `FAIL:compile-timeout` (twelve inlined
+stages), not a numeric disagreement; c and cpp both agree.
+
+## D. `cpp_isopar` capability gate -- RESOLVED
+
+**RESOLVED.** `languages.isopar_capability()` compiles one `std::execution::par_unseq` call at the
+harness's real C++ flags and reads `nm` for a TBB runtime call, returning the same three-way
+`AutoparVerdict` every other column uses. Measured on this box: `ok`, `runtime_calls=12`.
+
+It lives in `languages`, not beside `flags.polly_capability`, because only that module can name the
+cpp block's compiler and its `-std=`; `flags.probe_autopar` grew `runtime_pattern` + `suffix` so the
+one probe engine serves an OpenMP column and a TBB one instead of forking into two.
+
+⛔ **`cpp_isopar` is NOT a scored column today.** The entry above implies a performance column exists
+to protect; there is none. `FRAMEWORK_LANG` has no `cpp_isopar` entry, and the only consumers are
+correctness oracles (`tests/numerical_oracle.py`'s `ISOPAR`, `test_cpp_isopar_emit.py`), where a
+serial backend is slow rather than wrong. So the exposure today is zero and the work is to keep it
+zero: the probe is registered in `preflight.AUTOPAR_PROBES`, so the column cannot be added ungated.
+
+The negative case is REAL, not monkeypatched: `-D_GLIBCXX_USE_TBB_PAR_BACKEND=0` is exactly what a
+runner without libtbb-dev compiles (libstdc++ defines that macro AS the `__has_include`). Same
+source, same exit code, right answers -- 12 TBB references down to 0, object 22088 B down to 1256 B.
+`test_isopar_probe_discriminates_a_serial_execution_backend` asserts BOTH halves in one test so it
+cannot pass by measuring nothing, and `test_isopar_capability_agrees_with_the_link_decision` pins
+that the header question (which decides `-ltbb`) and the `nm` evidence never disagree.
+
+Also fixed in passing: `test_gate_is_a_no_op_for_ungated_frameworks` still listed `pluto` as
+ungated after it joined `AUTOPAR_GATED`, so it asserted the opposite of what the tree does and
+passed or failed according to whether the host's clang honours an OpenMP pragma.
+
+### Original entry
+
 
 libstdc++ chooses its parallel `<execution>` backend **per translation unit** via
 `__has_include(<tbb/tbb.h>)`. With no TBB header, `par_unseq` degrades silently to sequential --
@@ -164,15 +205,34 @@ This repo already engineered against exactly this failure for Polly (`flags.poll
 `languages.stdpar_link_flags()` already returns `()` precisely when the backend is serial, so the
 gate is a short step from what is there.
 
-## E. The warnings ratchet counts 20 on the CI runner and 0 on every local toolchain
+## E. The warnings ratchet -- RESOLVED, the premise no longer holds
 
 Never reproduced locally: 0 warnings under gcc 12, 14, 15, 16, clang++ 20, 21, 22, and gfortran
 (local, 14, 15, 16). The count is a property of the compiler, not of the sources.
 
 `ea59881c` made the failure print the warning TEXT and `toolchain_versions()` instead of only a
-number, so the next runner failure names the compiler and the exact diagnostics. **Nothing to fix
-until that output exists** -- and the report change was the fix for "the CI log had nothing
-actionable in it", which was the real problem.
+number, so the next runner failure names the compiler and the exact diagnostics.
+
+**RESOLVED -- it no longer counts 20 on CI.** Checked against run `31001878513` (green), integration
+job `92296893031`: `76 passed, 7 skipped`, and all 7 skips are `test_opt_reports_e2e.py`'s
+polycc-absent cases. `test_warnings_ratchet` is therefore among the 76 that PASSED, at
+`_KNOWN_BAD_COUNT = 0`. Nor did it pass vacuously: the test asserts `total_builds >= _MIN_BUILDS`
+(20), so a green run is 20+ real (kernel, flavor) builds emitting zero warnings on the runner. The
+three preceding red runs (`30994638862`, `30990017840`, `30952093069`) all have a **successful**
+integration job -- their failures were elsewhere.
+
+Two things landed so this cannot rot back into an unfalsifiable green:
+
+* `scripts/verify_toolchain.py` now verifies `clang++`, not just `clang`. The ratchet skips its
+  ENTIRE count when any of gcc/g++/clang/clang++/gfortran is missing, so a runner with clang but no
+  clang++ would have turned the ratchet into a silent no-op while the toolchain gate stayed green.
+* **CI moved to LLVM 21 from apt.llvm.org** (`.github/actions/setup`). ubuntu-latest ships 18 --
+  a CI-only major nobody develops against is precisely how a count reads 0 on a dev box and nonzero
+  on a runner with nothing in the log to say the toolchains differed. The unversioned
+  `clang`/`clang++`/`flang` are symlinked at `/usr/local/bin`, because `resolve_compiler`'s
+  highest-`<name>-<major>` fallback does NOT help here: `flags.polly_capability` probes bare
+  `shutil.which("clang")` and `compilers.yaml` names the drivers unversioned, so a distro clang left
+  on the box would keep winning. `toolset.yaml`'s discovery list gained clang-22/21.
 
 ## F. `_assert_ok` accepts a skip, so an op-oracle test can pass vacuously
 
@@ -189,14 +249,39 @@ that cannot lower an op should not fail the op's test) and it is also how a gree
 backend ran it*. It bit this session: the `np.triu` e2e case looked green before the raw status dict
 was printed, and only the printout established that all six backends actually ran and matched.
 
-**Suggested shape:** keep skips accepted, but assert a floor -- at minimum that the native backends
-(`c`, `cpp`, `fortran`) did not all skip -- so a case cannot go green with nothing behind it.
+**RESOLVED.** Skips stay accepted; `_assert_ok` now also asserts that at least one of `c` / `cpp` /
+`fortran` reported `ok`, and prints all three when none did. A case can no longer go green with
+nothing behind it, and the failure message names what actually happened per backend rather than
+leaving the reader to print the dict by hand.
 
-## G. Large-N fp32 reductions want pairwise summation
+## G. Large-N fp32 reductions want pairwise summation -- RESOLVED as BLOCKED summation
 
-At preset S the naive-vs-pairwise gap does not bite. At `n = 262144` it is ~1e-05. A future large-N
-fp32 kernel will need pairwise summation to keep agreeing with numpy, which reduces pairwise itself.
-Not urgent; record so it is not re-discovered as a mystery disagreement.
+A full float `sum` / `mean` now accumulates the innermost axis in blocks of 128 (numpy's own
+pairwise cutoff) instead of one serial chain -- the reassociation a vectorizing compiler performs
+once it is allowed to, written into the source so every backend gets it.
+
+**Measured A/B through the op oracle**, n = 2**22, emitted float32, gcc `-O2` (which does NOT
+reassociate on its own), seeded data. Difference from numpy's own pairwise sum:
+
+```
+one accumulator   |d| = 1.09e+02   (5.2e-05 relative)
+blocked, 128      |d| = 4.00e+00   (1.9e-06 relative)
+```
+
+`test_large_fp32_sum_agrees_with_numpy_pairwise` pins that at `rtol=1e-5`, a factor ~5 either side,
+so a regression to a single accumulator fails rather than drifting. ⛔ The test passes `dtypes=`
+explicitly: without it `run_op` emits **float64**, whose naive error is ~1e-11, and the test goes
+green whatever the accumulation does. That footgun cost a full A/B cycle here -- the first version
+of this test had no teeth and looked fine.
+
+**Scope, deliberately:** the FULL reduction only, and only its innermost axis -- that is the one
+long dependence chain. Outer axes keep plain loops so an emitted nest still looks like a nest to
+the parallelism and isopar recognisers. Axis-wise reductions and integer sums are untouched
+(integer addition is exact and associative, so blocking it is pure code growth).
+
+**Perspective on urgency, since the entry called it not urgent:** the fp32 grading tolerance is
+`rtol=1e-3`, so even the naive form had ~20x margin at n = 2**22. This lands because the reference
+lowering should not be the least accurate thing in the comparison, not because a gate was red.
 
 ## H. Objects built with `__new__` in tests
 
@@ -210,7 +295,35 @@ about.
 A sweep found no other `__new__` bypasses in the translator tests. If one appears, build through
 `__init__`: an empty kernel is enough for a scalar-only call.
 
-## I. The GPU skill pages ship, but nothing in CI ever scores a GPU submission
+## I. The determinism gate is now exercised without a GPU -- PARTLY RESOLVED
+
+**The determinism half is RESOLVED.** `tests/test_determinism_gate.py` runs the gate the GPU pages
+promise, on every CPU runner. It needs no device: `_determinism_check` is host Python over two output
+dicts, and "two runs of a float-atomic reduction" is fully characterised by what those dicts hold --
+values equal to the last ulp, unequal in their bits. Built with `nextafter` rather than a
+re-summation in another order, because numpy's pairwise sum may reassociate to identical bits and the
+fixture would then silently test nothing.
+
+Six tests, paired so none can pass vacuously: the ulp-apart pair is REJECTED under `bitwise=True`
+and **accepted** under `bitwise=False` (so the rejection is the bitwise leg's work, not a fixture
+whose numbers are simply far apart); a reproducing run is accepted; a run that reproduces a WRONG
+answer is still rejected (the oracle leg); and the default is pinned off `inspect.signature`, not
+off a call site's line number.
+
+⭐ **Found while pinning it: the gate false-failed any kernel whose output legitimately holds NaN.**
+`np.array_equal` reports `NaN != NaN`, so a bit-for-bit identical rerun of a kernel with a masked
+cell or a log of zero was scored NONDETERMINISTIC -- unfixable by the agent, since the second run was
+a copy of the first. `_determinism_check` now passes `equal_nan=True`. Reproducibility and validity
+are different questions: whether the NaN BELONGS there is the oracle leg's, and `compare_arrays` was
+already NaN/±Inf-aware, so the two legs had disagreed on what NaN means.
+`test_a_nan_that_appears_in_only_one_run_is_still_caught` pins that `equal_nan` did not become
+"NaN matches anything".
+
+**STILL OPEN:** the null-workspace protocol the pages warn about, and everything else the disabled
+`gpu` job would cover. **Do not treat "the GPU pages are green" as evidence the GPU track works.**
+
+### Original entry
+
 
 `fcdefffe` landed `lang-cuda` and `lang-hip` and routed cuda/hip at them instead of
 `lang-cpp`. What the pages CLAIM is pinned by tests -- neither may name a `-std=` the harness does
@@ -235,12 +348,26 @@ Two consequences worth carrying forward:
   already selectable, they just had no rules. Worth measuring if `any` prompts approach a context
   budget.
 
-## J. HPTT clone 403 -- unchanged, still intermittent
+## J. HPTT clone 403 -- MITIGATED (pinned + retried), not eliminated
 
-See `BACKLOG_ci_reds_20260804.md` item 4. Repeating only the part that decides scheduling: the
-repository is public and answering (`git ls-remote` returns
-`942538649b51ff14403a0c73a35d9825eab2d7de`), so the 403 is an unauthenticated clone from a shared
-runner egress pool being throttled. **A re-run may pass, and a green run does not prove it fixed.**
+See `BACKLOG_ci_reds_20260804.md` item 4 for the diagnosis: the repository is public and answering,
+so the 403 is an unauthenticated clone from a shared runner egress pool being throttled.
+
+`containers/build-hptt.sh` now (a) fetches the pinned SHA
+`942538649b51ff14403a0c73a35d9825eab2d7de` instead of a floating `master`, so the image's contents
+stop being a function of the day it was built, and (b) retries the fetch 4 times with exponential
+backoff, failing with a message that names the dependency, says a 403 here usually means throttling
+rather than a missing repository, and prints the `git ls-remote` command that settles which. Both
+container recipes call the same script (`hpcagent_bench.Dockerfile:99`, `cpu.def:37`), so both are
+covered.
+
+⛔ **Retry raises the odds, it does not remove the dependency.** A sustained throttle still red-lines
+the whole container track, because this step is early in the image and
+`tests/test_container_launch.py` never runs. Vendoring remains the only option that cannot fail this
+way; it was not taken here because it costs a vendored-source update path.
+
+`--branch` takes a branch or a tag and never a SHA, which is why the pin is `git init` + `fetch
+<sha>` + `checkout FETCH_HEAD` rather than a one-line clone. Verified against the live remote.
 
 ---
 
