@@ -9,10 +9,10 @@ import ast
 
 import pytest
 
-from numpyto_common.lib_nodes import (NP_CALL_EXPANDERS, _matmul_result_shape, _parse_einsum_subscripts, expand_cumprod,
-                                      expand_cumsum, expand_diagonal, expand_einsum, expand_inner, expand_linalg_norm,
-                                      expand_median, expand_reshape, expand_roll, expand_tensordot, expand_trace,
-                                      expand_tril, expand_triu, expand_vdot)
+from numpyto_common.lib_nodes import (NP_CALL_EXPANDERS, _matmul_result_shape, _parse_einsum_subscripts, dims_agree,
+                                      expand_cumprod, expand_cumsum, expand_diagonal, expand_einsum, expand_inner,
+                                      expand_linalg_norm, expand_median, expand_reshape, expand_roll, expand_tensordot,
+                                      expand_trace, expand_tril, expand_triu, expand_vdot, substitute_dim_aliases)
 from numpyto_common.lowering import (_EllipsisExpander, _FullCallHoister, _MatmulCallRewriter, _ReshapeMethodRewriter)
 
 
@@ -62,6 +62,61 @@ def test_matmul_result_shape_one_sided_batched():
 def test_matmul_result_shape_batch_mismatch_is_none():
     # Different leading batch dims do not contract.
     assert _matmul_result_shape(("B", "M", "K"), ("C", "K", "N")) is None
+
+
+# --------------------------------------------------------------------------- #
+# A.2b shape tokens from two vocabularies still name one extent                #
+# --------------------------------------------------------------------------- #
+
+
+def test_dims_agree_needs_no_aliases_when_spelled_alike():
+    assert dims_agree("N", "N")
+    assert not dims_agree("N", "M")
+
+
+def test_dims_agree_through_a_dimension_alias():
+    # ``batch, channels, h, w = x.shape`` binds locals the init.shapes side spells with symbols.
+    aliases = {"batch": "batch_size", "channels": "embed_dim"}
+    assert dims_agree("channels", "embed_dim", aliases)
+    assert dims_agree("batch", "batch_size", aliases)
+    assert not dims_agree("channels", "batch_size", aliases)
+
+
+def test_dims_agree_symbolically_when_substitution_leaves_arithmetic():
+    # swin's patch-merge doubles a stage's channels: the two sides stay textually different
+    # after substitution, and only the symbolic rung settles them.
+    assert dims_agree("4 * c", "16 * embed_dim", {"c": "4 * embed_dim"})
+    assert not dims_agree("4 * c", "15 * embed_dim", {"c": "4 * embed_dim"})
+
+
+def test_dims_agree_resolves_a_shape_read_against_the_table():
+    # An inlined helper spells its dims as a read off a LOCAL array, which no alias resolves.
+    aliases = {"__inl91_c": "__inl8_y.shape[3]"}
+    table = {"__inl8_y": ("b", "h", "w", "embed_dim")}
+    assert dims_agree("__inl91_c", "embed_dim", aliases, table)
+    assert not dims_agree("__inl91_c", "h", aliases, table)
+
+
+def test_dims_agree_is_false_on_an_unparseable_token():
+    # Unresolvable must decline, never claim agreement: a wrong True contracts over two extents.
+    assert not dims_agree("a b c", "embed_dim", {"zz": "1"})
+
+
+def test_substitute_dim_aliases_stops_on_a_self_referential_def():
+    assert substitute_dim_aliases("n", {"n": "n + 1"}) == "(n + 1)"
+
+
+def test_matmul_result_shape_accepts_an_aliased_contraction_dim():
+    aliases = {"channels": "embed_dim"}
+    assert _matmul_result_shape(("seq", "batch", "channels"), ("embed_dim", "3 * embed_dim")) is None
+    assert _matmul_result_shape(("seq", "batch", "channels"), ("embed_dim", "3 * embed_dim"),
+                                aliases) == ("seq", "batch", "3 * embed_dim")
+
+
+def test_matmul_result_shape_aliased_batch_dim_still_checks_rank():
+    # An alias must not let a rank-3 operand contract with a rank-4 one.
+    aliases = {"batch": "batch_size"}
+    assert _matmul_result_shape(("batch", "M", "K"), ("batch_size", "H", "K", "N"), aliases) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -439,10 +494,19 @@ def _oracle():
 # so jax lowers to a ``jnp.*`` library call, never a forked ``lax.while_loop`` -- no hang risk.
 _ALL = ("c", "cpp", "fortran", "numba", "pythran", "jax")
 
+#: Backends that must actually RUN an op, not skip it. A skip stays accepted -- a backend that
+#: cannot lower an op should not fail the op's test -- but accepting skips is also how a green
+#: test can mean NO backend ran the case: `np.triu` looked green here until the raw status dict
+#: was printed. These three are the reference lowering, so if none of them ran, nothing was graded.
+_MUST_NOT_ALL_SKIP = ("c", "cpp", "fortran")
+
 
 def _assert_ok(status, label):
     fails = {b: s for b, s in status.items() if s.startswith("FAIL")}
     assert not fails, f"{label}: {fails}"
+    native = {b: status.get(b) for b in _MUST_NOT_ALL_SKIP}
+    ran = [b for b, s in native.items() if s == "ok"]
+    assert ran, f"{label}: no native backend ran it, so this case graded NOTHING -- {native}"
 
 
 #: (id, numpy source, func, input shapes/arrays, output shape, syms, sym-shapes).

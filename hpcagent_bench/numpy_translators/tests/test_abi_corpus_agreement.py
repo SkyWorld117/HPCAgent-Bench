@@ -26,10 +26,9 @@ EMPTY** -- any entry appearing there is a regression, not a backlog.
 
 The third list is different in kind: a kernel there does not lower at all, so it has no
 emitted ABI to compare, and a REFUSAL is the wanted outcome rather than a defect to waive.
-It holds 5 of 631 kernels, all one root cause (a matmul reaching slice fusion un-hoisted).
-Read that number as five kernels that USED to emit silently-wrong elementwise products and
-now decline instead -- the list grew because a miscompile was found, not because the
-translator regressed.
+It is EMPTY: every kernel in the registry lowers. The five ML kernels it used to hold all
+declined at the matmul hoister, which now reconciles shape tokens across vocabularies and
+spills a call-valued operand -- so the contraction guard they used to trip is never reached.
 
 Marked ``integration``: it lowers the whole registry, far too slow for the default suite.
 """
@@ -56,21 +55,15 @@ KNOWN_NAME_DISAGREEMENTS: Dict[str, str] = {}
 #: fails too. A refusal is not a waiver -- it is the translator declining to emit something it
 #: cannot emit correctly, which is the outcome we want over a silently wrong loop nest.
 #:
-#: These five are ONE root cause, not five: a matmul reaches slice fusion un-hoisted, and the
-#: fusion rewrite would replace both operands with scalar subscripts and emit ``*`` -- dropping the
-#: contraction and computing an elementwise product that compiles clean and returns wrong numbers.
-#: ``lowering._refuse_scalarising_a_contraction`` catches it at the one point the difference is
-#: still visible. Before that guard these five kernels EMITTED, and what they emitted was wrong; the
-#: guard did not break them, it stopped them lying. Fix = teach the matmul hoister the shapes it
-#: currently declines (the ``batch`` vs ``batch_size`` shape-token aliasing is one known cause), NOT
-#: relax the guard.
-KNOWN_NON_LOWERING: Dict[str, str] = {
-    "ml/netvlad_no_ghost_clusters/netvlad_no_ghost_clusters": "matmul '__cb8 @ x' reaches slice fusion un-hoisted",
-    "ml/netvlad_with_ghost_clusters/netvlad_with_ghost_clusters": "matmul '__cb8 @ x' reaches slice fusion un-hoisted",
-    "ml/relu_self_attention/relu_self_attention": "matmul 'fmax(scores, 0.0) @ v' reaches slice fusion un-hoisted",
-    "ml/swin_transformer_v2/swin_transformer_v2": "matmul '__hcall43 @ __cb34' reaches slice fusion un-hoisted",
-    "ml/vision_attention/vision_attention": "matmul 'tokens @ __cb3' reaches slice fusion un-hoisted",
-}
+#: EMPTY. It held five ML kernels whose matmul reached slice fusion un-hoisted, where the fusion
+#: rewrite would have replaced both operands with scalar subscripts and emitted ``*`` -- dropping
+#: the contraction for an elementwise product that compiles clean and returns wrong numbers.
+#: ``lowering._refuse_scalarising_a_contraction`` still catches that, unchanged; what changed is
+#: that the hoister no longer declines the shapes, so the guard is never reached. Two causes, not
+#: the one root cause recorded here earlier: the operands spelled the same extent in two
+#: vocabularies (``channels`` off ``x.shape`` vs ``embed_dim`` from ``init.shapes``), and a
+#: call-valued operand (``np.maximum(scores, 0.0) @ v``) had no name for the loop nest to index.
+KNOWN_NON_LOWERING: Dict[str, str] = {}
 
 #: Names line up but a slot's DTYPE disagrees -- just as fatal, since SysV/AAPCS64 allocate INTEGER
 #: and SSE arguments from independent register sequences. EMPTY: an entry here is a regression.

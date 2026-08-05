@@ -41,9 +41,10 @@ from numpyto_common import dtypes
 from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import _np_linalg_attr
-from numpyto_common.lib_nodes import (LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES, UNARY_C_MATH,
-                                      _broadcast_extents, _is_integer_expr, _iter_extent_of, _scalarize_at_iters,
-                                      _slice_step_const, expand_meshgrid, extent_is_scalar, reset_temp_counters)
+from numpyto_common.lib_nodes import (DIM_IDENT_RE, SHAPE_READ_RE, LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES,
+                                      UNARY_C_MATH, _broadcast_extents, _is_integer_expr, _iter_extent_of,
+                                      _scalarize_at_iters, _slice_step_const, expand_meshgrid, extent_is_scalar,
+                                      reset_temp_counters)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
                                      _substitute_inlined_scalar_defs)
 
@@ -6006,6 +6007,9 @@ class LoweringContext:
         self.shapes: Dict[str, List[str]] = {}
         self.scalar_temps: Dict[str, Tuple[str, ...]] = {}
         self.inl_defs: Dict[str, object] = {}
+        #: Dimension local -> its definition (``channels`` -> ``embed_dim``), for the matmul
+        #: hoister's token comparison. See :func:`collect_dim_aliases`.
+        self.dim_aliases: Dict[str, str] = {}
         self.param_seed: Dict[str, Tuple[str, ...]] = {}
         #: Bound ``_resolve_inl_table`` closure, set in the resolve-inl phase and
         #: re-used by the slice-normalise phase (both resolve ``__inl`` tokens).
@@ -6190,6 +6194,33 @@ def _lp_seed_dtypes_and_harvest(ctx: LoweringContext) -> None:
     _PromoteMixedComplexIfExp(ctx.local_dtypes).visit(tree)
 
 
+def collect_dim_aliases(tree: ast.AST, array_names: Set[str]) -> Dict[str, str]:
+    """Map each DIMENSION local to its definition, for :func:`lib_nodes.dims_agree`.
+
+    A kernel names its own dimensions off a parameter's shape -- ``batch, channels, h, w =
+    x.shape``, which the tuple desugar has already folded to ``batch = batch_size`` / ``channels =
+    embed_dim``. Those locals then spell shape tokens the ``init.shapes`` side spells with the
+    symbol, so two operands of one contraction disagree textually while denoting the same extent.
+
+    ``_collect_inlined_scalar_defs`` with no prefix over-collects for this purpose: its
+    scalar-vs-array test is structural (a BinOp of Names looks like a dimension), so an ARRAY
+    expression -- vision_attention's ``resid = attn_out + tokens`` -- comes back as a candidate.
+    Substituting one into a shape token would be nonsense, so a name is kept only when neither it
+    nor any identifier it reads is a known array.
+
+    A ``.shape[i]`` read is the exception the filter must not eat: ``__inl91_c =
+    __inl8_y.shape[3]`` names an array precisely to read a DIMENSION off it, and it is the only
+    form swin's inlined stages have. Those reads are masked out before the array test and resolved
+    later, against the then-current shape table, by :func:`lib_nodes.substitute_dim_aliases`.
+    """
+    candidates = _collect_inlined_scalar_defs(tree, None)
+    return {
+        name: rhs
+        for name, rhs in candidates.items()
+        if name not in array_names and not (array_names & set(DIM_IDENT_RE.findall(SHAPE_READ_RE.sub("", rhs))))
+    }
+
+
 def _lp_resolve_inlined_shapes(ctx: LoweringContext) -> None:
     """Resolve inlined-scalar dim tokens in the harvest table, inherit loop-var
     dtypes, and pre-lift ``alpha * A`` so the matmul hoister sees a bare Name."""
@@ -6203,6 +6234,7 @@ def _lp_resolve_inlined_shapes(ctx: LoweringContext) -> None:
     # (``zeros_locals`` / ``shapes``).
     ctx.inl_defs = _collect_inlined_scalar_defs(tree)
     ctx.param_seed = {n: tuple(s) for n, s in ctx.arrays_shapes.items()}
+    ctx.dim_aliases = collect_dim_aliases(tree, set(ctx.arrays_shapes) | set(ctx.lib_shape_table))
 
     def _resolve_inl(shape):
         """Substitute ``__inl<k>_`` dim-locals away then resolve
@@ -6346,7 +6378,8 @@ def _lp_libnode_expand(ctx: LoweringContext) -> None:
     ctx.lib_rewriter = LibNodeRewriter(ctx.lib_shape_table,
                                        known_arrays=set(ctx.arrays_shapes.keys()),
                                        local_dtypes=ctx.local_dtypes,
-                                       sparse=ctx.original_kir.sparse)
+                                       sparse=ctx.original_kir.sparse,
+                                       dim_aliases=ctx.dim_aliases)
     ctx.lib_rewriter.visit(tree)
     # Second math rename: an intrinsic whose argument only becomes a SCALAR once the library
     # nodes expand. ``np.sqrt(w @ (cov @ w))`` (portfolio_optimization) defers the rename in

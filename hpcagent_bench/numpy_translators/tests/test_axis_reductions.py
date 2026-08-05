@@ -256,3 +256,105 @@ def test_instance_norm_over_expanded_operand():
                  },
                  backends=_ALL)
     assert all(v == "ok" or v.startswith("skip") for v in res.values()), res
+
+
+# --------------------------------------------------------------------------- #
+# E. Blocked accumulation -- a full float sum is partial sums, not one chain.   #
+# --------------------------------------------------------------------------- #
+
+
+def _full_sum_stmts(shape):
+    args, kws = _call_args("np.sum(a)")
+    return expand_sum(_target("s"), args, {"a": shape}, kwargs=kws, local_dtypes={})
+
+
+def test_full_float_sum_accumulates_in_blocks():
+    txt = ast.unparse(ast.fix_missing_locations(ast.Module(body=_full_sum_stmts(("N", )), type_ignores=[])))
+    # A block loop over N // 128 with its own accumulator, then the leftover elements.
+    assert "range(N // 128)" in txt, txt
+    assert "range(128)" in txt, txt
+    assert "range(N // 128 * 128, N)" in txt, txt
+
+
+def test_blocked_sum_keeps_the_outer_axes_as_plain_loops():
+    # Only the innermost axis is blocked -- an outer axis stays a plain nest, which is what the
+    # parallelism and isopar recognisers walk.
+    txt = ast.unparse(ast.fix_missing_locations(ast.Module(body=_full_sum_stmts(("M", "N")), type_ignores=[])))
+    assert "range(M)" in txt, txt
+    assert "range(N // 128)" in txt, txt
+
+
+def test_integer_sum_is_not_blocked():
+    # Integer addition is exact and associative, so blocking buys nothing and only adds code.
+    args, kws = _call_args("np.sum(a)")
+    stmts = expand_sum(_target("s"), args, {"a": ("N", )}, kwargs=kws, local_dtypes={"a": "int64"})
+    txt = ast.unparse(ast.fix_missing_locations(ast.Module(body=stmts, type_ignores=[])))
+    assert "128" not in txt, txt
+    assert "range(N)" in txt, txt
+
+
+def test_axis_sum_is_not_blocked():
+    # Blocking is the full-reduction chain only; an axis reduction keeps its per-element loop.
+    args, kws = _call_args("np.sum(a, axis=1)")
+    stmts = expand_sum(_target("s"), args, {"a": ("M", "N")}, kwargs=kws, local_dtypes={})
+    txt = ast.unparse(ast.fix_missing_locations(ast.Module(body=stmts, type_ignores=[])))
+    assert "128" not in txt, txt
+
+
+def test_blocked_sum_adds_initial_exactly_once():
+    """``initial=`` seeds the WHOLE sum, not each block.
+
+    The first version of the blocked path initialised every block accumulator to the reduction's
+    ``init``, which with ``initial=`` is the caller's seed -- so the answer gained one seed per
+    block, silently and only for arrays long enough to have more than one. The block accumulator
+    starts at zero; the seed stays on the outer accumulator.
+    """
+    n = 1000
+    a = np.random.default_rng(0).random(n)
+    src = ("import numpy as np\n"
+           "def f(a, out):\n"
+           "    out[0] = np.sum(a, initial=7.0)\n")
+    res = run_op(src,
+                 "f", {"a": a}, {"out": (1, )}, {"N": n},
+                 shapes={
+                     "a": "(N,)",
+                     "out": "(1,)"
+                 },
+                 backends=("c", "cpp", "fortran"))
+    assert all(v == "ok" or v.startswith("skip") for v in res.values()), res
+    assert any(v == "ok" for v in res.values()), f"no backend ran it: {res}"
+
+
+def test_large_fp32_sum_agrees_with_numpy_pairwise():
+    """The reason blocking exists, at a tolerance a serial chain does NOT meet.
+
+    numpy sums pairwise, so its error grows with log(n) while a naive chain's grows with n. A/B
+    measured through this very harness on this seeded data, n = 2**22, emitted float32, gcc -O2
+    (which does not reassociate): the emitted sum differs from numpy's by **5.2e-05** relative with
+    one accumulator and **1.9e-06** blocked. ``rtol`` below sits at 1e-05, a factor ~5 on each
+    side, so a regression to a single accumulator FAILS here rather than drifting silently until
+    some future large-N kernel disagrees.
+
+    ``dtypes=`` is not optional: without it the harness emits float64, whose naive error is ~1e-11
+    and which therefore passes whatever the accumulation does -- a green test proving nothing.
+    """
+    n = 1 << 22
+    a = np.random.default_rng(0).random(n, dtype=np.float32)
+    src = ("import numpy as np\n"
+           "def f(a, out):\n"
+           "    out[0] = np.sum(a)\n")
+    res = run_op(src,
+                 "f", {"a": a}, {"out": (1, )}, {"N": n},
+                 shapes={
+                     "a": "(N,)",
+                     "out": "(1,)"
+                 },
+                 rtol=1e-5,
+                 atol=0.0,
+                 dtypes={
+                     "a": "float32",
+                     "out": "float32"
+                 },
+                 backends=("c", "cpp", "fortran"))
+    assert all(v == "ok" or v.startswith("skip") for v in res.values()), res
+    assert any(v == "ok" for v in res.values()), f"no backend ran it: {res}"
