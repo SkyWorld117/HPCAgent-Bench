@@ -95,6 +95,18 @@ class ArrayDesc:
     shape: Tuple[str, ...]
     is_output: bool = False
 
+    def __post_init__(self) -> None:
+        # Same storage contract :class:`ScalarDesc` honours, for the same reason: normalise the
+        # spelling once, where the dtype is STORED, so signature / binding JSON / ABI gate cannot
+        # disagree over ``double`` vs ``float64``. And REFUSE a token that is not a dtype at all --
+        # every emitter's dtype table falls back to ``double`` on a miss, so an unvalidated token
+        # (``dtype=x.dtype`` once read as the literal ``"dtype"``) emitted a double buffer inside
+        # an fp32 kernel instead of failing. A refusal beats a silently wrong emit.
+        try:
+            self.dtype = dtypes.canonical(self.dtype)
+        except KeyError:
+            raise ValueError(f"array {self.name!r}: {self.dtype!r} is not a known dtype") from None
+
 
 @dataclass
 class ScalarDesc:
