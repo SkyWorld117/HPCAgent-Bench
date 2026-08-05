@@ -98,12 +98,14 @@ needs a separate flag for ptxas.
 ### 3. clang-tidy
 ```bash
 clang-tidy --checks='-*,bugprone-*,performance-*,portability-*,clang-analyzer-*' \
-  --warnings-as-errors='*' <file>.hip -- -x hip --offload-arch=<gfx> \
-  --rocm-path="$(hipconfig --rocmpath)" -Wall -Wextra
+  --warnings-as-errors='*' <file>.hip -- -x hip --offload-arch=<gfx> -nogpulib \
+  -Wall -Wextra
 ```
-hipcc IS clang, so this needs no special handling. Ask `hipconfig` for the path
-rather than assuming `/opt/rocm` -- a packaged ROCm answers `/usr`, and a wrong path
-fails with "cannot find ROCm device library". If the device pass still trips on
+hipcc IS clang, so this needs no special handling -- but `-nogpulib` is what makes
+it run at all on a packaged ROCm. Without it clang fails with "cannot find ROCm
+device library", and neither `--rocm-path=/opt/rocm` nor the `hipconfig --rocmpath`
+answer (`/usr`) fixes it, since system clang looks in neither. A lint pass does not
+link, so the device bitcode is irrelevant. If the device pass still trips on
 headers, add `--cuda-host-only` (which does clear it) and report that device code
 got no clang-tidy coverage.
 
