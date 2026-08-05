@@ -334,10 +334,30 @@ void ax(double *restrict y, const double *restrict x, double a, int n) {
 #: Undefined references that ARE a call into an OpenMP runtime: GNU ``libgomp`` spells them
 #: ``GOMP_*``, LLVM ``libomp`` spells them ``__kmpc_*``. Both count -- the probe asks whether a
 #: runtime is entered, not which vendor's.
-_OMP_RUNTIME_CALL = re.compile(r"GOMP_|__kmpc_")
+OMP_RUNTIME_CALL_PATTERN = r"GOMP_|__kmpc_"
+
+#: The same question for C++ ``<execution>`` policies, whose runtime is TBB rather than OpenMP.
+#: libstdc++'s parallel algorithms dispatch into ``tbb::detail::r1::*`` (mangled ``_ZN3tbb...``);
+#: the ``__TBB_`` alternative covers the C-linkage entry points other builds emit. Measured on
+#: g++ 15 with libtbb-dev present: 12 such undefined references from ONE ``par_unseq`` call.
+STDPAR_RUNTIME_CALL_PATTERN = r"_ZN3tbb|__TBB_"
 
 #: Polly's outlined parallel body, e.g. ``mm_polly_subfn.0``.
 POLLY_OUTLINE_PATTERN = r"polly_subfn"
+
+#: One ``std::execution::par_unseq`` call and nothing else -- what a ``cpp_isopar`` kernel IS.
+#: There is no flag to probe here: ``<execution>`` compiles and the policy overloads resolve on
+#: every conforming toolchain. What varies is the BACKEND libstdc++ picked for this translation
+#: unit (``#define _GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)``), and a serial pick
+#: is invisible in the source, the flags, the exit code and the answers alike -- only in whether
+#: the object calls a parallel runtime. Hence the same ``nm`` evidence every other column uses.
+STDPAR_PROBE_SOURCE = """\
+#include <algorithm>
+#include <execution>
+void ax(double *y, const double *x, int n) {
+  std::transform(std::execution::par_unseq, x, x + n, y, y, [](double a, double b) { return a + b; });
+}
+"""
 
 #: Matches no symbol at all -- for a probe whose only evidence is the OpenMP runtime call, because
 #: the parallelism came from the SOURCE (a pragma) rather than from the compiler inventing an
@@ -361,7 +381,12 @@ def _nm(nm_exe: str, args: List[str], obj: pathlib.Path) -> Optional[str]:
 
 
 @lru_cache(typed=True)
-def probe_autopar(compiler: str, flags: str, outline_pattern: str, source: str = _AUTOPAR_PROBE_SOURCE) -> AutoparProbe:
+def probe_autopar(compiler: str,
+                  flags: str,
+                  outline_pattern: str,
+                  source: str = _AUTOPAR_PROBE_SOURCE,
+                  runtime_pattern: str = OMP_RUNTIME_CALL_PATTERN,
+                  suffix: str = ".c") -> AutoparProbe:
     """Does ``compiler flags`` genuinely outline a parallel loop, or merely accept the flags?
 
     Compiles ``source`` to an object in a fresh temp dir with ``compiler`` and ``flags`` (the
@@ -369,14 +394,20 @@ def probe_autopar(compiler: str, flags: str, outline_pattern: str, source: str =
     inspects the object with ``nm``. Nothing else counts as evidence: not the compiler's exit
     code beyond compiling, not whether a benchmark kernel later validates. ``outline_pattern``
     is a regex matched against ``nm``'s defined-symbol output (:data:`POLLY_OUTLINE_PATTERN` /
-    :data:`GCC_AUTOPAR_OUTLINE_PATTERN`); an undefined :data:`_OMP_RUNTIME_CALL` reference (a
-    call into EITHER OpenMP runtime) is independently sufficient, since a compiler could name
-    its outlined body anything.
+    :data:`GCC_AUTOPAR_OUTLINE_PATTERN`); an undefined ``runtime_pattern`` reference (a call into
+    the parallel runtime -- :data:`OMP_RUNTIME_CALL_PATTERN` by default, either vendor's OpenMP)
+    is independently sufficient, since a compiler could name its outlined body anything.
 
     ``source`` defaults to :data:`_AUTOPAR_PROBE_SOURCE` -- a plain nest the compiler must find
     parallelism in by itself. A source-to-source column passes :data:`_OPENMP_PROBE_SOURCE`
     instead, which already carries the pragma, so the question becomes whether the compiler
     honours it (see :func:`pluto_capability`).
+
+    ``runtime_pattern`` and ``suffix`` exist because "parallel" is not always spelled OpenMP in
+    C: a ``<execution>`` column enters TBB from C++ (:data:`STDPAR_RUNTIME_CALL_PATTERN`,
+    ``.cpp``, see :func:`languages.isopar_capability`). Both stay parameters of THIS function
+    rather than becoming a second probe, since the evidence -- compile, then ``nm`` -- is the
+    same and only what counts as a runtime call differs.
 
     Parameterised by ``(compiler, flags, outline_pattern)`` rather than hardcoded per column,
     so a future autopar backend (Pluto, NVHPC ``-Mconcur``, ...) reuses this function instead
@@ -392,7 +423,7 @@ def probe_autopar(compiler: str, flags: str, outline_pattern: str, source: str =
     if exe is None:
         return AutoparProbe(AutoparVerdict.REJECTED, f"{compiler!r} not found on PATH")
     with tempfile.TemporaryDirectory(prefix="hpcagent_bench_autopar_probe_") as tmp:
-        src = pathlib.Path(tmp) / "probe.c"
+        src = pathlib.Path(tmp) / f"probe{suffix}"
         obj = pathlib.Path(tmp) / "probe.o"
         src.write_text(source)
         argv = [exe, *shlex.split(flags), "-c", str(src), "-o", str(obj)]
@@ -411,10 +442,10 @@ def probe_autopar(compiler: str, flags: str, outline_pattern: str, source: str =
         if undefined is None or defined is None:
             return AutoparProbe(AutoparVerdict.VACUOUS, "nm invocation failed on this host -- cannot confirm outlining")
 
-        omp_calls = sum(1 for line in undefined.splitlines() if _OMP_RUNTIME_CALL.search(line))
+        runtime_calls = sum(1 for line in undefined.splitlines() if re.search(runtime_pattern, line))
         outlined = sum(1 for line in defined.splitlines() if re.search(outline_pattern, line))
-        detail = f"omp_calls={omp_calls} outlined={outlined}"
-        if omp_calls > 0 or outlined > 0:
+        detail = f"runtime_calls={runtime_calls} outlined={outlined}"
+        if runtime_calls > 0 or outlined > 0:
             return AutoparProbe(AutoparVerdict.OK, detail)
         return AutoparProbe(AutoparVerdict.VACUOUS, f"flags accepted, nothing outlined ({detail})")
 

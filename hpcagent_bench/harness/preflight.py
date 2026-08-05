@@ -17,7 +17,7 @@ an autopar name is a wrong measurement wearing a right label.
 """
 from typing import Dict, List, Sequence, Tuple
 
-from hpcagent_bench import flags, pluto_transform
+from hpcagent_bench import flags, languages, pluto_transform
 from hpcagent_bench.flags import AutoparVerdict, Mode
 
 #: Columns a deterministic (unjudged) sweep may run: same artifact every run, no sampling and no
@@ -29,10 +29,17 @@ DETERMINISTIC_FRAMEWORKS: Tuple[str, ...] = ("numpy", "polly", "pluto", "cc", "c
                                              "dace_gpu_parallel", "dace_gpu_autoopt", "dace_gpu_canonicalize")
 
 #: Autopar column -> the capability probe that decides whether it is one in fact as well as name.
+#:
+#: ``cpp_isopar`` is listed although no SCORED column names it yet (its only consumers today are
+#: correctness oracles, where a serial backend is slow rather than wrong). It is here so that the
+#: column, when it is timed, cannot be added ungated: the parallelism of ``<execution>`` policies is
+#: a per-translation-unit property of the installed headers, invisible in flags, exit codes and
+#: answers alike, so it is exactly the kind of column this table exists for.
 AUTOPAR_PROBES = {
     "polly": flags.polly_capability,
     "cc_autopar": flags.gcc_autopar_capability,
     "fortran_autopar": flags.gcc_autopar_capability,
+    "cpp_isopar": languages.isopar_capability,
 }
 
 

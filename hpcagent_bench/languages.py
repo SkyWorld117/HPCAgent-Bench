@@ -413,6 +413,28 @@ def stdpar_link_flags(lang: str) -> Tuple[str, ...]:
     return tuple(shlex.split(flag_vars[ref]))
 
 
+def isopar_capability() -> flags.AutoparProbe:
+    """Do THIS host's ``<execution>`` policies genuinely run in parallel, or only compile?
+
+    The ``cpp_isopar`` column's entire claim is that its ``par_unseq`` calls are parallel, and
+    nothing in an ordinary build says whether they are. libstdc++ picks the backend per translation
+    unit from ``__has_include(<tbb/tbb.h>)``, so a runner that loses the TBB headers still compiles,
+    still links, still produces correct answers, and quietly times SEQUENTIAL work under a parallel
+    name. :attr:`flags.AutoparVerdict.VACUOUS` is precisely that state, and it is the one a
+    performance column must refuse rather than publish.
+
+    Same evidence as every other column -- :func:`flags.probe_autopar` compiles and reads ``nm``,
+    here for a TBB runtime call instead of an OpenMP one -- and the same flags the harness really
+    builds C++ with, so the verdict describes the column and not a probe-only toolchain. Lives in
+    this module rather than beside :func:`flags.polly_capability` because the cpp block's compiler
+    is nameable only here, and :func:`stdpar_link_flags` (which must AGREE with it) is right above.
+    """
+    _cname, block = _compiler_for_lang(_load_compilers(), "cpp")
+    composed = f"{baseline_flags('cpp')} {std_flag('cpp')}"
+    return flags.probe_autopar(block["cc"], composed, flags.NO_OUTLINE_PATTERN, flags.STDPAR_PROBE_SOURCE,
+                               flags.STDPAR_RUNTIME_CALL_PATTERN, ".cpp")
+
+
 def report_flags(lang: str, *, compiler: Optional[str] = None) -> str:
     """The optimization-report flags for ``lang`` (or an explicit ``compiler`` block).
 
