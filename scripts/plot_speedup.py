@@ -47,7 +47,7 @@ import argparse
 import math
 import pathlib
 import warnings
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -498,76 +498,93 @@ def mini_figure(points: Sequence[Point], kernels: Sequence[str], output: str, bo
     return plotting.save_figure(output, fig)
 
 
-#: How many cells the square figure shows. Four boxes is what fits one small square panel while
-#: still reading as a distribution rather than a bar; past that the boxes narrow faster than the
-#: figure gains meaning.
+#: How many boxes the square figure shows in total. Four is what fits one small square panel while
+#: each still reads as a distribution rather than a bar; past that the boxes narrow faster than the
+#: figure gains meaning. With two frameworks that is two kernels, grouped.
 SQUARE_CELLS: int = 4
 
 #: The square figure's side, in inches. Sized for an embed (a slide corner, a README header), which
-#: is why everything optional is stripped rather than shrunk -- text that has to be scaled down to
-#: fit is text that will not be read at this size.
-SQUARE_SIDE: float = 2.4
+#: is why what is dropped is dropped rather than shrunk -- text that has to be scaled down to fit is
+#: text that will not be read at this size.
+SQUARE_SIDE: float = 2.6
 
 
-def square_cells(points: Sequence[Point], cells: int = SQUARE_CELLS) -> List[Point]:
-    """The ``cells`` points the square figure shows: well sampled, and on ONE order of magnitude.
+def square_kernels(points: Sequence[Point], cells: int = SQUARE_CELLS) -> Tuple[List[str], List[str]]:
+    """The kernels and frameworks the square figure shows: one band, complete groups.
 
-    Two constraints, and the second is what makes the figure legible. A single ``> 10x`` cell sets
-    a y range in which every other box collapses to a line -- the same "one outlier flattens
-    everything" problem the banded layout exists to solve, except a square panel has no second band
-    to move it to. So the widest band that can supply enough cells wins, and the rest are left out.
+    Two constraints. **One band**, because a single ``> 10x`` cell sets a y range in which every
+    other box collapses to a line -- the same "one outlier flattens everything" problem the banded
+    layout exists to solve, except a square panel has no second band to move it to.
 
-    Within that band the best-sampled cells win, so the boxes drawn are the ones with the most
-    measurement behind them rather than whichever sorted first.
+    **Complete groups**, because the figure's claim is a comparison: a kernel where only one
+    framework has a box invites reading the gap as a result rather than as missing data. So a kernel
+    ships only if every plotted framework has a cell for it, and the kernel count is whatever fits
+    ``cells`` boxes at that group size.
     """
-    by_samples = sorted(points, key=lambda point: (len(point.samples), point.kernel), reverse=True)
+    frameworks = sorted({point.framework for point in points})
+    if not frameworks:
+        return [], []
     for band in (BAND_MID, BAND_LOW, BAND_HIGH):
-        inside = [point for point in by_samples if point.band == band]
-        if len(inside) >= cells:
-            return inside[:cells]
-    return by_samples[:cells]
+        inside = [point for point in points if point.band == band]
+        by_kernel: Dict[str, Set[str]] = {}
+        for point in inside:
+            by_kernel.setdefault(point.kernel, set()).add(point.framework)
+        complete = [
+            kernel for kernel in dict.fromkeys(p.kernel for p in inside) if by_kernel[kernel] == set(frameworks)
+        ]
+        if complete:
+            return complete[:max(1, cells // len(frameworks))], frameworks
+    return [], frameworks
 
 
 def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELLS) -> str:
-    """One square panel, ``cells`` boxes, NO title and no legend.
+    """One square panel: both frameworks on ONE axis, grouped and dodged per kernel.
 
-    A deliberately different figure from the banded one: it answers "what does the spread look
-    like" at embed size, not "which kernel did what". So it drops everything the banded figure
-    spends height on -- band titles, the legend, the kernel names, the supylabel -- and keeps only
-    what a box cannot be read without: the zero line (the boundary between a win and a loss) and a
-    few y numbers saying how far from it the boxes sit.
+    Mirrors the banded figure's reading -- same hue per framework, same dodge, same signed-change
+    axis -- with the band machinery removed, since a square panel shows one band. Keeps the three
+    things the figure cannot be read without: the kernel names, a ``Speedup`` y label, and a legend
+    naming the frameworks. Drops the band title, which a single-band panel does not need.
 
-    Everything here is sized for the figure being SMALL. Three y ticks rather than matplotlib's
-    default seven, because at 120 px seven labels are a grey smear; larger type than the banded
-    figure uses, for the same reason; and wide boxes, since a box thinner than its own outline
-    stops reading as a distribution. Each cell gets its own hue -- with no legend the colours only
-    have to separate the boxes.
+    Sized for the figure being SMALL: three y ticks rather than matplotlib's seven (at 120 px seven
+    labels are a grey smear), larger type than the banded figure, and wide boxes, since a box
+    thinner than its own outline stops reading as a distribution.
     """
-    chosen = square_cells(points, cells)
-    if not chosen:
-        raise RuntimeError("the square figure needs at least one point")
+    kernels, frameworks = square_kernels(points, cells)
+    if not kernels:
+        raise RuntimeError("the square figure needs at least one kernel with a cell for every framework")
+    colors = framework_colors(points)
+    offsets = dict(zip(frameworks, dodge_offsets(len(frameworks), slot=0.7)))
+    width = 0.7 / len(frameworks)
+    x_of = {kernel: i for i, kernel in enumerate(kernels)}
     fig, ax = plt.subplots(figsize=(SQUARE_SIDE, SQUARE_SIDE))
-    artists = ax.boxplot([list(point.samples) or [point.change] for point in chosen],
-                         positions=range(len(chosen)),
-                         widths=0.66,
-                         patch_artist=True,
-                         manage_ticks=False,
-                         showfliers=False,
-                         medianprops=dict(color="0.1", linewidth=1.4))
-    for index, box in enumerate(artists["boxes"]):
-        color = plotting.PALETTE[index % len(plotting.PALETTE)]
-        box.set(facecolor=color, edgecolor=color, alpha=0.7, linewidth=1.1)
-        for side in (2 * index, 2 * index + 1):
-            artists["whiskers"][side].set(color=color, linewidth=1.1)
-            artists["caps"][side].set(color=color, linewidth=1.1)
+    for framework in frameworks:
+        mine = [p for p in points if p.framework == framework and p.kernel in x_of]
+        color = colors[framework]
+        artists = ax.boxplot([list(p.samples) or [p.change] for p in mine],
+                             positions=[x_of[p.kernel] + offsets[framework] for p in mine],
+                             widths=width * 0.82,
+                             patch_artist=True,
+                             manage_ticks=False,
+                             showfliers=False,
+                             medianprops=dict(color="0.1", linewidth=1.3))
+        for box in artists["boxes"]:
+            box.set(facecolor=color, edgecolor=color, alpha=0.7, linewidth=1.0)
+        for part in ("whiskers", "caps"):
+            for line in artists[part]:
+                line.set(color=color, linewidth=1.0)
     ax.axhline(0.0, color="0.35", linewidth=1.0)
-    ax.set_xticks([])  # with four boxes and no legend, a name per box is more ink than signal
-    ax.set_xlim(-0.6, len(chosen) - 0.4)
+    ax.set_xticks(range(len(kernels)))
+    ax.set_xticklabels(kernels, fontsize=9)
+    ax.set_xlim(-0.55, len(kernels) - 0.45)
+    ax.set_ylabel("Speedup", fontsize=10)
     ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=3))
-    ax.tick_params(axis="y", labelsize=11, length=2, pad=1.5)
+    ax.tick_params(axis="y", labelsize=9, length=2, pad=1.5)
+    ax.tick_params(axis="x", length=0, pad=2.0)
     ax.grid(axis="y", color="0.88", linewidth=0.7)
-    for side in ("top", "right", "bottom"):
+    for side in ("top", "right"):
         ax.spines[side].set_visible(False)
+    handles = [plt.Rectangle((0, 0), 1, 1, facecolor=colors[f], edgecolor=colors[f], alpha=0.7) for f in frameworks]
+    ax.legend(handles, frameworks, fontsize=8, frameon=False, loc="best", handlelength=1.1, handleheight=0.9)
     return plotting.save_figure(output, fig)
 
 
@@ -656,7 +673,9 @@ DEMO_CELLS: Tuple[Tuple[str, float, float, int], ...] = (
 )
 
 #: The demo's two candidate columns -- two, so the shared palette and the legend are exercised.
-DEMO_FRAMEWORKS: Tuple[str, str] = ("dace_cpu", "pluto")
+#: Named generically rather than after real frameworks: these numbers were drawn from a generator,
+#: and a legend reading ``dace_cpu`` on synthetic data invites someone to quote it as a measurement.
+DEMO_FRAMEWORKS: Tuple[str, str] = ("Agent 1", "Agent 2")
 
 #: Repetitions the demo draws per cell, and their run-to-run scatter as a fraction of the cell's
 #: own time. 12 is enough for a box to be a box; 8% is a plausible timing jitter for a warm CPU

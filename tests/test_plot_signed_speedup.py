@@ -388,41 +388,47 @@ def test_the_demo_draws_enough_repetitions_for_a_box() -> None:
 # --- the square embed figure ---------------------------------------------------------------------
 
 
-def test_the_square_figure_keeps_its_cells_on_one_order_of_magnitude() -> None:
+def two_framework_points(kernels, band: str, magnitude: float = 3.0):
+    """Both demo frameworks on every kernel in ``kernels`` -- the complete groups the figure wants."""
+    return [
+        speedup.Point(kernel, framework, magnitude, magnitude - 1.0, band, tuple([magnitude - 1.0] * 12))
+        for kernel in kernels for framework in speedup.DEMO_FRAMEWORKS
+    ]
+
+
+def test_the_square_figure_keeps_its_kernels_on_one_order_of_magnitude() -> None:
     """A single ``> 10x`` cell would set a y range that collapses every other box to a line -- the
     same problem the banded layout exists to solve, except a square panel has no second band to
-    move the outlier to. So the cells must come from ONE band, never a mix."""
-    crowded = [
-        speedup.Point(f"k{i}", "dace_cpu", 3.0, 2.0, speedup.BAND_MID, tuple([2.0] * 12))
-        for i in range(speedup.SQUARE_CELLS)
-    ]
-    outlier = speedup.Point("huge", "dace_cpu", 90.0, 89.0, speedup.BAND_HIGH, tuple([89.0] * 40))
-    chosen = speedup.square_cells([outlier] + crowded)
-    assert len(chosen) == speedup.SQUARE_CELLS
-    assert {point.band for point in chosen} == {speedup.BAND_MID}
-    assert "huge" not in {point.kernel for point in chosen}, "the outlier would flatten the others"
+    move the outlier to. So the kernels must come from ONE band, never a mix."""
+    points = two_framework_points(["k0", "k1"], speedup.BAND_MID)
+    points += two_framework_points(["huge"], speedup.BAND_HIGH, magnitude=90.0)
+    kernels, frameworks = speedup.square_kernels(points)
+    assert frameworks == sorted(speedup.DEMO_FRAMEWORKS)
+    assert "huge" not in kernels, "the outlier would flatten the others"
+    assert kernels == ["k0", "k1"]
 
 
-def test_the_square_figure_falls_back_rather_than_drawing_nothing() -> None:
-    """Too few cells in any one band must still produce a figure -- fewer boxes beats no file."""
-    points = [
-        speedup.Point("a", "dace_cpu", 3.0, 2.0, speedup.BAND_MID, tuple([2.0] * 12)),
-        speedup.Point("b", "dace_cpu", 90.0, 89.0, speedup.BAND_HIGH, tuple([89.0] * 12)),
-    ]
-    assert len(speedup.square_cells(points)) == 2
+def test_a_kernel_missing_one_framework_is_not_drawn_as_a_half_group() -> None:
+    """The figure's claim is a comparison. A kernel where only one agent has a box invites reading
+    the gap as a result rather than as data that was never collected."""
+    points = two_framework_points(["paired"], speedup.BAND_MID)
+    points.append(speedup.Point("lonely", speedup.DEMO_FRAMEWORKS[0], 3.0, 2.0, speedup.BAND_MID, tuple([2.0] * 12)))
+    kernels, _frameworks = speedup.square_kernels(points)
+    assert kernels == ["paired"], "a group with a missing agent must be left out entirely"
 
 
-def test_the_square_svg_carries_no_title_and_four_boxes(tmp_path: pathlib.Path) -> None:
-    """The embed figure is asked for with no titles at all, and a title that crept back would only
-    be noticed by someone opening the SVG. Four boxes, no text but the y numbers."""
+def test_the_square_figure_groups_both_agents_on_one_axis(tmp_path: pathlib.Path) -> None:
+    """It mimics the banded figure: kernel names on x, a Speedup label, a legend naming the agents,
+    and one hue per agent -- so the two are read against each other rather than in two panels."""
     out = tmp_path / "square.svg"
     written = speedup.square_figure(speedup.demo_points(), str(out))
     assert pathlib.Path(written).exists()
     body = out.read_text()
     for band in speedup.BANDS:
-        assert band not in body, f"band title {band!r} leaked into the embed figure"
+        assert band not in body, f"band title {band!r} leaked into a single-band panel"
     for framework in speedup.DEMO_FRAMEWORKS:
-        assert framework not in body, f"legend text {framework!r} leaked into the embed figure"
+        assert framework in body, f"the legend must name {framework!r}"
+    assert "Speedup" in body, "the y axis must say what it measures"
 
 
 def test_the_square_figure_is_square() -> None:
