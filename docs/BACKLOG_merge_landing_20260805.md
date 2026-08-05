@@ -31,9 +31,30 @@ ratchet **1 passed**.
 
 ---
 
-## A. A helper's array-return buffer is typed float64 inside an fp32 kernel -- WORK IS WRITTEN, NOT VERIFIED
+## A. A helper's array-return buffer is typed float64 inside an fp32 kernel -- RESOLVED `559456fb`
 
-**Highest-value open item, and the one closest to landing.**
+**RESOLVED 2026-08-05.** The worktree patch was re-applied onto the merged tree (its author branched
+from `a4796377`, two merges stale, so its own verification described a translator that is not the one
+shipping) and put through the gate this entry asked for:
+
+- ABI corpus agreement, whole registry: **5 passed in 668.78 s**.
+- Full translator op suite: **1495 passed, 6 skipped**, zero failures.
+- Both named kernels re-checked at fp32 specifically. They now emit
+  `static void _instance_norm(float *restrict __hret_0, const float *restrict x, ...)` -- `float`,
+  not `double`, in both.
+
+No kernel started raising from the new `__post_init__` refusal, so nothing in the corpus was
+depending on the double fallback.
+
+The fix landed at two levels rather than one, because the defect had two: `_ctor_dtype_tag` resolves
+a `dtype=x.dtype` kwarg by chasing `x` through the alias walk that already resolves the shape (the
+dtype must FOLLOW the source array), and `ArrayDesc.__post_init__` canonicalises on store and raises
+on an unknown token -- the contract `ScalarDesc` already honoured. The original entry below is kept
+because the reasoning is what made the gate the right one.
+
+---
+
+**Original entry, 2026-08-05:**
 
 A non-inlinable helper's array-return buffer is emitted `double` while an fp32 caller passes
 `float*`. Breaks `conv2d_instance_norm_divide` and `conv3d_multiply_instance_norm_clamp_multiply_max`
@@ -66,10 +87,30 @@ translator op suite, and re-check the two named fp32 kernels specifically. A `Va
 `__post_init__` on a kernel that previously emitted is a finding, not a regression to work around --
 it means that kernel was choosing `double` by fallback.
 
-## B. The `unit` job's Phase 6 dies on a 25-MINUTE STEP ceiling
+## B. The `unit` job's Phase 6 dies on a 25-MINUTE STEP ceiling -- RESOLVED `0c7bc5a9`
 
-Updates item 2 of `BACKLOG_ci_reds_20260804.md`, which recorded the **1h30m JOB** ceiling. That is a
-different limit, and the fix is now more urgent because the step ceiling bites sooner:
+**RESOLVED 2026-08-05.** Phase 6 is now its own `integration` job with the whole job budget, and its
+step cap is 70 minutes -- a hang detector rather than the budget it had become. It deliberately does
+NOT `needs: [unit]`, so a Phase 1 unit failure cannot hide what the integration tests would have said.
+
+Two consequences that had to be handled with it, neither of which is visible from the timeout alone:
+
+- **Phase 7's gate would have silently narrowed.** The HF export is `if: success()` meaning "never
+  publish from a run where a phase went red", and inside the old single job that covered Phase 6.
+  Left as a step of `unit` it would have begun publishing on runs whose integration tests failed. It
+  moved to an `hf-export` job with `needs: [unit, integration]`, which restores the guarantee across
+  the split instead of quietly reducing it to `unit`.
+- **`coverage` needed the new job in its `needs` list.** Nothing pins that list to the set of jobs
+  uploading coverage -- the combine counts whatever it downloaded -- so a missing entry would not
+  fail, it would race and report a plausible total built from fewer jobs. That is the same defect the
+  per-artifact subdirectories were added to fix.
+
+`tests/test_ci_coverage.py` green (11 passed) against the split.
+
+---
+
+**Original entry.** Updates item 2 of `BACKLOG_ci_reds_20260804.md`, which recorded the **1h30m JOB**
+ceiling. That is a different limit, and the fix was more urgent because the step ceiling bites sooner:
 
 ```
 ##[error]The action 'Phase 6 -- integration-marked tests (build/run real artifacts)' has timed out after 25 minutes.
