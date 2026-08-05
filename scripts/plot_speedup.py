@@ -506,7 +506,7 @@ SQUARE_CELLS: int = 4
 #: The square figure's side, in inches. Sized for an embed (a slide corner, a README header), which
 #: is why what is dropped is dropped rather than shrunk -- text that has to be scaled down to fit is
 #: text that will not be read at this size.
-SQUARE_SIDE: float = 2.6
+SQUARE_SIDE: float = 3.3
 
 
 def square_kernels(points: Sequence[Point], cells: int = SQUARE_CELLS) -> Tuple[List[str], List[str]]:
@@ -622,17 +622,18 @@ def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELL
                 line.set(color=color, linewidth=1.0)
     ax.axhline(0.0, color="0.35", linewidth=1.0)
     ax.set_xticks(range(len(kernels)))
-    ax.set_xticklabels(kernels, fontsize=9)
+    ax.set_xticklabels(kernels, fontsize=11)
     ax.set_xlim(-0.55, len(kernels) - 0.45)
-    ax.set_ylabel("speedup", fontsize=10)
+    ax.set_ylabel("speedup", fontsize=15, labelpad=-1.0)
     ax.set_yticks(square_ticks(*ax.get_ylim()))
-    ax.tick_params(axis="y", labelsize=9, length=2, pad=1.5)
+    ax.tick_params(axis="y", labelsize=11, length=2, pad=1.0)
     ax.tick_params(axis="x", length=0, pad=2.0)
     ax.grid(axis="y", color="0.88", linewidth=0.7)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
+    # All four spines kept, matching the violin panel this figure sits beside in the overview
+    # diagram -- the two are read together, so a frame on one and none on the other reads as two
+    # unrelated charts.
     handles = [plt.Rectangle((0, 0), 1, 1, facecolor=colors[f], edgecolor=colors[f], alpha=0.7) for f in frameworks]
-    ax.legend(handles, frameworks, fontsize=8, frameon=False, loc="best", handlelength=1.1, handleheight=0.9)
+    ax.legend(handles, frameworks, fontsize=10, frameon=False, loc="best", handlelength=1.2, handleheight=0.9)
     return plotting.save_figure(output, fig)
 
 
@@ -715,11 +716,11 @@ DEMO_SEED: int = 20260804
 #: slow-down -- are the ones named "kernel one" and "kernel two". A small embed labelled with
 #: "kernel four" and "kernel six" reads as an excerpt of something larger that is not shown.
 DEMO_CELLS: Tuple[Tuple[str, float, float, int], ...] = (
-    ("kernel one", 2.2, 5.0, +1),
+    ("kernel one", 2.2, 3.2, +1),
     # Kept just past the 2x edge so the mirrored slow-down lands near -1 rather than deep in the
     # band: the square figure shows these two together, and a loss of -7 would set a range in which
     # the win beside it is a sliver.
-    ("kernel two", 2.05, 2.6, -1),
+    ("kernel two", 2.05, 2.5, -1),
     ("kernel three", 5.0, 9.5, +1),
     ("kernel four", 12.0, 45.0, +1),
     ("kernel five", 45.0, 140.0, +1),
@@ -732,7 +733,7 @@ DEMO_CELLS: Tuple[Tuple[str, float, float, int], ...] = (
 #: The demo's two candidate columns -- two, so the shared palette and the legend are exercised.
 #: Named generically rather than after real frameworks: these numbers were drawn from a generator,
 #: and a legend reading ``dace_cpu`` on synthetic data invites someone to quote it as a measurement.
-DEMO_FRAMEWORKS: Tuple[str, str] = ("Agent 1", "Agent 2")
+DEMO_FRAMEWORKS: Tuple[str, str] = ("Agent A", "Agent B")
 
 #: Repetitions the demo draws per cell, and their run-to-run scatter as a fraction of the cell's
 #: own time. 12 is enough for a box to be a box; 8% is a plausible timing jitter for a warm CPU
