@@ -56,6 +56,10 @@ trailing `else`, because making the last axis the fallthrough is the silent clam
 
 ## 2. The `unit` job no longer fits in 1h30m
 
+**UPDATE 2026-08-05**: it now fails EARLIER, on a different ceiling -- the 25-minute STEP timeout on
+Phase 6 itself (`has timed out after 25 minutes`), which also red-lines the downstream `coverage`
+job. Same fix, more urgent. See [`BACKLOG_merge_landing_20260805.md`](BACKLOG_merge_landing_20260805.md) item B.
+
 ```
 The job has exceeded the maximum execution time of 1h30m0s
 ```
