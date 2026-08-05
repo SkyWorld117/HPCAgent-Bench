@@ -450,7 +450,7 @@ def simple_figure(points: Sequence[Point],
         # draw_band turned BOTH grids on -- the x rules exist to carry the eye down to a kernel
         # name, and there are no names here. Off first, because grid(axis="y") leaves them.
         ax.grid(False)
-        ax.grid(axis="y", color="0.88", linewidth=0.7)
+        ax.grid(axis="y", color="0.85", linewidth=0.9)
         for side in ("top", "right", "bottom"):
             ax.spines[side].set_visible(False)
         plt.tight_layout()
@@ -507,6 +507,11 @@ SQUARE_CELLS: int = 4
 #: is why what is dropped is dropped rather than shrunk -- text that has to be scaled down to fit is
 #: text that will not be read at this size.
 SQUARE_SIDE: float = 3.3
+
+#: Frame weight. Heavier than a default axes spine on purpose: this figure is placed at a fraction
+#: of its natural size, and a hairline frame is the first thing to vanish there -- before the boxes,
+#: which is the wrong order for the element that tells a reader where the panel ends.
+SQUARE_BORDER: float = 1.8
 
 
 def square_kernels(points: Sequence[Point], cells: int = SQUARE_CELLS) -> Tuple[List[str], List[str]]:
@@ -601,8 +606,8 @@ def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELL
     if not kernels:
         raise RuntimeError("the square figure needs at least one kernel with a cell for every framework")
     colors = framework_colors(points)
-    offsets = dict(zip(frameworks, dodge_offsets(len(frameworks), slot=0.7)))
-    width = 0.7 / len(frameworks)
+    offsets = dict(zip(frameworks, dodge_offsets(len(frameworks), slot=0.78)))
+    width = 0.78 / len(frameworks)
     x_of = {kernel: i for i, kernel in enumerate(kernels)}
     fig, ax = plt.subplots(figsize=(SQUARE_SIDE, SQUARE_SIDE))
     for framework in frameworks:
@@ -610,30 +615,32 @@ def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELL
         color = colors[framework]
         artists = ax.boxplot([list(p.samples) or [p.change] for p in mine],
                              positions=[x_of[p.kernel] + offsets[framework] for p in mine],
-                             widths=width * 0.82,
+                             widths=width * 0.92,
                              patch_artist=True,
                              manage_ticks=False,
                              showfliers=False,
-                             medianprops=dict(color="0.1", linewidth=1.3))
+                             medianprops=dict(color="0.1", linewidth=1.8))
         for box in artists["boxes"]:
-            box.set(facecolor=color, edgecolor=color, alpha=0.7, linewidth=1.0)
+            box.set(facecolor=color, edgecolor=color, alpha=0.7, linewidth=1.5)
         for part in ("whiskers", "caps"):
             for line in artists[part]:
-                line.set(color=color, linewidth=1.0)
-    ax.axhline(0.0, color="0.35", linewidth=1.0)
+                line.set(color=color, linewidth=1.5)
+    ax.axhline(0.0, color="0.35", linewidth=1.6)
     ax.set_xticks(range(len(kernels)))
-    ax.set_xticklabels(kernels, fontsize=11)
+    ax.set_xticklabels(kernels, fontsize=14)
     ax.set_xlim(-0.55, len(kernels) - 0.45)
-    ax.set_ylabel("speedup", fontsize=15, labelpad=-1.0)
+    ax.set_ylabel("speedup", fontsize=18, labelpad=-1.0)
     ax.set_yticks(square_ticks(*ax.get_ylim()))
-    ax.tick_params(axis="y", labelsize=11, length=2, pad=1.0)
+    ax.tick_params(axis="y", labelsize=14, length=3, width=1.6, pad=1.0)
     ax.tick_params(axis="x", length=0, pad=2.0)
-    ax.grid(axis="y", color="0.88", linewidth=0.7)
+    ax.grid(axis="y", color="0.85", linewidth=0.9)
     # All four spines kept, matching the violin panel this figure sits beside in the overview
     # diagram -- the two are read together, so a frame on one and none on the other reads as two
-    # unrelated charts.
+    # unrelated charts. Heavy, because at embed size a hairline frame disappears before the boxes do.
+    for spine in ax.spines.values():
+        spine.set_linewidth(SQUARE_BORDER)
     handles = [plt.Rectangle((0, 0), 1, 1, facecolor=colors[f], edgecolor=colors[f], alpha=0.7) for f in frameworks]
-    ax.legend(handles, frameworks, fontsize=10, frameon=False, loc="best", handlelength=1.2, handleheight=0.9)
+    ax.legend(handles, frameworks, fontsize=13, frameon=False, loc="best", handlelength=1.2, handleheight=0.9)
     return plotting.save_figure(output, fig)
 
 
