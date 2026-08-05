@@ -520,10 +520,15 @@ def square_kernels(points: Sequence[Point], cells: int = SQUARE_CELLS) -> Tuple[
     framework has a box invites reading the gap as a result rather than as missing data. So a kernel
     ships only if every plotted framework has a cell for it, and the kernel count is whatever fits
     ``cells`` boxes at that group size.
+
+    Selection then ALTERNATES between speed-ups and slow-downs, so a two-kernel figure cannot show
+    only wins while the band it came from also holds losses. At this size the figure is the summary
+    somebody actually reads, and one that quietly drops the regressions is the wrong summary.
     """
     frameworks = sorted({point.framework for point in points})
     if not frameworks:
         return [], []
+    want = max(1, cells // len(frameworks))
     for band in (BAND_MID, BAND_LOW, BAND_HIGH):
         inside = [point for point in points if point.band == band]
         by_kernel: Dict[str, Set[str]] = {}
@@ -532,9 +537,52 @@ def square_kernels(points: Sequence[Point], cells: int = SQUARE_CELLS) -> Tuple[
         complete = [
             kernel for kernel in dict.fromkeys(p.kernel for p in inside) if by_kernel[kernel] == set(frameworks)
         ]
-        if complete:
-            return complete[:max(1, cells // len(frameworks))], frameworks
+        if not complete:
+            continue
+        wins = [k for k in complete if group_change(inside, k) > 0.0]
+        losses = [k for k in complete if group_change(inside, k) <= 0.0]
+        picked: List[str] = []
+        while len(picked) < want and (wins or losses):
+            for pool in (wins, losses):
+                if pool and len(picked) < want:
+                    picked.append(pool.pop(0))
+        return picked, frameworks
     return [], frameworks
+
+
+def group_change(points: Sequence[Point], kernel: str) -> float:
+    """The representative signed change of ``kernel``'s group -- the mean of its cells.
+
+    Only its SIGN is used, to sort a kernel into "the agents sped this up" or "they slowed it
+    down". A mean is enough for that and needs no tie-break rule; where the agents disagree in
+    direction the kernel lands on whichever side is larger, which is the honest summary of a group
+    that has no single direction.
+    """
+    changes = [point.change for point in points if point.kernel == kernel]
+    return sum(changes) / len(changes) if changes else 0.0
+
+
+def square_ticks(low: float, high: float) -> List[float]:
+    """Y ticks for the square panel: the axis's LANDMARKS, plus the extremes they do not reach.
+
+    ``-1``, ``0`` and ``+1`` are not arbitrary round numbers on this axis -- they are 2x slower,
+    unchanged, and 2x faster. A generic locator picks whatever is round in the data's range and
+    routinely omits them: on a -1.6 .. 4.3 panel it chose ``0.0`` and ``2.5``, which left the figure
+    unable to say whether a box below zero was a small regression or a catastrophic one.
+
+    So the landmarks inside the range are always ticked, and the outermost whole numbers are added
+    only where the landmarks stop short -- few enough labels to stay readable at embed size.
+    """
+    ticks = [value for value in (-1.0, 0.0, 1.0) if low <= value <= high]
+    if not ticks:
+        return [round(low), round(high)]
+    top = float(math.floor(high))
+    if top > max(ticks):
+        ticks.append(top)
+    bottom = float(math.ceil(low))
+    if bottom < min(ticks):
+        ticks.insert(0, bottom)
+    return ticks
 
 
 def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELLS) -> str:
@@ -576,8 +624,8 @@ def square_figure(points: Sequence[Point], output: str, cells: int = SQUARE_CELL
     ax.set_xticks(range(len(kernels)))
     ax.set_xticklabels(kernels, fontsize=9)
     ax.set_xlim(-0.55, len(kernels) - 0.45)
-    ax.set_ylabel("Speedup", fontsize=10)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=3))
+    ax.set_ylabel("speedup", fontsize=10)
+    ax.set_yticks(square_ticks(*ax.get_ylim()))
     ax.tick_params(axis="y", labelsize=9, length=2, pad=1.5)
     ax.tick_params(axis="x", length=0, pad=2.0)
     ax.grid(axis="y", color="0.88", linewidth=0.7)
@@ -660,16 +708,25 @@ DEMO_SEED: int = 20260804
 #: The demo's synthetic layout: ``(kernel, magnitude low, magnitude high, sign)``, three kernels per
 #: band with a mirrored SLOW-DOWN in each -- the mirroring is the claim, so it is drawn, not stated.
 #: Magnitudes are speed-up magnitudes (``max(r, 1/r)``); ``sign`` -1 makes the kernel a slow-down.
+#: Kernels are named generically for the same reason the frameworks below are: the numbers come out
+#: of a seeded generator, and a real short_name on synthetic data is an invitation to quote it.
+#: ``reporting_order`` groups unknown names under ``other``, which is the honest bucket for them.
+#: Ordered so the two the SQUARE figure selects -- the first mid-band win and the first mid-band
+#: slow-down -- are the ones named "kernel one" and "kernel two". A small embed labelled with
+#: "kernel four" and "kernel six" reads as an excerpt of something larger that is not shown.
 DEMO_CELLS: Tuple[Tuple[str, float, float, int], ...] = (
-    ("gemm", 12.0, 45.0, +1),
-    ("heat3d", 45.0, 140.0, +1),
-    ("jacobi2d", 11.0, 30.0, -1),
-    ("atax", 2.2, 5.0, +1),
-    ("bicg", 5.0, 9.5, +1),
-    ("mvt", 2.5, 8.0, -1),
-    ("syrk", 1.05, 1.9, +1),
-    ("correlation", 1.1, 1.8, -1),
-    ("arc_distance", 1.02, 1.6, +1),
+    ("kernel one", 2.2, 5.0, +1),
+    # Kept just past the 2x edge so the mirrored slow-down lands near -1 rather than deep in the
+    # band: the square figure shows these two together, and a loss of -7 would set a range in which
+    # the win beside it is a sliver.
+    ("kernel two", 2.05, 2.6, -1),
+    ("kernel three", 5.0, 9.5, +1),
+    ("kernel four", 12.0, 45.0, +1),
+    ("kernel five", 45.0, 140.0, +1),
+    ("kernel six", 11.0, 30.0, -1),
+    ("kernel seven", 1.05, 1.9, +1),
+    ("kernel eight", 1.1, 1.8, -1),
+    ("kernel nine", 1.02, 1.6, +1),
 )
 
 #: The demo's two candidate columns -- two, so the shared palette and the legend are exercised.

@@ -418,7 +418,7 @@ def test_a_kernel_missing_one_framework_is_not_drawn_as_a_half_group() -> None:
 
 
 def test_the_square_figure_groups_both_agents_on_one_axis(tmp_path: pathlib.Path) -> None:
-    """It mimics the banded figure: kernel names on x, a Speedup label, a legend naming the agents,
+    """It mimics the banded figure: kernel names on x, a speedup label, a legend naming the agents,
     and one hue per agent -- so the two are read against each other rather than in two panels."""
     out = tmp_path / "square.svg"
     written = speedup.square_figure(speedup.demo_points(), str(out))
@@ -428,7 +428,7 @@ def test_the_square_figure_groups_both_agents_on_one_axis(tmp_path: pathlib.Path
         assert band not in body, f"band title {band!r} leaked into a single-band panel"
     for framework in speedup.DEMO_FRAMEWORKS:
         assert framework in body, f"the legend must name {framework!r}"
-    assert "Speedup" in body, "the y axis must say what it measures"
+    assert "speedup" in body, "the y axis must say what it measures"
 
 
 def test_the_square_figure_is_square() -> None:
@@ -463,3 +463,27 @@ def test_the_unbare_simple_figure_still_states_what_it_hides(tmp_path: pathlib.P
     out = tmp_path / "titled.svg"
     speedup.simple_figure(points, kernels, str(out), boxes=True)
     assert "not shown" in out.read_text(), "the simplification must be stated on the default figure"
+
+
+def test_the_square_ticks_always_show_the_axis_landmarks() -> None:
+    """-1, 0 and +1 are not round numbers on this axis, they are 2x slower / unchanged / 2x faster.
+    A generic locator omits them routinely -- on a -1.6..4.3 panel it chose 0.0 and 2.5, leaving the
+    figure unable to say whether a box below zero was a small regression or a catastrophic one."""
+    assert speedup.square_ticks(-1.8, 4.4) == [-1.0, 0.0, 1.0, 4.0]
+    # A bottom the landmarks do not reach gets one whole number; -1.8 above did not need one,
+    # because ceil(-1.8) is -1 and the landmark already sits there.
+    assert speedup.square_ticks(-2.4, 4.4) == [-2.0, -1.0, 0.0, 1.0, 4.0]
+    assert -1.0 in speedup.square_ticks(-1.2, 6.0)
+    assert 0.0 in speedup.square_ticks(-3.0, 3.0)
+    # A range that misses every landmark still gets ticks rather than an empty axis.
+    assert speedup.square_ticks(20.0, 40.0) == [20, 40]
+
+
+def test_the_square_figure_shows_a_slow_down_when_its_band_has_one() -> None:
+    """At this size the figure IS the summary somebody reads. One that shows only wins while the
+    band it came from also holds losses is the wrong summary."""
+    kernels, _frameworks = speedup.square_kernels(speedup.demo_points())
+    points = {(p.kernel, p.framework): p for p in speedup.demo_points()}
+    changes = [points[(k, f)].change for k in kernels for f in speedup.DEMO_FRAMEWORKS]
+    assert any(change < 0.0 for change in changes), "no regression is shown"
+    assert any(change > 0.0 for change in changes), "no speed-up is shown"
