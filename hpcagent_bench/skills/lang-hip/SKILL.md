@@ -9,10 +9,18 @@ Two jobs: (A) QUALITY-CHECK a `.hip` through five gates; (B) write device code t
 survives THIS harness. `<file>.hip` is the placeholder for the target -- swap in the
 real path.
 
-The host half is ordinary C++ and `lang-cpp` Section B governs it unchanged. Read
-`lang-cuda` alongside this page: the determinism gate, the error-checking rule and
-the null-workspace trap are identical in substance with the names changed, and are
-summarized rather than repeated here.
+The host half is ordinary C++ and `lang-cpp` Section B governs it unchanged.
+Otherwise this page stands alone: no CUDA page ships with a HIP task, so everything
+you need is here.
+
+## Golden rule
+
+**All five gates run. Warnings are errors. A clean pass = zero diagnostics from
+every tool + a clean device-ASan run + a serialized-dispatch run that agrees with
+the normal one.** Do not report "looks good" until all five are green. Fix findings
+at the source, never suppress to pass. A gate you could not run is DEFERRED and
+says which -- three CUDA tools have no ROCm equivalent, so claiming coverage you do
+not have is the failure mode this page exists to prevent.
 
 ## What the harness actually builds
 
@@ -91,10 +99,13 @@ needs a separate flag for ptxas.
 ```bash
 clang-tidy --checks='-*,bugprone-*,performance-*,portability-*,clang-analyzer-*' \
   --warnings-as-errors='*' <file>.hip -- -x hip --offload-arch=<gfx> \
-  --rocm-path=/opt/rocm -Wall -Wextra
+  --rocm-path="$(hipconfig --rocmpath)" -Wall -Wextra
 ```
-hipcc IS clang, so this needs no special handling. If the device pass trips on
-headers, add `--cuda-host-only` and report the missing device coverage.
+hipcc IS clang, so this needs no special handling. Ask `hipconfig` for the path
+rather than assuming `/opt/rocm` -- a packaged ROCm answers `/usr`, and a wrong path
+fails with "cannot find ROCm device library". If the device pass still trips on
+headers, add `--cuda-host-only` (which does clear it) and report that device code
+got no clang-tidy coverage.
 
 ### 4. ROCm device AddressSanitizer -- build and RUN
 ```bash
@@ -108,8 +119,9 @@ ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 /tmp/hipq_asan
 All three parts are required and each fails differently if dropped: `xnack+` in the
 offload arch, `HSA_XNACK=1` at run time (a mismatch aborts at load with a target-ID
 error), and the `LD_PRELOAD` when `-shared-libasan` is used. If a report lands
-inside rocBLAS rather than your kernel, put `/opt/rocm/lib/asan/` first on
-`LD_LIBRARY_PATH` -- ROCm ships instrumented copies of its own libraries there.
+inside rocBLAS rather than your kernel, put `$(hipconfig --rocmpath)/lib/asan` first
+on `LD_LIBRARY_PATH` -- ROCm ships instrumented copies of its own libraries there,
+when the install has them at all.
 
 ### 5. Serialized-dispatch run
 ```bash
@@ -132,9 +144,13 @@ reads as zeros and zeros look like an answer.
 ## B. Writing it
 
 ### B.1 Check every call
-Same rule and same reasoning as `lang-cuda` B.1, with `hipGetErrorString`. After
-every launch: `hipGetLastError()` immediately, then again at the next
-synchronization point. Errors are sticky; never swallow one.
+An unchecked HIP call is a defect in its own right, and the failure mode is silence:
+the call returns a code nobody reads, the kernel does not run, and the buffer keeps
+what it held -- which on fresh device memory is a plausible all-zero result. Wrap
+every call in a macro that tests the status and aborts with `hipGetErrorString`.
+After every launch: `hipGetLastError()` immediately (a bad launch configuration
+means the kernel never ran), then again at the next synchronization point (execution
+errors). Errors are sticky; never swallow one.
 
 ### B.2 The null-workspace trap
 rocPRIM and hipCUB keep CUB's protocol, including that a **null workspace means
@@ -147,11 +163,13 @@ and MIOpen workspaces.
 
 ### B.3 Device code -- where HIP differs from CUDA most
 - **`warpSize` is NOT 32.** It is 64 on CDNA (gfx90a, gfx942) and 32 on RDNA
-  (gfx10xx/gfx11xx), and in HIP it is a **runtime** value, not a compile-time
-  constant. `constexpr int kWarp = 32;` is the most common porting bug on this
-  page, and it produces a silently wrong reduction rather than a crash. Use
-  `warpSize`, or `__AMDGCN_WAVEFRONT_SIZE__` where a compile-time value is genuinely
-  needed, and write reductions correct for both.
+  (gfx10xx/gfx11xx), and in HIP it is a **runtime** value. `constexpr int kWarp = 32;`
+  is the most common porting bug on this page, and it produces a silently wrong
+  reduction rather than a crash. There is no supported compile-time replacement:
+  `__AMDGCN_WAVEFRONT_SIZE__` is deprecated ("compile-time-constant access to the
+  wavefront size will be removed in a future release") and so is a hard error under
+  gate 2's `-Werror`, while `__builtin_amdgcn_wavefrontsize()` is not a constant
+  expression. Size LDS for the 64 case and read `warpSize` at run time.
 - Lane masks are **64-bit**: `__ballot()` returns `unsigned long long`. Code ported
   from CUDA's 32-bit masks truncates silently.
 - HIP's `__shfl_*` take a `width` and have no `_sync` variants. AMD wavefronts do

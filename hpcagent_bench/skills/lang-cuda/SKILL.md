@@ -12,6 +12,14 @@ real path.
 The host half of a `.cu` is ordinary C++ and `lang-cpp` Section B governs it
 unchanged. This page is what is different about device code.
 
+## Golden rule
+
+**All seven gates run. Warnings are errors. A clean pass = zero diagnostics from
+every tool + a clean run under all four compute-sanitizer tools.** Do not report
+"looks good" until all seven are green. Fix findings at the source, never suppress
+to pass. A gate you could not run is DEFERRED and says which -- "the numbers
+matched" is not a substitute for a sanitizer run.
+
 ## What the harness actually builds
 
 ```
@@ -92,11 +100,15 @@ nvcc splits the comma form on commas.
 ### 3. clang-tidy
 ```bash
 clang-tidy --checks='-*,bugprone-*,performance-*,portability-*,clang-analyzer-*' \
-  --warnings-as-errors='*' <file>.cu -- -x cuda --cuda-gpu-arch=sm_80 \
-  --cuda-path=/usr/local/cuda -Wall -Wextra
+  --warnings-as-errors='*' <file>.cu -- -x cuda --cuda-gpu-arch=<detected sm> \
+  --cuda-path="$(dirname "$(dirname "$(command -v nvcc)")")" -Wall -Wextra
 ```
-If clang cannot parse the installed toolkit's headers, add `--cuda-host-only` and
-SAY in your report that device code got no clang-tidy coverage.
+Pass the arch the other gates use, not a pinned one -- analyzing for a device you
+are not building for is how an arch-specific finding is missed. clang carries its
+own table of known CUDA versions, so a toolkit newer than clang parses its headers
+only partly; `--cuda-host-only` may not clear that either, and when it does not the
+gate is DEFERRED. Either way, SAY in your report that device code got no clang-tidy
+coverage.
 
 ### 4-7. compute-sanitizer -- four tools, all of them
 ```bash
