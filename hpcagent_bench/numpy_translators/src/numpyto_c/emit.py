@@ -314,6 +314,13 @@ class _CBodyEmitter(BaseEmitter):
         #: Branch-scoped locals whose declaration has actually been emitted, so a free is only ever
         #: appended for a pointer that exists on that path.
         self._branch_declared: Set[str] = set()
+        #: Function-top heap locals, in declaration order: what every exit from this body must free.
+        self.heap_locals: List[str] = []
+        #: id() of each branch statement-list currently being emitted, outermost first, so a return
+        #: inside a branch can also release what that branch allocated.
+        self.branch_stack: List[int] = []
+        #: C return type of a scalar-returning helper, for the temporary an early return latches into.
+        self.return_ctype: str = _c_type("float64")
         self.array_shapes: Dict[str, List[str]] = {a.name: list(a.shape) for a in kir.arrays}
         zeros = kir.zeros_locals
         for name, shape in zeros.items():
@@ -720,14 +727,42 @@ class _CBodyEmitter(BaseEmitter):
                 f"{body}\n"
                 f"{indent}}}")
 
+    def live_heap_locals(self) -> List[str]:
+        """Heap buffers alive at this point, innermost branch first -- what an exit here must release.
+
+        The frees a function ends with sit AFTER its body, so a return in the middle jumps over all
+        of them. Only helpers can return at all (the kernel is void and its returns are dropped),
+        which is why this leaked quietly: a helper that allocates a workspace and returns early
+        leaks it once per call, and the caller is a benchmark loop.
+        """
+        in_branch = [
+            name for frame in reversed(self.branch_stack) for name, branch in self.branch_local_owner.items()
+            if branch == frame and name in self._branch_declared
+        ]
+        return in_branch + list(self.heap_locals)
+
     def _emit_return(self, node: ast.Return, indent: str) -> str:
         # In the (void) kernel a return is dropped; in a HELPER function it's a real C return.
         mode = self.return_mode
         if mode is None:
             return ""
+        live = self.live_heap_locals()
+        frees = [f"{indent}free({name});" for name in live]
         if node.value is None or mode == "scalar":
-            val = "" if node.value is None else f" {self.emit_expr(node.value)}"
-            return f"{indent}return{val};"
+            if node.value is None:
+                return "\n".join([*frees, f"{indent}return;"])
+            val = self.emit_expr(node.value)
+            if not live:
+                return f"{indent}return {val};"
+            # The returned expression may read a buffer this exit releases (``return t[n - 1];``),
+            # so latch the value into a temporary before any free runs.
+            return "\n".join([
+                f"{indent}{{",
+                f"{indent}  {self.return_ctype} __ret = {val};",
+                *[f"{indent}  free({name});" for name in live],
+                f"{indent}  return __ret;",
+                f"{indent}}}",
+            ])
         # Array return: write the value into the out-param (whole-array assign), then return void.
         assign = ast.Assign(targets=[
             ast.Subscript(value=ast.Name(id=mode, ctx=ast.Load()),
@@ -737,7 +772,7 @@ class _CBodyEmitter(BaseEmitter):
                             value=node.value)
         ast.copy_location(assign, node)
         ast.fix_missing_locations(assign)
-        return f"{self._emit_assign(assign, indent)}\n{indent}return;"
+        return "\n".join([self._emit_assign(assign, indent), *frees, f"{indent}return;"])
 
     def _emit_if(self, node: ast.If, indent: str) -> str:
         then = self._branch_block(node.body, indent + "  ")
@@ -767,7 +802,11 @@ class _CBodyEmitter(BaseEmitter):
         nor frees, and nothing is freed twice. Only a name whose declaration was actually emitted is
         freed -- an empty branch the emitter drops has no pointer to release.
         """
-        body = self.emit_block(stmts, indent)
+        self.branch_stack.append(id(stmts))
+        try:
+            body = self.emit_block(stmts, indent)
+        finally:
+            self.branch_stack.pop()
         owned = [
             name for name, branch in self.branch_local_owner.items()
             if branch == id(stmts) and name in self._branch_declared
@@ -1779,10 +1818,13 @@ def _emit_body(kir: KernelIR,
                return_parts: bool = False,
                return_mode: Optional[str] = None,
                parallel: bool = False,
-               isopar: bool = False):
+               isopar: bool = False,
+               return_ctype: Optional[str] = None):
     emitter = _CBodyEmitter(kir, multidim_arrays=multidim_arrays)
     emitter.pluto = pluto
     emitter.return_mode = return_mode
+    if return_ctype is not None:
+        emitter.return_ctype = return_ctype
     emitter.parallel = parallel
     emitter.isopar = isopar
     zeros = kir.zeros_locals
@@ -1873,7 +1915,8 @@ def _emit_body(kir: KernelIR,
         },
     }
     decls: List[str] = []
-    frees: List[str] = []
+    # Names, not statements: every exit needs this list too, at whatever indent it sits on.
+    heap: List[str] = []
     for name in int_locals:
         # canonical int is int64_t everywhere else (see _c_type / the int(x) cast); a bare 32-bit
         # int here overflows on a literal grid unpack like nx, ny = 46341, 46341 (nx*ny > 2^31).
@@ -1893,11 +1936,11 @@ def _emit_body(kir: KernelIR,
             tr = emitter.md_trailing[name]
             decls.append(f"{indent}{c_type} (*{name}){tr} = "
                          f"({c_type} (*){tr})malloc({_byte_count(size, c_type)});")
-            frees.append(f"{indent}free({name});")
+            heap.append(name)
         elif any(c.isalpha() for c in size):
             decls.append(f"{indent}{c_type} *{name} = "
                          f"({c_type} *)malloc({_byte_count(size, c_type)});")
-            frees.append(f"{indent}free({name});")
+            heap.append(name)
         else:
             decls.append(f"{indent}{c_type} {name}[{size}];")
         # Only fill locals explicitly built by a zeros/ones constructor; empty-kind/scratch temps are skipped.
@@ -1933,7 +1976,7 @@ def _emit_body(kir: KernelIR,
             decls.append(f"{indent}{c_type} (*{name}){emitter.md_trailing[name]} = NULL;")
         else:
             decls.append(f"{indent}{c_type} *{name} = NULL;")
-        frees.append(f"{indent}free({name});")
+        heap.append(name)
         kind = zeros_fills.get(name)
         fill = None if (kind is None or kind in ("empty", "empty_like", "ndarray")) else kind
         deferred_specs[name] = (size, c_type, fill)
@@ -1953,7 +1996,12 @@ def _emit_body(kir: KernelIR,
                          f"{name}[__i] = 1;")
         else:  # zeros / zeros_like / default
             decls.append(f"{indent}memset({name}, 0, {_byte_count(size, c_type)});")
+    emitter.heap_locals = heap
     body = emitter.emit_block(kir.tree.body, indent)
+    # A body ending in a return already freed everything on that path, so the closing frees would be
+    # unreachable -- emit them only where control can actually fall out of the body.
+    falls_through = not (return_mode is not None and kir.tree.body and isinstance(kir.tree.body[-1], ast.Return))
+    frees = [f"{indent}free({name});" for name in heap] if falls_through else []
     if return_parts:
         # Pluto: keep allocations/frees out of the loop body so the caller can place them outside #pragma scop.
         return ("\n".join(d for d in decls if d), body, "\n".join(f for f in frees if f))
@@ -2443,7 +2491,7 @@ def _emit_c_helper(hkir: KernelIR, cpp: bool = False, isopar: bool = False) -> s
     signature = _emit_signature(hkir, hkir.kernel_name, order=hkir.abi_param_order()).replace("void ", f"{rettype} ", 1)
     if cpp:
         signature = signature.replace("*restrict ", "*__restrict__ ")
-    body = _emit_body(hkir, indent="    ", return_mode=hkir.return_kind, isopar=isopar)
+    body = _emit_body(hkir, indent="    ", return_mode=hkir.return_kind, isopar=isopar, return_ctype=rettype)
     return f"static {signature} {{\n{body}\n}}\n\n"
 
 

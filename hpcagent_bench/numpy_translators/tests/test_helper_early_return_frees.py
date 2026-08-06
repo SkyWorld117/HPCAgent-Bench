@@ -1,0 +1,90 @@
+"""Generated C/C++ frees its heap locals on EVERY exit, not just the last one.
+
+A helper's frees are emitted after its body, so a data-dependent early ``return`` jumped straight
+over them. Only helpers can return at all -- the kernel is void and its returns are dropped -- so
+the leak was invisible in every kernel-level test, and it is the worst possible shape: the caller
+is a benchmark loop, so the helper leaks its workspace once per element per rep, and a run long
+enough to measure is a run long enough to exhaust the box.
+
+Under AddressSanitizer, which fails the run on a leak rather than asking a human to read a number.
+"""
+import json
+import pathlib
+import tempfile
+
+from _native_tu import build_run_c, have_gcc, have_gpp
+from _op_oracle import _bench_info
+from numpyto_c.emit import emit_c, emit_cpp
+from numpyto_common.frontend import parse_kernel
+from numpyto_common.lowering import lower
+
+#: ``scratch`` allocates a workspace AFTER a guard that returns early, so one call in three exits
+#: with the buffer live and one exits with it allocated. The early return is also what stops the
+#: inliner absorbing the helper, which is why it survives as a real function with a real free.
+SOURCE = ("import numpy as np\n\n\n"
+          "def scratch(v, N):\n"
+          "    if v < 0.0:\n"
+          "        return 0.0\n"
+          "    t = np.zeros((N,))\n"
+          "    for k in range(N):\n"
+          "        t[k] = v * (k + 1)\n"
+          "    if v > 1.0:\n"
+          "        return t[0]\n"
+          "    return t[1]\n\n\n"
+          "def k(a, out, N):\n"
+          "    for i in range(N):\n"
+          "        out[i] = scratch(a[i], N)\n")
+
+DRIVER = ("int main(void) {\n"
+          "    enum { N = 8 };\n"
+          "    double a[N], out[N];\n"
+          "    for (int i = 0; i < N; ++i) a[i] = (double)i - 3.5;\n"
+          "    for (int rep = 0; rep < 32; ++rep) k(a, out, N);\n"
+          "    return out[N - 1] == out[N - 1] ? 0 : 1;\n"
+          "}\n")
+
+
+def emitted(cpp: bool) -> str:
+    bench_info = _bench_info("k", ["a"], ["out"], {"a": "(N,)", "out": "(N,)"}, {"N": 8}, None)
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td)
+        (d / "k_numpy.py").write_text(SOURCE)
+        (d / "bi.json").write_text(json.dumps(bench_info))
+        kir = lower(parse_kernel(d / "k_numpy.py", d / "bi.json"))
+    return emit_cpp(kir, fn_name="k") if cpp else emit_c(kir, fn_name="k")
+
+
+def helper_of(text: str) -> str:
+    """Just the helper, so a free in the KERNEL cannot stand in for one the helper owes."""
+    start = text.index("scratch(")
+    return text[start:text.index("\n}\n", start)]
+
+
+def test_the_c_helper_frees_its_workspace_on_every_return():
+    text = emitted(cpp=False)
+    helper = helper_of(text)
+    assert "malloc(" in helper, f"the helper stopped allocating, so this proves nothing:\n{helper}"
+    # The allocation is hoisted to function top, so ALL THREE exits owe a free -- including the
+    # guard that reads as "before" it in the numpy source. No fourth: the body ends in a return, so
+    # a closing free would be unreachable.
+    assert helper.count("return ") == 3 and helper.count("free(") == 3, helper
+
+
+def test_the_cpp_helper_frees_its_workspace_on_every_return():
+    helper = helper_of(emitted(cpp=True))
+    assert "malloc(" in helper, f"the helper stopped allocating, so this proves nothing:\n{helper}"
+    assert helper.count("return ") == 3 and helper.count("free(") == 3, helper
+
+
+@have_gcc
+def test_generated_c_runs_leak_free_under_address_sanitizer():
+    run = build_run_c(emitted(cpp=False), DRIVER, sanitize=True)
+    assert run.returncode == 0, f"{run.stdout}\n{run.stderr}"
+    assert "detected memory leaks" not in run.stderr, run.stderr
+
+
+@have_gpp
+def test_generated_cpp_runs_leak_free_under_address_sanitizer():
+    run = build_run_c(emitted(cpp=True), DRIVER, cpp=True, sanitize=True)
+    assert run.returncode == 0, f"{run.stdout}\n{run.stderr}"
+    assert "detected memory leaks" not in run.stderr, run.stderr
