@@ -656,6 +656,86 @@ class ResolveShapeReads(ast.NodeTransformer):
 _ALLOC_FUNCS = frozenset({"zeros", "empty", "ones", "full"})
 
 
+def is_scalar_literal(node: ast.AST) -> bool:
+    """True iff the expression is numeric literals only -- provably a scalar, and folded by dace's frontend."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (bool, int, float, complex))
+    if isinstance(node, ast.UnaryOp):
+        return is_scalar_literal(node.operand)
+    if isinstance(node, ast.BinOp):
+        return is_scalar_literal(node.left) and is_scalar_literal(node.right)
+    return False
+
+
+class BroadcastScalarWhere(ResolveShapeReads):
+    """Fill one branch of ``np.where(cond, -1.0, 1.0)`` to the condition's shape.
+
+    DaCe sizes a ``where`` from its BRANCHES only, so two scalar branches leave the result shapeless
+    and it refuses with "Both x and y cannot be scalars in numpy.where". Filling the first branch to
+    the condition's own extents keeps numpy's answer exactly -- numpy broadcasts all three operands,
+    and the fill contributes the extents the condition already had.
+
+    Inference is stricter here than in the base class, which reads an UNKNOWN operand as a scalar and
+    takes the other side: right for a ``.shape`` read, wrong for a fill, because ``x @ w + bias``
+    would take ``bias``'s rank-1 shape and a wrong extent is a miscompile rather than a refusal. So
+    an unknown operand poisons the whole expression -- and, to keep the gemm family inferable at all,
+    a rank-2 matmul's shape is computed instead of skipped, which is exact rather than a guess.
+    """
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)  # innermost first: a nested where is filled before it is measured
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "where"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy")
+                and len(node.args) == 3 and not node.keywords):
+            return node
+        if not (is_scalar_literal(node.args[1]) and is_scalar_literal(node.args[2])):
+            return node
+        shape = self.infer(node.args[0])
+        if not shape:
+            return node  # unknown, or a scalar condition: an invented extent would be a miscompile
+        extents = ", ".join(shape) + ("," if len(shape) == 1 else "")
+        node.args[1] = ast.parse(f"np.full(({extents}), {ast.unparse(node.args[1])})", mode="eval").body
+        return ast.fix_missing_locations(node)
+
+    def infer(self, node: ast.AST) -> Optional[List[str]]:
+        if is_scalar_literal(node):
+            return []  # rank 0: a literal broadcasts against anything and decides no extent
+        if isinstance(node, ast.Compare):
+            return self.broadcast([node.left, *node.comparators])
+        if isinstance(node, ast.BinOp):
+            return self.matmul(node) if isinstance(node.op, ast.MatMult) else self.broadcast([node.left, node.right])
+        if isinstance(node, ast.Attribute) and node.attr == "T":
+            base = self.infer(node.value)
+            return None if base is None else list(reversed(base))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _ELEMENTWISE_CALLS:
+            return self.broadcast(node.args)
+        return super().infer(node)
+
+    def matmul(self, node: ast.BinOp) -> Optional[List[str]]:
+        """``[m, k] @ [k, n]`` is exact; any other rank pair stays unknown."""
+        left, right = self.infer(node.left), self.infer(node.right)
+        if left is None or right is None or len(left) != 2 or len(right) != 2:
+            return None
+        return [left[0], right[1]]
+
+    def broadcast(self, operands: List[ast.expr]) -> Optional[List[str]]:
+        """The broadcast shape of an elementwise operand list, or None when it is not certain.
+
+        Certain means: every operand's shape is known, and the widest one carries every extent --
+        an extent contributed by a shorter operand (``[bs, 1]`` against ``[bs, n]``) is refused
+        rather than worked out, since only the widest is read as the result.
+        """
+        shapes = [self.infer(operand) for operand in operands]
+        if any(shape is None for shape in shapes):
+            return None
+        widest: List[str] = max(shapes, key=len, default=[])
+        for shape in shapes:
+            tail = widest[len(widest) - len(shape):]
+            if any(extent != wide and extent != "1" for extent, wide in zip(shape, tail)):
+                return None
+        return widest
+
+
 def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
     """True iff node is a shape expression dace can evaluate as a symbol (names, int consts, + - * // %, min/max)."""
     if isinstance(node, ast.Name):
@@ -1005,6 +1085,9 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # ... and every remaining .shape read, including on a transient: one unresolved read makes the
     # enclosing size expression non-symbolic, and promotion is all-or-nothing.
     fn_ast = ResolveShapeReads(arr_shapes).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
+    # dace sizes np.where from its branches: give a two-scalar where the condition's shape, or it refuses.
+    fn_ast = BroadcastScalarWhere(arr_shapes).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # Inline a shape scalar that's a pure symbolic alias of an existing dc.symbol, rather than promoting a fresh one.
     fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names), set(arrays) | set(scalars) | set(symbol_names))
