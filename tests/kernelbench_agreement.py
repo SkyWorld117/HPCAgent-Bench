@@ -120,13 +120,21 @@ def forward_parameters(model) -> List[str]:
     return [p.name for p in list(sig.parameters.values())[1:] if p.kind in (p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY)]
 
 
-def init_kwargs(module, preset: Dict[str, Any], scalars: Dict[str, Any]) -> Dict[str, Any]:
+def init_kwargs(module, preset: Dict[str, Any], scalars: Dict[str, Any], largest_dim: int) -> Dict[str, Any]:
     """Init arguments resolved BY NAME: manifest preset, then manifest scalars, then upstream.
 
     Upstream's ``get_init_inputs()`` returns only the hyperparameters IT chose to vary -- a level1
     conv returns ``[in_channels, out_channels, kernel_size]`` and leaves stride/padding/dilation to
     ``__init__`` defaults. Taken positionally, a manifest ``padding: 1`` never reaches the model and
     the comparison silently grades a differently-shaped convolution.
+
+    A SEQUENCE has no manifest name to bind, so it always falls back to upstream's own value, and
+    that is refused only when the value is at UPSTREAM scale -- ``largest_dim`` is the largest
+    dimension the manifest declares anywhere. Most such sequences are not layer sizes at all:
+    ``bias_shape = (out_channels, 1, 1)`` is a derived constant :func:`patch_sizes` already
+    re-evaluated at the manifest's sizes, and ``[C, 1, 1]`` is one channel-broadcast bias rather
+    than C scalars. Below that scale it is :func:`map_parameters`, which verifies every shape, that
+    catches a value the manifest did not want.
     """
     positional, keyword = init_positional(module)
     resolved: Dict[str, Any] = {}
@@ -140,12 +148,15 @@ def init_kwargs(module, preset: Dict[str, Any], scalars: Dict[str, Any]) -> Dict
         elif index < len(positional):
             resolved[param.name] = positional[index]
         upstream = resolved.get(param.name)
-        if param.name not in preset and param.name not in scalars and isinstance(upstream, (list, tuple)):
-            # A manifest names scalars, so it can never bind a LIST of layer sizes -- the port spells
-            # them hidden1, hidden2. Falling back to upstream's builds the model at upstream scale:
+        if param.name in preset or param.name in scalars or not isinstance(upstream, (list, tuple)):
+            continue
+        if upstream and max(upstream) > largest_dim:
+            # A size no declared array is that big can only be a LIST of upstream layer sizes -- the
+            # port spells them hidden1, hidden2. Building it costs upstream scale for nothing:
             # measured, shallow_wide_mlp's [32768, 32768] cost 3.1 GB before failing to align anyway.
-            raise ValueError(f"{param.name} is a sequence upstream ({list(upstream)}) and the manifest "
-                             "names scalars, so the two cannot be lined up")
+            raise ValueError(f"{param.name} is a sequence upstream ({list(upstream)}) naming a size larger "
+                             f"than every dimension the manifest declares ({largest_dim}), so the model "
+                             "would only build at upstream scale")
     return resolved
 
 
@@ -248,7 +259,7 @@ def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -
     torch.set_num_threads(1)
     module = load_module(upstream, f"kernelbench_upstream_{kernel}")
     patch_sizes(module, preset)
-    kwargs = init_kwargs(module, preset, scalars)
+    kwargs = init_kwargs(module, preset, scalars, max((max(s) for s in shapes.values() if s), default=0))
     model = module.Model(**kwargs)
     overrides = submodule_scalars(model, module.Model, scalars)
     if any(kwargs.get(k) != v for k, v in overrides.items()):
