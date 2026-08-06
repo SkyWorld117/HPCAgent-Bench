@@ -16,7 +16,7 @@ mini-swe-agent) calls over a port:
   agent must beat (``{"baselines": {"numpy": ns, ...}}``), measured IN THIS
   CONTAINER so they share the submission's toolchain/CPU.
 * ``POST /submit`` (historical alias ``/oracle``)  body
-  ``{"kernel","language","source"|"library","build"}``  -> compile (server-side --
+  ``{"kernel","language","source"|"source_file"|"library","build"}``  -> compile (server-side --
   the agent needs no toolchain), run + time the submission next to the baseline,
   grade vs the configured oracle on PUBLIC + HIDDEN inputs (the held-out second
   seed), record it when recording is on, and return the score (``correct``,
@@ -47,7 +47,12 @@ The submission is compiled + timed HERE, next to the baseline -- so the speedup
 is apples-to-apples and the agent can neither read the hidden tests nor tamper
 with the timer. ``input_mode`` (config ``service.input_mode``: ``py-binding`` / ``source`` /
 ``library`` / ``any``) decides whether ``/oracle`` requires source code or a
-prebuilt ``.so`` -- the "oracle requires code, or the .so" knob.
+prebuilt ``.so`` -- the "oracle requires code, or the .so" knob. It is also what makes a track
+LANGUAGE-ENFORCED (:data:`ENFORCED_LANGUAGES`): ``source`` compiles and ``py-binding`` calls
+Python, so each accepts only the languages it can serve and refuses the rest with a 400.
+
+Source arrives either inline (``source``) or as a FILE in the shared mount (``source_file``, whose
+basename must be ``<kernel>.<ext>``); a ``library`` is always a path in that mount.
 
 The aim the agent optimizes: maximize ``/submit``'s returned ``speedup`` while
 keeping ``correct == true``, iterating against ``/score`` on the way.
@@ -66,10 +71,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from hpcagent_bench import config
+from hpcagent_bench import config, languages
 from hpcagent_bench.api import InputMode, RunConfig
 from hpcagent_bench.harness import native_call, sandbox
-from hpcagent_bench.harness.envelope import Submission
+from hpcagent_bench.harness.envelope import PYTHON_LANG, Submission
 from hpcagent_bench.harness import memory_pool
 from hpcagent_bench.harness.judge_scheduler import DeviceSlot, JudgeConfig, gpu_capacity_bytes
 from hpcagent_bench.harness.scoring import measure_baselines, score, suspect_threshold
@@ -154,6 +159,22 @@ ServiceConfig = RunConfig
 #: The ``POST /oracle`` input policies, sourced from the :class:`~hpcagent_bench.api.InputMode`
 #: enum (kept as a tuple so the CLI's ``--input-mode`` choices read off one source).
 INPUT_MODES = tuple(m.value for m in InputMode)
+
+#: Delivery language -> the ONE extension a submitted ``source_file`` may carry. The compiled
+#: languages come from :data:`hpcagent_bench.languages.LANG_EXT` (the same table
+#: :meth:`Sandbox.build` names the file it compiles by); ``python`` is not compiled, so it has no
+#: row there and its module is a ``.py``.
+SOURCE_EXT: dict[str, str] = {**languages.LANG_EXT, PYTHON_LANG: "py"}
+
+#: What each ``input_mode`` accepts as a submission's delivery language -- the ENFORCED-track check.
+#: A judge that pins the delivery KIND pins the language with it: ``source`` COMPILES, so a Python
+#: module is not a submission it can build, and ``py-binding`` CALLS Python, so a ``.f90`` is not one
+#: it can call. ``any`` and ``library`` pin nothing (a prebuilt ``.so`` is language-agnostic) and are
+#: absent, which is what makes them the non-enforced modes.
+ENFORCED_LANGUAGES: dict[InputMode, tuple[str, ...]] = {
+    InputMode.SOURCE: tuple(languages.LANG_EXT),
+    InputMode.PY_BINDING: (PYTHON_LANG, ),
+}
 
 
 def from_config() -> RunConfig:
@@ -258,26 +279,69 @@ def service_prompt(kernel: str,
     return finish_prompt(body, prompt_config)
 
 
-def _submission_from_body(body: dict, language: str, cfg: RunConfig) -> Submission:
+def _source_from_file(path: str, kernel: str, language: str) -> str:
+    """The text of a submitted source FILE, which must be ``<kernel>.<ext>`` in the shared mount.
+
+    Resolved through :func:`sandbox.resolve_shared` for the same reason a prebuilt ``library`` is:
+    the path arrived over HTTP from an untrusted agent, it means nothing in this container unless it
+    names the one filesystem both containers see, and the judge compiles then ``dlopen``s the result.
+
+    The basename is the contract: the kernel key verbatim plus the language's one extension
+    (:data:`SOURCE_EXT`), which is how every other file in the kernel's directory is named
+    (``<kernel>_numpy.py``, ``<kernel>_reference.cpp``). Alternates a compiler would also accept
+    (``.F90``, ``.cc``) are REFUSED rather than mapped: :meth:`Sandbox.build` rewrites the source
+    under ``LANG_EXT``'s extension before building, so a ``.F90`` would silently lose the
+    preprocessing its name promises -- one name, one meaning.
+    """
+    ext = SOURCE_EXT.get(language)
+    if ext is None:
+        raise ValueError(f"unknown submission language {language!r}: one of {', '.join(sorted(SOURCE_EXT))}")
+    resolved = sandbox.resolve_shared(path)
+    # A path-key request ("track/dir/gemm") names the same kernel as the bare key; its last segment
+    # is the key the kernel's own files are named after.
+    expected = f"{kernel.rsplit('/', 1)[-1]}.{ext}"
+    if resolved.name != expected:
+        raise ValueError(f"'source_file' must be named {expected!r} -- the kernel key plus the "
+                         f"{language} extension {ext!r}; got {resolved.name!r}")
+    try:
+        return resolved.read_text()
+    except OSError as exc:
+        raise ValueError(f"'source_file' {expected!r} is not readable in the shared folder: {exc}") from exc
+
+
+def _submission_from_body(body: dict, kernel: str, language: str, cfg: RunConfig) -> Submission:
     """Build + policy-check a :class:`Submission` from a ``/oracle`` request body.
 
     Enforces ``input_mode``: ``source`` / ``py-binding`` reject a prebuilt ``.so``,
-    ``library`` rejects source, and ``any`` allows both. Raises ``ValueError``
-    (-> 400) on a policy or shape violation.
+    ``library`` rejects source, and ``any`` allows both. It also enforces the LANGUAGE those two
+    modes pin (:data:`ENFORCED_LANGUAGES`) -- refused here, before anything is built or run, so a
+    wrong-language delivery costs a 400 rather than a compile. Raises ``ValueError`` (-> 400) on a
+    policy or shape violation.
 
-    A ``library`` is resolved INSIDE the shared mount here, at the trust boundary: the path arrived
-    over HTTP, it means nothing in this container unless it names the one filesystem both see, and
-    the judge ends up ``dlopen``ing it.
+    Source arrives either inline (``source``) or as a file in the shared mount (``source_file``),
+    never both -- two spellings of the same field is an ambiguous request, not a merge. Both a
+    ``library`` and a ``source_file`` are resolved INSIDE the shared mount here, at the trust
+    boundary: the path arrived over HTTP and means nothing in this container unless it names the one
+    filesystem both see.
     """
+    source_file = body.get("source_file")
     has_source = bool(body.get("source"))
     has_library = bool(body.get("library"))
+    if has_source and source_file:
+        raise ValueError("deliver the code ONE way: inline 'source' or 'source_file' (a path in the "
+                         "shared folder), not both")
     if cfg.input_mode in (InputMode.SOURCE, InputMode.PY_BINDING) and has_library:
-        raise ValueError("this judge requires source code ('source'), not a prebuilt 'library'")
-    if cfg.input_mode is InputMode.LIBRARY and has_source:
+        raise ValueError("this judge requires source code ('source' or 'source_file'), not a prebuilt 'library'")
+    if cfg.input_mode is InputMode.LIBRARY and (has_source or source_file):
         raise ValueError("this judge requires a prebuilt 'library' (.so), not 'source'")
+    allowed = ENFORCED_LANGUAGES.get(cfg.input_mode)
+    if allowed is not None and language not in allowed:
+        raise ValueError(f"this judge's input_mode is {cfg.input_mode.value!r}, which accepts only "
+                         f"language {' / '.join(allowed)}; got {language!r}")
     library = body.get("library")
+    source = _source_from_file(str(source_file), kernel, language) if source_file else body.get("source")
     return Submission(language=language,
-                      source=body.get("source"),
+                      source=source,
                       library=str(sandbox.resolve_shared(library)) if library else None,
                       build=list(body.get("build", [])),
                       workspace_bytes=body.get("workspace_bytes"))
@@ -401,13 +465,15 @@ class JudgeHandler(BaseHTTPRequestHandler):
         # A non-str kernel is a body-shape fault: the registry lookup below would raise TypeError on it.
         if not isinstance(kernel, str) or not kernel:
             return self._send(400, {"error": "body must include 'kernel' (a benchmark name)"})
-        try:
-            submission = _submission_from_body(body, language, self.cfg)
-        except ValueError as exc:
-            return self._send(400, {"error": str(exc)})
         if kernel not in KERNELS:
             # Existence is a request fault; Task() never checks it, so it leaked into score()/perf_check().
+            # Checked BEFORE the body: a registry lookup is cheaper than reading a submitted file, and
+            # the expected 'source_file' name is derived from this key.
             return self._send(404, {"error": f"no task for {kernel!r}: unknown benchmark"})
+        try:
+            submission = _submission_from_body(body, kernel, language, self.cfg)
+        except ValueError as exc:
+            return self._send(400, {"error": str(exc)})
         try:
             source_mode = "any" if submission.library is not None else "restricted"
             task = Task(kernel, source_mode, language)

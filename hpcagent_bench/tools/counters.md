@@ -13,6 +13,13 @@ Or from Python:
 ```python
 JudgeClient("{{ judge_url }}", rank={{ judge_rank }}).profile(Submission(language="{{ language }}", {% if input_mode == "library" %}library="<path to your .so>"{% else %}source="<your full {{ language }} source>"{% endif %}), "{{ kernel }}", counters=True, counter_group="cache")
 ```
+
+{% if input_mode != "library" %}
+Same either way for a source FILE: `"source_file":"{{ shared_dir }}/{{ kernel }}.{{ ext }}"` in the
+JSON body, `source_file="{{ shared_dir }}/{{ kernel }}.{{ ext }}"` in `Submission` -- that exact
+basename, and never alongside `source`.
+
+{% endif %}
 Ask a QUESTION, not an event: `counter_group` is one of `overview` (default), `cache`,
 `memory`, `branch`, `tlb`, `flops`, `stalls`, `all`.
 

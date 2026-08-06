@@ -824,6 +824,10 @@ def build_context(task: Task,
         "language": task.language,
         "precision": task.precision.value,
         "source_mode": task.source_mode,
+        # The judge's submission policy (service.input_mode). It is what makes a track
+        # LANGUAGE-ENFORCED: under source / py-binding the judge 400s any other language, so the
+        # prompt must not offer one. service.service_prompt overwrites this with its live cfg.
+        "input_mode": str(config.get("service.input_mode", "source")),
         "residency": task.residency,
         # Distributed (MPI) track knobs. node_mode/scaling select the multi-node contract
         # (sections/mpi.j2) and its strong/weak framing; ranks + k_repeats + the Sec. 12 kernel_mpi

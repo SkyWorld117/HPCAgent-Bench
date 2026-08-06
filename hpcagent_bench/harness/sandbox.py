@@ -51,10 +51,11 @@ def resolve_shared(path: str) -> pathlib.Path:
     """Resolve an artifact named by a REMOTE submission inside the shared folder, or ``ValueError``.
 
     The two containers agree on one filesystem and one only: an agent that builds its own ``.so``
-    leaves it in the shared mount, and its path in the AGENT's container means nothing in the
-    judge's. So a relative path is taken under the shared folder and an absolute one must already
-    be inside it -- anything else is refused rather than read, because the judge ``dlopen``s what
-    this returns and a path outside the mount is an arbitrary object of the agent's choosing.
+    (or writes its own source file) leaves it in the shared mount, and its path in the AGENT's
+    container means nothing in the judge's. So a relative path is taken under the shared folder and
+    an absolute one must already be inside it -- anything else is refused rather than read, because
+    the judge compiles and ``dlopen``s what this returns and a path outside the mount is an
+    arbitrary object of the agent's choosing.
 
     The HTTP boundary calls this, not :meth:`Sandbox.build`: an in-process caller (the optimizers,
     the framework runners) built its own ``.so`` in this very process and its path is not a claim
@@ -64,7 +65,7 @@ def resolve_shared(path: str) -> pathlib.Path:
     named = pathlib.Path(path)
     resolved = (named if named.is_absolute() else root / named).resolve()
     if resolved != root and root not in resolved.parents:
-        raise ValueError(f"library must live in the shared folder {root}; got {path!r}")
+        raise ValueError(f"a submitted path must live in the shared folder {root}; got {path!r}")
     return resolved
 
 
