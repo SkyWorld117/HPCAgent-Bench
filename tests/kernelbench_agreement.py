@@ -70,9 +70,8 @@ def load_module(path: pathlib.Path, name: str):
 
 
 def assigned_names(node: ast.stmt) -> set:
-    targets = list(getattr(node, "targets", []) or [])
-    if getattr(node, "target", None) is not None:
-        targets.append(node.target)
+    """Every name an assignment binds. ``Assign`` carries ``targets``, ``AnnAssign`` a ``target``."""
+    targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
     return {sub.id for tgt in targets for sub in ast.walk(tgt) if isinstance(sub, ast.Name)}
 
 
@@ -140,6 +139,13 @@ def init_kwargs(module, preset: Dict[str, Any], scalars: Dict[str, Any]) -> Dict
             resolved[param.name] = keyword[param.name]
         elif index < len(positional):
             resolved[param.name] = positional[index]
+        upstream = resolved.get(param.name)
+        if param.name not in preset and param.name not in scalars and isinstance(upstream, (list, tuple)):
+            # A manifest names scalars, so it can never bind a LIST of layer sizes -- the port spells
+            # them hidden1, hidden2. Falling back to upstream's builds the model at upstream scale:
+            # measured, shallow_wide_mlp's [32768, 32768] cost 3.1 GB before failing to align anyway.
+            raise ValueError(f"{param.name} is a sequence upstream ({list(upstream)}) and the manifest "
+                             "names scalars, so the two cannot be lined up")
     return resolved
 
 
@@ -239,12 +245,18 @@ def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -
     scalars = dict(spec.init.scalars) if spec.init else {}
     shapes = resolved_shapes(spec, preset)
 
+    torch.set_num_threads(1)
     module = load_module(upstream, f"kernelbench_upstream_{kernel}")
     patch_sizes(module, preset)
     kwargs = init_kwargs(module, preset, scalars)
     model = module.Model(**kwargs)
-    kwargs.update(submodule_scalars(model, module.Model, scalars))
-    model = module.Model(**kwargs)
+    overrides = submodule_scalars(model, module.Model, scalars)
+    if any(kwargs.get(k) != v for k, v in overrides.items()):
+        # Rebuilding is what applies a <submodule>_<param> scalar, but it doubles peak parameter
+        # memory while both models are alive, so drop the first one before asking for the second.
+        kwargs.update(overrides)
+        del model
+        model = module.Model(**kwargs)
     model.eval()
 
     drift = audit_hyperparameters(model, scalars)
@@ -274,12 +286,17 @@ def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -
         produced = model(*forward_args)
     reference = (produced[0] if isinstance(produced, (tuple, list)) else produced).detach().numpy().astype(np.float64)
 
+    parameters = {arg: mapping[arg].detach().numpy().astype(np.float64) for arg in mapping}
+    # Everything still needed is numpy now. The port allocates its own float64 copies next, so the
+    # model's parameters and the module that built them are pure peak from here on.
+    del model, module, forward_args, produced, mapping
+
     call: Dict[str, Any] = {}
     for arg in spec.input_args:
         if arg in outputs or arg in zero_filled:
             call[arg] = np.zeros(tuple(shapes.get(arg) or ()), dtype=np.float64)
-        elif arg in mapping:
-            call[arg] = mapping[arg].detach().numpy().astype(np.float64)
+        elif arg in parameters:
+            call[arg] = parameters[arg]
         elif arg in data:
             call[arg] = data[arg]
         else:
