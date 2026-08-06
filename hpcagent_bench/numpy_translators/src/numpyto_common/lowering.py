@@ -3204,6 +3204,18 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
             rhs_slice_idx += 1
             rhs_start = self._resolve_bound(d.lower, rhs_name, axis, default=_const(0))
             ivar = ast.Name(id=ivar_node.id, ctx=ast.Load())
+            # numpy KEEPS an axis a slice produced even at length 1, and then BROADCASTS it: every
+            # result position along that axis reads the SAME source element. Advancing it with the
+            # iter var instead reads a whole row -- ``out[:, :] = a[:, 0:1] + b`` came out as
+            # ``a[i][j] + b[i][j]``, wrong numbers in C, C++ and Fortran alike and no diagnostic.
+            # (An INTEGER index is the other rule and is already handled: it drops the axis, so it
+            # never reaches here.) Emitting the start is right whichever extent the destination has:
+            # where the destination is also length 1 the iter var only ever takes that one value.
+            rhs_stop = (self._resolve_bound(d.upper, rhs_name, axis, default=_const(0))
+                        if d.upper is not None else None)
+            if _is_unit_extent(rhs_start, rhs_stop):
+                idx_nodes.append(rhs_start)
+                continue
             if step is not None and step != 1:
                 # Strided RHS slice ``a[lo:hi:k]``: the source index for the
                 # result position ``pos = ivar - lhs_start`` is ``lo + pos*k``.
@@ -3302,6 +3314,20 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
                 else ast.Name(id=shape[axis], ctx=ast.Load())
             return _binop(axis_len, ast.Sub(), _const(bound.operand.value))
         return bound
+
+
+def _is_unit_extent(start: ast.AST, stop: Optional[ast.AST]) -> bool:
+    """Is this slice exactly one element long -- ``[0:1]`` or the symbolic ``[k:k+1]``?
+
+    Length 1 is the case where numpy's two indexing rules visibly differ: the slice keeps its axis
+    and broadcasts along it, while the integer index would have removed the axis entirely.
+    """
+    if stop is None:
+        return False  # an open upper bound is the whole axis; length 1 only if the axis is
+    if _fold_offset(stop, start) == 1:
+        return True
+    return (isinstance(stop, ast.BinOp) and isinstance(stop.op, ast.Add) and isinstance(stop.right, ast.Constant)
+            and stop.right.value == 1 and ast.dump(stop.left) == ast.dump(start))
 
 
 def _fold_offset(rhs_start: ast.AST, lhs_start: ast.AST) -> Optional[int]:
