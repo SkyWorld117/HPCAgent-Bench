@@ -64,3 +64,8 @@ tests/test_container_launch.py
 # --- QUARANTINE: not run anywhere, each needs a decision ----------------------------------------
 # Nothing is quarantined today. A file added below runs NOWHERE, so it needs a one-line reason and
 # an owner -- an unexplained entry here is the same silent inertness this file exists to end.
+
+# --- port fidelity: the corpus vs what it was ported from ---------------------------------------
+# Needs the whole DaCe frontend over 576 generated programs -- minutes, one subprocess each --
+# which the cheap unit sweep's runner has neither the time nor the dependency for.
+tests/test_dace_frontend_validity.py

@@ -331,6 +331,50 @@ jobs:
           if-no-files-found: ignore
 
   # ===========================================================================================
+  # port-fidelity -- can DaCe still read what the generator emits? A question about the CORPUS
+  # rather than about the harness, and it compiles nothing, so it gets its own cheap runner. The
+  # torch-agreement phase (do the ML ports still mean what they were ported from) lands here too.
+  # ===========================================================================================
+
+  port-fidelity:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    name: port-fidelity (dace frontend reads the generated corpus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # third_party/KernelBench holds the upstream models the torch-agreement phase will
+          # compare against; checked out here so adding that phase needs no runner change.
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/setup
+
+      - name: Phase 8 -- the DaCe frontend still reads what the generator emits
+        # Parse only: to_sdfg(simplify=False) never invokes a C++ compiler, so the whole corpus is
+        # affordable on a runner with no toolchain beyond python. The gate is a RATCHET on the
+        # known refusals -- a new one fails, and one that starts parsing fails too, so the list
+        # can only shrink. *_dace.py is gitignored, so the test emits what it needs first.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: |
+          python -m pytest -q -p no:cacheprovider -rfsxX -m dace_frontend \
+            --timeout=2400 tests/test_dace_frontend_validity.py
+
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-port-fidelity
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # ===========================================================================================
   # translators -- the numpyto_* translator's own suite (~640 tests), sharded three ways by file.
   # Port fidelity + the benchmark reference validators moved to the mpi runner (see BALANCE above).
   # ===========================================================================================
@@ -1114,7 +1158,7 @@ jobs:
   coverage:
     if: ${{!cancelled()}}
     name: coverage (combined total)
-    needs: [unit, integration, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi]
+    needs: [unit, integration, translators, frameworks-pluto, e2e-native, e2e-pythran, container-image, mpi, port-fidelity]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
