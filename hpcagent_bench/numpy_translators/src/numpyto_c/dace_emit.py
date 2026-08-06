@@ -145,6 +145,30 @@ class _ResolveZeros(ast.NodeTransformer):
         return ast.copy_location(ast.parse(f"{name} = {ctor}(({elts}), dtype={dtype})").body[0], node)
 
 
+class _AnnotateEmptyDtype(ast.NodeTransformer):
+    """Give a bare ``np.empty(shape)`` the dtype dace's replacement requires but never defaults.
+
+    ``array_creation_dace.py``'s ``_numpy_empty(pv, sdfg, state, shape, dtype)`` has no default,
+    unlike its ``zeros``/``ones``/``full`` siblings (which fall back to float64, matching real
+    numpy) -- an asymmetry in dace, not something this generator should keep relying on. A source
+    call with no dtype IS real numpy's own float64 default, so filling in the kernel's
+    precision-driven float global reproduces that default rather than guessing one.
+    """
+
+    def __init__(self, dtype_expr: str):
+        self.dtype_expr = dtype_expr
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "empty"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy")):
+            return node
+        if len(node.args) != 1 or any(kw.arg == "dtype" for kw in node.keywords):
+            return node  # dtype already positional/keyword, or not a plain empty(shape) call
+        node.keywords.append(ast.keyword(arg="dtype", value=ast.parse(self.dtype_expr, mode="eval").body))
+        return node
+
+
 #: numpy dtype tag -> dace type expression (floats route through the precision-driven globals).
 _DTYPE_TO_DACE = {
     "float64": "dc_float",
@@ -574,9 +598,12 @@ class ResolveShapeReads(ast.NodeTransformer):
     visited in order.
 
     Inference is deliberately conservative: an extent guessed wrong is a miscompile, not a refusal.
-    Only an alias, an allocation, a reshape, a transpose, and an elementwise result whose operands
-    agree are inferred; anything else (notably ``@``, whose result shape is neither operand's)
-    leaves the name unknown and its ``.shape`` read intact.
+    Only an alias, an allocation, a reshape, a transpose, a rank-2 matmul (exact, not a guess) and a
+    broadcast whose every operand is known are inferred; ONE unknown operand poisons the whole
+    expression, leaving the name unknown and its ``.shape`` read intact. Taking the known side of an
+    elementwise pair -- what this did before -- is what miscompiled ``flat @ clusters - bn_mean``:
+    the rank-2 matmul is unknown, so the result adopted ``bn_mean``'s RANK-1 shape and axis 1's
+    extent was read as axis 0's.
     """
 
     def __init__(self, shapes: Dict[str, List[str]]):
@@ -604,20 +631,38 @@ class ResolveShapeReads(ast.NodeTransformer):
         return node
 
     def tuple_tokens(self, node: ast.AST) -> Optional[List[str]]:
-        elements = node.elts if isinstance(node, ast.Tuple) else [node]
-        return [ast.unparse(e) for e in elements] if elements else None
+        """The extent tokens of a shape ARGUMENT, or None when its RANK is not established.
+
+        A tuple spells its own extents. A ``.shape`` read carries the array's WHOLE rank:
+        ``N = np.zeros(C.shape)`` reading as the rank-1 ``['C.shape']`` is what rewrote
+        ``N.shape[0]`` to a bare ``C.shape`` -- a tuple where mandelbrot's loop wanted an extent --
+        while ``N.shape[1]`` fell out of range and survived, so one nest disagreed with itself.
+        Anything else is one extent only if it is PROVABLY rank 0; an expression whose rank is
+        unknown refuses rather than donating a rank of 1.
+        """
+        if isinstance(node, ast.Tuple):
+            return [ast.unparse(e) for e in node.elts] if node.elts else None
+        if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name):
+            tokens = self.shapes.get(node.value.id)
+            return list(tokens) if tokens else None
+        return [ast.unparse(node)] if self.infer(node) == [] else None
 
     def infer(self, node: ast.AST) -> Optional[List[str]]:
+        if is_scalar_literal(node):
+            return []  # rank 0: a literal broadcasts against anything and decides no extent
         if isinstance(node, ast.Name):
             return self.shapes.get(node.id)
-        if isinstance(node, ast.BinOp):
-            if isinstance(node.op, ast.MatMult):
-                return None  # a matmul's shape is neither operand's; do not guess
-            return self.agreeing(self.infer(node.left), self.infer(node.right))
         if isinstance(node, ast.UnaryOp):
             return self.infer(node.operand)
+        if isinstance(node, ast.Compare):
+            return self.broadcast([node.left, *node.comparators])
+        if isinstance(node, ast.BinOp):
+            return self.matmul(node) if isinstance(node.op, ast.MatMult) else self.broadcast([node.left, node.right])
+        if isinstance(node, ast.Attribute) and node.attr == "T":
+            base = self.infer(node.value)
+            return None if base is None else list(reversed(base))
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            return None
+            return None  # a Subscript included: numpy's index rules (drop/keep/insert) are not guessed here
         name, args = node.func.attr, node.args
         if name in _ALLOC_FUNCS and args:
             return self.tuple_tokens(args[0])
@@ -626,10 +671,7 @@ class ResolveShapeReads(ast.NodeTransformer):
         if name == "transpose" and args:
             return self.transposed(args)
         if name in _ELEMENTWISE_CALLS:
-            for argument in args:
-                shape = self.infer(argument)
-                if shape is not None:
-                    return shape
+            return self.broadcast(args)
         return None
 
     def transposed(self, args: List[ast.expr]) -> Optional[List[str]]:
@@ -644,13 +686,34 @@ class ResolveShapeReads(ast.NodeTransformer):
             return None
         return [base[axis] for axis in axes]
 
-    @staticmethod
-    def agreeing(left: Optional[List[str]], right: Optional[List[str]]) -> Optional[List[str]]:
-        """The shape of an elementwise pair, when it is not a guess: one side unknown takes the
-        other, and two known sides must already agree (a real broadcast is not inferred)."""
-        if left is None or right is None:
-            return left or right
-        return left if left == right else None
+    def matmul(self, node: ast.BinOp) -> Optional[List[str]]:
+        """``[m, k] @ [k, n]`` is exact; any other rank pair stays unknown."""
+        left, right = self.infer(node.left), self.infer(node.right)
+        if left is None or right is None or len(left) != 2 or len(right) != 2:
+            return None
+        return [left[0], right[1]]
+
+    def broadcast(self, operands: List[ast.expr]) -> Optional[List[str]]:
+        """The broadcast shape of an elementwise operand list, or None when it is not certain.
+
+        Certain means: every operand's shape is known, and the widest one carries every extent --
+        an extent contributed by a shorter operand (``[bs, 1]`` against ``[bs, n]``) is refused
+        rather than worked out, since only the widest is read as the result. One unknown operand
+        poisons the result: taking the known side instead would adopt its RANK, and a rank-1 shape
+        read as a rank-2 value's is a miscompile rather than a refusal.
+        """
+        shapes: List[List[str]] = []
+        for operand in operands:
+            shape = self.infer(operand)
+            if shape is None:
+                return None
+            shapes.append(shape)
+        widest: List[str] = max(shapes, key=len, default=[])
+        for shape in shapes:
+            tail = widest[len(widest) - len(shape):]
+            if any(extent != wide and extent != "1" for extent, wide in zip(shape, tail)):
+                return None
+        return widest
 
 
 _ALLOC_FUNCS = frozenset({"zeros", "empty", "ones", "full"})
@@ -675,11 +738,8 @@ class BroadcastScalarWhere(ResolveShapeReads):
     the condition's own extents keeps numpy's answer exactly -- numpy broadcasts all three operands,
     and the fill contributes the extents the condition already had.
 
-    Inference is stricter here than in the base class, which reads an UNKNOWN operand as a scalar and
-    takes the other side: right for a ``.shape`` read, wrong for a fill, because ``x @ w + bias``
-    would take ``bias``'s rank-1 shape and a wrong extent is a miscompile rather than a refusal. So
-    an unknown operand poisons the whole expression -- and, to keep the gemm family inferable at all,
-    a rank-2 matmul's shape is computed instead of skipped, which is exact rather than a guess.
+    Inference is the base class's, which poisons on an unknown operand: ``x @ w + bias`` taking
+    ``bias``'s rank-1 shape is a miscompile for a fill and for a ``.shape`` read alike.
     """
 
     def visit_Call(self, node: ast.Call):
@@ -696,44 +756,6 @@ class BroadcastScalarWhere(ResolveShapeReads):
         extents = ", ".join(shape) + ("," if len(shape) == 1 else "")
         node.args[1] = ast.parse(f"np.full(({extents}), {ast.unparse(node.args[1])})", mode="eval").body
         return ast.fix_missing_locations(node)
-
-    def infer(self, node: ast.AST) -> Optional[List[str]]:
-        if is_scalar_literal(node):
-            return []  # rank 0: a literal broadcasts against anything and decides no extent
-        if isinstance(node, ast.Compare):
-            return self.broadcast([node.left, *node.comparators])
-        if isinstance(node, ast.BinOp):
-            return self.matmul(node) if isinstance(node.op, ast.MatMult) else self.broadcast([node.left, node.right])
-        if isinstance(node, ast.Attribute) and node.attr == "T":
-            base = self.infer(node.value)
-            return None if base is None else list(reversed(base))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _ELEMENTWISE_CALLS:
-            return self.broadcast(node.args)
-        return super().infer(node)
-
-    def matmul(self, node: ast.BinOp) -> Optional[List[str]]:
-        """``[m, k] @ [k, n]`` is exact; any other rank pair stays unknown."""
-        left, right = self.infer(node.left), self.infer(node.right)
-        if left is None or right is None or len(left) != 2 or len(right) != 2:
-            return None
-        return [left[0], right[1]]
-
-    def broadcast(self, operands: List[ast.expr]) -> Optional[List[str]]:
-        """The broadcast shape of an elementwise operand list, or None when it is not certain.
-
-        Certain means: every operand's shape is known, and the widest one carries every extent --
-        an extent contributed by a shorter operand (``[bs, 1]`` against ``[bs, n]``) is refused
-        rather than worked out, since only the widest is read as the result.
-        """
-        shapes = [self.infer(operand) for operand in operands]
-        if any(shape is None for shape in shapes):
-            return None
-        widest: List[str] = max(shapes, key=len, default=[])
-        for shape in shapes:
-            tail = widest[len(widest) - len(shape):]
-            if any(extent != wide and extent != "1" for extent, wide in zip(shape, tail)):
-                return None
-        return widest
 
 
 def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
@@ -848,18 +870,21 @@ def hoist_compound_extents(fn_ast: ast.AST, known: set) -> ast.AST:
     return fn_ast
 
 
+def shape_base_ids(node: ast.AST) -> set:
+    """``id()`` of every Name read as ``<x>.shape`` -- x is a DIMENSION source, never an integer value."""
+    return {
+        id(a.value)
+        for a in ast.walk(node) if isinstance(a, ast.Attribute) and a.attr == "shape" and isinstance(a.value, ast.Name)
+    }
+
+
 def _shape_ident_candidates(fn_ast: ast.AST, known: set) -> set:
     """Identifiers in an np.zeros/empty/ones shape arg not already array/scalar/symbol -- promotion candidates."""
     names = set()
     for node in ast.walk(fn_ast):
         shape_arg = shape_argument(node)
         if shape_arg is not None:
-            # <x>.shape[k] is x's own dimension, not a scalar dim identifier -- exclude base x.
-            shape_bases = {
-                id(a.value)
-                for a in ast.walk(shape_arg)
-                if isinstance(a, ast.Attribute) and a.attr == "shape" and isinstance(a.value, ast.Name)
-            }
+            shape_bases = shape_base_ids(shape_arg)
             for sub in ast.walk(shape_arg):
                 if isinstance(sub, ast.Name) and id(sub) not in shape_bases and sub.id not in known:
                     names.add(sub.id)
@@ -881,6 +906,42 @@ def _scan_size_assigns(fn_ast: ast.AST, targets: set):
     # emitted body, so this order is statement order in the generated program.
     reassigned = OrderedSet(nm for nm, c in counts.items() if c > 1)
     return first_rhs, order, reassigned
+
+
+def mintable_int_locals(fn_ast: ast.AST, symbols: set, known: set) -> set:
+    """Body locals bound ONCE to an integer expression over declared symbols -- mintable as dc.symbols.
+
+    Seeding promotion from shape arguments alone leaves ``k = K`` a scalar transient, and dace's
+    frontend then mints a FRESH symbol for it that it never unifies with the one it came from --
+    ``[__sym_k_0]`` into ``[K]``, the largest refusal class in the generated corpus. A name minted
+    here keeps the one spelling both sides agree on.
+
+    Atoms are the DECLARED SYMBOLS, never the wider ``known``: an array (``B = A``) and a float
+    scalar (``c = 2 * alpha``) both read as integer symbol expressions against ``known``, and either
+    one minted as an int64 symbol is a wrong answer rather than a refusal.
+    """
+    bindings: dict[str, int] = {}
+    stored: set[str] = set()
+    for node in ast.walk(fn_ast):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bindings[node.id] = bindings.get(node.id, 0) + 1  # every rebinding: assign, augassign, for, walrus
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name):
+            stored.add(node.value.id)  # ``x[...] = ...`` is data, and a name cannot be both data and symbol
+    once = {nm for nm, count in bindings.items() if count == 1 and nm not in stored and nm not in known}
+    first_rhs, order, _ = _scan_size_assigns(fn_ast, once)
+    cand: set[str] = set()
+    while True:  # least fixed point: a name qualifies once every name its definition reads does
+        atoms = symbols | cand
+        # Reading a symbol is required, not just being integer: dace folds a literal-valued local
+        # (``vl = 64``) already, so minting one only adds a symbol the caller then has to bind.
+        grown = {
+            nm
+            for nm in order if nm not in cand and _is_symbol_expr(first_rhs[nm], atoms) and any(
+                isinstance(sub, ast.Name) and sub.id in atoms for sub in ast.walk(first_rhs[nm]))
+        }
+        if not grown:
+            return cand
+        cand |= grown
 
 
 def _inline_symbol_aliases(fn_ast: ast.AST, symbols: set, known: set) -> ast.AST:
@@ -926,9 +987,9 @@ def _inline_transient_shape_scalars(fn_ast: ast.AST, known: set) -> ast.AST:
     return fn_ast
 
 
-def _plan_size_promotion(fn_ast: ast.AST, known: set):
+def _plan_size_promotion(fn_ast: ast.AST, known: set, symbols: set | None = None):
     """Plan promotion of body-computed size scalars to dace symbols; returns (order, symbol_defs, reassigned)."""
-    cand = _shape_ident_candidates(fn_ast, known)
+    cand = _shape_ident_candidates(fn_ast, known) | mintable_int_locals(fn_ast, symbols or set(), known)
     if not cand:
         return [], [], set()
     body_assigned = {
@@ -942,8 +1003,13 @@ def _plan_size_promotion(fn_ast: ast.AST, known: set):
     while changed:
         changed = False
         for nm in list(order):
+            # ``h__ssa3.shape[2]`` reads a DIMENSION: dragging h__ssa3 in makes an array alias
+            # (``h = x``) look like a symbol expression, since ``x`` is a known name.
+            bases = shape_base_ids(first_rhs[nm])
             for sub in ast.walk(first_rhs[nm]):
-                if isinstance(sub, ast.Name) and sub.id not in known and sub.id not in cand and sub.id in body_assigned:
+                if not isinstance(sub, ast.Name) or id(sub) in bases:
+                    continue
+                if sub.id not in known and sub.id not in cand and sub.id in body_assigned:
                     cand.add(sub.id)
                     changed = True
         if changed:
@@ -1077,6 +1143,10 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     local_dtypes = kir.local_dtypes
     default_dtype = kir.float_precision or "float64"
     fn_ast = _ResolveZeros(zeros_locals, zeros_fills, local_dtypes, default_dtype).visit(fn_ast)
+    # np.empty's dace replacement has no dtype default (unlike zeros/ones/full): a bare call means
+    # numpy's own float64 default, so fill in the precision-driven float global explicitly.
+    fn_ast = _AnnotateEmptyDtype(_dace_dtype(default_dtype)).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
     # dace has no runtime .shape: rewrite arr.shape[k] to the symbolic dim and drop redundant/illegal symbol recomputes.
     # Tuple assignment first, so the shape passes below see the subscript spelling they resolve.
     fn_ast = SplitTupleAssign().visit(fn_ast)
@@ -1084,10 +1154,13 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     fn_ast = _ShapeToSymbol(arr_shapes).visit(fn_ast)
     # ... and every remaining .shape read, including on a transient: one unresolved read makes the
     # enclosing size expression non-symbolic, and promotion is all-or-nothing.
-    fn_ast = ResolveShapeReads(arr_shapes).visit(fn_ast)
+    # A declared scalar or size symbol is rank 0 -- it broadcasts against anything and decides no
+    # extent -- so it has to be KNOWN, now that one unknown operand poisons the whole expression.
+    value_shapes = {**arr_shapes, **{nm: [] for nm in list(scalars) + symbol_names}}
+    fn_ast = ResolveShapeReads(value_shapes).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # dace sizes np.where from its branches: give a two-scalar where the condition's shape, or it refuses.
-    fn_ast = BroadcastScalarWhere(arr_shapes).visit(fn_ast)
+    fn_ast = BroadcastScalarWhere(value_shapes).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # Inline a shape scalar that's a pure symbolic alias of an existing dc.symbol, rather than promoting a fresh one.
     fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names), set(arrays) | set(scalars) | set(symbol_names))
@@ -1096,7 +1169,9 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # Name any compound shape expression first, so promotion has a single name to work on.
     fn_ast = hoist_compound_extents(fn_ast, set(arrays) | set(scalars) | set(symbol_names))
     # dace forbids a data-dependent array shape; promote body-computed size scalars to dc.symbols the caller binds.
-    promoted, symbol_defs, reassigned = _plan_size_promotion(fn_ast, set(arrays) | set(scalars) | set(symbol_names))
+    promoted, symbol_defs, reassigned = _plan_size_promotion(fn_ast,
+                                                             set(arrays) | set(scalars) | set(symbol_names),
+                                                             set(symbol_names))
     for nm in promoted:
         if nm not in symbol_names:
             symbol_names.append(nm)
