@@ -416,7 +416,7 @@ def store_prompt(conn: sqlite3.Connection,
 
 def connect(path: Optional[str] = None) -> sqlite3.Connection:
     """Open the results DB: a 30 s busy timeout (the judge service is threaded, so
-    concurrent ``/oracle`` writers must not lose a row to ``SQLITE_BUSY``), WAL so
+    concurrent ``/submit`` writers must not lose a row to ``SQLITE_BUSY``), WAL so
     readers don't block the writer, foreign keys on, schema ensured (idempotent).
 
     ``sqlite3.connect(timeout=...)`` IS the busy-timeout knob, so it is the single

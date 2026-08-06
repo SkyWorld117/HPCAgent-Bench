@@ -1,6 +1,6 @@
 ---
 name: rocprof-compute-judge
-description: Kernel-level analysis on AMD through the JUDGE -- Speed-of-Light first, then the memory chart, then the pipe. The ncu-shaped question, answered with CU-shaped numbers.
+description: Kernel-level analysis on AMD, off-judge -- Speed-of-Light first, then the memory chart, then the pipe. The ncu-shaped question, answered with CU-shaped numbers.
 ---
 
 `rocprof` answers WHICH kernel owns device time. This page answers WHY THAT KERNEL IS SLOW: which
@@ -69,45 +69,28 @@ If `rocprof-compute` is not found, try `omniperf` before concluding the tool is 
 
 ## How it runs
 
-> **This route does not exist yet.** The judge accepts `oracle`, `submit`, `score` and `profile`
-> today (`harness/service.py`), there is no `/instrument`, `JudgeClient` has no `instrument()`, and
-> nothing returns the child's stdout. The contract below is the one being built, stated exactly so
-> the page is ready the day it lands -- but do NOT try these calls against a judge yet. Until then,
-> run the instrument yourself; the rest of this page is unchanged either way.
+**The judge has no route to this tool.** `POST /profile` on a `hip` submission runs `rocprofv3` --
+the dispatch trace, which kernel owns device time -- and that is the only instrument it attaches:
+`linuxperf`, `papi` and `none` each come back 400 naming `rocprofv3`, because a device kernel has no
+host-side bracket for them to run in. Nothing there replays a kernel for counters and nothing hands
+back a workload directory. Take the kernel name off the trace, then run everything below on a box of
+your own.
 
-The judge owns the GPU and the ROCm install, so it owns this tool. You ask for a workload by name
-and get the analysis back; you do not get the workload directory, because it is megabytes of CSV
-and it dies with the sandbox.
+Three things about the tool that change how you use the ladder below:
 
-The judge URL, the kernel name and your rank are the ones your task statement gave you.
-
-```sh
-curl -s -X POST "$JUDGE_URL/instrument" -H 'Content-Type: application/json' \
-  -d '{"kernel":"<kernel>","language":"hip","rank":<judge rank>,
-       "instrument":"rocprof-compute","source":"<your source>"}'
-```
-
-```python
-JudgeClient("<judge url>", rank=<judge rank>).instrument(
-    Submission(language="hip", source="<your source>"), "<kernel>",
-    instrument="rocprof-compute")
-```
-
-Three things about this route that change how you use the ladder below:
-
-- **You submit ORDINARY source.** There is no bracket to write and no counter to name -- unlike
-  the PAPI route, the tool attributes per dispatch on its own. What you lose is the ability to ask
+- **You profile ORDINARY source.** There is no bracket to write and no counter to name -- unlike
+  the PAPI bracket, the tool attributes per dispatch on its own. What you lose is the ability to ask
   about a REGION that is not a kernel.
-- **Replay is the judge's cost, not yours, and it is still your problem.** The tool runs your
-  application repeatedly to collect all counters, so a submission whose output depends on an
-  unseeded RNG or on wall clock produces counter rows from runs that did different things. The
-  judge cannot detect that. Fix the determinism before you profile, not after.
-- **A multi-rank submission needs a single-pass mode.** Default replay re-runs the workload, and
-  the second `MPI_Init` is not legal -- so an MPI submission profiled this way fails rather than
+- **Replay is your cost, and it is also your problem.** The tool runs your application repeatedly
+  to collect all counters, so a program whose output depends on an unseeded RNG or on wall clock
+  produces counter rows from runs that did different things. Nothing detects that for you. Fix the
+  determinism before you profile, not after.
+- **A multi-rank run needs a single-pass mode.** Default replay re-runs the workload, and the
+  second `MPI_Init` is not legal -- so an MPI application profiled this way fails rather than
   answers. See the replay section below for the two documented ways out.
 
-Ask for `--no-roof` behaviour by default while iterating; request the roofline once, at the end,
-when you want the picture rather than a number.
+Run with `--no-roof` by default while iterating; collect the roofline once, at the end, when you
+want the picture rather than a number.
 
 ## The two-command shape
 

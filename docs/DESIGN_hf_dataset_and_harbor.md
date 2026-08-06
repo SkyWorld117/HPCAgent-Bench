@@ -37,12 +37,14 @@ harmonic mean of speedup ratios."* We mirror its layout and parity discipline.
         |  load_dataset(...)
         v
  Harbor adapter  adapters/hpcagent_bench       builds prompt, runs agent in a task container
-        |  POST /oracle  (submission)
+        |  POST /submit  (submission)
         v
  HPCAgent-Bench judge  (hpcagent_bench.harness, containerized)   HIDDEN tests + timing + independent_verify
         |
         v  {correct, speedup}  ->  pass/fail + HPCAgent-Bench Score
 ```
+
+(`/oracle` is a historical alias for `/submit`, same behaviour.)
 
 **Key invariant -- the firewall.** The judge is the *single* evaluator for both the
 self-report ("PR a result") path and the Harbor adapter. The dataset ships only
@@ -168,12 +170,12 @@ adapters/hpcagent_bench/tasks/ # GENERATED (gitignored): one task dir per kernel
 
 - **`adapter.py`** -- `load_tasks(config)` = `load_dataset("spcl/hpcagent_bench", config)`;
   `HPCAgent-BenchTask.prompt` = instructions + `numpy_reference` + `signature` + judge URL
-  + objective (*"emit an optimized implementation; maximize `/oracle` `speedup`
+  + objective (*"emit an optimized implementation; maximize `/submit` `speedup`
   while `correct` is true"*); `HPCAgent-BenchTask.evaluate(workdir)` submits the artifact
   and reads back `{correct, speedup}` + `independent_verify`.
 - **`template/`** -- reuse `containers/cpu.def` (gcc/gfortran/clang + OpenBLAS +
   `hpcagent_bench/harness/service.py`). The agent writes a kernel (C/Fortran source for
-  `restricted`, a built `.so` for `any`) and `POST`s `/oracle`. Toolchain + judge
+  `restricted`, a built `.so` for `any`) and `POST`s `/submit`. Toolchain + judge
   already exist -- this is wiring, not new code.
 - **Source mode** -- default `restricted` (agent edits code, like every Harbor coding
   adapter); `any` (prebuilt `.so`) stays as a power-user mode.

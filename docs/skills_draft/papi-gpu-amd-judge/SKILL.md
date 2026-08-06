@@ -1,6 +1,6 @@
 ---
 name: papi-gpu-amd-judge
-description: AMD GPU hardware counters over ONE of your kernels, run by the JUDGE -- PAPI's rocp_sdk component in your source, one counter per submission, profile on stdout.
+description: "AMD GPU hardware counters over ONE of your kernels -- PAPI's rocp_sdk component in your source, one counter per run, and why the JUDGE has no route to it: a hip submission is traced only."
 ---
 
 `rocprof` answers WHICH kernel owns device time. This page answers WHAT THE DEVICE DID while one
@@ -296,73 +296,29 @@ and check the region count.
 
 ## How it runs
 
-> **This route does not exist yet.** The judge accepts `oracle`, `submit`, `score` and `profile`
-> today (`harness/service.py`), there is no `/instrument`, `JudgeClient` has no `instrument()`, and
-> nothing returns the child's stdout. The contract below is the one being built, stated exactly so
-> the page is ready the day it lands -- but do NOT try these calls against a judge yet. Until then,
-> run the instrument yourself; the rest of this page is unchanged either way.
+You write the bracket, and you run it -- the JUDGE will not. `tool: "papi"` on a `hip` submission is
+refused 400 before anything is built, and the refusal names `rocprofv3`: PAPI counts through the
+host process, and a device kernel leaves it no host-side bracket to count. `linuxperf` and `none`
+come back the same way, so no judge route compiles this source, runs it and hands you its stdout.
+The judge's one instrument for a `hip` submission is the `rocprofv3` trace -- which kernel owns
+device time and how often it launched. It counts nothing.
 
-You write the bracket; the JUDGE compiles and runs it, on its own GPU -- its part, its ROCm build,
-and its answer to whether the component was configured in at all. That last point is the reason
-this route exists: neither `rocp_sdk` nor `rocm` is built into PAPI by default, so the box you are
-on very likely has neither, and the judge's may have one.
+That leaves the component question on your own box, where it started: neither `rocp_sdk` nor `rocm`
+is built into PAPI by default, so run `papi_component_avail` (above) before anything else. A PAPI
+built without one of them cannot count an AMD GPU at all, whatever the source says.
 
-The judge URL, the kernel name, your language and your rank are the ones your task statement gave
-you -- substitute them; this page cannot know them.
+Running it yourself is also the ordinary shape of the code above -- a program with `main`, the event
+name from `argv`, `gpu_papi_report` printing where you can read it -- and the "initialise before any
+HIP call" rule is easy to keep, because you own the first HIP call. Put `gpu_papi_init` at the very
+top, bracket your first launch as the live half of the self-test, and call `gpu_papi_forget()`
+before the measured loop.
 
-Three differences from running it yourself, all consequences of the judge building a LIBRARY
-rather than a program:
-
-- **There is no `main`.** The judge dlopens `lib<kernel>.so` and calls your entry symbol, so
-  `gpu_papi_init`, both halves of the self-test, every `gpu_region_begin` / `gpu_region_end` pair
-  and `gpu_papi_report` all live INSIDE the kernel function, in that order. The "initialise before
-  any HIP call" rule is HARDER here, not easier: the judge's harness may already have touched HIP
-  before your symbol runs. Put `gpu_papi_init` at the very top of your entry function, bracket your
-  first launch as the live half, and `gpu_papi_forget()` before the measured loop.
-- **The event cannot come from `argv`.** Take it from a `-D`, one of the token prefixes that
-  survive: pass `-DHPC_EVENT="rocp_sdk:::FetchSize:device=0"` in `build` and call
-  `gpu_papi_init(HPC_EVENT)`. The prefix is the COMPONENT name and the judge's PAPI decides which
-  one it has, so enumerate through a `profile` run before you spend a submission on `rocm:::`.
-  One submission per counter, for the same reason as one run per counter.
-- **The profile leaves on STDOUT.** Replace `gpu_papi_report`'s `printf` calls with ONE
-  self-delimiting block and print nothing else anywhere in the source:
-
-```c
-printf("HPCB2 begin papi-gpu-amd %s\n", gpu_event ? gpu_event : "?");
-if (!gpu_ok)                                 printf("HPCB2 row error=not_counted\n");
-else if (gpu_regions > 0 && gpu_total == 0)  printf("HPCB2 row error=silent_zero regions=%d\n", gpu_regions);
-else                                         printf("HPCB2 row value=%lld regions=%d\n", gpu_total, gpu_regions);
-printf("HPCB2 end rows=1\n");
-fflush(stdout);
-```
-
-Two `error=` rows, because on this route the two failures look identical from outside: `not_counted`
-is setup refusing, `silent_zero` is a run that counted nothing over regions that provably ran. A
-missing component, or PAPI initialised after the first HIP call, produces the second one, and a
-refusal that arrives as an ABSENT block reads exactly like a kernel that moved no bytes. The region
-count rides in the same row, so every check on this page that reads it still works -- a short one
-says brackets were skipped.
-
-```sh
-curl -s -X POST "$JUDGE_URL/instrument" -H 'Content-Type: application/json' \
-  -d '{"kernel":"<kernel>","language":"hip","rank":<judge rank>,
-       "build":["-lpapi","-DHPC_EVENT=\"rocp_sdk:::FetchSize:device=0\""],
-       "source":"<your instrumented source>"}'
-```
-
-```python
-JudgeClient("<judge url>", rank=<judge rank>).instrument(
-    Submission(language="hip", source="<your instrumented source>",
-               build=["-lpapi", '-DHPC_EVENT="rocp_sdk:::FetchSize:device=0"']), "<kernel>")
-```
-
-One counter per submission, and EXTENSIVE counters only -- one submission returns one accumulated
-total, and a sum of percentages is not a percentage. The events worth asking for, in the order this
-page reads them: `rocp_sdk:::SQ_WAVES`, `rocp_sdk:::FetchSize`, `rocp_sdk:::WriteSize`,
-`rocp_sdk:::GRBM_GUI_ACTIVE`, each with `:device=0`. The ratios this page reads (`L2CacheHit`,
-`VALUBusy`, `MemUnitStalled`, `VALUUtilization`) are percentages that this component sums and
-truncates, so they cannot be collected this way at all -- build them from raw counters per region,
-or take them from `rocprofv3` on a box you control.
+One counter per RUN, and EXTENSIVE counters only -- one run returns one accumulated total, and a sum
+of percentages is not a percentage. The events worth asking for, in the order this page reads them:
+`rocp_sdk:::SQ_WAVES`, `rocp_sdk:::FetchSize`, `rocp_sdk:::WriteSize`, `rocp_sdk:::GRBM_GUI_ACTIVE`,
+each with `:device=0`. The ratios this page reads (`L2CacheHit`, `VALUBusy`, `MemUnitStalled`,
+`VALUUtilization`) are percentages that this component sums and truncates, so they cannot be
+collected this way at all -- build them from raw counters per region, or take them from `rocprofv3`.
 
 ## One region per kernel
 

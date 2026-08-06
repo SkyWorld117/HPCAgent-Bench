@@ -175,9 +175,10 @@ You prepare the source and name the QUESTION; the JUDGE builds it, runs it, coun
 numbers back. The judge URL, the kernel name, your language and your rank are the ones your task
 statement gave you -- substitute them; this page cannot know them.
 
-The route is `POST /profile` with `counters` on. It counts the judge's OWN timed call of your
-kernel, from outside: one measured run per metric, at the thread count its sweep found fastest. The
-bracket above has no route -- see "What the judge will not do" at the end of this section.
+The route is `POST /profile`, and the body field `tool` picks the instrument. Two of them count the
+judge's OWN timed call of your kernel, from outside, one measured run per metric. `linuxperf` with
+`counters: true` puts the counts NEXT TO the call graph, at the thread count its sweep found
+fastest:
 
 ```sh
 curl -s -X POST "$JUDGE_URL/profile" -H 'Content-Type: application/json' \
@@ -191,35 +192,53 @@ JudgeClient("<judge url>", rank=<judge rank>).profile(
     counters=True, counter_group="cache")
 ```
 
+`tool: "papi"` gives the same counts ALONE, with no sampler attached, at one thread count you name.
+That is the measurement that survives a host whose `perf_event_paranoid` forbids sampling: `perf`
+needs `<= 2`, PAPI does not.
+
+```sh
+curl -s -X POST "$JUDGE_URL/profile" -H 'Content-Type: application/json' \
+  -d '{"rank":<judge rank>,"kernel":"<kernel>","language":"<language>","source":"<your source>",
+       "tool":"papi","counter_group":"cache","threads":4}'
+```
+
+```python
+JudgeClient("<judge url>", rank=<judge rank>).profile(
+    Submission(language="<language>", source="<your source>"), "<kernel>",
+    tool="papi", counter_group="cache", threads=4)
+```
+
+Your own bracket is the third tool, `none`, at the end of this section.
+
 | field | default | what it does |
 |---|---|---|
 | `rank` | REQUIRED | the judge you believe you are addressing; absent is 400, another judge's is 421 |
 | `kernel` | REQUIRED | an unknown name is 404 |
-| `language` | `c` | `python` cannot be counted (503 `not_native`); `cuda`/`hip` is traced by `nsys` instead |
+| `language` | `c` | `python` cannot be counted (503 `not_native`); `cuda`/`hip` goes to `nsys`/`rocprofv3` |
+| `tool` | by language | `linuxperf` (+`counters`) or `papi` to count; `none` for your own bracket |
 | `source` / `library` | -- | whichever this judge's input mode allows; sending the other is 400 |
 | `build` | `[]` | only single-token `-I` `-D` `-l` `-L` survive; `-O3`, `-march=`, `-fopenmp` are dropped |
-| `preset` | the judge's | the input size, on the same public seed `/oracle` grades on |
-| `threads` | `[1,2,4]` | the sweep, deduplicated and clamped to the cores this judge may use |
+| `preset` | the judge's | the input size, on the same public seed `/submit` grades on |
+| `threads` | `[1,2,4]` / `1` | a LIST (the sweep) under `linuxperf`; a single INT under `papi` and `none` |
 | `reps` | `50` | timed calls per configuration, after one discarded warmup; the time kept is the min |
-| `counters` | `false` | add the hardware counts; costs one further measured run PER METRIC in the group |
+| `counters` | `false` | `linuxperf` only: add the counts, one further measured run PER METRIC in the group |
 | `counter_group` | `overview` | `overview` `cache` `memory` `branch` `tlb` `flops` `stalls` `all`; unknown is 400 |
-| `min_percent` | `1.0` | prunes branches under this share from the returned call graph |
+| `min_percent` | `1.0` | `linuxperf` only: prunes branches under this share from the returned call graph |
 
 **You name a GROUP, never an event.** A group is a set of named quantities -- `cycles`,
 `instructions`, `data_cache_misses`, `cache_hits`, `l2_cache_misses`, `l3_cache_misses`,
 `data_tlb_misses`, `instruction_tlb_misses`, `branch_instructions`, `branch_mispredictions`,
 `fp_ops`, `fma_instructions`, `integer_instructions`, `stalled_cycles` -- and each is resolved on
 the judge's CPU to the first preset expression that fits there. The row's `expression` says which
-one answered, so the AMD gaps above arrive as a `missing` reason instead of as a wrong number.
-Counting rides on the sampling: a host without usable `perf` refuses the request even when you
-asked for counts alone.
+one answered, so the AMD gaps above arrive as a `missing` reason instead of as a wrong number. The
+group applies to both counting tools; only `linuxperf` also needs `counters: true` to turn them on.
 
 The answer is one JSON object. A build failure is a normal answer -- `build_ok` false plus `detail`,
 the tail of the compiler log. Otherwise:
 
-- `counters` is `null` unless you asked. Otherwise it carries `group`, `threads` (the counted
-  configuration), `threads_counted`, `smt`, `pinned`, `runs` (one per metric), `metrics[]`,
-  `derived`.
+- `counters` carries `group`, `threads` (the counted configuration), `threads_counted`, `smt`,
+  `pinned`, `runs` (one per metric), `metrics[]`, `derived`. Under `linuxperf` it is `null` unless
+  you asked for it; under `papi` it is always there.
 - a `metrics[]` row is `metric`, `expression`, `events`, `count`, `elapsed_ns`, `reps_counted`,
   `threads_counted`, `scope`, `smt`, `hardware_counters`. A metric this CPU could not count comes
   back as `count: null` with a `missing` reason -- absence never arrives as a zero.
@@ -229,57 +248,64 @@ the tail of the compiler log. Otherwise:
   `expressions` they came from, with a `caveat` when the operands resolved to different cache
   levels; `unavailable` names every ratio that could NOT be computed and why. `cache_line_bytes`
   is read from sysfs, not assumed.
-- the sampled half comes back with it: `symbol`, `representative` (the fastest thread count, which
-  is the counted one), `scalability[]` (`threads`, `elapsed_ns`, `speedup`, `kernel_pct`),
-  `configs[]` and `rising[]`. The only `speedup` here is one thread count against the lowest in the
-  sweep, never against the baseline.
-- `text` renders all of it: the scaling table, the counter table with its per-1k-instruction
-  column, the ratios, then the call graphs.
+- under `linuxperf` the sampled half comes back with it: `symbol`, `representative` (the fastest
+  thread count, which is the counted one), `scalability[]` (`threads`, `elapsed_ns`, `speedup`,
+  `kernel_pct`), `configs[]` and `rising[]`. The only `speedup` here is one thread count against the
+  lowest in the sweep, never against the baseline.
+- under `papi` there is no sweep for counts to hang on, so none of that exists -- no `configs`, no
+  `scalability`, no `rising`, no `representative`. The answer is `build_ok`, `kernel`, `language`,
+  `preset`, `datatype`, `symbol`, `reps`, `threads`, `counters` and `text`.
+- `text` renders what came back: the counter table with its per-1k-instruction column and the
+  ratios, preceded by the scaling table and followed by the call graphs when there were any.
 
-The counted run gets `OMP_NUM_THREADS` (and the MKL/OpenBLAS/BLIS equivalents) set to the
-representative count, plus `OMP_PLACES=cores` and `OMP_PROC_BIND=close`, echoed back in `pinned`.
+The counted run gets `OMP_NUM_THREADS` (and the MKL/OpenBLAS/BLIS equivalents) set to the counted
+thread count -- the sweep's representative under `linuxperf`, the number you named under `papi` --
+plus `OMP_PLACES=cores` and `OMP_PROC_BIND=close`, echoed back in `pinned`.
 `OMP_WAIT_POLICY` is never set, so the idle-thread inflation described below is yours to allow for.
 
 Failures refuse rather than invent:
 
-- **503** `{"error","cause"}` -- this host cannot sample or cannot count: `perf_missing`,
-  `no_perf_events`, `perf_event_paranoid`, `perf_record_failed`, `no_samples`, `not_linux`,
-  `papi_missing`, `papi_init_failed`, `not_native`. Both gates run BEFORE anything is compiled.
+- **503** `{"error","cause"}` -- this host cannot serve the tool you asked for: `perf_missing`,
+  `no_perf_events`, `perf_event_paranoid`, `perf_record_failed`, `no_samples`, `not_linux` from the
+  sampler, `papi_missing`, `papi_init_failed`, `not_native` from the counters. `tool: "papi"` is
+  subject to the second set only. Every gate runs BEFORE anything is compiled.
 - **500** `profile failed for <kernel>` -- the profiled run itself died, the tail of the child's
   stderr in the message. A dead run is an error, never an empty or half-filled profile.
-- **400** a body with no `kernel`, no `rank`, an unknown `counter_group`, or the input form this
-  judge refuses. **421** another judge's rank. **404** an unknown kernel.
+- **400** a body with no `kernel`, no `rank`, an unknown `tool` or `counter_group`, or the input
+  form this judge refuses. **421** another judge's rank. **404** an unknown kernel.
 
-What `/profile` will not do:
+What the judge's own counters will not do:
 
 - **No region counting.** Its count spans the judge's whole timed call, so it can say what the
   kernel did and never which PART of it did that.
 - **No event names.** You cannot ask for `PAPI_TLB_DM`, a native event, or a set of your own -- you
   ask a group and read which expression answered it.
 
-Your own bracket has its own route: `POST /instrument`. `/profile` is the judge measuring with the
-judge's instrument; this is the reverse -- you put the counters in the source, the judge builds it,
-runs it ONCE and hands back what it printed. Nothing is attached to that run: no `perf`, no counter
-set, no thread sweep, because an instrument you did not ask for lands inside the numbers you read.
+`tool: "none"` is the reverse of both. The two above are the judge measuring with the judge's
+instrument; here you put the counters in the source, the judge builds it, runs it ONCE and hands
+back what it printed. `none` is the judge attaching NOTHING -- no `perf`, no counter set, no thread
+sweep -- because an instrument you did not ask for lands inside the numbers you read.
 
 ```sh
-curl -s -X POST "$JUDGE_URL/instrument" -H 'Content-Type: application/json' \
-  -d '{"rank":<judge rank>,"kernel":"<kernel>","language":"<language>",
+curl -s -X POST "$JUDGE_URL/profile" -H 'Content-Type: application/json' \
+  -d '{"rank":<judge rank>,"kernel":"<kernel>","language":"<language>","tool":"none",
        "source":"<your instrumented source>","build":["-lpapi"],"threads":1}'
 ```
 
 ```python
-JudgeClient("<judge url>", rank=<judge rank>).instrument(
-    Submission(language="<language>", source="<your instrumented source>", build=["-lpapi"]), "<kernel>")
+JudgeClient("<judge url>", rank=<judge rank>).profile(
+    Submission(language="<language>", source="<your instrumented source>", build=["-lpapi"]), "<kernel>",
+    tool="none")
 ```
 
 | field | default | what it does |
 |---|---|---|
-| `rank` / `kernel` | REQUIRED | same contract as `/profile`: absent rank 400, another judge's 421, unknown kernel 404 |
+| `rank` / `kernel` | REQUIRED | same contract as above: absent rank 400, another judge's 421, unknown kernel 404 |
+| `tool` | by language | `"none"` must be named -- the default follows the language, and it is not this |
 | `source` / `library` / `build` | -- | same policy and the same single-token `-I` `-D` `-l` `-L` filter |
-| `preset` | the judge's | the input size, on the same public seed `/oracle` grades on |
+| `preset` | the judge's | the input size, on the same public seed `/submit` grades on |
 | `threads` | `1` | `OMP_NUM_THREADS` for the run; no sweep, no `OMP_PLACES`/`OMP_PROC_BIND` |
-| `language` | `c` | host languages only -- `cuda`/`hip` is 400 naming `/profile` |
+| `language` | `c` | host only -- a `cuda`/`hip` submission is 400 naming `nsys`/`rocprofv3`, for every host tool |
 
 The answer: `build_ok` (false plus `detail` on a build failure), `stdout`, `stderr`, `exit_code`,
 `elapsed_ns` (the harness's own timing of the rep, for scale), `reps` 1, `warmup` 0, `threads`,
@@ -287,7 +313,7 @@ The answer: `build_ok` (false plus `detail` on a build failure), `stdout`, `stde
 
 Four rules that decide whether you get your numbers back:
 
-- **ONE rep and no warmup**, pinned by the route. A bracket that prints per call prints once, not
+- **ONE rep and no warmup**, pinned by the tool. A bracket that prints per call prints once, not
   51 times -- do not add your own loop to compensate.
 - **Flush before you exit.** The measured child leaves via `os._exit`, so libc never flushes for
   you: `fflush(stdout)` at the end of `papi_finalize`, or your counts are formatted and discarded.
@@ -297,10 +323,10 @@ Four rules that decide whether you get your numbers back:
 - **64 KiB of `stdout` and `stderr` come back, from the END.** `truncated` says when the head was
   dropped -- print a summary per phase, not a line per iteration.
 
-So: bracket regions with the code above, run them through `/instrument`, and use `/profile` for
-whole-kernel counts the judge takes from outside. Submit the CLEAN source to `/oracle`: the bracket
-is work inside the timed region, so a scored run of instrumented code is a slower run of the wrong
-program.
+So: bracket regions with the code above and run them through `tool: "none"`; ask `linuxperf` with
+`counters` or `papi` for the whole-kernel counts the judge takes from outside. Submit the CLEAN
+source to `/submit`: the bracket is work inside the timed region, so a scored run of instrumented
+code is a slower run of the wrong program.
 
 ## Where to put the bracket
 

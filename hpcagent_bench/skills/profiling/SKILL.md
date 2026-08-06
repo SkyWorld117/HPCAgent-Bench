@@ -16,7 +16,7 @@ defend. Four questions, in order -- each one narrows what the next has to look a
 | question | tool | what you get |
 | --- | --- | --- |
 | where does the time go? | `perf record` + the folded call graph | a ranked call graph |
-| what is the machine doing there? | PAPI counters (`/profile` `counters:true`) | instructions, misses, flops |
+| what is the machine doing there? | PAPI counters (`/profile` `counters:true`, or `tool:"papi"` alone) | instructions, misses, flops |
 | do all the threads do the same amount of it? | the per-thread report (`papi.count_per_thread`) | CPI and cycles per thread |
 | why does *this loop* behave that way? | `objdump -d`, cachegrind, the compiler's vector report | the emitted code |
 
@@ -290,11 +290,12 @@ cross-level ratio, which is why one arrives with a `caveat` instead of pretendin
 `expressions` a ratio was built from before you compare its value with a published threshold,
 and never carry a number across machines without carrying its expression too.
 
-**Counters can be gated off entirely.** No PAPI, `kernel.perf_event_paranoid` above 2, a
-container without `CAP_PERFMON`, or a python submission with no native call to bracket: all of
-them are an explicit failure with a named `cause`, never an empty result. A profiler that
+**Counters can be gated off entirely.** No PAPI, or a python submission with no native call to
+bracket: both are an explicit failure with a named `cause`, never an empty result. A profiler that
 reports nothing looks exactly like a fast kernel, so treat a 503 as "not measured" and go fix
-the environment -- never as a measurement.
+the environment -- never as a measurement. `kernel.perf_event_paranoid` above 2 and a container
+without `CAP_PERFMON` gate the SAMPLER, not the counts: ask `/profile` for `tool: "papi"` and the
+counts come back with no `perf` attached, at one thread count instead of a sweep.
 
 **A multiplexed number is an estimate wearing a count's clothes.** The harness never multiplexes
 a group (one run per metric is exactly why), and the per-thread path needs two events, which fits
