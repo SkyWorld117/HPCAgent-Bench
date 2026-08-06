@@ -12,6 +12,8 @@ import json
 import pathlib
 import tempfile
 
+import pytest
+
 from _native_tu import build_run_c, have_gcc, have_gpp
 from _op_oracle import _bench_info
 from numpyto_c.emit import emit_c, emit_cpp
@@ -44,11 +46,11 @@ DRIVER = ("int main(void) {\n"
           "}\n")
 
 
-def emitted(cpp: bool) -> str:
+def emitted(cpp: bool, source: str = SOURCE) -> str:
     bench_info = _bench_info("k", ["a"], ["out"], {"a": "(N,)", "out": "(N,)"}, {"N": 8}, None)
     with tempfile.TemporaryDirectory() as td:
         d = pathlib.Path(td)
-        (d / "k_numpy.py").write_text(SOURCE)
+        (d / "k_numpy.py").write_text(source)
         (d / "bi.json").write_text(json.dumps(bench_info))
         kir = lower(parse_kernel(d / "k_numpy.py", d / "bi.json"))
     return emit_cpp(kir, fn_name="k") if cpp else emit_c(kir, fn_name="k")
@@ -74,6 +76,30 @@ def test_the_cpp_helper_frees_its_workspace_on_every_return():
     helper = helper_of(emitted(cpp=True))
     assert "malloc(" in helper, f"the helper stopped allocating, so this proves nothing:\n{helper}"
     assert helper.count("return ") == 3 and helper.count("free(") == 3, helper
+
+
+#: A helper returning a heap local BY VALUE. The array return is supposed to become an out-param;
+#: reaching a scalar return with a live buffer means the classification went wrong upstream.
+RETURNS_BUFFER = ("import numpy as np\n\n\n"
+                  "def build(v, N):\n"
+                  "    t = np.zeros((N,))\n"
+                  "    s = np.zeros((N,))\n"
+                  "    for k in range(N):\n"
+                  "        t[k] = v * (k + 1)\n"
+                  "    if v < 0.0:\n"
+                  "        return s\n"
+                  "    return t\n\n\n"
+                  "def k(a, out, N):\n"
+                  "    for i in range(N):\n"
+                  "        r = build(a[i], N)\n"
+                  "        out[i] = r[0]\n")
+
+
+def test_returning_a_heap_local_by_value_is_refused_by_name():
+    """Freeing on the way out must never hand back a dangling pointer. Emitting the free would; NOT
+    emitting it leaks; the emitted C does not even typecheck. So it is refused, naming the buffer."""
+    with pytest.raises(NotImplementedError, match="heap buffer"):
+        emitted(cpp=False, source=RETURNS_BUFFER)
 
 
 @have_gcc

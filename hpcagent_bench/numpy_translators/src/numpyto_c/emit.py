@@ -751,6 +751,13 @@ class _CBodyEmitter(BaseEmitter):
         if node.value is None or mode == "scalar":
             if node.value is None:
                 return "\n".join([*frees, f"{indent}return;"])
+            if isinstance(node.value, ast.Name) and node.value.id in live:
+                # Returning a heap local BY VALUE from a scalar-typed function: the C is already
+                # ill-typed (a pointer where a double is declared), and freeing it here would hand
+                # back a dangling one. An array return is supposed to reach _rewrite_returns_to_outparam
+                # instead, so this is a misclassified helper -- say which, rather than emit either.
+                raise NotImplementedError(f"helper returns heap buffer {node.value.id!r} from a scalar "
+                                          "return; an array return must go through the out-param path")
             val = self.emit_expr(node.value)
             if not live:
                 return f"{indent}return {val};"
