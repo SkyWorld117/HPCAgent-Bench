@@ -264,6 +264,10 @@ def _submission_from_body(body: dict, language: str, cfg: RunConfig) -> Submissi
     Enforces ``input_mode``: ``source`` / ``py-binding`` reject a prebuilt ``.so``,
     ``library`` rejects source, and ``any`` allows both. Raises ``ValueError``
     (-> 400) on a policy or shape violation.
+
+    A ``library`` is resolved INSIDE the shared mount here, at the trust boundary: the path arrived
+    over HTTP, it means nothing in this container unless it names the one filesystem both see, and
+    the judge ends up ``dlopen``ing it.
     """
     has_source = bool(body.get("source"))
     has_library = bool(body.get("library"))
@@ -271,9 +275,10 @@ def _submission_from_body(body: dict, language: str, cfg: RunConfig) -> Submissi
         raise ValueError("this judge requires source code ('source'), not a prebuilt 'library'")
     if cfg.input_mode is InputMode.LIBRARY and has_source:
         raise ValueError("this judge requires a prebuilt 'library' (.so), not 'source'")
+    library = body.get("library")
     return Submission(language=language,
                       source=body.get("source"),
-                      library=body.get("library"),
+                      library=str(sandbox.resolve_shared(library)) if library else None,
                       build=list(body.get("build", [])),
                       workspace_bytes=body.get("workspace_bytes"))
 

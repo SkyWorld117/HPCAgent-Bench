@@ -207,3 +207,19 @@ def test_oracle_rejects_wrong_input_mode():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_a_library_outside_the_shared_folder_is_refused_before_anything_runs(tmp_path, monkeypatch):
+    """The judge dlopen()s the .so a submission names, so an absolute path outside the one mount
+    both containers see is an arbitrary object of the agent's choosing -- refused at the boundary,
+    with the request faulted rather than the build."""
+    monkeypatch.setenv("HPCAGENT_BENCH_SHARED_DIR", str(tmp_path))
+    srv, port = _server(ServiceConfig(input_mode="any"))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, "/submit", {"kernel": "gemm", "language": "c", "rank": RANK, "library": "/usr/lib/libc.so.6"})
+        assert ei.value.code == 400
+        assert "shared folder" in json.loads(ei.value.read())["error"]
+    finally:
+        srv.shutdown()
+        srv.server_close()

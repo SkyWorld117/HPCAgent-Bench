@@ -48,13 +48,17 @@ def shared_dir() -> str:
 
 
 def resolve_shared(path: str) -> pathlib.Path:
-    """Resolve a submission-named artifact INSIDE the shared folder, or raise ``ValueError``.
+    """Resolve an artifact named by a REMOTE submission inside the shared folder, or ``ValueError``.
 
     The two containers agree on one filesystem and one only: an agent that builds its own ``.so``
     leaves it in the shared mount, and its path in the AGENT's container means nothing in the
     judge's. So a relative path is taken under the shared folder and an absolute one must already
     be inside it -- anything else is refused rather than read, because the judge ``dlopen``s what
     this returns and a path outside the mount is an arbitrary object of the agent's choosing.
+
+    The HTTP boundary calls this, not :meth:`Sandbox.build`: an in-process caller (the optimizers,
+    the framework runners) built its own ``.so`` in this very process and its path is not a claim
+    anyone needs to check.
     """
     root = pathlib.Path(shared_dir()).resolve()
     named = pathlib.Path(path)
@@ -266,12 +270,9 @@ class Sandbox:
             return BuildResult(True, py, "")
 
         if submission.source is None:
-            try:
-                src_lib = resolve_shared(submission.library)
-            except ValueError as exc:
-                return BuildResult(False, None, str(exc))
+            src_lib = pathlib.Path(submission.library)
             if not src_lib.exists():
-                return BuildResult(False, None, f"library not found in the shared folder: {src_lib}")
+                return BuildResult(False, None, f"library not found: {src_lib}")
             shutil.copy2(src_lib, lib)
             return BuildResult(True, lib, "")
 

@@ -110,9 +110,11 @@ def test_a_full_memory_filesystem_is_declined_rather_than_filled():
 
 
 def test_a_prebuilt_library_is_read_from_the_shared_folder_only(tmp_path, monkeypatch):
-    """The judge ``dlopen``s what a submission's ``library`` names, so the path is a code-execution
-    channel: the two containers share exactly one directory, and an object outside it is either a
-    path that means nothing here or one the agent picked off the judge's own filesystem."""
+    """The judge ``dlopen``s what a REMOTE submission's ``library`` names, so that path is a
+    code-execution channel: the two containers share exactly one directory, and an object outside
+    it is either a path that means nothing here or one the agent picked off the judge's own
+    filesystem. Checked at the HTTP boundary -- an in-process caller built its .so in this very
+    process, and re-checking a path this program just produced would only break it."""
     from hpcagent_bench.harness.sandbox import resolve_shared
 
     shared = tmp_path / "shared"
