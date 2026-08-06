@@ -65,12 +65,23 @@ class SplitTupleAssign(ast.NodeTransformer):
             if reads & set(names):
                 return self.through_temporaries(node, names, value.elts)
             return self.located(node, [(nm, elt) for nm, elt in zip(names, value.elts)])
-        if isinstance(value, ast.Attribute) and value.attr == "shape" and isinstance(value.value, ast.Name):
+        if isinstance(value, ast.Attribute) and value.attr == "shape":
             # Re-reading ``.shape`` per name is free: it is resolved to declared extents below, and
             # never survives as a runtime read.
-            return self.located(
-                node, [(nm, ast.Subscript(value=copy.deepcopy(value), slice=ast.Constant(value=index), ctx=ast.Load()))
-                       for index, nm in enumerate(names)])
+            base, prelude = value.value, []
+            if not isinstance(base, ast.Name):
+                # ``n, c, h, w = np.maximum(t, 0.0).shape``: name the operand first, or each of the
+                # four reads would carry its own copy of the call. The temporary is elementwise, so
+                # the shape resolver can follow it to the operand's own extents.
+                temporary = f"__hpcagent_bench_shaped{self.temporaries}"
+                self.temporaries += 1
+                prelude = [(temporary, base)]
+                base = ast.Name(id=temporary, ctx=ast.Load())
+            reads = [(nm,
+                      ast.Subscript(value=ast.Attribute(value=copy.deepcopy(base), attr="shape", ctx=ast.Load()),
+                                    slice=ast.Constant(value=index),
+                                    ctx=ast.Load())) for index, nm in enumerate(names)]
+            return self.located(node, prelude + reads)
         return node
 
     def through_temporaries(self, node: ast.Assign, names: List[str], sources: List[ast.expr]):
@@ -642,7 +653,7 @@ class ResolveShapeReads(ast.NodeTransformer):
         return left if left == right else None
 
 
-_ALLOC_FUNCS = frozenset({"zeros", "empty", "ones"})
+_ALLOC_FUNCS = frozenset({"zeros", "empty", "ones", "full"})
 
 
 def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
@@ -665,7 +676,7 @@ def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
 #: ``batch_size_oh_times_ow`` -- and then wants a symbol of that same name, which is the
 #: "Cannot create symbol X, the name is used by a data descriptor" refusal. A shape that is one
 #: plain name gives it nothing to mint.
-SHAPE_ARG_INDEX = {"zeros": 0, "empty": 0, "ones": 0, "reshape": 1}
+SHAPE_ARG_INDEX = {"zeros": 0, "empty": 0, "ones": 0, "full": 0, "reshape": 1}
 
 
 def reshape_argument(node: ast.AST):
