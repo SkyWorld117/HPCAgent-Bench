@@ -848,11 +848,13 @@ class _CBodyEmitter(BaseEmitter):
                         if is_reassign or fill is None:
                             return ""
                         return _zero_fill_stmt(t, size, c_type, fill, indent)
-                    realloc = prev is not None
                     sizes[t] = size
-                    lines = []
-                    if realloc:
-                        lines.append(f"{indent}free({t});")
+                    # Free before EVERY deferred allocation, not only where a second marker made the
+                    # reallocation visible in the emitted text. A marker whose one occurrence sits
+                    # inside a loop is emitted once and runs per iteration, so every iteration but
+                    # the last overwrote a pointer nothing had freed. The declaration
+                    # NULL-initialises the name and free(NULL) is a no-op, so the first pass is safe.
+                    lines = [f"{indent}free({t});"]
                     # Pluto: cast to the multidimensional pointer-to-array type matching the declaration; else flat T*.
                     cast = (f"({c_type} (*){self.md_trailing[t]})" if t in self.md_trailing else f"({c_type} *)")
                     lines.append(f"{indent}{t} = {cast}malloc({_byte_count(size, c_type)});")

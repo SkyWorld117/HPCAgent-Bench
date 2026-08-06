@@ -102,6 +102,44 @@ def test_returning_a_heap_local_by_value_is_refused_by_name():
         emitted(cpp=False, source=RETURNS_BUFFER)
 
 
+#: A local whose EXTENT is computed in the loop body, so its allocation is deferred to a marker
+#: inside that loop -- emitted once, executed once per iteration.
+IN_LOOP_ALLOC = ("import numpy as np\n\n\n"
+                 "def k(a, out, N):\n"
+                 "    for i in range(N):\n"
+                 "        m = i + 1\n"
+                 "        t = np.zeros((m,))\n"
+                 "        for j in range(m):\n"
+                 "            t[j] = a[j] * 2.0\n"
+                 "        out[i] = t[0]\n")
+
+IN_LOOP_DRIVER = ("int main(void) {\n"
+                  "    enum { N = 8 };\n"
+                  "    double a[N], out[N];\n"
+                  "    for (int i = 0; i < N; ++i) a[i] = (double)i + 1.0;\n"
+                  "    for (int rep = 0; rep < 16; ++rep) k(a, out, N);\n"
+                  "    return out[0] == out[0] ? 0 : 1;\n"
+                  "}\n")
+
+
+def test_a_deferred_allocation_inside_a_loop_frees_the_previous_iteration():
+    """The reallocating free was only emitted where a SECOND marker made it visible in the text. A
+    marker whose one occurrence is inside a loop runs per iteration, so every iteration but the last
+    overwrote a pointer nothing freed -- measured on dbcsr, ~160k live buffers at preset XL."""
+    text = emitted(cpp=False, source=IN_LOOP_ALLOC)
+    alloc = text.index("t = (double *)malloc(")
+    before = text[:alloc]
+    assert "free(t);" in before[before.rindex("for "):], (
+        "the deferred allocation inside the loop does not free the previous iteration's buffer:\n" + text)
+
+
+@have_gcc
+def test_a_deferred_loop_allocation_runs_leak_free_under_address_sanitizer():
+    run = build_run_c(emitted(cpp=False, source=IN_LOOP_ALLOC), IN_LOOP_DRIVER, sanitize=True)
+    assert run.returncode == 0, f"{run.stdout}\n{run.stderr}"
+    assert "detected memory leaks" not in run.stderr, run.stderr
+
+
 @have_gcc
 def test_generated_c_runs_leak_free_under_address_sanitizer():
     run = build_run_c(emitted(cpp=False), DRIVER, sanitize=True)
