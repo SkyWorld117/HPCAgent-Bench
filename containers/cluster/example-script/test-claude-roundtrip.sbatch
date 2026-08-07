@@ -280,6 +280,10 @@ cat >"${CLIENT_SCRIPT}" <<'CLIENT'
 set -Eeuo pipefail
 
 # Runs inside the agent EDF on node 1.
+# The CXI hook injects host (SLES) libcurl into the container's lib resolution; the container
+# curl then fails on libldap_r-2.4. Pin the container binary with a clean lib environment.
+curl() { env LD_LIBRARY_PATH= /usr/bin/curl "$@"; }
+
 VLLM_URL="http://${NODE0}:${API_PORT}/v1"
 AGENT_CWD="${RUN_DIR}/agent-cwd"
 CONFIG="${RUN_DIR}/litellm.yaml"

@@ -154,7 +154,9 @@ run_judge_node() {
     # Come up only once grading works. The router's own /health cannot answer for the upstream, and
     # agent_driver.py starts submitting the moment /health is reachable -- so a router that binds
     # first turns the upstream's startup into a burst of 502s charged to the agents' turn budget.
-    until curl --fail --silent --output /dev/null "http://127.0.0.1:${JUDGE_UPSTREAM_PORT}/health"; do
+    # Clean lib env: the CXI hook injects host (SLES) libcurl, which breaks the container curl.
+    until env LD_LIBRARY_PATH= /usr/bin/curl --fail --silent --output /dev/null \
+        "http://127.0.0.1:${JUDGE_UPSTREAM_PORT}/health"; do
         if ! kill -0 "${upstream_pid}" 2>/dev/null; then
             printf 'judge upstream died during startup; see %s/upstream-%s.log\n' "${log_dir}" "${judge_rank}" >&2
             return 1
@@ -220,12 +222,19 @@ EOF
     }
     trap cleanup_agent EXIT INT TERM
 
-    litellm --config "${config}" --host 127.0.0.1 --port "${LITELLM_PORT}" \
-        >"${node_dir}/litellm.log" 2>&1 &
-    proxy_pid="$!"
-
-    export ANTHROPIC_BASE_URL="http://127.0.0.1:${LITELLM_PORT}"
-    export ANTHROPIC_AUTH_TOKEN="${LITELLM_MASTER_KEY:-EMPTY}"
+    # direct (default): claude speaks vLLM's native /v1/messages, no proxy -- upstream litellm
+    # proxy wheels are broken across releases. The driver stripes ANTHROPIC_BASE_URL per agent.
+    if [[ "${AGENT_LLM_MODE:-direct}" == "litellm" ]]; then
+        litellm --config "${config}" --host 127.0.0.1 --port "${LITELLM_PORT}" \
+            >"${node_dir}/litellm.log" 2>&1 &
+        proxy_pid="$!"
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:${LITELLM_PORT}"
+        export ANTHROPIC_AUTH_TOKEN="${LITELLM_MASTER_KEY:-EMPTY}"
+    else
+        # vLLM only answers its served name; the litellm alias would 404.
+        export CLAUDE_MODEL="${VLLM_SERVED_MODEL:-optarena-vllm}"
+        export ANTHROPIC_AUTH_TOKEN="${VLLM_API_KEY:-EMPTY}"
+    fi
     export ANTHROPIC_API_KEY="${ANTHROPIC_AUTH_TOKEN}"
     export OPTARENA_AGENT_API_URL="${JUDGE_BASE_URL}"
     export AGENT_NODE_RANK="${agent_rank}"

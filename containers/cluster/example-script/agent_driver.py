@@ -195,6 +195,14 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     environment["OPTARENA_AGENT_API_URL"] = judge_url
     environment["JUDGE_RANK"] = str(judge_rank)
 
+    # Direct mode (default): claude speaks vLLM's native /v1/messages; agents stripe over the
+    # replicas the same way problems stripe over judges. ANTHROPIC_BASE_URL must be the server
+    # root -- the client appends /v1/messages itself.
+    if os.environ.get("AGENT_LLM_MODE", "direct") != "litellm":
+        endpoints = vllm_urls()
+        endpoint = endpoints[problem_index % len(endpoints)]
+        environment["ANTHROPIC_BASE_URL"] = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+
     # Hard wall-clock cap per agent process. The SOFT half is the deadline sentence make_problems.py
     # --note puts in the task text; this is the backstop so one wedged agent cannot hold the Slurm
     # step to its time limit and take every later problem in the queue down with it. 0 = no cap.
