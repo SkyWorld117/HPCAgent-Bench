@@ -4,8 +4,8 @@ This directory is a configurable Slurm example for running an HPCAgent-Bench
 batch on Beverin. One allocation is divided into three disjoint roles:
 
 1. inference nodes run one distributed vLLM service in the inference CE image;
-2. agent nodes run LiteLLM and concurrent Claude Code workers in the AMD CE
-   image; and
+2. agent nodes run concurrent Claude Code workers in the AMD CE image, talking
+   to vLLM's native Anthropic endpoint directly by default; and
 3. judge nodes run the judge HTTP service in the AMD CE image.
 
 The example contains the orchestration needed to start and stop these services.
@@ -22,6 +22,7 @@ campaign.
 | `.env.example` | Shell-compatible configuration template for role sizes, CE environments, model, ports, timeouts, and workload. |
 | `beverin.sbatch` | Slurm entry point. It loads the configuration, validates the allocation size, and starts the orchestrator. |
 | `run_cluster.sh` | Splits the allocation, starts the three role-specific `srun` steps, and cleans up long-running services. |
+| `materialize_shared.sh` | Copies read-only per-kernel reference material and the prompt template into the shared folder, once, before any role starts. |
 | `agent_driver.py` | Waits for dependencies, loads and shards problems, and starts concurrent agents on each agent node. |
 | `judge_service.py` | Serves health and web search locally; forwards every grading route to the benchmark judge. |
 
@@ -36,15 +37,36 @@ first replica.
 
 ```mermaid
 flowchart LR
-    A["Agent workers"] --> L["Local LiteLLM"]
-    L --> V["Distributed vLLM"]
+    A["Agent workers (claude)"] -->|"direct (default)"| V["Distributed vLLM"]
+    A -.->|"AGENT_LLM_MODE=litellm"| L["Local LiteLLM"]
+    L -.-> V
     A --> J["Judge master"]
     J --> V
 ```
 
-Each agent node has its own LiteLLM gateway on loopback. Agent model requests
-flow through that gateway to the vLLM master. Agent MCP calls go to the judge
-master, and judge web-search synthesis calls vLLM directly.
+`AGENT_LLM_MODE` (default `direct`) picks how Claude Code reaches vLLM. In `direct` mode claude
+speaks vLLM's native Anthropic `/v1/messages` endpoint straight, no proxy: the driver stripes each
+agent's `ANTHROPIC_BASE_URL` over `VLLM_REPLICA_URLS` by the problem's global index, and forces
+`CLAUDE_MODEL` to `VLLM_SERVED_MODEL` because vLLM only answers its own served name. `litellm` mode
+runs a LiteLLM gateway on loopback on every agent node instead and routes Claude Code through it; it
+is a fallback, not the default, because the upstream litellm proxy wheels are currently broken. Agent
+MCP calls always go to the judge master, and judge web-search synthesis always calls vLLM directly.
+
+## Shared folder
+
+`run_cluster.sh` creates `${RUN_DIR}/shared` on the host (`SHARED_HOST_DIR`) and bind-mounts it at
+`/shared` (`SHARED_MOUNT`) in every role's container -- CE via a per-run EDF copy with the mount
+line inserted, apptainer/podman/docker via an explicit bind/volume. `materialize_shared.sh` fills it
+once, before any role starts:
+
+- `tasks/<kernel>/` -- read-only reference material for that kernel, copied from
+  `hpcagent_bench/benchmarks`.
+- `prompt.md` -- the prompt template copied from `containers/agent/prompt.md`; each agent renders its
+  own copy by substituting `{{TASK}}`.
+
+`agent_driver.py` then makes one write folder per agent under `/shared`, keyed by the problem's
+GLOBAL index rather than the worker slot: `agent-<index>/`. That index is stable across nodes, so
+agents on the same kernel never collide on one write folder the way a per-node worker slot would.
 
 ## Prerequisites
 
@@ -66,9 +88,10 @@ Before submitting the example, verify that:
   because Slurm opens its output files before the job script runs.
 
 The CE images must provide the commands used by their roles: `vllm` in the
-inference image, and `python3`, `uvicorn`, `litellm`, and `claude` in the AMD
-image. The AMD image also needs the HPCAgent-Bench agent and judge files copied
-by its container build.
+inference image, and `python3`, `uvicorn`, and `claude` in the AMD image;
+`litellm` too if any run uses `AGENT_LLM_MODE=litellm`, but the default
+`direct` mode does not need it. The AMD image also needs the HPCAgent-Bench
+agent and judge files copied by its container build.
 
 ## Configure the run
 
@@ -147,10 +170,11 @@ lists or edit the command array for more complex values.
 | --- | --- | --- |
 | `AGENTS_PER_NODE` | `4` | Maximum number of concurrent problem workers on each agent node. |
 | `CLAUDE_BIN` | `claude` | Claude Code executable in the AMD image. |
-| `CLAUDE_MODEL` | `optarena-llm` | Model name given to Claude Code and mapped by LiteLLM. |
+| `AGENT_LLM_MODE` | `direct` | `direct`: claude talks to vLLM directly, striped over `VLLM_REPLICA_URLS` by global problem index. `litellm`: route through the per-node LiteLLM gateway instead. |
+| `CLAUDE_MODEL` | `optarena-llm` | Model given to Claude Code. `direct` mode (default) overrides this to `VLLM_SERVED_MODEL`; only `litellm` mode uses the configured value, matched against LiteLLM's mapping. |
 | `CLAUDE_MAX_TURNS` | `40` | Maximum turns per problem. |
-| `LITELLM_PORT` | `4000` | Loopback LiteLLM port on every agent node. |
-| `LITELLM_MASTER_KEY` | `EMPTY` | Non-secret placeholder token supplied to Claude Code for the local LiteLLM gateway. |
+| `LITELLM_PORT` | `4000` | Loopback LiteLLM port on every agent node. Only used under `AGENT_LLM_MODE=litellm`. |
+| `LITELLM_MASTER_KEY` | `EMPTY` | Non-secret placeholder token supplied to Claude Code for the local LiteLLM gateway. Only used under `AGENT_LLM_MODE=litellm`. |
 
 ## Submit on Beverin
 
@@ -262,8 +286,11 @@ inference + 1 agent + 4 judge, `sbatch --nodes=7 --time=08:00:00`), sized for
 this track's 4-arm ablation. The single agent node runs `AGENTS_PER_NODE=40`
 against the 242-problem queue; the 4 judge nodes grade in parallel; the 2
 inference nodes each serve `openai/gpt-oss-120b` as their own tensor-parallel
-replica, with `INFERENCE_MODE=replicas` fanning agent requests across both
-through LiteLLM round-robin instead of one pipeline-parallel endpoint.
+replica, with `INFERENCE_MODE=replicas` fanning agent requests across both.
+None of these four files set `AGENT_LLM_MODE`, so the default `direct` mode
+applies: the driver stripes each agent's request over `VLLM_REPLICA_URLS` by
+the problem's global index, not a LiteLLM round-robin, instead of one
+pipeline-parallel endpoint.
 
 The one-script path does all of it — problem generation, `.env` install, allocation
 sizing from the variant file, and submission (everything after the variant name goes
@@ -353,11 +380,15 @@ with no assigned problems exits successfully.
 ## Startup and shutdown lifecycle
 
 1. `beverin.sbatch` sources the environment and checks the requested node count.
-2. `run_cluster.sh` resolves the allocated hostnames and assigns role groups.
+2. `run_cluster.sh` creates `RUN_DIR` and the shared folder, then
+   `materialize_shared.sh` fills it (see [Shared folder](#shared-folder)), then
+   it resolves the allocated hostnames and assigns role groups.
 3. Exclusive `srun` steps start vLLM, judge replicas, and agent nodes.
-4. Each agent node starts a local LiteLLM gateway.
-5. The agent driver polls vLLM, the judge, and LiteLLM. The default vLLM wait is
-   15 minutes, but work starts immediately when all dependencies are ready.
+4. Each agent node starts a local LiteLLM gateway, only under
+   `AGENT_LLM_MODE=litellm`; the default `direct` mode starts no gateway.
+5. The agent driver polls vLLM and the judge, plus LiteLLM if it was started.
+   The default vLLM wait is 15 minutes, but work starts immediately when all
+   dependencies are ready.
 6. Problems are loaded, sharded, and processed concurrently.
 7. When the agent step finishes, the orchestrator returns its status and its
    exit trap terminates the vLLM and judge steps.
@@ -371,7 +402,7 @@ scancel <job-id>
 ```
 
 Slurm and the script traps clean up the remaining steps and each agent node's
-LiteLLM subprocess.
+LiteLLM subprocess, if `AGENT_LLM_MODE=litellm` started one.
 
 ## Service endpoints
 
@@ -441,11 +472,14 @@ Runtime artifacts are stored below `RUN_ROOT/<job-id>`:
 | Path | Contents |
 | --- | --- |
 | `vllm/nccl.<host>.<pid>.log` | Per-process NCCL diagnostics. |
-| `agents/node-<rank>/litellm.yaml` | Generated gateway configuration. |
-| `agents/node-<rank>/litellm.log` | LiteLLM output. |
+| `agents/node-<rank>/litellm.yaml` | Generated gateway configuration; always written, only read under `AGENT_LLM_MODE=litellm`. |
+| `agents/node-<rank>/litellm.log` | LiteLLM output; exists only under `AGENT_LLM_MODE=litellm`, since that is the only mode that starts the gateway. |
 | `agents/node-<rank>/problem-<id>-worker-<n>/prompt.txt` | Rendered agent prompt. |
 | `agents/node-<rank>/problem-<id>-worker-<n>/mcp.json` | Generated MCP configuration. |
 | `agents/node-<rank>/problem-<id>-worker-<n>/claude.log` | Agent output and errors. |
+| `shared/tasks/<kernel>/` | Read-only reference material, copied once by `materialize_shared.sh`; see [Shared folder](#shared-folder). |
+| `shared/prompt.md` | Prompt template copy, `containers/agent/prompt.md`. |
+| `shared/agent-<global-problem-index>/` | Per-agent write folder for submissions, keyed by global problem index. |
 
 Judge and vLLM standard output is captured by the Slurm output/error files.
 Use a shared `RUN_ROOT`; node-local storage would make the aggregate results
@@ -476,11 +510,14 @@ Inspect the Slurm error file and `vllm/nccl.*.log`. Verify model access,
 to `VLLM_MASTER_HOST:VLLM_MASTER_PORT`. Large models may also need a longer
 `AGENT_READY_TIMEOUT_SECONDS` or distributed timeout.
 
-### LiteLLM or Claude Code does not start
+### Claude Code does not start
 
-Inspect the node's `litellm.log` and problem `claude.log`. Confirm that the AMD
-image contains both executables and that `CLAUDE_MODEL` matches the LiteLLM
-mapping generated by the script.
+Inspect the problem's `claude.log`. Confirm the AMD image contains `claude`.
+In the default `direct` mode, also confirm the node reached vLLM directly --
+there is no LiteLLM gateway to inspect. Under `AGENT_LLM_MODE=litellm`,
+inspect the node's `litellm.log` too, confirm the image contains `litellm`,
+and confirm `CLAUDE_MODEL` matches the LiteLLM mapping generated by the
+script.
 
 ### Web search returns 502
 

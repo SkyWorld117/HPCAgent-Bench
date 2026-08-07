@@ -46,10 +46,22 @@ def load_problem_file(path: pathlib.Path) -> list[dict[str, Any]]:
     return [normalize_problem(item, index) for index, item in enumerate(parsed)]
 
 
+def resolve_problems_path(problem_file: str) -> pathlib.Path:
+    """A bare PROBLEMS_FILE name is written next to this script by run_campaign.sh, but the agent
+    node's CWD is not SCRIPT_DIR -- run_cluster.sh only resolves it locally for materialize_shared.sh
+    and never re-exports the resolved value, so the raw env var still reaches this process. Fall back
+    to the script's own directory only for a bare name that does not exist as given; a path with a
+    directory component or an absolute path is used exactly as given, error and all."""
+    path = pathlib.Path(problem_file)
+    if not path.exists() and path.parent == pathlib.Path("."):
+        return pathlib.Path(__file__).resolve().parent / problem_file
+    return path
+
+
 def load_problems() -> list[dict[str, Any]]:
     problem_file = os.environ.get("PROBLEMS_FILE", "").strip()
     if problem_file:
-        return load_problem_file(pathlib.Path(problem_file))
+        return load_problem_file(resolve_problems_path(problem_file))
 
     kernels = [value.strip() for value in os.environ.get("KERNELS", "").split(",") if value.strip()]
     if kernels:
