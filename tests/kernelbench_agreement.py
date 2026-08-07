@@ -242,12 +242,17 @@ def resolved_shapes(spec, preset: Dict[str, Any]) -> Dict[str, List[int]]:
     return out
 
 
-def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -> Agreement:
+def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S", train: bool = False) -> Agreement:
     """Build the upstream model at the manifest's sizes, run both, and compare.
 
     Raises nothing for a numerical disagreement -- that is a RESULT. It raises only when the port
     cannot be lined up with its model at all, which is a different finding and must not be
     reported as agreement or as disagreement.
+
+    ``train`` exists so the mode is testable rather than assumed. EVAL is what the ports were
+    written against -- every one of them normalises by ``running_mean``/``running_var``, which is
+    the eval-mode branch -- so it is the default, and the train-mode run is what proves that choice
+    is load-bearing instead of incidental.
     """
     import torch
 
@@ -268,7 +273,7 @@ def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -
         kwargs.update(overrides)
         del model
         model = module.Model(**kwargs)
-    model.eval()
+    model.train(train)
 
     drift = audit_hyperparameters(model, scalars)
     if drift:
@@ -332,6 +337,17 @@ def compare(spec, kernel: str, upstream: pathlib.Path, preset_name: str = "S") -
     return result
 
 
+def upstream_root() -> pathlib.Path:
+    """The submodule tree the upstream models live in -- named in the skip reason when it is absent.
+
+    In-repo, not a sibling checkout: KernelBench is a git submodule, so the collector ignores its
+    ``sources_root`` for this one root and there is no path to configure.
+    """
+    from collect_reference_sources import Roots
+
+    return Roots.default(REPO.parent).kernelbench
+
+
 def upstream_for(kernel: str) -> Optional[pathlib.Path]:
     """The one upstream KernelBench model this port was translated from, or None.
 
@@ -339,9 +355,9 @@ def upstream_for(kernel: str) -> Optional[pathlib.Path]:
     (``2_Standard_matrix_multiplication_`` -> ``standard_matrix_multiplication``), and a second
     implementation of that matching would drift from the one the provenance files were built with.
     """
-    from collect_reference_sources import Roots, kernelbench_port_key, kernelbench_sources
+    from collect_reference_sources import kernelbench_port_key, kernelbench_sources
 
     key, variant = kernelbench_port_key(kernel)
-    group = kernelbench_sources(Roots.default(REPO.parent).kernelbench).get(key, [])
+    group = kernelbench_sources(upstream_root()).get(key, [])
     index = 1 if variant else 0
     return group[index] if len(group) > index else None

@@ -47,6 +47,45 @@ dc_complex_float = None
 OUTPUT_ARGS: Dict[str, int] = {"-o": 2, "-MT": 2, "-MF": 2, "-MD": 1, "-MMD": 1}
 
 
+def bind_free_symbols(sdfg: Any, symbol_recipes: Sequence[Tuple[str, str]], input_args: Sequence[str],
+                      resolved: Dict[str, Any], bound: Dict[str, Any]) -> Dict[str, int]:
+    """Bind the SDFG free symbols ``bound`` does not already supply; ``{symbol: value}``.
+
+    A compiled SDFG needs EVERY free symbol as an explicit keyword or the call dies on "Missing
+    program argument", so the two ways a symbol can be recovered both live here:
+
+    * an array's symbolic shape matched against its concrete shape (bare dimension names only);
+    * a MINTED size symbol (``m = LEN_1D // 2``), which is carried by no array shape and named by
+      no manifest -- the emitter records its closed form in ``__hpcagent_bench_symbol_defs__`` and
+      the caller is the only place it can be evaluated. Recipes come in dependency order.
+
+    Free function rather than a method because the numeric-agreement probe
+    (``tests/dace_numeric_probe.py``) binds the same symbols for a bare ``CompiledSDFG`` and a
+    second copy of the recipe evaluator would drift from this one.
+    """
+    missing = {str(s) for s in sdfg.free_symbols} - set(bound)
+    if not missing:
+        return {}
+    extra: Dict[str, int] = {}
+    for name in input_args:
+        arr = resolved.get(name)
+        desc = sdfg.arrays.get(name)
+        if not isinstance(arr, np.ndarray) or desc is None:
+            continue
+        for sym, dim in zip(desc.shape, arr.shape):
+            s = str(sym)
+            if s in missing and s not in extra:
+                extra[s] = int(dim)
+    if symbol_recipes:
+        values = {n: int(v) for n, v in bound.items() if isinstance(v, (int, np.integer))}
+        values.update(extra)
+        for name, expr in symbol_recipes:
+            values[name] = int(eval(expr, {"__builtins__": {}}, {"min": min, "max": max, **values}))  # noqa: S307
+            if name in missing:
+                extra[name] = values[name]
+    return extra
+
+
 def strip_output_args(argv: Sequence[str]) -> List[str]:
     """``argv`` without its output/depfile arguments (see :data:`OUTPUT_ARGS`)."""
     kept: List[str] = []
@@ -813,36 +852,12 @@ class DaceFramework(Framework):
 
     def shape_symbols(self, impl: Callable, bench: Benchmark, resolved: Dict[str, Any],
                       bound: Dict[str, Any]) -> Dict[str, int]:
-        """Bind free SDFG symbols the manifest didn't supply by matching each array's symbolic shape to its
-        concrete shape (a compiled SDFG needs every free symbol as an explicit keyword; bare dims only)."""
+        """Bind free SDFG symbols the manifest didn't supply -- see :func:`bind_free_symbols`, which
+        the numeric-agreement probe shares so there is one recipe evaluator, not two."""
         if not isinstance(impl, TimedCompiledSDFG):
             return {}
-        sdfg = impl.sdfg
-        missing = {str(s) for s in sdfg.free_symbols} - set(bound)
-        if not missing:
-            return {}
-        extra: Dict[str, int] = {}
-        for name in bench.info["input_args"]:
-            arr = resolved.get(name)
-            desc = sdfg.arrays.get(name)
-            if not isinstance(arr, np.ndarray) or desc is None:
-                continue
-            for sym, dim in zip(desc.shape, arr.shape):
-                s = str(sym)
-                if s in missing and s not in extra:
-                    extra[s] = int(dim)
-        # A minted size symbol (``m = LEN_1D // 2``) is carried by no array shape and named by no
-        # manifest, so matching shapes can never bind it -- the emitter records its closed form and
-        # the caller is the only place it can be evaluated. Recorded in dependency order.
         recipes = vars(self.kernel_module(bench)).get("__hpcagent_bench_symbol_defs__", ())
-        if recipes:
-            values = {n: int(v) for n, v in bound.items() if isinstance(v, (int, np.integer))}
-            values.update(extra)
-            for name, expr in recipes:
-                values[name] = int(eval(expr, {"__builtins__": {}}, {"min": min, "max": max, **values}))
-                if name in missing:
-                    extra[name] = values[name]
-        return extra
+        return bind_free_symbols(impl.sdfg, recipes, bench.info["input_args"], resolved, bound)
 
     def set_datatype(self, datatype):
         super().set_datatype(datatype)
