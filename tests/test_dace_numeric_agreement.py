@@ -6,8 +6,9 @@
 not correctness: a program can parse, lower, compile and still return a different answer, and every
 one of those states grades submissions against a DaCe baseline nobody checked. Measured over the
 331 gated kernels on the day this landed, 19 of them parse clean and are still not usable --
-``channel_flow`` and ``cp2k_grid_integrate`` return wrong numbers, ``fft_1d`` emits C++ that does
-not compile, ``nbody`` cannot be called at all. The parse gate is green for every one of them.
+``channel_flow`` and ``cp2k_grid_integrate`` returned wrong numbers (both fixed 2026-08-08, in the
+generator), ``fft_1d`` emits C++ that does not compile, ``nbody`` cannot be called at all. The
+parse gate is green for every one of them.
 
 So the two gates ask different questions and neither subsumes the other. This one lowers with
 ``to_sdfg(simplify=True)`` -- the graph a run actually executes, library nodes expanded -- and
@@ -50,6 +51,8 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: by hand-editing a ``*_dace.py``, which is regenerated from the numpy reference on the next miss.
 #:
 #: Seeded from a full sweep of the 331 gated kernels: 311 agreed, 19 did not, 1 has no case.
+#: Remeasured 2026-08-08: the four ``mismatch`` entries all agree now and are gone; ``stockham_fft``
+#: was measured failing and was never on the list.
 NUMERIC_BAD: Dict[str, str] = {
     # `Connector name 'out' is already used as a symbol, constant, or array name` -- a gemv/solve
     # library node's connector collides with the kernel's ARRAY named `out`. One upstream DaCe bug
@@ -59,19 +62,28 @@ NUMERIC_BAD: Dict[str, str] = {
     "gesummv": "compile_fail",
     "k3mm": "compile_fail",
     "raman_fitting": "compile_fail",
-    # The generated C++ does not build: `cmplx<double> / int64_t` has no operator/.
+    # The generated C++ does not build: `cmplx<double> / int64_t` has no operator/ in
+    # dace/runtime/include/dace/complex.h, which supplies mixed complex/integer `*` and nothing
+    # else. Filed upstream as issue 07.
     "fft_1d": "compile_fail",
+    # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
+    # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
+    # ("'real' was not declared in this scope; did you mean 'std::real'?", 12 sites).
     "largest_eigenval": "compile_fail",
+    # Two more codegen defects in one kernel, measured 2026-08-08: `complex128* + double` (a
+    # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
+    # predicate". Neither is issue 07's operator gap.
+    "stockham_fft": "compile_fail",
     # `SympifyError: cannot sympify object of type <class 'function'>` out of the frontend.
     "crc16": "parse_fail",
     "dfa": "parse_fail",
     "subset_sum": "parse_fail",  # KeyError: ConditionalBlock (if_32)
-    # Ran, and the answer is wrong. The two reduction kernels are the interesting pair: both are
-    # accumulator patterns, which is exactly where a wrongly-parallelized loop shows up.
-    "channel_flow": "mismatch",  # u: d=4.41e-02
-    "cp2k_grid_integrate": "mismatch",  # hab: d=4.32e+00
-    "s353_gather_reduction_unroll": "mismatch",  # b: d=5.41e+02
-    "unroll_reduction_11_accs": "mismatch",  # out: d=1.12e+03
+    # No `mismatch` entry survives. All four -- channel_flow (u: d=4.41e-02), cp2k_grid_integrate
+    # (hab: d=4.32e+00), s353_gather_reduction_unroll (b: d=5.41e+02) and unroll_reduction_11_accs
+    # (out: d=1.12e+03) -- were one of two dace frontend defects on SCALAR containers, and all four
+    # agree since the emitter routes around both (dace issues 05 and 06; see the desugars in
+    # numpyto_c.dace_emit). Remeasured 2026-08-08, one subprocess per kernel.
+    #
     # A free symbol neither an array shape nor a __hpcagent_bench_symbol_defs__ recipe binds. The
     # emitter mints the name and then records no closed form for it, so nothing downstream can.
     "cp2k_density_matrix_trs4": "unbound_symbols",  # n_block_rows
