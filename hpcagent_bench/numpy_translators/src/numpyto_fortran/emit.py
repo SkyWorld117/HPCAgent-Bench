@@ -1296,6 +1296,15 @@ class _FortranBodyEmitter(BaseEmitter):
         text = self.emit_expr(node)
         return f"real({text}, {self._rk})" if self._expr_is_integer(node) else text
 
+    def _as_true_div_arg(self, node: ast.AST) -> str:
+        """``_as_real_arg`` for floor/ceil: a top-level int/int ``/`` must promote BOTH
+        operands before dividing, not just cast the (already-truncated) result."""
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and self._expr_is_integer(node.left)
+                and self._expr_is_integer(node.right)):
+            dk = _double_kind()
+            return f"(REAL({self.emit_expr(node.left)}, {dk}) / REAL({self.emit_expr(node.right)}, {dk}))"
+        return self._as_real_arg(node)
+
     def _expr_is_integer(self, e: ast.AST) -> bool:
         """True if e is an integer-typed Fortran expression (so a paired literal should be int-kinded)."""
         if isinstance(e, ast.Constant):
@@ -1509,7 +1518,7 @@ class _FortranBodyEmitter(BaseEmitter):
             # numpy floor/ceil return a FLOAT and never overflow, unlike the integer
             # FLOOR/CEILING intrinsics; AINT truncates toward zero then adjusts by one.
             if fn in ("floor", "ceil") and len(node.args) == 1:
-                x = self.emit_expr(node.args[0])
+                x = self._as_true_div_arg(node.args[0])
                 rk = self._rk
                 t = f"aint({x})"
                 if fn == "floor":
