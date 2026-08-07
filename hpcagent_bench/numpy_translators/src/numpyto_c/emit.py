@@ -37,6 +37,11 @@ def pluto_floordiv(lhs: str, rhs: str) -> str:
     return f"floord({lhs}, {rhs})"
 
 
+def pluto_ceildiv(lhs: str, rhs: str) -> str:
+    """``ceild``, pet's named quasi-affine ceiling-division counterpart to ``floord``."""
+    return f"ceild({lhs}, {rhs})"
+
+
 #: Prelude helper -> the ``_C_HEADER`` macro spelling the SAME semantics with no call. ``max``/``min``
 #: propagate NaN exactly as ``__npb_fmax``/``__npb_fmin`` do (see the header's own guard pair), so
 #: this is a spelling, not a second definition.
@@ -1282,6 +1287,15 @@ class _CBodyEmitter(BaseEmitter):
                 helper = "__npb_fmax" if fn == "fmax" else "__npb_fmin"
                 args = f"{self.emit_expr(node.args[0])}, {self.emit_expr(node.args[1])}"
                 return pluto_call_free(helper, args) if self.pluto else f"{helper}({args})"
+            # floor(a/b) on int/int IS floor-division: route through emit_floordiv/emit_ceildiv
+            # (POLYCC-008's pluto floord/ceild, else the exact int_floor/int_ceil _Generic macro)
+            # instead of C's truncating int64_t / int64_t, which a forward-substituted int/int
+            # divide can reach here past _emit_true_divide (only sees a bare top-level Div).
+            if (fn in ("floor", "ceil") and len(node.args) == 1 and isinstance(node.args[0], ast.BinOp)
+                    and isinstance(node.args[0].op, ast.Div) and self._floor_ceil_div_operand_is_int(node.args[0].left)
+                    and self._floor_ceil_div_operand_is_int(node.args[0].right)):
+                emit_div = self.emit_floordiv if fn == "floor" else self.emit_ceildiv
+                return emit_div(node.args[0].left, node.args[0].right)
             args = ", ".join(self.emit_expr(a) for a in node.args)
             return f"{self._math_name(fn)}({args})"
         # np.X(arg) / arr.X(...): handle passthrough/identity intrinsics that survived lowering.
@@ -1382,6 +1396,15 @@ class _CBodyEmitter(BaseEmitter):
             return pluto_floordiv(lhs, rhs)
         return f"int_floor({lhs}, {rhs})"
 
+    def emit_ceildiv(self, left: ast.AST, right: ast.AST) -> str:
+        """``emit_floordiv``'s ceiling counterpart: ``ceild`` in a pluto scop, else ``int_ceil``."""
+        lhs, rhs = self.emit_expr(left), self.emit_expr(right)
+        if self.pluto and self._is_signed_int_operand(left) and self._is_signed_int_operand(right):
+            if self._index_depth and self._reads_symbols_only(left) and self._reads_symbols_only(right):
+                return pluto_call_free("ceild", f"{lhs}, {rhs}", self.pluto_hoisted)
+            return pluto_ceildiv(lhs, rhs)
+        return f"int_ceil({lhs}, {rhs})"
+
     def _reads_symbols_only(self, node: ast.AST) -> bool:
         """Every Name read by ``node`` is a kernel SYMBOL -- so the expression is scop-invariant."""
         symbols = {s.name for s in self.kir.symbols}
@@ -1450,6 +1473,16 @@ class _CBodyEmitter(BaseEmitter):
         if isinstance(node, ast.UnaryOp):
             return self._is_int_operand(node.operand, allow_array=allow_array)
         return False
+
+    def _floor_ceil_div_operand_is_int(self, node: ast.AST) -> bool:
+        """``_is_int_operand`` plus ``int(x)``-cast Calls, scoped to the floor/ceil divide above."""
+        if _is_int_cast(node):
+            return True
+        if isinstance(node, ast.BinOp) and not isinstance(node.op, ast.Div):
+            return (self._floor_ceil_div_operand_is_int(node.left) and self._floor_ceil_div_operand_is_int(node.right))
+        if isinstance(node, ast.UnaryOp):
+            return self._floor_ceil_div_operand_is_int(node.operand)
+        return self._is_int_operand(node)
 
     def _all_int_locals(self) -> Set[str]:
         """Cached set of all locals known to be int: int kernel scalars + tuple-unpack int_locals + needs_int promotions."""
