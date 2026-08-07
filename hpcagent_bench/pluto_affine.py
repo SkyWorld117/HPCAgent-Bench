@@ -228,8 +228,8 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
                      "computes inf; tsvc_2_s128 drops all three writes to its induction scalars j / k "
                      "and reads k uninitialized. What did collapse is the sub-class the POLYCC-002 "
                      "retarget reaches: a full np.sum whose result IS an array cell now accumulates "
-                     "into that cell and mints no scalar. pagerank is not in it -- its sum feeds an "
-                     "elementwise divide, so the scalar stays."),
+                     "into that cell and mints no scalar -- one corpus kernel, fft_3d (__cb7 gone). "
+                     "pagerank is not in it: its sum feeds an elementwise divide, so the scalar stays."),
             repro=f"{_BENCH}/graph_traversal/pagerank -- its pluto input transforms clean and computes inf",
             avoided_by="",
             upstream="not filed",
