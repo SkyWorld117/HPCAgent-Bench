@@ -34,10 +34,14 @@ from numpyto_common.lib_nodes import _reduction_misses_target, _retarget_scalar_
 DLA = tu.REPO / "hpcagent_bench" / "benchmarks" / "scientific_computing" / "dense_linear_algebra"
 
 
-def _pattern(target, body, *, augmented=False, iterable="range(i)", init="0.0"):
+def _pattern(target, body, *, augmented=False, iterable="range(i)", init="0.0", step="+="):
     """``__mm1 = <init>; for __mml1 in <iterable>: __mm1 += <body>`` plus the statement
-    that consumes ``__mm1`` -- the exact shape ``_hoist_value`` leaves behind."""
-    prelude = ast.parse(f"__mm1 = {init}\nfor __mml1 in {iterable}:\n    __mm1 += {body}\n").body
+    that consumes ``__mm1`` -- the exact shape ``_hoist_value`` leaves behind.
+
+    ``step="="`` spells the accumulation ``__mm1 = __mm1 + <body>`` instead, which is what the
+    reduction expanders emit; both are the same reduction and both must retarget."""
+    accum = f"__mm1 += {body}" if step == "+=" else f"__mm1 = __mm1 + {body}"
+    prelude = ast.parse(f"__mm1 = {init}\nfor __mml1 in {iterable}:\n    {accum}\n").body
     node = ast.parse(f"{target} {'+=' if augmented else '='} __mm1").body[0]
     return node, prelude
 
@@ -63,6 +67,31 @@ def test_plain_assign_retargets_onto_the_destination_cell():
     assert "temp2[j] = 0.0" in text
     assert "temp2[j] += B[__mml1, j] * A[i, __mml1]" in text
     assert "__mm1" not in text
+
+
+def test_the_expanders_assign_spelling_retargets_too():
+    """``s = s + f(k)`` is the full-reduction expander's step; before it was matched, every
+    ``out[i] = np.sum(a)`` shipped a scop-external accumulator pet then dropped (POLYCC-009)."""
+    out = _retarget_scalar_accumulator(*_pattern("out[i]", "a[__mml1]", step="="))
+    assert out is not None
+    text = _unparse(out)
+    assert "out[i] = 0.0" in text
+    assert "out[i] += a[__mml1]" in text
+    assert "__mm1" not in text
+
+
+def test_a_non_add_assign_step_is_left_alone():
+    # ``s = s * f(k)`` is a product, not the reduction this fold is sound for.
+    node, prelude = _pattern("out[i]", "a[__mml1]")
+    prelude[1].body = ast.parse("__mm1 = __mm1 * a[__mml1]").body
+    assert _retarget_scalar_accumulator(node, prelude) is None
+
+
+def test_an_assign_step_that_does_not_read_the_scalar_is_left_alone():
+    # ``s = f(k) + g(k)`` overwrites rather than accumulates -- folding it would sum every term.
+    node, prelude = _pattern("out[i]", "a[__mml1]")
+    prelude[1].body = ast.parse("__mm1 = a[__mml1] + b[__mml1]").body
+    assert _retarget_scalar_accumulator(node, prelude) is None
 
 
 def test_aug_assign_retargets_without_a_zero_init():

@@ -202,12 +202,14 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
             kind="bug",
             component="pet",
             severity="refusal",
-            symptom=("The SUM_BLOCK blocked-reduction lowering puts int_floor(N, 128) in a scop LOOP "
-                     "BOUND, which pet reads as a data-dependent condition (pet_to_pluto.cpp:565) and "
-                     "aborts on; measured on pagerank 08-07, after the POLYCC-003 self-assign fix "
-                     "removed the earlier abort. pet name-matches a call spelled floord and models it "
-                     "as quasi-affine, so the pluto emit spells integer floor division that way and "
-                     "the same scop transforms (rc 0, 3 parallel bands, 7 tiled loops)."),
+            symptom=("An int_floor call in a scop LOOP BOUND is read as a data-dependent condition "
+                     "(pet_to_pluto.cpp:565) and aborts pet; first measured 08-07 on pagerank, whose "
+                     "blocked-reduction lowering put int_floor(N, 128) there. pet name-matches a call "
+                     "spelled floord and models it as quasi-affine, so the pluto emit spells integer "
+                     "floor division that way and the same scop transforms. The blocked lowering is "
+                     "gone (reassociation is sanctioned), but the spelling stays load-bearing for the "
+                     "divisions the SOURCE writes -- tsvc_2_s128's floord(LEN_1D, 2) bound transforms "
+                     "clean 08-07, and int_floor there would abort pet the same way."),
             repro=f"{_TRANS_TESTS}/test_pluto_named_div_builtins.py",
             avoided_by="numpyto_c.emit.pluto_floordiv",
             upstream="n/a",
@@ -220,10 +222,14 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
             symptom=("Every statement whose only write is a scop-EXTERNAL scalar is dropped from the "
                      "transformed output, so its consumers read an uninitialized value; rc 0, no "
                      "diagnostic. Reduced to a 12-line scop (s = 0.0; s += a[i]; out[i] = a[i] / s "
-                     "loses both writes to s), so no floor division is involved. pagerank's teleport / "
-                     "__cb2 / __rblk1 go the same way and its transformed output computes inf where the "
-                     "untransformed source computes 1.0. Masked until POLYCC-008 stopped pet aborting "
-                     "on that scop; the POLYCC-002 retarget does not fire for a BLOCKED reduction."),
+                     "loses both writes to s), so no floor division is involved. Remeasured 08-07 with "
+                     "the blocked reduction removed: NOT collapsed. pagerank still keeps 4 of its 7 "
+                     "statements (teleport, __cb2 = 0.0 and the __cb2 accumulation loop go) and still "
+                     "computes inf; tsvc_2_s128 drops all three writes to its induction scalars j / k "
+                     "and reads k uninitialized. What did collapse is the sub-class the POLYCC-002 "
+                     "retarget reaches: a full np.sum whose result IS an array cell now accumulates "
+                     "into that cell and mints no scalar. pagerank is not in it -- its sum feeds an "
+                     "elementwise divide, so the scalar stays."),
             repro=f"{_BENCH}/graph_traversal/pagerank -- its pluto input transforms clean and computes inf",
             avoided_by="",
             upstream="not filed",

@@ -1280,103 +1280,7 @@ def _read_axis_keepdims(args, kwargs):
     return axes, keepdims
 
 
-#: Elements per partial sum in a blocked float accumulation. numpy's own pairwise cutoff, and the
-#: reason for picking it: below this numpy sums naively too, so a shorter block buys nothing.
-SUM_BLOCK: int = 128
-
-
-def _blocked_innermost_accumulation(target, iters: List[str], shape, arr) -> List[ast.stmt]:
-    """A full float ``sum`` as blocked partial sums, not one serial chain.
-
-    A naive accumulation's rounding error grows with the number of terms, and numpy -- the oracle
-    every backend is graded against -- sums PAIRWISE, so the two drift apart as N grows. A/B
-    measured through the op oracle (emit, gcc ``-O2``, run, compare against numpy), n = 2**22,
-    emitted float32, seeded uniform data: the emitted sum is **1.09e+02** away from numpy's with a
-    single accumulator and **4.00e+00** with blocks of :data:`SUM_BLOCK`, on a total near 2.1e+06.
-    That is the same reassociation a vectorizing compiler performs once it is allowed to, expressed
-    in the source so every backend gets it rather than only the ones built with fast-math.
-
-    Only the INNERMOST axis is blocked, and only for a full reduction: that is the one long
-    dependence chain. Outer axes keep their plain loops, so an emitted nest still looks like a nest
-    to the parallelism and isopar recognisers.
-
-    The block accumulator starts at ZERO, not at the reduction's ``init``: with ``initial=`` the
-    caller's seed belongs to the WHOLE sum, and seeding each block would add it once per block.
-    ``op_fn`` / ``update_fn`` are not consulted either -- this shape is addition by construction,
-    which is why only float ``sum`` / ``mean`` may ask for it.
-
-    Emitted shape, with no ``min`` and no in-loop guard so the block loop stays a plain countable
-    trip (both matter for vectorization):
-
-        for b in range(N // 128):
-            blk = 0
-            for i in range(128):
-                blk = blk + a[..., b * 128 + i]
-            acc = acc + blk
-        for i in range(N // 128 * 128, N):
-            acc = acc + a[..., i]
-    """
-    n_dim = len(iters)
-    extent = _const_or_name(shape[-1]) if isinstance(shape[-1], str) else shape[-1]
-    blk = _make_iter_name("__rblk", n_dim)
-    b_iter = _make_iter_name("__rb", n_dim)
-    i_iter = _make_iter_name("__ri", n_dim)
-    # Every literal is built fresh rather than shared: one AST node reachable from two places in
-    # the tree is a node an in-place transformer can rewrite once and observe twice.
-    n_blocks = ast.BinOp(left=extent, op=ast.FloorDiv(), right=_const(SUM_BLOCK))
-    tail_start = ast.BinOp(left=copy.deepcopy(n_blocks), op=ast.Mult(), right=_const(SUM_BLOCK))
-
-    def elem(last_index: ast.expr) -> ast.expr:
-        """``arr[outer..., last_index]`` -- the outer axes keep their own iter names."""
-        if n_dim == 1:
-            slot: ast.expr = last_index
-        else:
-            slot = ast.Tuple(elts=[_name(v) for v in iters[:-1]] + [last_index], ctx=ast.Load())
-        return ast.Subscript(value=_name(arr.id), slice=slot, ctx=ast.Load())
-
-    blk_store, blk_load = _store(blk), _name(blk)
-    acc_store, acc_load = ast.Name(id=target.id, ctx=ast.Store()), ast.Name(id=target.id, ctx=ast.Load())
-    offset = ast.BinOp(left=ast.BinOp(left=_name(b_iter), op=ast.Mult(), right=_const(SUM_BLOCK)),
-                       op=ast.Add(),
-                       right=_name(i_iter))
-    block_loop = ast.For(target=_store(b_iter),
-                         iter=ast.Call(func=_name("range"), args=[n_blocks], keywords=[]),
-                         body=[
-                             ast.Assign(targets=[blk_store], value=_const(0.0)),
-                             ast.For(target=_store(i_iter),
-                                     iter=ast.Call(func=_name("range"), args=[_const(SUM_BLOCK)], keywords=[]),
-                                     body=[
-                                         ast.Assign(targets=[_store(blk)],
-                                                    value=ast.BinOp(left=blk_load, op=ast.Add(), right=elem(offset)))
-                                     ],
-                                     orelse=[]),
-                             ast.Assign(targets=[acc_store],
-                                        value=ast.BinOp(left=acc_load,
-                                                        op=ast.Add(),
-                                                        right=ast.Name(id=blk, ctx=ast.Load())))
-                         ],
-                         orelse=[])
-    tail_loop = ast.For(target=_store(i_iter),
-                        iter=ast.Call(func=_name("range"), args=[tail_start, copy.deepcopy(extent)], keywords=[]),
-                        body=[
-                            ast.Assign(targets=[ast.Name(id=target.id, ctx=ast.Store())],
-                                       value=ast.BinOp(left=ast.Name(id=target.id, ctx=ast.Load()),
-                                                       op=ast.Add(),
-                                                       right=elem(_name(i_iter))))
-                        ],
-                        orelse=[])
-    return _wrap_for_loops(iters[:-1], shape[:-1], [block_loop, tail_loop])
-
-
-def _expand_axis_reduction(target,
-                           args,
-                           kwargs,
-                           shape_table,
-                           init,
-                           op_fn,
-                           post_fn=None,
-                           update_fn=None,
-                           blocked: bool = False):
+def _expand_axis_reduction(target, args, kwargs, shape_table, init, op_fn, post_fn=None, update_fn=None):
     """Generic axis-aware reduction. Lowers ``out = np.X(arr, axis=k,
     keepdims=True)`` into a nested loop, non-reduction axes outside and the
     reduction axis inside; writes through to ``out`` at the kept axes (axis
@@ -1389,9 +1293,10 @@ def _expand_axis_reduction(target,
         default ``store = op_fn(load, src)``; used by if-guarded boolean
         reductions (any/all/count_nonzero), which can't rely on C's
         bool-as-int arithmetic (invalid in Fortran).
-    :param blocked: sum the innermost axis of a FULL reduction in blocks (see
-        :func:`_blocked_innermost_accumulation`). Float ``sum``/``mean`` only -- it reassociates,
-        so it is wrong for a non-associative op and pointless for an exact integer one.
+
+    A float sum accumulates in ONE chain, matching the source order rather than numpy's pairwise
+    blocking: reassociation is sanctioned, so the extra block loop bought only a scop that pet
+    refuses (POLYCC-008) and a scop-external block accumulator it silently drops (POLYCC-009).
     """
     arr = args[0]
     shape = _resolve_shape(arr, shape_table)
@@ -1432,10 +1337,7 @@ def _expand_axis_reduction(target,
             update_fn(target, target_load, subscript) if update_fn else ast.Assign(targets=[target],
                                                                                    value=op_fn(target_load, subscript))
         ]
-        if blocked:
-            loops = _blocked_innermost_accumulation(target, iters, shape, arr)
-        else:
-            loops = _wrap_for_loops(iters, shape, body)
+        loops = _wrap_for_loops(iters, shape, body)
         stmts = [ast.Assign(targets=[target], value=_init_for(init, arr, n_dim))]
         stmts.extend(loops)
         if post_fn is not None:
@@ -1605,8 +1507,7 @@ def expand_sum(target, args, shape_table, kwargs=None, local_dtypes=None):
                                   kwargs,
                                   shape_table,
                                   init=_const(0) if is_int else _const(0.0),
-                                  op_fn=lambda acc, x: ast.BinOp(left=acc, op=ast.Add(), right=x),
-                                  blocked=not is_int)
+                                  op_fn=lambda acc, x: ast.BinOp(left=acc, op=ast.Add(), right=x))
 
 
 def expand_max(target, args, shape_table, kwargs=None):
@@ -1697,8 +1598,7 @@ def expand_mean(target, args, shape_table, kwargs=None):
                                       value=ast.BinOp(left=(lvalue if isinstance(lvalue, ast.Name) else ast.Subscript(
                                           value=lvalue.value, slice=lvalue.slice, ctx=ast.Load())),
                                                       op=ast.Div(),
-                                                      right=divisor)),
-                                  blocked=True)
+                                                      right=divisor)))
 
 
 def expand_prod(target, args, shape_table, kwargs=None, local_dtypes=None):
@@ -7750,6 +7650,21 @@ def _reduction_misses_target(target: ast.Subscript, loop: ast.For, body: ast.exp
     return True
 
 
+def _accumulation_addend(step: ast.stmt, scalar: str) -> Optional[ast.expr]:
+    """What one ``+=`` step of ``scalar`` adds, in either spelling the lowerings emit
+    (``s += x`` from the matmul hoist, ``s = s + x`` from the reduction expanders), else ``None``."""
+    if isinstance(step, ast.AugAssign):
+        if isinstance(step.op, ast.Add) and isinstance(step.target, ast.Name) and step.target.id == scalar:
+            return step.value
+        return None
+    if (isinstance(step, ast.Assign) and len(step.targets) == 1 and isinstance(step.targets[0], ast.Name)
+            and step.targets[0].id == scalar and isinstance(step.value, ast.BinOp)
+            and isinstance(step.value.op, ast.Add) and isinstance(step.value.left, ast.Name)
+            and step.value.left.id == scalar):
+        return step.value.right
+    return None
+
+
 def _retarget_scalar_accumulator(node: ast.stmt, prelude: List[ast.stmt]) -> Optional[List[ast.stmt]]:
     """Fold ``s = 0.0; for k: s += f(k); T[idx] (+)= s`` into an in-place
     reduction on ``T[idx]``, dropping the scalar. Returns ``None`` when the
@@ -7762,6 +7677,10 @@ def _retarget_scalar_accumulator(node: ast.stmt, prelude: List[ast.stmt]) -> Opt
     band -- a race. An array cell carries the same reduction with no
     scop-external state, which is why ``syrk`` (reducing into ``C[i, si1]``) was
     never affected.
+
+    pet goes further than racing on that scalar: a statement whose only write is one drops out of
+    the transformed output entirely (POLYCC-009), so the same fold is what keeps a full
+    ``np.sum`` into an array cell computing at all.
     """
     if len(prelude) < 2 or not isinstance(node.value, ast.Name):
         return None
@@ -7787,17 +7706,16 @@ def _retarget_scalar_accumulator(node: ast.stmt, prelude: List[ast.stmt]) -> Opt
     if not (isinstance(loop, ast.For) and not loop.orelse and len(loop.body) == 1
             and isinstance(loop.target, ast.Name)):
         return None
-    step = loop.body[0]
-    if not (isinstance(step, ast.AugAssign) and isinstance(step.op, ast.Add) and isinstance(step.target, ast.Name)
-            and step.target.id == scalar):
+    addend = _accumulation_addend(loop.body[0], scalar)
+    if addend is None:
         return None
-    if any(isinstance(n, ast.Name) and n.id == scalar for n in ast.walk(step.value)):
+    if any(isinstance(n, ast.Name) and n.id == scalar for n in ast.walk(addend)):
         return None  # self-referential accumulation -- not a plain reduction
-    if not _reduction_misses_target(target, loop, step.value):
+    if not _reduction_misses_target(target, loop, addend):
         return None
     store = copy.deepcopy(target)
     store.ctx = ast.Store()
-    loop.body = [ast.AugAssign(target=store, op=ast.Add(), value=step.value)]
+    loop.body = [ast.AugAssign(target=store, op=ast.Add(), value=addend)]
     # An ``AugAssign`` target already holds the running value: zero-initialising
     # it would drop what the reduction must add to.
     if augmented:
