@@ -80,7 +80,7 @@ output_args:
 - x_greater_upper
 - x_retarded_diag
 taxonomy:
-  track: hpc
+  track: scientific_computing
   subtrack: quatrex
   dwarf: sparse_linear_algebra
   domain: Physics
