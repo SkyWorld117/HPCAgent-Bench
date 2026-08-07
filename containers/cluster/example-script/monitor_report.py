@@ -3,15 +3,20 @@
 
 Usage: monitor_report.py <monitor_dir_or_run_dir>
 Reads *.csv recursively (files are named "<role>-<hostname>.csv") and prints a
-plain-text table and a verdicts section. Stdlib only.
+plain-text table, a per-GPU balance section, and a verdicts section. Stdlib only.
+
+CSV format: a fixed 8-column header, optionally followed by per-GPU columns
+(gpu0_pct..gpu(N-1)_pct) that node_monitor.sh appends when a GPU tool is present.
+Both shapes are read header-driven -- old, 8-column files parse exactly as before.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import re
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROLES = ("vllm", "judge", "agent")
@@ -23,6 +28,7 @@ LOW_GPU_PCT = 40.0
 HIGH_CPU_P95_PCT = 90.0
 
 COLUMNS = ("ts", "cpu_pct", "load1", "mem_used_mib", "mem_total_mib", "gpu_pct", "vram_used_mib", "vram_total_mib")
+GPU_COL_RE = re.compile(r"^gpu(\d+)_pct$")
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -50,12 +56,21 @@ def parse_role_host(path: Path) -> tuple[str, str]:
     return "unknown", stem
 
 
-def read_columns(path: Path) -> dict[str, list[float]]:
-    values: dict[str, list[float]] = {name: [] for name in COLUMNS if name != "ts"}
+def gpu_columns(fieldnames: list[str]) -> list[str]:
+    # header-driven: whatever gpuN_pct columns this file's header declares, in GPU index order
+    found = [name for name in fieldnames if GPU_COL_RE.match(name)]
+    return sorted(found, key=lambda name: int(GPU_COL_RE.match(name).group(1)))
+
+
+def read_columns(path: Path) -> tuple[dict[str, list[float]], list[str]]:
+    """Returns (values per column, per-GPU column names present in this file's header)."""
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
+        gpu_cols = gpu_columns(reader.fieldnames or [])
+        names = [name for name in COLUMNS if name != "ts"] + gpu_cols
+        values: dict[str, list[float]] = {name: [] for name in names}
         for row in reader:
-            for name in values:
+            for name in names:
                 raw = row.get(name, "")
                 if raw == "" or raw is None:
                     continue
@@ -63,7 +78,7 @@ def read_columns(path: Path) -> dict[str, list[float]]:
                     values[name].append(float(raw))
                 except ValueError:
                     continue
-    return values
+    return values, gpu_cols
 
 
 @dataclass
@@ -77,15 +92,19 @@ class NodeStats:
     gpu_p95: float | None
     mem_peak_mib: float | None
     vram_peak_mib: float | None
+    per_gpu_mean: dict[str, float] = field(default_factory=dict)  # gpuN_pct -> mean, extended format only
+    gpu_imbalance: float | None = None  # max per-gpu mean - min per-gpu mean; None with < 2 gpu columns
 
 
 def compute_node_stats(path: Path) -> NodeStats:
     role, host = parse_role_host(path)
-    cols = read_columns(path)
+    cols, gpu_cols = read_columns(path)
     cpu = cols["cpu_pct"]
     gpu = cols["gpu_pct"]
     mem = cols["mem_used_mib"]
     vram = cols["vram_used_mib"]
+    per_gpu_mean = {name: statistics.mean(cols[name]) for name in gpu_cols if cols[name]}
+    gpu_imbalance = max(per_gpu_mean.values()) - min(per_gpu_mean.values()) if len(per_gpu_mean) >= 2 else None
     return NodeStats(
         role=role,
         host=host,
@@ -96,6 +115,8 @@ def compute_node_stats(path: Path) -> NodeStats:
         gpu_p95=percentile(gpu, 95),
         mem_peak_mib=max(mem) if mem else None,
         vram_peak_mib=max(vram) if vram else None,
+        per_gpu_mean=per_gpu_mean,
+        gpu_imbalance=gpu_imbalance,
     )
 
 
@@ -115,6 +136,18 @@ def print_table(nodes: list[NodeStats]) -> None:
               f"{fmt(node.cpu_mean, '%'):>9} {fmt(node.cpu_p95, '%'):>8} "
               f"{fmt(node.gpu_mean, '%'):>9} {fmt(node.gpu_p95, '%'):>8} "
               f"{fmt(node.mem_peak_mib, 'M'):>10} {fmt(node.vram_peak_mib, 'M'):>10}")
+
+
+def print_gpu_balance(nodes: list[NodeStats]) -> None:
+    extended = [n for n in nodes if n.per_gpu_mean]
+    if not extended:
+        return
+    print()
+    print("gpu balance (per-GPU mean %, spread = max-min):")
+    for node in sorted(extended, key=lambda n: (n.role, n.host)):
+        cols = sorted(node.per_gpu_mean, key=lambda name: int(GPU_COL_RE.match(name).group(1)))
+        per_gpu = " ".join(f"gpu{GPU_COL_RE.match(c).group(1)}={fmt(node.per_gpu_mean[c])}" for c in cols)
+        print(f"  {node.role:<7} {node.host:<20} spread={fmt(node.gpu_imbalance):>6} {per_gpu}")
 
 
 def print_role_summary(groups: dict[str, list[NodeStats]]) -> None:
@@ -180,6 +213,7 @@ def main() -> None:
         groups.setdefault(node.role, []).append(node)
 
     print_table(nodes)
+    print_gpu_balance(nodes)
     print_role_summary(groups)
     print_verdicts(groups)
 

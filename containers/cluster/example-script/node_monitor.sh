@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Samples cpu/mem/gpu utilization on this node every INTERVAL seconds and appends
 # to a per-node CSV, so a benchmark run can be checked for workload balance
-# (idle judges, saturated inference, starved agents) after the fact.
+# (idle judges, saturated inference, starved agents) after the fact. gpu_pct is the
+# cross-GPU average; gpu0_pct..gpu(N-1)_pct (appended after the fixed 8 columns)
+# give per-GPU utilization, for spotting judge-to-GPU imbalance.
 #
 # env: ROLE (vllm|judge|agent, required), OUT_DIR (default "${RUN_DIR:-.}/monitor"),
 #      INTERVAL (default 5, seconds)
@@ -19,22 +21,38 @@ fi
 
 mkdir -p "${OUT_DIR}"
 CSV="${OUT_DIR}/${ROLE}-$(hostname).csv"
-HEADER="ts,cpu_pct,load1,mem_used_mib,mem_total_mib,gpu_pct,vram_used_mib,vram_total_mib"
-[ -s "${CSV}" ] || echo "${HEADER}" > "${CSV}"
 
 STOP=0
 trap 'STOP=1' TERM INT
 
-# Decide once which GPU tool works; per-sample code below just calls that one tool,
-# so a missing/broken rocm-smi never costs a second failing fork every 5s.
+# Decide once which GPU tool works and how many GPUs it reports; per-sample code
+# below just calls that one tool, so a missing/broken rocm-smi never costs a second
+# failing fork every 5s, and the header (below) stays fixed for the life of the CSV.
 GPU_TOOL=none
-if command -v rocm-smi >/dev/null 2>&1 \
-        && rocm-smi --showuse --showmeminfo vram --json >/dev/null 2>&1; then
-    GPU_TOOL=rocm
-elif command -v amd-smi >/dev/null 2>&1 \
-        && amd-smi metric -u --json >/dev/null 2>&1; then
-    GPU_TOOL=amdsmi
+NGPU=0
+if command -v rocm-smi >/dev/null 2>&1; then
+    probe=$(rocm-smi --showuse --showmeminfo vram --json 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        GPU_TOOL=rocm
+        NGPU=$(printf '%s' "${probe}" | grep -oE '"GPU use \(%\)"' | wc -l | tr -d ' ')
+    fi
 fi
+if [ "${GPU_TOOL}" = none ] && command -v amd-smi >/dev/null 2>&1; then
+    probe=$(amd-smi metric -u --json 2>/dev/null | tr -s '[:space:]' ' ')
+    if [ $? -eq 0 ]; then
+        GPU_TOOL=amdsmi
+        NGPU=$(printf '%s' "${probe}" | grep -oE '"gfx_activity"' | wc -l | tr -d ' ')
+    fi
+fi
+
+# Per-GPU columns are appended after the fixed 8, so old consumers keep working.
+HEADER="ts,cpu_pct,load1,mem_used_mib,mem_total_mib,gpu_pct,vram_used_mib,vram_total_mib"
+i=0
+while [ "${i}" -lt "${NGPU}" ]; do
+    HEADER="${HEADER},gpu${i}_pct"
+    i=$((i + 1))
+done
+[ -s "${CSV}" ] || echo "${HEADER}" > "${CSV}"
 
 cpu_fields() {
     # prints the numeric fields of the "cpu " line from /proc/stat, space separated
@@ -42,32 +60,64 @@ cpu_fields() {
         /proc/stat 2>/dev/null
 }
 
+per_gpu_list() {
+    # reads one per-GPU value per stdin line, echoes exactly NGPU comma-separated
+    # fields (blank-padded if the smi output had fewer entries than expected) -- the
+    # order is the smi tool's own card/gpu index order, which is the assumption the
+    # gpu0_pct.. header columns rely on
+    awk -v n="${NGPU}" '{
+        v[NR] = $1
+    } END {
+        for (i = 1; i <= n; i++) {
+            if (i > 1) printf ","
+            if (i in v) printf "%s", v[i]
+        }
+    }'
+}
+
+gpu_row() {
+    # args: util vu vt per_gpu_csv; appends the per-GPU columns only when NGPU > 0
+    if [ "${NGPU}" -gt 0 ]; then
+        echo "${1},${2},${3},${4}"
+    else
+        echo "${1},${2},${3}"
+    fi
+}
+
 sample_gpu() {
-    # echoes "gpu_pct,vram_used_mib,vram_total_mib"; blank fields on any failure
-    local json util vu vt
+    # echoes "gpu_pct,vram_used_mib,vram_total_mib[,gpu0_pct,...]"; blank fields on
+    # any failure
+    local json util vu vt per blank
+    blank=$(per_gpu_list < /dev/null)
     case "${GPU_TOOL}" in
         rocm)
-            json=$(rocm-smi --showuse --showmeminfo vram --json 2>/dev/null) || { echo ",,"; return; }
+            json=$(rocm-smi --showuse --showmeminfo vram --json 2>/dev/null) || { gpu_row "" "" "" "${blank}"; return; }
             util=$(printf '%s' "${json}" | grep -oE '"GPU use \(%\)": *"?[0-9.]+' \
                 | grep -oE '[0-9.]+' | awk '{s += $1; n++} END {if (n > 0) printf "%.1f", s / n}')
             vu=$(printf '%s' "${json}" | grep -oE '"VRAM Total Used Memory \(B\)": *"?[0-9]+' \
                 | grep -oE '[0-9]+' | awk '{s += $1} END {if (s > 0) printf "%d", s / 1048576}')
             vt=$(printf '%s' "${json}" | grep -oE '"VRAM Total Memory \(B\)": *"?[0-9]+' \
                 | grep -oE '[0-9]+' | awk '{s += $1} END {if (s > 0) printf "%d", s / 1048576}')
-            echo "${util},${vu},${vt}"
+            per=$(printf '%s' "${json}" | grep -oE '"GPU use \(%\)": *"?[0-9.]+' \
+                | grep -oE '[0-9.]+' | per_gpu_list)
+            gpu_row "${util}" "${vu}" "${vt}" "${per}"
             ;;
         amdsmi)
             # metric -u is usage-only: no vram fields come back from this call
-            json=$(amd-smi metric -u --json 2>/dev/null | tr -s '[:space:]' ' ') || { echo ",,"; return; }
+            json=$(amd-smi metric -u --json 2>/dev/null | tr -s '[:space:]' ' ') || { gpu_row "" "" "" "${blank}"; return; }
             util=$(printf '%s' "${json}" | grep -oE '"gfx_activity": *\{ *"value": *[0-9.]+' \
                 | grep -oE '[0-9.]+' | awk '{s += $1; n++} END {if (n > 0) printf "%.1f", s / n}')
-            echo "${util},,"
+            per=$(printf '%s' "${json}" | grep -oE '"gfx_activity": *\{ *"value": *[0-9.]+' \
+                | grep -oE '[0-9.]+' | per_gpu_list)
+            gpu_row "${util}" "" "" "${per}"
             ;;
         *)
-            echo ",,"
+            gpu_row "" "" "" "${blank}"
             ;;
     esac
 }
+
+GPU_BLANK_LINE=$(gpu_row "" "" "" "$(per_gpu_list < /dev/null)")
 
 prev=$(cpu_fields)
 while [ "${STOP}" -eq 0 ]; do
@@ -97,7 +147,7 @@ while [ "${STOP}" -eq 0 ]; do
     mem_line="${mem_line:-,}"
 
     gpu_line=$(sample_gpu 2>/dev/null)
-    gpu_line="${gpu_line:-,,}"
+    gpu_line="${gpu_line:-${GPU_BLANK_LINE}}"
 
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     echo "${ts},${cpu_pct},${load1},${mem_line},${gpu_line}" >> "${CSV}"
