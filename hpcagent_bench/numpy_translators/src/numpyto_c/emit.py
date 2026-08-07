@@ -37,6 +37,32 @@ def pluto_floordiv(lhs: str, rhs: str) -> str:
     return f"floord({lhs}, {rhs})"
 
 
+#: Prelude helper -> the ``_C_HEADER`` macro spelling the SAME semantics with no call. ``max``/``min``
+#: propagate NaN exactly as ``__npb_fmax``/``__npb_fmin`` do (see the header's own guard pair), so
+#: this is a spelling, not a second definition.
+_PLUTO_MACRO_SPELLING = {"__npb_fmax": "max", "__npb_fmin": "min"}
+
+
+def pluto_call_free(name: str, args: str, hoisted: Optional[Dict[str, str]] = None) -> str:
+    """``name(args)`` with the CALL removed, for a pluto scop (POLYCC-010's guard).
+
+    pet outlines a ``static inline`` call inside a scop into a return temporary ``__pet_ret_0`` it
+    never declares, so polycc exits 0 and its output does not compile. Two routes remove the call:
+    a prelude helper that has a macro twin is spelled as the macro, which pet expands away; anything
+    else is INTERNED in ``hoisted`` (call text -> scop-external temp) and replaced by that temp,
+    which the caller declares above ``#pragma scop``. Interning needs the call to be scop-invariant,
+    which only the caller can know, so a caller that cannot prove it passes no ``hoisted`` and the
+    call text comes back unchanged.
+    """
+    macro = _PLUTO_MACRO_SPELLING.get(name)
+    if macro is not None:
+        return f"{macro}({args})"
+    call = f"{name}({args})"
+    if hoisted is None:
+        return call
+    return hoisted.setdefault(call, f"__pl{len(hoisted)}")
+
+
 def _is_int_cast(node: ast.AST) -> bool:
     """True for a call whose result is an integer regardless of its argument dtype
     (``int(x)``, ``len(x)``, ``np.int32(x)``), so float-ness must not propagate out of it."""
@@ -311,6 +337,10 @@ class _CBodyEmitter(BaseEmitter):
         self.isopar_counts: int = 0
         #: Pluto: name -> "[d1][d2]" trailing-dim string for a pointer-to-array local's deferred-malloc cast.
         self.md_trailing: Dict[str, str] = {}
+        #: Pluto: scop-invariant call text -> the scop-external temp that replaces it (:func:`pluto_call_free`).
+        self.pluto_hoisted: Dict[str, str] = {}
+        #: Nesting depth of the subscript INDEX currently being emitted; 0 outside one.
+        self._index_depth: int = 0
         #: Branch-scoped local -> (size, C type, fill kind): declared + malloc'd at its marker inside
         #: the one branch that uses it, freed at that branch's end (see :func:`_branch_scoped_locals`).
         self.branch_local_decls: Dict[str, Tuple[str, str, Optional[str]]] = {}
@@ -1083,13 +1113,18 @@ class _CBodyEmitter(BaseEmitter):
         """Collapse a subscript chain a[i][j]... into (base_node, [i, j, ...]) for row-major flattening."""
         chain: List[str] = []
         cur: ast.AST = node
-        while isinstance(cur, ast.Subscript):
-            sl = cur.slice
-            if isinstance(sl, ast.Tuple):
-                chain = [self.emit_expr(e) for e in sl.elts] + chain
-            else:
-                chain = [self.emit_expr(sl)] + chain
-            cur = cur.value
+        # Index texts are marked so a pluto scop can hoist a call out of one (see pluto_call_free).
+        self._index_depth += 1
+        try:
+            while isinstance(cur, ast.Subscript):
+                sl = cur.slice
+                if isinstance(sl, ast.Tuple):
+                    chain = [self.emit_expr(e) for e in sl.elts] + chain
+                else:
+                    chain = [self.emit_expr(sl)] + chain
+                cur = cur.value
+        finally:
+            self._index_depth -= 1
         return cur, chain
 
     def _dim_minus_k(self, dim_token: str, k: int, orig: ast.AST) -> ast.AST:
@@ -1245,7 +1280,8 @@ class _CBodyEmitter(BaseEmitter):
             # np.maximum/np.minimum lower to fmax/fmin, but libm's suppress NaN while numpy propagates it.
             if fn in ("fmax", "fmin") and len(node.args) == 2:
                 helper = "__npb_fmax" if fn == "fmax" else "__npb_fmin"
-                return f"{helper}({self.emit_expr(node.args[0])}, {self.emit_expr(node.args[1])})"
+                args = f"{self.emit_expr(node.args[0])}, {self.emit_expr(node.args[1])}"
+                return pluto_call_free(helper, args) if self.pluto else f"{helper}({args})"
             args = ", ".join(self.emit_expr(a) for a in node.args)
             return f"{self._math_name(fn)}({args})"
         # np.X(arg) / arr.X(...): handle passthrough/identity intrinsics that survived lowering.
@@ -1339,8 +1375,17 @@ class _CBodyEmitter(BaseEmitter):
         """``a // b``: ``floord`` in a pluto scop over provably signed ints, else ``int_floor``."""
         lhs, rhs = self.emit_expr(left), self.emit_expr(right)
         if self.pluto and self._is_signed_int_operand(left) and self._is_signed_int_operand(right):
+            # pet name-matches floord in a loop BOUND, but outlines it in an INDEX (POLYCC-010); a
+            # symbol-only divisor is scop-invariant, so hoisting it keeps the index affine.
+            if self._index_depth and self._reads_symbols_only(left) and self._reads_symbols_only(right):
+                return pluto_call_free("floord", f"{lhs}, {rhs}", self.pluto_hoisted)
             return pluto_floordiv(lhs, rhs)
         return f"int_floor({lhs}, {rhs})"
+
+    def _reads_symbols_only(self, node: ast.AST) -> bool:
+        """Every Name read by ``node`` is a kernel SYMBOL -- so the expression is scop-invariant."""
+        symbols = {s.name for s in self.kir.symbols}
+        return all(n.id in symbols for n in ast.walk(node) if isinstance(n, ast.Name))
 
     def _is_signed_int_operand(self, node: ast.AST) -> bool:
         """Provably a SIGNED integer built from Python ints -- no arrays, no unsigned scalar."""
@@ -2028,6 +2073,8 @@ def _emit_body(kir: KernelIR,
             decls.append(f"{indent}memset({name}, 0, {_byte_count(size, c_type)});")
     emitter.heap_locals = heap
     body = emitter.emit_block(kir.tree.body, indent)
+    # Calls hoisted out of a scop index read symbols only, so they sit with the other pre-scop decls.
+    decls += [f"{indent}{_c_type('int')} {tmp} = {call};" for call, tmp in emitter.pluto_hoisted.items()]
     # A body ending in a return already freed everything on that path, so the closing frees would be
     # unreachable -- emit them only where control can actually fall out of the body.
     falls_through = not (return_mode is not None and kir.tree.body and isinstance(kir.tree.body[-1], ast.Return))

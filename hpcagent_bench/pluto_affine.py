@@ -177,11 +177,23 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
             id="POLYCC-007",
             kind="bug",
             component="translator",
-            severity="latent",
+            severity="refusal",
             symptom=("A local malloc is emitted INSIDE #pragma scop when its size depends on a scop-local "
-                     "scalar (dbcsr pluto input lines 205, 222, 229), against the emitter's own stated "
-                     "invariant that allocations sit outside."),
-            repro=f"{_BENCH}/sparse_linear_algebra/dbcsr -- invariant stated at numpyto_c/emit.py:2631",
+                     "scalar (dbcsr, gmres, minife, needleman_wunsch, histogram_equalization, vexx), "
+                     "against the emitter's own stated invariant that allocations sit outside. It costs "
+                     "the whole kernel: pet reports 'unsupported' on the sizeof and extracts no scop at "
+                     "all. NOT hoistable. dbcsr's sizes (m, k, n) are read per iteration out of m_sizes / "
+                     "k_sizes / n_sizes, so there is no scop-invariant expression to allocate from -- the "
+                     "deferred-malloc path exists for exactly that. Of the six only needleman_wunsch is "
+                     "affine enough to reach polycc, and its size scalar (M = N) IS invariant, but "
+                     "hoisting the assign above the scop makes M a SECOND pluto parameter and the "
+                     "schedule comes back with 2**64-scale coefficients that divide by zero (SIGFPE); "
+                     "hoisting only the malloc leaves the assign to be dropped by POLYCC-009. Removing M "
+                     "by forward substitution transforms and validates, but _ForwardSubstituteInvariantScalars "
+                     "excludes a function-level assign by design (it would replay deriche's exp() "
+                     "coefficients down a nest), so there is no fix on this entry's own ground."),
+            repro=f"{_BENCH}/dynamic_programming/needleman_wunsch -- polycc --pet extracts no scop from "
+            "its pluto input; invariant stated in numpyto_c.emit.emit_pluto",
             avoided_by="",
             upstream="n/a",
         ),
@@ -224,10 +236,17 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
             symptom=("pet mints a return temporary __pet_ret_0 and never declares it, so polycc exits 0 "
                      "and the transformed output does not compile ('__pet_ret_0' undeclared). Measured "
                      "08-07 on 4 kernels once POLYCC-008 let them reach the transform: "
-                     "disjoint_halves_gather, ext_floordiv_offset, triplet_margin_loss, tsvc_2_s173."),
-            repro="hpcagent_bench/benchmarks/loop_level_reasoning/disjoint_halves_gather -- its *_pluto.c "
-            "fails to compile",
-            avoided_by="",
+                     "disjoint_halves_gather, ext_floordiv_offset, triplet_margin_loss, tsvc_2_s173. "
+                     "The trigger is a static inline call pet can see the BODY of -- it outlines that; "
+                     "libm calls (pow, sqrt) have no body in the TU and survive verbatim. Reduced to two "
+                     "spellings: floord in a SUBSCRIPT (pet name-matches it only in a loop BOUND, so "
+                     "POLYCC-008's spelling stands) and __npb_fmax/__npb_fmin. The pluto emit hoists an "
+                     "invariant subscript floord to a scop-external temp and spells min/max with the "
+                     "prelude's own NaN-propagating macro, which pet expands away; all 4 now compile and "
+                     "3 agree with the oracle. triplet_margin_loss agrees only up to POLYCC-009, which "
+                     "compiling unmasks: its __cb8 accumulator is dropped from the transformed output."),
+            repro=f"{_TRANS_TESTS}/test_pluto_no_helper_calls_in_scop.py",
+            avoided_by="numpyto_c.emit.pluto_call_free",
             upstream="not filed",
         ),
         PolyccIssue(
