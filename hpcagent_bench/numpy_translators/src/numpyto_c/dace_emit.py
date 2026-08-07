@@ -559,7 +559,13 @@ class _DropRedundantSliceStore(ast.NodeTransformer):
 
 
 class _DesugarChainedAssign(ast.NodeTransformer):
-    """Split a chained slice assignment (a = b = rhs) into a temp plus one assignment per target -- dace can't codegen it."""
+    """Split a chained slice assignment (a = b = rhs) into a temp plus one assignment per target -- dace can't codegen it.
+
+    A LITERAL right-hand side is repeated at each target rather than routed through the temp: dace
+    issue 05 makes ``s0 = tmp`` alias ``tmp``'s container, so ``s0 = s1 = ... = 0.0`` -- how a
+    hand-unrolled reduction opens -- collapses every accumulator onto one cell and over-counts by
+    the unroll factor. Repeating the literal is what the reference already means.
+    """
 
     def __init__(self):
         self.ctr = 0
@@ -568,6 +574,11 @@ class _DesugarChainedAssign(ast.NodeTransformer):
         self.generic_visit(node)
         if len(node.targets) <= 1:
             return node
+        if is_scalar_literal(node.value):
+            stmts = [ast.Assign(targets=[tgt], value=copy.deepcopy(node.value)) for tgt in node.targets]
+            for s in stmts:
+                ast.copy_location(s, node)
+            return stmts
         tmp = f"__hpcagent_bench_chain{self.ctr}"
         self.ctr += 1
         stmts: List[ast.stmt] = [ast.Assign(targets=[ast.Name(id=tmp, ctx=ast.Store())], value=node.value)]
@@ -909,6 +920,112 @@ class BroadcastScalarWhere(ResolveShapeReads):
         extents = ", ".join(shape) + ("," if len(shape) == 1 else "")
         node.args[1] = ast.parse(f"np.full(({extents}), {ast.unparse(node.args[1])})", mode="eval").body
         return ast.fix_missing_locations(node)
+
+
+#: Bare-name calls whose result is rank 0 when every argument is, and whose kind is decided.
+_SCALAR_BUILTINS = frozenset({"int", "float", "abs", "min", "max", "round"})
+_FLOAT_CALLS = frozenset({
+    "float", "float32", "float64", "exp", "log", "log2", "log10", "sqrt", "sin", "cos", "tan", "tanh", "arctan2",
+    "atan2", "fabs", "hypot", "erf", "mean", "std", "var", "linalg"
+})
+_INT_CALLS = frozenset({"int", "int32", "int64", "len", "argmax", "argmin", "floor_divide"})
+
+
+def _is_float_expr(node: ast.AST, floats: set) -> bool:
+    """Conservative: True only where the value is CERTAINLY floating point (or complex).
+
+    One-directional on purpose. Both consumers fall back to the integer spelling when this says no,
+    and an integer spelling is right for a float too (``x + 0`` keeps float64) while the reverse
+    would widen an index scalar.
+    """
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (float, complex))
+    if isinstance(node, ast.Name):
+        return node.id in floats
+    if isinstance(node, ast.UnaryOp):
+        return _is_float_expr(node.operand, floats)
+    if isinstance(node, ast.BinOp):
+        return isinstance(node.op, ast.Div) or _is_float_expr(node.left, floats) or _is_float_expr(node.right, floats)
+    if isinstance(node, ast.Subscript):
+        return _is_float_expr(node.value, floats)
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            name = node.func.id
+        else:
+            name = ""
+        if name in _INT_CALLS:
+            return False
+        return name in _FLOAT_CALLS or any(_is_float_expr(a, floats) for a in node.args)
+    return False
+
+
+def _float_names(fn_ast: ast.AST, declared: set) -> set:
+    """Every name that certainly holds a floating-point value, to a least fixed point."""
+    floats = set(declared)
+    while True:
+        grown: set = set()
+        for node in ast.walk(fn_ast):
+            if not isinstance(node, (ast.Assign, ast.AugAssign)) or not _is_float_expr(node.value, floats):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            grown |= {t.id for t in targets if isinstance(t, ast.Name) and t.id not in floats}
+        if not grown:
+            return floats
+        floats |= grown
+
+
+class _CopyScalarAlias(ResolveShapeReads):
+    """``x = y`` on a scalar makes ``x`` a second NAME for ``y``'s container (dace issue 05), so a
+    later write through either one lands in the other: spell it ``x = y + 0`` to force a copy.
+
+    Only a bare rank-0 Name is rewritten. An array alias is numpy's own semantics, a declared
+    parameter is copied by the frontend already, and an operand whose rank the base class cannot
+    infer is left alone -- an invented copy on a rank it guessed wrong is a miscompile.
+    """
+
+    def __init__(self, shapes: Dict[str, List[str]], floats: set, skip: set):
+        super().__init__(shapes)
+        self.floats = floats
+        self.skip = skip
+
+    def infer(self, node: ast.AST) -> Optional[List[str]]:
+        """The base class declines a bare-name call; ``center = int(center0_value)`` is rank 0."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _SCALAR_BUILTINS:
+            ranks = [super(_CopyScalarAlias, self).infer(a) for a in node.args]
+            return [] if ranks and all(r == [] for r in ranks) else None
+        return super().infer(node)
+
+    def visit_Assign(self, node: ast.Assign):
+        node = super().visit_Assign(node)
+        value = node.value
+        if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(value, ast.Name)
+                and value.id not in self.skip and value.id != node.targets[0].id and self.infer(value) == []):
+            zero = ast.Constant(value=0.0 if _is_float_expr(value, self.floats) else 0)
+            node.value = ast.copy_location(ast.BinOp(left=value, op=ast.Add(), right=zero), node)
+        return node
+
+
+def _widen_int_seeds(fn_ast: ast.AST, floats: set, skip: set) -> None:
+    """``udiff = 1`` fixes an int64 container that silently TRUNCATES a later float store into it
+    (dace issue 06), so the convergence loop it opens exits after two trips: seed it as a float."""
+    seeds: Dict[str, List[ast.Assign]] = {}
+    widen: set = set()
+    for node in ast.walk(fn_ast):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+            continue
+        name = node.targets[0].id
+        if name in skip:
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, int) \
+                and not isinstance(node.value.value, bool):
+            seeds.setdefault(name, []).append(node)
+        elif _is_float_expr(node.value, floats):
+            widen.add(name)
+    for name in widen & set(seeds):
+        for node in seeds[name]:
+            node.value = ast.copy_location(ast.Constant(value=float(node.value.value)), node.value)
 
 
 def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
@@ -1361,6 +1478,13 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         ast.fix_missing_locations(fn_ast)
         fn_ast.body[0:0] = [ast.parse(f"{nm}_iter = {nm}").body[0] for nm in reassigned]
     fn_ast = _DropSymbolAssign(symbol_names).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
+    # Last, after promotion: a name that became a dc.symbol is no longer a container, and neither
+    # rewrite has anything to say about one. See dace issues 05 and 06 for both causes.
+    declared_floats = {d.name for d in (*kir.arrays, *kir.scalars) if not d.dtype.startswith(("int", "uint", "bool"))}
+    floats = _float_names(fn_ast, declared_floats)
+    fn_ast = _CopyScalarAlias(value_shapes, floats, set(symbol_names) | set(scalars)).visit(fn_ast)
+    _widen_int_seeds(fn_ast, floats, set(symbol_names))
     ast.fix_missing_locations(fn_ast)
     body = list(fn_ast.body)
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
