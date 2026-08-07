@@ -425,8 +425,6 @@ jobs:
     timeout-minutes: 60
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
-      # NOT /tmp: it is tmpfs, and exhausting it fails builds in a way that reads as a kernel defect.
-      HPCAGENT_BENCH_DACE_BUILD_ROOT: ${{ runner.temp }}/dace_numeric
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -447,6 +445,9 @@ jobs:
         #
         # --maxfail=20 so a translator-wide break reports twenty named kernels, not three hundred.
         timeout-minutes: 30
+        env:
+          # NOT /tmp: it is tmpfs, and exhausting it fails builds in a way that reads as a kernel defect.
+          HPCAGENT_BENCH_DACE_BUILD_ROOT: ${{ runner.temp }}/dace_numeric
         run: |
           rm -rf "$HPCAGENT_BENCH_DACE_BUILD_ROOT"
           # Regenerate ONCE, before xdist starts. *_dace.py is gitignored, so collection emits what
