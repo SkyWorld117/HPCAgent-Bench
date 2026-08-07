@@ -2,7 +2,7 @@
 # This deliberately excludes vLLM. First prove loader compatibility and
 # one-rank RCCL initialization; add vLLM only after those gates pass.
 
-ARG BASE_IMAGE=rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.9.1
+ARG BASE_IMAGE=docker.io/rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.9.1
 ARG AWS_OFI_NCCL_REF=v1.20.0
 
 FROM ${BASE_IMAGE} AS ofi-builder

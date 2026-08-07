@@ -33,11 +33,17 @@ AMD_CE_ENV="${AMD_CE_ENV:-optarena-amd-mi300}"
 HPCAGENT_BENCH_REPO="${HPCAGENT_BENCH_REPO:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
 RUN_ROOT="${RUN_ROOT:-${HPCAGENT_BENCH_REPO}/results/cluster}"
 RUN_DIR="${RUN_ROOT}/${SLURM_JOB_ID:-local}"
+# The one folder the agent and the judge both see: host side under RUN_DIR (one path on every node),
+# container side at the harness default, bind-mounted into every role. The containers are writable,
+# so an unmounted /shared is a per-node layer the judge cannot read -- a file there vanishes silently.
+SHARED_HOST_DIR="${SHARED_HOST_DIR:-${RUN_DIR}/shared}"
+SHARED_MOUNT="/shared"
 
 export INFERENCE_NODES AGENT_NODES JUDGE_NODES GPUS_PER_NODE INFERENCE_MODE
 export VLLM_PORT VLLM_MASTER_PORT JUDGE_PORT LITELLM_PORT
 export JUDGE_UPSTREAM_PORT JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS
-export HPCAGENT_BENCH_REPO RUN_DIR SCRIPT_DIR
+export HPCAGENT_BENCH_REPO RUN_DIR SCRIPT_DIR SHARED_HOST_DIR SHARED_MOUNT
+export HPCAGENT_BENCH_SHARED_DIR="${SHARED_MOUNT}"
 
 run_vllm_node() {
     local node_rank="${SLURM_PROCID:-0}"
@@ -247,7 +253,17 @@ esac
 : "${SLURM_JOB_ID:?run through beverin.sbatch or inside a Slurm allocation}"
 : "${SLURM_JOB_NODELIST:?missing Slurm node list}"
 
-mkdir -p "${RUN_DIR}"
+mkdir -p "${RUN_DIR}" "${SHARED_HOST_DIR}"
+
+# Read-only per-kernel material + the prompt template, once per run, before any role starts.
+# run_campaign.sh writes the problems file next to this script, so a bare name from .env is relative
+# to SCRIPT_DIR, not to whatever directory the job was submitted from.
+problems_file="${PROBLEMS_FILE:-}"
+if [[ -n "${problems_file}" && ! -f "${problems_file}" ]]; then
+    problems_file="${SCRIPT_DIR}/${problems_file}"
+fi
+"${SCRIPT_DIR}/materialize_shared.sh" "${HPCAGENT_BENCH_REPO}" "${SHARED_HOST_DIR}" "${problems_file}"
+
 mapfile -t allocated_nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 required_nodes=$((INFERENCE_NODES + AGENT_NODES + JUDGE_NODES))
 
@@ -296,6 +312,7 @@ inference:  ${INFERENCE_NODELIST} (${INFERENCE_MODE}: ${VLLM_REPLICA_URLS})
 agents:     ${AGENT_NODELIST}
 judges:     ${JUDGE_NODELIST} (${JUDGE_BASE_URL})
 run dir:    ${RUN_DIR}
+shared:     ${SHARED_HOST_DIR} -> ${SHARED_MOUNT}
 EOF
 
 # One OCI image per role, four launch idioms. `ce` (the default) is the CSCS Container
@@ -312,7 +329,8 @@ BENCH_IMAGE="${BENCH_IMAGE:-}"
 # Site GPU flags, passed verbatim: apptainer "--rocm" or "--nv", podman on AMD
 # "--device /dev/kfd --device /dev/dri", docker on NVIDIA "--gpus all".
 CONTAINER_GPU_FLAGS="${CONTAINER_GPU_FLAGS:-}"
-# Paths every runtime must present at the same location inside the container.
+# Paths every runtime must present at the same location inside the container. The shared folder is
+# not one of them: it is mounted at ${SHARED_MOUNT} instead, so both containers spell it alike.
 CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${HPCAGENT_BENCH_REPO} ${RUN_ROOT}}"
 
 # podman/docker do not inherit the job environment; hand them the relevant slice.
@@ -323,6 +341,37 @@ case "${CONTAINER_RUNTIME}" in
             >"${JOB_ENV_FILE}"
         ;;
 esac
+
+derived_edf() {
+    # derived_edf <registered EDF name> -- leaves in EDF_FILE a per-run COPY of that EDF which also
+    # mounts the shared folder. An EDF is a static registered file, so a run-specific mount can only
+    # enter through a rewritten one; srun --environment takes an absolute .toml path.
+    local name="$1" dir src=""
+    local -a edf_dirs
+    EDF_FILE="${RUN_DIR}/edf/${name}.toml"
+    IFS=: read -r -a edf_dirs <<<"${EDF_PATH:-${HOME}/.edf}"
+    for dir in "${edf_dirs[@]}"; do
+        if [[ -f "${dir}/${name}.toml" ]]; then
+            src="${dir}/${name}.toml"
+            break
+        fi
+    done
+    if [[ -z "${src}" ]]; then
+        echo "EDF '${name}.toml' not found in ${EDF_PATH:-${HOME}/.edf}" >&2
+        exit 2
+    fi
+    mkdir -p "${RUN_DIR}/edf"
+    awk -v entry="    \"${SHARED_HOST_DIR}:${SHARED_MOUNT}\"," \
+        '!added && /^[[:space:]]*mounts[[:space:]]*=[[:space:]]*\[[[:space:]]*$/ {
+             print; print entry; added = 1; next
+         }
+         { print }' "${src}" >"${EDF_FILE}"
+    # Refuse to launch: without the mount the judge sees no submitted file and blames the agent.
+    if ! grep -qF "${SHARED_HOST_DIR}:${SHARED_MOUNT}" "${EDF_FILE}"; then
+        echo "EDF ${src} has no multi-line 'mounts = [' block to add ${SHARED_MOUNT} to" >&2
+        exit 2
+    fi
+}
 
 role_srun() {
     # role_srun <nodes> <nodelist> <ce-env> <image> <role-flag>
@@ -340,10 +389,11 @@ role_srun() {
     wrap=()
     case "${CONTAINER_RUNTIME}" in
         ce)
-            srun_args+=(--environment="${ce_env}")
+            derived_edf "${ce_env}"
+            srun_args+=(--environment="${EDF_FILE}")
             ;;
         apptainer)
-            bind=""
+            bind="${SHARED_HOST_DIR}:${SHARED_MOUNT}"
             for mount in ${CONTAINER_MOUNTS}; do
                 bind="${bind:+${bind},}${mount}"
             done
@@ -351,7 +401,7 @@ role_srun() {
                 "${image:?CONTAINER_RUNTIME=apptainer needs an image for ${role_flag}}")
             ;;
         podman|docker)
-            vols=()
+            vols=(--volume "${SHARED_HOST_DIR}:${SHARED_MOUNT}")
             for mount in ${CONTAINER_MOUNTS}; do
                 vols+=(--volume "${mount}:${mount}")
             done

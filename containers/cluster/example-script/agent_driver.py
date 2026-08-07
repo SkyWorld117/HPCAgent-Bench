@@ -109,6 +109,16 @@ def problem_text(problem: dict[str, Any]) -> str:
     return json.dumps(problem, indent=2, sort_keys=True)
 
 
+def shared_paths(kernel: str, problem_index: int) -> tuple[pathlib.Path, str]:
+    """This agent's write folder under the shared mount, plus the task-text line announcing it."""
+    shared = pathlib.Path(os.environ.get("HPCAGENT_BENCH_SHARED_DIR", "/shared"))
+    agent_dir = shared / f"agent-{problem_index}"
+    stem = kernel.rsplit("/", 1)[-1] or "<kernel>"
+    note = (f"Your shared write folder: {agent_dir}. Write submissions there, e.g. "
+            f"{agent_dir}/{stem}.<ext>. Reference implementations: {shared}/tasks/{stem}/.")
+    return agent_dir, note
+
+
 def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path, judges: list[str],
               problem_index: int) -> int:
     runtime = pathlib.Path("/opt/optarena-agent")
@@ -118,7 +128,13 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     workdir = node_dir / f"problem-{problem['id']}-worker-{worker_index}"
     workdir.mkdir(parents=True, exist_ok=True)
     prompt_template = (runtime / "prompt.md").read_text(encoding="utf-8")
-    prompt = prompt_template.replace("{{TASK}}", problem_text(problem))
+    # Keyed by the GLOBAL problem index, not the worker slot, which repeats across nodes. Without a
+    # folder each, agents on ONE kernel all write the same <kernel>.<ext> in the flat shared root and
+    # clobber each other; the judge resolves any path inside the shared folder and name-checks only
+    # the basename, so a subdirectory costs nothing.
+    agent_dir, shared_note = shared_paths(str(problem.get("kernel", "")), problem_index)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    prompt = prompt_template.replace("{{TASK}}", f"{problem_text(problem)}\n{shared_note}")
     prompt_file = workdir / "prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
 

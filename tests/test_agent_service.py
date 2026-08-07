@@ -59,6 +59,21 @@ def test_health_and_task():
         srv.server_close()
 
 
+def test_task_accepts_path_style_kernel_keys():
+    """Every registry key is path-style (track/dir/name), so the kernel is everything after the
+    verb. Truncating to one segment 404'd the first tool call of every campaign task."""
+    srv, port = _server(ServiceConfig())
+    try:
+        key = "loop_level_reasoning/argmax_value/argmax_value"
+        code, spec = _get(port, f"/task/{key}?language=c&rank={RANK}")
+        assert code == 200
+        assert spec["kernel"] == "argmax_value" and spec["symbol"] and spec["signature"]
+        assert "dir" in spec["shared"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_baseline_endpoint():
     srv, port = _server(ServiceConfig(baseline="numpy"))
     try:

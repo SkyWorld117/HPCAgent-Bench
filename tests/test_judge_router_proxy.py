@@ -6,7 +6,8 @@ The router sits between an untrusted agent and the real judge, so what is tested
 DOES NOT interpret: the method, the path, the body (``rank`` included) and the query string reach
 the upstream judge unchanged, and the judge's answer -- a refusal as much as a grade -- comes back
 as itself. A proxy that swallowed a 400 into a 500, or that re-encoded a body, would grade nothing
-and say so wrongly.
+and say so wrongly. The ONE thing it withholds is the held-out seed's own verdict, which is an
+oracle to iterate against rather than a measurement.
 """
 import importlib.util
 import json
@@ -30,12 +31,28 @@ GRADE = {
     "correct": True,
     "public_correct": True,
     "hidden_correct": True,
+    "hidden_passed": 8,
+    "hidden_total": 8,
     "max_rel_error": 1e-12,
     "build_ok": True,
     "detail": "ok",
     "oracle": "numpy",
     "speedup": 4.5,
     "native_ns": 100,
+}
+
+#: The same grade as the agent may read it: the held-out seed's own verdict is withheld.
+RELAYED_GRADE = {key: value for key, value in GRADE.items() if not key.startswith("hidden_")}
+
+#: What ``GET /task`` answers -- the leak-free spec the agent builds from.
+TASK = {
+    "kernel": "gemm",
+    "language": "c",
+    "signature": "void gemm(...)",
+    "shared": {
+        "dir": "/shared",
+        "libraries": []
+    },
 }
 
 
@@ -49,15 +66,20 @@ class StubJudge(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def do_POST(self):
+    def record(self, body: Dict[str, Any]):
         url = urlparse(self.path)
+        StubJudge.calls.append({"method": self.command, "path": url.path, "query": url.query, "body": body})
+
+    def do_GET(self):
+        self.record({})  # the read routes carry their whole request in the path + query
+        self.answer()
+
+    def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        StubJudge.calls.append({
-            "method": self.command,
-            "path": url.path,
-            "query": url.query,
-            "body": json.loads(raw or b"{}"),
-        })
+        self.record(json.loads(raw or b"{}"))
+        self.answer()
+
+    def answer(self):
         code, payload = StubJudge.reply
         data = json.dumps(payload).encode("utf-8")
         self.send_response(code)
@@ -104,13 +126,61 @@ def test_grading_routes_forward_verbatim(client, route, upstream_path):
     """Method, path, body and query (rank included) arrive unchanged; the answer comes back whole."""
     response = client.post(f"{route}?rank=3&preset=S", json=SUBMISSION)
     assert response.status_code == 200
-    assert response.json() == GRADE
+    assert response.json() == (RELAYED_GRADE if route == "/submit" else GRADE)
     assert StubJudge.calls == [{
         "method": "POST",
         "path": upstream_path,
         "query": "rank=3&preset=S",
         "body": SUBMISSION,
     }]
+
+
+@pytest.mark.parametrize("route", [
+    "/task/loop_level_reasoning/argmax_value/argmax_value",
+    "/baseline/loop_level_reasoning/argmax_value/argmax_value",
+])
+def test_read_routes_keep_path_style_kernel_keys(client, route):
+    """Every registry key carries slashes; a single-segment route parameter would 404 the agent's
+    first tool call at the router, before the judge ever sees it."""
+    StubJudge.reply = (200, TASK)
+    response = client.get(f"{route}?language=fortran&rank=3")
+    assert response.status_code == 200
+    assert StubJudge.calls == [{"method": "GET", "path": route, "query": "language=fortran&rank=3", "body": {}}]
+
+
+@pytest.mark.parametrize("route", ["/task/gemm", "/baseline/gemm"])
+def test_read_routes_forward_as_a_get(client, route):
+    """The agent's contract and its target time are READ through this router. A GET the router does
+    not serve is a 404 the agent cannot recover from -- it never sees the spec it must implement."""
+    StubJudge.reply = (200, TASK)
+    response = client.get(f"{route}?language=c&rank=3")
+    assert response.status_code == 200
+    assert response.json() == TASK
+    assert StubJudge.calls == [{"method": "GET", "path": route, "query": "language=c&rank=3", "body": {}}]
+
+
+def test_an_unknown_kernel_stays_the_judges_404(client):
+    """The kernel key is the judge's to know; the router forwards it and relays the refusal."""
+    StubJudge.reply = (404, {"error": "no task for 'nope': unknown benchmark"})
+    response = client.get("/task/nope?rank=3")
+    assert response.status_code == 404
+    assert StubJudge.calls[0]["path"] == "/task/nope"
+
+
+def test_submit_withholds_the_hidden_seed_verdict(client):
+    """The held-out seed exists so the agent cannot iterate against it: relaying its per-attempt
+    verdict would hand back exactly that oracle. ``correct`` (public AND hidden) still stands, and
+    the upstream recording keeps the full result."""
+    body = client.post("/submit", json=SUBMISSION).json()
+    assert not set(body) & {"hidden_correct", "hidden_passed", "hidden_total"}
+    assert body == RELAYED_GRADE
+
+
+def test_score_is_untouched_by_the_hidden_filter(client):
+    """/score never grades a hidden seed, so its answer is relayed whole -- including a
+    ``hidden_total`` of 0, which is how the agent tells the two grades apart."""
+    StubJudge.reply = (200, {"correct": True, "hidden_total": 0, "speedup": 2.0})
+    assert client.post("/score", json=SUBMISSION).json()["hidden_total"] == 0
 
 
 def test_unknown_body_fields_are_relayed_not_interpreted(client):
@@ -138,13 +208,14 @@ def test_misdirected_rank_refusal_is_relayed(client):
 
 
 def test_verify_grades_on_submit_and_keeps_the_correctness_slice(client):
-    """/verify is the correctness view of /submit -- same route upstream, no speedup returned."""
+    """/verify is the correctness view of /submit -- same route upstream, no speedup returned, and
+    no hidden-seed verdict: a second route onto the same grade must withhold the same thing."""
     response = client.post("/verify", json=SUBMISSION)
     assert StubJudge.calls[0]["path"] == "/submit"
     assert response.status_code == 200
     assert response.json() == {
         key: GRADE[key]
-        for key in ("correct", "public_correct", "hidden_correct", "max_rel_error", "build_ok", "detail", "oracle")
+        for key in ("correct", "public_correct", "max_rel_error", "build_ok", "detail", "oracle")
     }
 
 
@@ -193,4 +264,4 @@ def test_health_reports_the_upstream_it_forwards_to(client, upstream):
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["judge_upstream_url"] == upstream
-    assert set(body["proxied"]) == {"submit", "score", "bench", "verify", "profile"}
+    assert set(body["proxied"]) == {"task", "baseline", "submit", "score", "bench", "verify", "profile"}

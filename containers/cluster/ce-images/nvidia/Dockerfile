@@ -123,7 +123,7 @@ RUN set -eux; \
     PIP_BREAK_SYSTEM_PACKAGES=1 MPICC=mpicc.mpich python3 -m pip install --no-cache-dir --no-binary=mpi4py -r "/${PYTHON_REQUIREMENTS}"
 
 RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir \
-      "litellm[proxy]" fastapi uvicorn httpx pydantic orjson tenacity rich typer
+      "litellm[proxy]==1.94.0" fastapi uvicorn httpx pydantic orjson tenacity rich typer
 
 RUN set -eux; \
     git clone --depth 1 --recurse-submodules --shallow-submodules \
@@ -168,6 +168,9 @@ RUN set -eux; \
       flang --version | head -1 | grep -q " ${llvm_major}" \
         || { echo "bare flang is not LLVM ${llvm_major}: $(command -v flang)" >&2; exit 1; }; \
     fi; \
-    python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"
+    python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"; \
+    # Both images must grade on the same interpreter line; the NGC base does not state its python. \
+    python3 --version 2>&1 | grep -q "^Python 3\.12\." \
+      || { echo "expected python 3.12, got $(python3 --version 2>&1)" >&2; exit 1; }
 
 WORKDIR /work

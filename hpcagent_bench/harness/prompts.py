@@ -794,14 +794,18 @@ def build_context(task: Task,
     # so they answer to the same knob as optimizations.j2 -- otherwise turning guidance off
     # would still ship a pile of tuning advice.
     general_skill, other_skills = load_skills(prompt_config.search_dirs())
+    language_skills = language_skills_for(task)
     if not prompt_config.optimization_guidance:
-        other_skills = []
+        # Guidance off drops the how-to pages but NEVER the rules for the language the task
+        # requires: a wholesale wipe silently removed the lang-* page too (the template inlines
+        # language pages from other_skills), turning the "language skill only" ablation arm into
+        # a no-skills arm.
+        other_skills = [skill for skill in other_skills if skill.name in language_skills]
     # The instrument manuals are INDEXED always and INLINED only on request: they are the bulk of
     # the skill text (measured: 1081 of 1169 lines) and a box has at most one GPU vendor, so most of
     # it is a manual for hardware the reader does not have. profile_first is the strategy that
     # exists to reach for them, so it turns them on without anyone configuring it.
     inline_instruments = prompt_config.profiling_guidance or prompt_config.strategy == "profile_first"
-    language_skills = language_skills_for(task)
     symbol = binding.symbols.get(task.language, f"{spec.short_name}_{task.language}_auto")
     ext = languages.LANG_EXT.get(task.language, task.language)
     resources = available_resources()

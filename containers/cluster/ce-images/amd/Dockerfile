@@ -7,7 +7,7 @@
 # The public CSCS docs do not currently list an Alps Extended ROCm/PyTorch image
 # equivalent to the NVIDIA NGC extended images. Start from AMD's ROCm PyTorch image
 # and keep the MI300A target explicit: MI300A is gfx942.
-ARG BASE_IMAGE=rocm/pytorch:latest-release
+ARG BASE_IMAGE=docker.io/rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.9.1
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -130,7 +130,7 @@ RUN set -eux; \
     PIP_BREAK_SYSTEM_PACKAGES=1 MPICC=mpicc.mpich python3 -m pip install --no-cache-dir --no-binary=mpi4py -r "/${PYTHON_REQUIREMENTS}"
 
 RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir \
-      "litellm[proxy]" fastapi uvicorn httpx pydantic orjson tenacity rich typer
+      "litellm[proxy]==1.94.0" fastapi uvicorn httpx pydantic orjson tenacity rich typer
 
 COPY containers/judge/requirements.txt /opt/optarena-judge/requirements.txt
 RUN set -eux; \

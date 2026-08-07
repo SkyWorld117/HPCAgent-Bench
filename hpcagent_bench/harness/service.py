@@ -384,9 +384,12 @@ class JudgeHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _task(self, parts, qs) -> Tuple[Optional[str], str]:
-        """(kernel, language) from ``/<verb>/<kernel>?language=`` -- or (None, ...)."""
+        """(kernel, language) from ``/<verb>/<kernel>?language=`` -- or (None, ...).
+
+        Kernel keys are path-style (``track/dir/name``), so the kernel is everything
+        after the verb, not one segment."""
         language = (qs.get("language") or ["c"])[0]
-        kernel = parts[1] if len(parts) > 1 and parts[1] else None
+        kernel = "/".join(parts[1:]) if len(parts) > 1 and parts[1] else None
         return kernel, language
 
     def misrouted(self, requested: Any) -> bool:

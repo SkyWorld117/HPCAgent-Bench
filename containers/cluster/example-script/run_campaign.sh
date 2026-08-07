@@ -3,9 +3,9 @@
 # allocation from it, and submit. Everything after the variant name is passed to sbatch verbatim
 # (account, partition, a --time override).
 #
-#   ./run_campaign.sh smoke       --account=<a>
-#   ./run_campaign.sh llr-cpp     --account=<a>
-#   ./run_campaign.sh llr-fortran --account=<a>
+#   ./run_campaign.sh smoke       --account=<a> --partition=mi300
+#   ./run_campaign.sh llr-cpp     --account=<a> --partition=mi300
+#   ./run_campaign.sh llr-fortran --account=<a> --partition=mi300
 #
 # After the job: merge the per-rank judge DBs and read the balance report --
 #   python3 merge_results.py  <RUN_ROOT>/<jobid>

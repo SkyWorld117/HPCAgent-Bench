@@ -182,6 +182,69 @@ CLUSTER_ENV_FILE=/shared/configs/experiment.env \
   containers/cluster/example-script/beverin.sbatch
 ```
 
+## Container runtimes
+
+The path above -- `run_campaign.sh` -> `beverin.sbatch` -> `run_cluster.sh` -- is the primary
+way to run this example. Inside `run_cluster.sh`, `role_srun()` picks how each role's `srun`
+step launches its image, controlled by `CONTAINER_RUNTIME` (default `ce`): `ce`, `apptainer`,
+`podman`, or `docker`. All four keep host networking; roles talk over node hostnames and ports.
+
+### CSCS Container Engine (default)
+
+Nothing extra to set. `role_srun()` adds `srun --environment=<edf>`: `INFERENCE_CE_ENV`
+(default `rocm723-vllm-0.23.0-pytorch211-ofi`) for the vLLM node, `AMD_CE_ENV` (default
+`optarena-amd-mi300`) for judge and agent nodes. Both EDFs must already be registered under
+`${HOME}/.edf` (or another `EDF_PATH` dir) and point their `image` line at a built `.sqsh`. See
+[Prerequisites](#prerequisites).
+
+### Apptainer
+
+```bash
+export CONTAINER_RUNTIME=apptainer
+export INFERENCE_IMAGE=/path/to/inference.sif
+export BENCH_IMAGE=/path/to/bench.sif
+export CONTAINER_GPU_FLAGS="--rocm"   # or --nv on NVIDIA
+```
+
+Build each `.sif` from the same image as the matching CE EDF first. `role_srun()` runs
+`apptainer exec ${CONTAINER_GPU_FLAGS} --bind <mounts> <image>`; the bind list comes from
+`CONTAINER_MOUNTS` (default `${HPCAGENT_BENCH_REPO} ${RUN_ROOT}`, space-separated, same path
+inside and outside the container).
+
+### Podman / Docker
+
+```bash
+export CONTAINER_RUNTIME=podman   # or docker
+export INFERENCE_IMAGE=<image-ref-or-loaded-archive>
+export BENCH_IMAGE=<image-ref-or-loaded-archive>
+export CONTAINER_GPU_FLAGS="--device /dev/kfd --device /dev/dri"   # podman/AMD example
+```
+
+Load or pull the OCI image on every allocated node first. `role_srun()` runs `<runtime> run
+--rm --network host --env-file <job.env> ${CONTAINER_GPU_FLAGS} <volumes> <image>`. Podman and
+Docker do not inherit the job environment, so `run_cluster.sh` writes a fixed prefix list
+(`AGENT`, `CLAUDE`, `GPUS_`, `HPCAGENT`, `INFERENCE`, `JUDGE`, `KERNELS`, `LANGUAGE`, `LITELLM`,
+`OPTARENA`, `PROBLEMS`, `RUN_DIR`, `RUN_ROOT`, `SCRIPT_DIR`, `SERPAPI`, `SLURM_`, `VLLM`,
+`WEBSEARCH`) of the job env to `${RUN_DIR}/job.env` and passes it via `--env-file`. Volumes come
+from the same `CONTAINER_MOUNTS` list, one `--volume <mount>:<mount>` per entry.
+
+### Images
+
+The three images are built by `containers/cluster/ce-images/{amd,nvidia}/build_sqsh.sh` and the
+inference rebuild chain `containers/cluster/ce-images/inference/build/build-chain.sh`. See
+[`containers/cluster/ce-images/README.md`](../ce-images/README.md) for the build and EDF-install
+steps; this file does not repeat them.
+
+### Known traps
+
+- `--environment` goes on the `srun` line, never on `#SBATCH` -- Slurm does not expand it there.
+- Slurm runs a spooled copy of a batch script, so its own path is meaningless inside role logic;
+  do not add `BASH_SOURCE`-relative paths there.
+- Compute nodes are diskless: point podman's storage (`runroot`/`graphroot`) and `TMPDIR` at
+  `/dev/shm` and clear the graphroot before the job runs, or a multi-GB pull dies mid-transfer
+  and a stale graphroot breaks the next job on that node. `run_cluster.sh` does not do this for
+  you; see [ce-images/README.md Step 1](../ce-images/README.md#step-1-optional-podman-storage-config).
+
 ## Language-track variants
 
 Four ready configurations for the `loop_level_reasoning` track (242 kernels each),
@@ -208,7 +271,7 @@ to sbatch verbatim):
 
 ```bash
 cd containers/cluster/example-script
-PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh llr-fortran --account=<account>
+PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh llr-fortran --account=<account> --partition=mi300
 ```
 
 Or by hand:
@@ -236,7 +299,7 @@ text carries a soft ~35-minute deadline (agents cannot see a clock otherwise), a
 step. Every node writes a 5-second utilization CSV under `<RUN_DIR>/monitor/`.
 
 ```bash
-PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh smoke --account=<account>
+PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh smoke --account=<account> --partition=mi300
 ```
 
 `make_problems.py` is a generator rather than a checked-in list on purpose: the
