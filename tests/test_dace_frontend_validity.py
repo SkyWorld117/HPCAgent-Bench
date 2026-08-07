@@ -20,6 +20,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Set
 
 import pytest
@@ -30,6 +31,14 @@ BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
 #: Seconds one kernel's PARSE may take before it counts as a hang. Generous next to the ~2 s a
 #: kernel actually takes: the budget is here to bound a wedged frontend, not to time anything.
 PARSE_TIMEOUT_S = 180.0
+
+#: How many kernels are in flight at once. The sweep is a SUBPROCESS per program already, so this
+#: changes no verdict and no per-kernel budget -- it only stops the five ``hang`` entries, at
+#: :data:`PARSE_TIMEOUT_S` each, from serialising 15 minutes of pure timeout ahead of the 620
+#: kernels that take ~2 s. Measured on the whole corpus 2026-08-08: 45 min serial against 20 min at
+#: two workers, which is the difference between fitting the CI step's budget and not. Two, not
+#: ``auto``: a parse of the deep vision nets is memory-bound in sympy, not core-bound.
+PARSE_WORKERS = 2
 
 #: Kernels whose generated DaCe program the frontend does not accept today, with the cause. Shrink
 #: this list by fixing the GENERATOR (a desugar in ``dace_emit``) or by fixing DaCe -- never by
@@ -279,9 +288,10 @@ def test_every_generated_dace_program_parses_or_is_a_known_refusal() -> None:
     assert programs, "no generated DaCe programs found -- the glob or the corpus moved"
     regressions: List[str] = []
     fixed: Set[str] = set()
-    for path in programs:
+    with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as pool:
+        verdicts = list(pool.map(parse_one, programs))
+    for path, verdict in zip(programs, verdicts):
         kernel = kernel_of(path)
-        verdict = parse_one(path)
         if verdict["verdict"] == "ok":
             if kernel in REFUSED:
                 fixed.add(kernel)
