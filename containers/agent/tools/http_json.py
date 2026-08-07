@@ -9,9 +9,10 @@ Two unrelated services sit behind these tools:
   with no rank and no submission body.
 
 Everything a judge request must carry that is NOT the caller's to decide is added HERE, once, so no
-tool module can forget it: the judge ``rank`` (:func:`judge_rank`) and the submission ``language``
-(:func:`task_language`). That mirrors ``JudgeClient._get`` / ``_post``, where no caller writes a rank
-either.
+tool module can forget it: the judge ``rank`` (:func:`judge_rank`), the submission ``language``
+(:func:`task_language`) and the run identity a recorded row is attributed to
+(:func:`identity_fields`). That mirrors ``JudgeClient._get`` / ``_post``, where no caller writes a
+rank either.
 
 Nothing in this module repairs a request. A wrong path, a wrong filename or a language the track does
 not accept travels as sent and comes back as the judge's own 4xx with its reason attached -- a
@@ -159,10 +160,32 @@ def get_judge(path: str, query: dict[str, Any] | None = None) -> dict[str, Any]:
     return call_json(f"{judge_base()}{path}?{q}", None, judge_timeout())
 
 
+#: Judge body fields carrying the run identity, and the environment variable each is read from.
+#: ``agent_driver.py`` composes both per agent; the judge stores them on the row it records.
+IDENTITY_ENV = (("run_id", "OPTARENA_RUN_ID"), ("optimizer", "OPTARENA_OPTIMIZER"))
+
+
+def identity_fields() -> dict[str, str]:
+    """Who this call is, for the row the judge writes: ``run_id`` and ``optimizer``.
+
+    A ``/submit`` row records only what the body named, so without these every row of a campaign is
+    the judge's ``"adhoc"`` default and no arm, node, problem or worker can be told from another --
+    which is the whole attribution an ablation reads. They come from the ENVIRONMENT the launcher
+    set, never from the tool payload: a value the model could write is a label it could choose.
+    An unset variable is omitted rather than sent empty, leaving the judge on its own default.
+    """
+    fields: dict[str, str] = {}
+    for key, name in IDENTITY_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            fields[key] = value
+    return fields
+
+
 def post_judge(path: str, body: dict[str, Any]) -> dict[str, Any]:
-    """POST a judge route with ``body`` plus this client's rank -- merged HERE, so no tool can
-    forget it."""
-    data = json.dumps({**body, "rank": judge_rank()}).encode("utf-8")
+    """POST a judge route with ``body`` plus this client's rank and run identity -- merged HERE,
+    after the body, so no tool can forget them and no payload can overwrite them."""
+    data = json.dumps({**body, **identity_fields(), "rank": judge_rank()}).encode("utf-8")
     return call_json(f"{judge_base()}{path}", data, judge_timeout())
 
 

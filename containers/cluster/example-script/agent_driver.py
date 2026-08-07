@@ -121,6 +121,39 @@ def problem_text(problem: dict[str, Any]) -> str:
     return json.dumps(problem, indent=2, sort_keys=True)
 
 
+def node_rank() -> int:
+    """This agent node's index in the run: what run_cluster.sh exported, else the Slurm rank."""
+    return int(os.environ.get("AGENT_NODE_RANK", os.environ.get("SLURM_PROCID", "0")))
+
+
+def campaign_arm() -> str:
+    """The campaign arm this run belongs to (``llr-c``, ``llr-cpp``, ``llr-fortran``, ``llr-any``).
+
+    ``CAMPAIGN_ARM`` is set by the ``.env.<variant>`` file run_campaign.sh installs, so it is the one
+    arm label that reaches a recorded row -- on the free-choice arm the ``language`` column carries
+    no arm signal at all, and on the smoke variant every row shares kernel and language too. The
+    PROBLEMS_FILE stem is the fallback for a hand-written .env that predates the variable.
+    """
+    arm = os.environ.get("CAMPAIGN_ARM", "").strip()
+    if arm:
+        return arm
+    return pathlib.Path(os.environ.get("PROBLEMS_FILE", "").strip()).stem or "adhoc"
+
+
+def identity_env(problem_index: int, worker_index: int) -> dict[str, str]:
+    """The identity ONE agent's judge calls are recorded under, as environment for its process.
+
+    The submission body is built inside the agent container by ``containers/agent/tools/http_json.py``,
+    which knows nothing of arms or shards -- so the run id is composed here, where the arm, the node,
+    the problem's index in the FULL list and the worker slot are all known, and handed over as
+    ``$OPTARENA_RUN_ID``. Dots join the four fields because an arm name already contains hyphens and
+    a run id is used as a directory name elsewhere in the harness.
+    """
+    run_id = f"{campaign_arm()}.n{node_rank()}.p{problem_index}.w{worker_index}"
+    optimizer = os.environ.get("OPTARENA_OPTIMIZER", "").strip() or os.environ.get("CLAUDE_MODEL", "optarena-llm")
+    return {"OPTARENA_RUN_ID": run_id, "OPTARENA_OPTIMIZER": optimizer}
+
+
 def shared_paths(kernel: str, problem_index: int) -> tuple[pathlib.Path, str]:
     """This agent's write folder under the shared mount, plus the task-text line announcing it."""
     shared = pathlib.Path(os.environ.get("HPCAGENT_BENCH_SHARED_DIR", "/shared"))
@@ -206,6 +239,9 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     environment["JUDGE_URL"] = judge_url
     environment["OPTARENA_AGENT_API_URL"] = judge_url
     environment["JUDGE_RANK"] = str(judge_rank)
+    # Same channel, same reason: the MCP server puts these in every judge POST body, and a row the
+    # judge records without them is one no arm, node or worker can be recovered from afterwards.
+    environment.update(identity_env(problem_index, worker_index))
 
     # Direct mode (default): claude speaks vLLM's native /v1/messages; agents stripe over the
     # replicas the same way problems stripe over judges. ANTHROPIC_BASE_URL must be the server
@@ -271,18 +307,18 @@ def main() -> int:
         )
         return 2
 
-    node_rank = int(os.environ.get("AGENT_NODE_RANK", os.environ.get("SLURM_PROCID", "0")))
+    node = node_rank()
     node_count = int(os.environ.get("AGENT_NODES", os.environ.get("SLURM_NTASKS", "1")))
     # (index in the FULL list, problem): the same stride as before, but carrying the index, because
     # the judge a problem is striped onto must not depend on which node happens to run it.
-    local_problems = [(index, problems[index]) for index in range(node_rank, len(problems), node_count)]
+    local_problems = [(index, problems[index]) for index in range(node, len(problems), node_count)]
     workers = max(1, int(os.environ.get("AGENTS_PER_NODE", "4")))
-    node_dir = pathlib.Path(os.environ["RUN_DIR"]) / "agents" / f"node-{node_rank}"
+    node_dir = pathlib.Path(os.environ["RUN_DIR"]) / "agents" / f"node-{node}"
     node_dir.mkdir(parents=True, exist_ok=True)
 
     print(
-        f"node {node_rank}/{node_count} received {len(local_problems)} problems; "
-        f"workers={workers} judges={len(judges)}",
+        f"node {node}/{node_count} received {len(local_problems)} problems; "
+        f"workers={workers} judges={len(judges)} arm={campaign_arm()}",
         flush=True,
     )
     if not local_problems:

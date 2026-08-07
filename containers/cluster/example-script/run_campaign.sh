@@ -34,6 +34,13 @@ set -a
 . "${ENV_FILE}"
 set +a
 
+# A mislabelled arm is worse than an unlabelled one: CAMPAIGN_ARM is the only arm signal in the
+# judge DB, and a stale copy would attribute this arm's rows to another one, silently.
+if [[ "${CAMPAIGN_ARM:-}" != "${VARIANT}" ]]; then
+    echo "${ENV_FILE} sets CAMPAIGN_ARM='${CAMPAIGN_ARM:-}' but the variant is '${VARIANT}'" >&2
+    exit 2
+fi
+
 nodes=$(( ${INFERENCE_NODES:-2} + ${AGENT_NODES:-1} + ${JUDGE_NODES:-1} ))
 
 case "${VARIANT}" in
