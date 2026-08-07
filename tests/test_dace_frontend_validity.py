@@ -35,27 +35,26 @@ PARSE_TIMEOUT_S = 180.0
 #: this list by fixing the GENERATOR (a desugar in ``dace_emit``) or by fixing DaCe -- never by
 #: hand-editing a ``*_dace.py``, which is regenerated from the numpy reference on the next miss.
 #:
-#: The causes, measured 2026-08-06 over the whole corpus, one process per kernel:
-#:   broadcast     111 -- a padded conv/pool workspace is allocated from a runtime scalar and the
-#:                        frontend re-promotes that scalar to a FRESH symbol at every use, so a
-#:                        write that is shape-equal by construction no longer proves it
-#:   matmul         17 -- ``numpy.matmul`` has no SDFG implementation registered (``np.dot`` does)
-#:   keyerror       10 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns: the
-#:                        transient shadows the symbol the argument shapes are declared with
-#:   reassign        9 -- a second assignment to an array/View name the frontend treats as
-#:                        single-assignment
-#:   symbol_data     7 -- a scalar used BOTH as data and as a shape symbol
+#: The causes, measured 2026-08-07 over the whole corpus, one process per kernel (161 of 625):
+#:   broadcast     109 -- two extents that ARE one quantity reach a write spelled differently, and
+#:                        the frontend re-promotes each to a fresh symbol it cannot prove equal
+#:   misc           10 -- one-offs: negative strides, a symbolic ``np.arange`` stop, ``np.ix_``, a
+#:                        memlet dimensionality, a ZeroDivisionError, an unimplemented replacement
+#:   symbol_data     7 -- a scalar used BOTH as data and as a shape symbol ("Cannot create symbol
+#:                        X, the name is used by a data descriptor")
 #:   undefined       7 -- a name the frontend cannot resolve in the emitted scope
-#:   symbolic_or     6 -- ``if dim == 0 or dim == -2`` over symbols: ``'Equality' object is not
-#:                        iterable``
-#:   where_scalars   6 -- ``np.where(cond, scalar, scalar)``
 #:   callback        5 -- an untyped callback return value
-#:   keepdims        4 -- ``keepdims=`` on a reduction whose replacement does not take it
-#:   clip_syntax     3 -- the emitted clip tasklet is not valid Python
+#:   hang            5 -- the frontend does not finish parsing inside the budget; the deep vision
+#:                        nets spend it in sympy over per-layer extent expressions
+#:   keyerror        5 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns
+#:   reassign        5 -- a second assignment to an array/View name the frontend treats as
+#:                        single-assignment
+#:   matmul          2 -- ``numpy.matmul`` has no SDFG implementation registered (``np.dot`` does)
+#:   symbolic_or     2 -- ``if dim == 0 or dim == -2`` over symbols
 #:   chained_compare 1 -- a chain whose middle operand repeats work, so the generator leaves it
-#:   misc            8 -- one-offs: negative strides, a symbolic ``np.arange`` stop, a ListComp,
-#:                        ``np.ix_``, a memlet dimensionality, a ``str`` where a node belonged
-#:   hang            1 -- the frontend does not finish parsing at all
+#:   clip_syntax     1 -- the emitted clip tasklet is not valid Python
+#:   keepdims        1 -- ``keepdims=`` on a reduction whose replacement does not take it
+#:   where_scalars   1 -- ``np.where(cond, scalar, scalar)``
 REFUSED: Dict[str, str] = {
     "average_pooling_1d": "broadcast",
     "average_pooling_2d": "broadcast",
@@ -71,7 +70,6 @@ REFUSED: Dict[str, str] = {
     "conv2d_add_scale_sigmoid_group_norm": "broadcast",
     "conv2d_avg_pool_sigmoid_sum": "broadcast",
     "conv2d_batch_norm_scaling": "broadcast",
-    "conv2d_bias": "broadcast",
     "conv2d_divide_leaky_relu": "broadcast",
     "conv2d_gelu_global_avg_pool": "broadcast",
     "conv2d_group_norm_scale_max_pool_clamp": "broadcast",
@@ -90,16 +88,9 @@ REFUSED: Dict[str, str] = {
     "conv2d_subtract_tanh_subtract_avg_pool": "broadcast",
     "conv2d_tanh_scaling_bias_add_max": "broadcast",
     "conv3d_divide_max_global_avg_pool_bias_add_sum": "broadcast",
-    "conv3d_group_norm_mean": "broadcast",
-    "conv3d_group_norm_min_clamp_dropout": "broadcast",
-    "conv3d_hardswish_group_norm_mean": "broadcast",
-    "conv3d_leaky_relu_sum_clamp_gelu": "broadcast",
     "conv3d_max_logsumexp_relu": "broadcast",
-    "conv3d_min_softmax": "broadcast",
     "conv3d_mish_tanh": "broadcast",
     "conv3d_multiply_instance_norm_clamp_multiply_max": "broadcast",
-    "conv3d_relu_leaky_relu_gelu_sigmoid_bias_add": "broadcast",
-    "conv3d_scaling_tanh_multiply_sigmoid": "broadcast",
     "conv3d_softmax_max_pool_max_pool": "broadcast",
     "conv_depthwise_2d_asymmetric_input_asymmetric_kernel": "broadcast",
     "conv_depthwise_2d_asymmetric_input_square_kernel": "broadcast",
@@ -166,92 +157,66 @@ REFUSED: Dict[str, str] = {
     "conv_transposed_3d_square_input_asymmetric_kernel": "broadcast",
     "conv_transposed_3d_square_input_square_kernel": "broadcast",
     "conv_transposed_3d_square_input_square_kernel_padded_dilated_strided": "broadcast",
-    "cumprod": "symbolic_or",
-    "cumsum": "symbolic_or",
+    "convolutional_vision_transformer": "reassign",
     "cumsum_exclusive": "symbolic_or",
     "cumsum_reverse": "symbolic_or",
     "daubechies_dwt2d": "broadcast",
     "dbcsr": "broadcast",
+    "densenet121": "reassign",
+    "densenet121_transition_layer": "broadcast",
+    "densenet201": "reassign",
     "distribution_search": "misc",
     "dwt2d": "broadcast",
-    "edge_laplacian": "callback",
-    "fft_3d": "keyerror",
+    "efficientnet_b0": "hang",
+    "efficientnet_mb_conv": "broadcast",
     "floyd_warshall": "chained_compare",
-    "fragment_patch_density": "callback",
-    "frobenius_norm": "keepdims",
-    "gelu": "where_scalars",
-    "gemm_batch_norm_gelu_relu": "where_scalars",
     "gemm_bias_add_hardtanh_mish_group_norm": "clip_syntax",
-    "gemm_divide_sum_scaling": "matmul",
     "gemm_group_norm_hardtanh": "symbol_data",
     "gemm_group_norm_min_bias_add": "symbol_data",
-    "gemm_group_norm_swish_multiply_swish": "symbol_data",
-    "gemm_logsumexp_leaky_relu_leaky_relu_gelu_gelu": "reassign",
-    "gemm_max_subtract_gelu": "reassign",
-    "gemm_scaling_hardtanh_gelu": "clip_syntax",
-    "gemm_sigmoid_logsumexp": "reassign",
-    "gemm_subtract_global_avg_pool_logsumexp_gelu_residual_add": "reassign",
     "gmres": "misc",
+    "googlenet_inception_v1": "hang",
     "gpt2_block": "symbol_data",
     "group_norm": "symbol_data",
-    "hdiff": "keyerror",
-    "hinge_loss": "keepdims",
+    "gru_bidirectional": "broadcast",
+    "gru_bidirectional_hidden": "broadcast",
     "histogram_equalization": "undefined",
-    "icon_gather": "keyerror",
     "icon_scatter": "keyerror",
     "kl_div_loss": "undefined",
-    "kmeans": "misc",
     "laplacian_stencil_3d": "callback",
     "lenet": "broadcast",
-    "log_softmax": "symbolic_or",
     "ls3df_scf": "keyerror",
+    "lstm_bidirectional": "broadcast",
     "lulesh": "reassign",
-    "masked_cumsum": "symbolic_or",
-    "matmul_add_swish_tanh_gelu_hardtanh": "where_scalars",
+    "mamba2_return_final_state": "callback",
+    "mamba2_return_y": "callback",
     "matmul_avg_pool_gelu_scale_max": "where_scalars",
-    "matmul_divide_gelu": "where_scalars",
-    "matmul_for_lower_triangular_matrices": "matmul",
-    "matmul_for_symmetric_matrices": "matmul",
-    "matmul_for_upper_triangular_matrices": "matmul",
-    "matmul_gelu_softmax": "where_scalars",
     "matmul_group_norm_leaky_relu_sum": "symbol_data",
     "matmul_max_pool_sum_scale": "keepdims",
-    "matmul_scale_residual_add_clamp_logsumexp_mish": "clip_syntax",
-    "matmul_sigmoid_sum": "reassign",
-    "matmul_sum_max_avg_pool_logsumexp_logsumexp": "reassign",
-    "matmul_swish_sum_group_norm": "symbol_data",
-    "matmul_with_irregular_shapes": "matmul",
-    "matmul_with_large_k_dimension": "matmul",
-    "matmul_with_small_k_dimension": "matmul",
-    "matmul_with_transposed_a": "matmul",
-    "matmul_with_transposed_b": "matmul",
-    "matmul_with_transposed_both": "matmul",
-    "matrix_vector_multiplication": "matmul",
     "max_filter": "keyerror",
     "max_pooling_1d": "broadcast",
     "max_pooling_2d": "broadcast",
     "max_pooling_3d": "broadcast",
     "minife": "misc",
     "minres": "undefined",
-    "mlp": "reassign",
-    "mse_loss": "keepdims",
+    "mobilenet_v2": "hang",
     "needleman_wunsch": "misc",
     "poisson_cg_3d": "callback",
     "rayleigh_ritz_rotation": "misc",
-    "resnet": "broadcast",
-    "scaled_dot_product_attention": "matmul",
+    "resnet101": "symbol_data",
+    "shufflenet": "hang",
+    "shufflenet_unit": "misc",
     "smith_waterman": "misc",
     "spmm": "undefined",
-    "square_matrix_multiplication": "matmul",
+    "squeezenet": "misc",
     "srad": "misc",
-    "standard_matrix_multiplication": "matmul",
-    "stockham_fft": "keyerror",
-    "tall_skinny_matrix_multiplication": "matmul",
+    "swin_mlp": "symbol_data",
+    "swin_transformer_v2": "misc",
     "three_d_tensor_matrix_multiplication": "matmul",
+    "unet_softmax": "broadcast",
     "vadv": "keyerror",
     "velocity_tendencies": "reassign",
     "vexx": "broadcast",
-    "zekin_gather": "keyerror",
+    "vision_transformer": "broadcast",
 }
 
 

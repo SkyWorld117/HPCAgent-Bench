@@ -500,6 +500,22 @@ class _BatchedMatmulToLoop(ast.NodeTransformer):
                                  ctx=ast.Store())
         return None
 
+    def _allocation(self, name: str, value: ast.AST) -> Optional[ast.stmt]:
+        """The ``np.empty`` that BINDS a bare-Name target, or None when its extents are not exact:
+        the loop form only WRITES the target, so nothing would bind it (dace: "ctx used before
+        definition"). Exact means equal-rank operands -- ``A``'s extents with ``B``'s last."""
+        pairs = _matmul_pairs(value)
+        if len(pairs) != 1 or pairs[0] is not value:
+            return None  # the matmul is nested in a larger expression: its result extents are not this one's
+        a, b = _matmul_operands(value)
+        rank = expr_rank(a, self.ranks)
+        if not (isinstance(a, ast.Name) and isinstance(b, ast.Name)) or rank != expr_rank(b, self.ranks):
+            return None
+        if rank is None or rank < 3:
+            return None
+        dims = [f"{a.id}.shape[{k}]" for k in range(rank - 1)] + [f"{b.id}.shape[{rank - 1}]"]
+        return ast.parse(f"{name} = np.empty(({', '.join(dims)}), {a.id}.dtype)").body[0]
+
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         self.generic_visit(node)
         if len(node.targets) != 1 or not self._is_batched(node.value):
@@ -510,6 +526,13 @@ class _BatchedMatmulToLoop(ast.NodeTransformer):
         new_target = self._index_target(node.targets[0], "")  # probe form first
         if new_target is None:
             return node  # target not a recognised batched whole-array write
+        # A bare-Name target is a BINDING, not a write into an existing array: it needs its own
+        # allocation, and without an exact shape for it the statement stays verbatim.
+        alloc = None
+        if isinstance(node.targets[0], ast.Name):
+            alloc = self._allocation(node.targets[0].id, node.value)
+            if alloc is None:
+                return node
         bv = f"__bm{self._ctr}"
         self._ctr += 1
         self.changed = True
@@ -524,7 +547,8 @@ class _BatchedMatmulToLoop(ast.NodeTransformer):
                        iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()), args=[extent], keywords=[]),
                        body=[ast.Assign(targets=[new_target], value=new_value)],
                        orelse=[])
-        return ast.copy_location(loop, node)
+        ast.copy_location(loop, node)
+        return [ast.copy_location(alloc, node), loop] if alloc is not None else loop
 
 
 def _const_pair_widths(pad_width: ast.AST, rank: int):
@@ -1351,6 +1375,19 @@ class _CallFixups(ast.NodeTransformer):
             slices = ", ".join("::-1" if d in axes else ":" for d in range(rank))
             self.changed = True
             return ast.copy_location(ast.parse(f"({ast.unparse(x)})[{slices}]", mode="eval").body, node)
+        if attr == "swapaxes" and len(node.args) == 3 and not node.keywords:
+            # np.swapaxes -> np.transpose: no backend implements swapaxes, dace makes it a callback.
+            rank = expr_rank(node.args[0], self.ranks)
+            axes = [a.value for a in node.args[1:] if isinstance(a, ast.Constant) and isinstance(a.value, int)]
+            if rank is None or len(axes) != 2:
+                return node
+            perm = list(range(rank))
+            i, j = axes[0] % rank, axes[1] % rank
+            perm[i], perm[j] = perm[j], perm[i]
+            self.changed = True
+            order = ", ".join(str(p) for p in perm)
+            return ast.copy_location(
+                ast.parse(f"np.transpose({ast.unparse(node.args[0])}, ({order}))", mode="eval").body, node)
         return node
 
 
