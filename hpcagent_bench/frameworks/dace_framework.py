@@ -514,8 +514,9 @@ class DaceFramework(Framework):
 
     def _sdfg_fingerprint(self, bench: Benchmark) -> str:
         """Freshness key for a kernel's cached base SDFG: the numpy reference + the generated
-        ``<module>_dace.py`` it is parsed from + the run precision. Any change to the source, the
-        emitted DaCe program, or the datatype misses the cache and rebuilds."""
+        ``<module>_dace.py`` it is parsed from + the run precision + which DaCe tree parsed it
+        (:func:`framework_cache.dace_tree_fingerprint`). Any change to the source, the emitted
+        DaCe program, the datatype, or the DaCe library itself misses the cache and rebuilds."""
         from hpcagent_bench import framework_cache, paths
         kdir = paths.BENCHMARKS / bench.info["relative_path"]
         module = bench.info["module_name"]
@@ -525,6 +526,7 @@ class DaceFramework(Framework):
             if p.exists():
                 parts.append(p.read_bytes())
         parts.append(str(self.datatype).encode())
+        parts.append(framework_cache.dace_tree_fingerprint().encode())
         return framework_cache.fingerprint_bytes(b"\x00".join(parts))
 
     def build_with_cache(self, bench: Benchmark, tag: str, build: Callable[[], Any]) -> Any:

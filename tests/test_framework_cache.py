@@ -49,6 +49,13 @@ def test_source_fingerprint_folds_in_the_translator_tree(tmp_path):
     assert fc.translator_fingerprint() == fc.translator_fingerprint()  # memoized, one walk per process
 
 
+def test_dace_tree_fingerprint_is_memoized_and_well_defined():
+    """A DaCe upgrade (or a switch between trees) must move the SDFG cache key even when the kernel's
+    own files are untouched -- otherwise a stale SDFG parsed by the OLD tree is served forever."""
+    import_or_skip("dace")
+    assert fc.dace_tree_fingerprint() == fc.dace_tree_fingerprint()  # memoized, one git call per process
+
+
 def test_kernel_cache_dir_creates_dir_with_gitkeep(tmp_path):
     kdir = tmp_path / "kern"
     kdir.mkdir()
