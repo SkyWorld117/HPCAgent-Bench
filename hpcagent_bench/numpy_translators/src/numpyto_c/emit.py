@@ -32,6 +32,11 @@ def _c_type(dtype: str) -> str:
 _INT_CAST_NAMES = frozenset({"int", "len"})
 
 
+def pluto_floordiv(lhs: str, rhs: str) -> str:
+    """Integer floor division as pet's named quasi-affine ``floord`` builtin (POLYCC-008's guard)."""
+    return f"floord({lhs}, {rhs})"
+
+
 def _is_int_cast(node: ast.AST) -> bool:
     """True for a call whose result is an integer regardless of its argument dtype
     (``int(x)``, ``len(x)``, ``np.int32(x)``), so float-ness must not propagate out of it."""
@@ -1033,7 +1038,7 @@ class _CBodyEmitter(BaseEmitter):
             # inferred from the AST is what silently truncated ``int(a[i]) // 2`` instead of
             # flooring it -- the compiler knows the type exactly, this pass does not.
             if isinstance(node.op, ast.FloorDiv):
-                return f"int_floor({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
+                return self.emit_floordiv(node.left, node.right)
             if isinstance(node.op, ast.Mod):
                 return f"python_mod({self.emit_expr(node.left)}, {self.emit_expr(node.right)})"
             if isinstance(node.op, ast.Div):
@@ -1329,6 +1334,22 @@ class _CBodyEmitter(BaseEmitter):
         if self._is_int_operand(left) and self._is_int_operand(right):
             return f"__npb_int_pow({self.emit_expr(left)}, {self.emit_expr(right)})"
         return f"{self._math_name('pow')}({self.emit_expr(left)}, {self.emit_expr(right)})"
+
+    def emit_floordiv(self, left: ast.AST, right: ast.AST) -> str:
+        """``a // b``: ``floord`` in a pluto scop over provably signed ints, else ``int_floor``."""
+        lhs, rhs = self.emit_expr(left), self.emit_expr(right)
+        if self.pluto and self._is_signed_int_operand(left) and self._is_signed_int_operand(right):
+            return pluto_floordiv(lhs, rhs)
+        return f"int_floor({lhs}, {rhs})"
+
+    def _is_signed_int_operand(self, node: ast.AST) -> bool:
+        """Provably a SIGNED integer built from Python ints -- no arrays, no unsigned scalar."""
+        if not self._is_int_operand(node, allow_array=False):
+            return False
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and (self._name_dtype(sub.id) or "").startswith("uint"):
+                return False
+        return True
 
     def _is_int_operand(self, node: ast.AST, *, allow_array: bool = True) -> bool:
         """Conservative int-typed operand detection: int Constant, an int-typed Name or
@@ -2136,6 +2157,18 @@ _C_HEADER = ("#define _USE_MATH_DEFINES\n"
              "    __NPB_UNSIGNED_ASSOC(__npb_ceildiv_u) \\\n"
              "    float: __npb_ceildiv_f, double: __npb_ceildiv_f, long double: __npb_ceildiv_f, \\\n"
              "    default: __npb_ceildiv_i)((a), (b))\n"
+             "#endif\n"
+             "/* pet's named quasi-affine builtins (POLYCC-008); guarded because polycc prepends\n"
+             " * its own #define floord/ceild, which would expand these declarators (POLYCC-004). */\n"
+             "#ifndef floord\n"
+             "static inline int64_t floord(int64_t a, int64_t b) {\n"
+             "    return __npb_floordiv_i(a, b);\n"
+             "}\n"
+             "#endif\n"
+             "#ifndef ceild\n"
+             "static inline int64_t ceild(int64_t a, int64_t b) {\n"
+             "    return __npb_ceildiv_i(a, b);\n"
+             "}\n"
              "#endif\n"
              "/* Python ``%`` returns sign of divisor; C returns sign of dividend. Same\n"
              " * type-dispatch as int_floor: integer operands use the exact integer form,\n"

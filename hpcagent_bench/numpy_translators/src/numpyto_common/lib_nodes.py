@@ -3875,10 +3875,11 @@ def expand_pad(target: ast.expr,
     component axis ``(0, 0)``). Source may be a bare array or a
     leading-scalar-indexed sub-array (``in_grid[b]``). Two modes: ``edge``
     takes the nearest source edge value (``padded[i...] = src[clamp(i - before,
-    0, d - 1)...]``, clamp emitted as scalar ``__ps<k>`` locals with guard
-    ``if``s, no min/max in subscript position); ``constant`` (numpy default)
-    zeroes the buffer then copies the interior ``padded[i + before...] =
-    src[i...]``. The halo-exchange idiom of the structured-grid stencils."""
+    0, d - 1)...]``, clamp emitted as one conditional-expression assign to a
+    scalar ``__ps<k>`` local, no min/max in subscript position); ``constant``
+    (numpy default) zeroes the buffer then copies the interior ``padded[i +
+    before...] = src[i...]``. The halo-exchange idiom of the structured-grid
+    stencils."""
     if not args:
         raise NotImplementedError("np.pad needs a source operand")
     base = _pad_src_base_and_lead(args[0])
@@ -3930,6 +3931,8 @@ def expand_pad(target: ast.expr,
     # mode-specific remap of ``q = out_iter - before`` back into ``[0, d-1]``
     # (edge = clamp, wrap = periodic, reflect/symmetric = mirror), emitted as
     # scalar ``__ps<k>`` locals so no min/max/mod sits in subscript position.
+    # edge clamps in ONE conditional expression (see _remap); the fold/mod modes
+    # keep their statement sequence, which reads sv back.
     out_iters = [f"__pp{k}" for k in range(rank)]
     src_idx_vars = [f"__ps{k}" for k in range(rank)]
 
@@ -3947,16 +3950,22 @@ def expand_pad(target: ast.expr,
                       body=[ast.Assign(targets=[_store(sv)], value=ast.BinOp(left=hi, op=ast.Sub(), right=_name(sv)))],
                       orelse=[])
 
-    def _remap(sv: str, d: ast.expr, pv: str) -> List[ast.stmt]:
+    def _remap(sv: str, d: ast.expr, pv: str, raw: ast.expr) -> List[ast.stmt]:
         if mode == "edge":
-            lo = ast.If(test=ast.Compare(left=_name(sv), ops=[ast.Lt()], comparators=[_const(0)]),
-                        body=[ast.Assign(targets=[_store(sv)], value=_const(0))],
-                        orelse=[])
+            # ONE conditional-expression assign, not two guard ifs: a polyhedral
+            # extractor (pluto/pet) reads data-dependent control flow inside the
+            # loop body as a statement it cannot schedule and drops the body.
+            # Every arm recomputes the PRE-clamp ``raw``; reading sv back would
+            # add a RAW dependence on top of the WAW the assign already carries.
             upper = ast.BinOp(left=copy.deepcopy(d), op=ast.Sub(), right=_const(1))
-            hi = ast.If(test=ast.Compare(left=_name(sv), ops=[ast.Gt()], comparators=[upper]),
-                        body=[ast.Assign(targets=[_store(sv)], value=copy.deepcopy(upper))],
-                        orelse=[])
-            return [lo, hi]
+            hi = ast.IfExp(test=ast.Compare(left=copy.deepcopy(raw), ops=[ast.Gt()],
+                                            comparators=[copy.deepcopy(upper)]),
+                           body=copy.deepcopy(upper),
+                           orelse=copy.deepcopy(raw))
+            clamp = ast.IfExp(test=ast.Compare(left=copy.deepcopy(raw), ops=[ast.Lt()], comparators=[_const(0)]),
+                              body=_const(0),
+                              orelse=hi)
+            return [ast.Assign(targets=[_store(sv)], value=clamp)]
         if mode == "wrap":  # periodic tiling: src[q mod d]
             return [ast.Assign(targets=[_store(sv)], value=_floor_mod(_name(sv), d))]
         # symmetric/reflect: mirror with period 2d (incl. edge) or 2(d-1) (excl.
@@ -4004,9 +4013,12 @@ def expand_pad(target: ast.expr,
     pre: List[ast.stmt] = []
     for k in range(rank):
         sv = src_idx_vars[k]
-        pre.append(
-            ast.Assign(targets=[_store(sv)], value=ast.BinOp(left=_name(out_iters[k]), op=ast.Sub(), right=_before(k))))
-        pre.extend(_remap(sv, _dim(k), f"__pm{k}"))
+        raw = ast.BinOp(left=_name(out_iters[k]), op=ast.Sub(), right=_before(k))
+        # edge folds the raw index into its clamp expression; the fold/mod modes
+        # read sv back, so they need the plain seeding assign first.
+        if mode != "edge":
+            pre.append(ast.Assign(targets=[_store(sv)], value=raw))
+        pre.extend(_remap(sv, _dim(k), f"__pm{k}", raw))
     body = pre + [
         ast.Assign(targets=[_store_target([_name(v) for v in out_iters])],
                    value=_src_read([_name(v) for v in src_idx_vars]))
@@ -7685,6 +7697,116 @@ _ELEMENT_WRITE_EXPANDERS = {
 }
 
 
+def _index_axes(sub: ast.Subscript) -> Optional[Tuple[str, ...]]:
+    """Per-axis index expressions of a fully scalar subscript, or ``None`` when
+    any axis is a slice (no single cell to reason about)."""
+    elts = sub.slice.elts if isinstance(sub.slice, ast.Tuple) else [sub.slice]
+    if any(isinstance(e, (ast.Slice, ast.Starred)) for e in elts):
+        return None
+    return tuple(ast.unparse(e) for e in elts)
+
+
+def _reduction_misses_target(target: ast.Subscript, loop: ast.For, body: ast.expr) -> bool:
+    """True when moving the reduction onto ``target`` cannot change what ``body``
+    reads: either ``body`` never touches the target's array, or every read of it
+    provably misses ``target``'s cell for all iterations of ``loop``.
+
+    ``trmm``'s ``B[i, j] += sum_k A[k, i] * B[k, j]`` needs the second rung: ``k``
+    runs from ``i + 1``, so the accumulating cell is never read back. ``symm``
+    takes the first (``temp2`` is write-only in the body).
+    """
+    base = target.value.id
+    mentions = [n for n in ast.walk(body) if isinstance(n, ast.Name) and n.id == base]
+    if not mentions:
+        return True
+    reads = [n for n in ast.walk(body) if isinstance(n, ast.Subscript) and n.value in mentions]
+    if len(reads) != len(mentions):
+        return False  # a bare-Name (whole-array) mention -- no cell to compare
+    axes = _index_axes(target)
+    if axes is None:
+        return False
+    # The nonnegativity below is what proves the miss, so demand the 0-based
+    # ``range(n)`` that makes it true rather than assuming every hoist emits one.
+    if not (isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Name) and loop.iter.func.id == "range"
+            and len(loop.iter.args) == 1):
+        return False
+    # Deferred: sympy import costs ~100s of ms and only this narrow shape needs it.
+    import sympy
+    iter_name = loop.target.id
+    it = sympy.Symbol(iter_name, nonnegative=True)
+    for read in reads:
+        read_axes = _index_axes(read)
+        if read_axes is None or len(read_axes) != len(axes):
+            return False
+        try:
+            diffs = [
+                sympy.sympify(r, locals={iter_name: it}) - sympy.sympify(t, locals={iter_name: it})
+                for r, t in zip(read_axes, axes)
+            ]
+        except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
+            return False
+        if not any(d.is_zero is False for d in diffs):
+            return False
+    return True
+
+
+def _retarget_scalar_accumulator(node: ast.stmt, prelude: List[ast.stmt]) -> Optional[List[ast.stmt]]:
+    """Fold ``s = 0.0; for k: s += f(k); T[idx] (+)= s`` into an in-place
+    reduction on ``T[idx]``, dropping the scalar. Returns ``None`` when the
+    statement is not that shape.
+
+    ``emit_pluto`` hoists every scalar declaration above ``#pragma scop``, so
+    ``s`` models to pet as a one-element array live across the whole iteration
+    domain: the false WAW/WAR fragments the schedule, and Pluto's ``--parallel``
+    privatises only its own tile counters, leaving ``s`` shared in the parallel
+    band -- a race. An array cell carries the same reduction with no
+    scop-external state, which is why ``syrk`` (reducing into ``C[i, si1]``) was
+    never affected.
+    """
+    if len(prelude) < 2 or not isinstance(node.value, ast.Name):
+        return None
+    augmented = isinstance(node, ast.AugAssign)
+    if augmented:
+        if not isinstance(node.op, ast.Add):
+            return None
+        target = node.target
+    else:
+        if len(node.targets) != 1:
+            return None
+        target = node.targets[0]
+    # A single cell is the whole point: a slice destination is a different lowering
+    # (slice fusion) and would not give pet the affine reduction carrier we are after.
+    if not (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+            and _index_axes(target) is not None):
+        return None
+    scalar = node.value.id
+    init, loop = prelude[-2], prelude[-1]
+    if not (isinstance(init, ast.Assign) and len(init.targets) == 1 and isinstance(init.targets[0], ast.Name)
+            and init.targets[0].id == scalar and isinstance(init.value, ast.Constant) and init.value.value == 0.0):
+        return None
+    if not (isinstance(loop, ast.For) and not loop.orelse and len(loop.body) == 1
+            and isinstance(loop.target, ast.Name)):
+        return None
+    step = loop.body[0]
+    if not (isinstance(step, ast.AugAssign) and isinstance(step.op, ast.Add) and isinstance(step.target, ast.Name)
+            and step.target.id == scalar):
+        return None
+    if any(isinstance(n, ast.Name) and n.id == scalar for n in ast.walk(step.value)):
+        return None  # self-referential accumulation -- not a plain reduction
+    if not _reduction_misses_target(target, loop, step.value):
+        return None
+    store = copy.deepcopy(target)
+    store.ctx = ast.Store()
+    loop.body = [ast.AugAssign(target=store, op=ast.Add(), value=step.value)]
+    # An ``AugAssign`` target already holds the running value: zero-initialising
+    # it would drop what the reduction must add to.
+    if augmented:
+        return prelude[:-2] + [loop]
+    zero = copy.deepcopy(target)
+    zero.ctx = ast.Store()
+    return prelude[:-2] + [ast.Assign(targets=[zero], value=_const(0.0)), loop]
+
+
 class LibNodeRewriter(ast.NodeTransformer):
     """Single-pass rewriter for the library-node registry. Consumes
     :class:`KernelIR`'s array-shape table so reduction expanders know how many
@@ -7955,6 +8077,9 @@ class LibNodeRewriter(ast.NodeTransformer):
                     return prelude + expanded
                 except NotImplementedError:
                     pass
+        retargeted = _retarget_scalar_accumulator(node, prelude)
+        if retargeted is not None:
+            return retargeted
         if prelude:
             return prelude + [node]
         return node
@@ -8033,6 +8158,9 @@ class LibNodeRewriter(ast.NodeTransformer):
         self.generic_visit(node)
         node.value, prelude = self._hoist_value(node.value)
         prelude = self._lower_prelude_calls(prelude)
+        retargeted = _retarget_scalar_accumulator(node, prelude)
+        if retargeted is not None:
+            return retargeted
         if prelude:
             return prelude + [node]
         return node

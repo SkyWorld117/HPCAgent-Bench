@@ -867,10 +867,6 @@ class _FortranBodyEmitter(BaseEmitter):
                 if kind in ("ones", "ones_like"):
                     return f"{indent}{target.id} = {'.true.' if is_logical else '1'}"
             return ""  # local declared in prelude (empty / scratch)
-        # Skip tautological self-assigns I = I that the shape-resolution pass leaves
-        # behind; Fortran rejects intent(in) parameters on the LHS even when RHS matches.
-        if (isinstance(target, ast.Name) and isinstance(node.value, ast.Name) and target.id == node.value.id):
-            return ""
         # Storing a numeric 0/1 into a LOGICAL array element must be a logical literal.
         if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                 and target.value.id in vars(self).get("_logical_array_locals", set())
