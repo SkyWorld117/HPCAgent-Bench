@@ -445,7 +445,7 @@ claude_roundtrip() {
         cd "${AGENT_CWD}" || exit 1
         ANTHROPIC_BASE_URL="${base}" timeout 900 claude -p "${PROMPT}" \
             --model "${model}" \
-            --max-turns 3 \
+            --max-turns 10 \
             --output-format stream-json \
             --verbose \
             --allowedTools "Bash(ls:*)" "Bash(ls*)" "Bash" \
