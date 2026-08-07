@@ -154,9 +154,10 @@ run_judge_node() {
     # Come up only once grading works. The router's own /health cannot answer for the upstream, and
     # agent_driver.py starts submitting the moment /health is reachable -- so a router that binds
     # first turns the upstream's startup into a burst of 502s charged to the agents' turn budget.
-    # Clean lib env: the CXI hook injects host (SLES) libcurl, which breaks the container curl.
-    until env LD_LIBRARY_PATH= /usr/bin/curl --fail --silent --output /dev/null \
-        "http://127.0.0.1:${JUDGE_UPSTREAM_PORT}/health"; do
+    # The CXI hook injects host libcurl via the container ld.so cache (breaks even a clean-env
+    # curl, job 583987); python3 stdlib is immune.
+    until python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).read()' \
+        "http://127.0.0.1:${JUDGE_UPSTREAM_PORT}/health" 2>/dev/null; do
         if ! kill -0 "${upstream_pid}" 2>/dev/null; then
             printf 'judge upstream died during startup; see %s/upstream-%s.log\n' "${log_dir}" "${judge_rank}" >&2
             return 1

@@ -280,9 +280,26 @@ cat >"${CLIENT_SCRIPT}" <<'CLIENT'
 set -Eeuo pipefail
 
 # Runs inside the agent EDF on node 1.
-# The CXI hook injects host (SLES) libcurl into the container's lib resolution; the container
-# curl then fails on libldap_r-2.4. Pin the container binary with a clean lib environment.
-curl() { env LD_LIBRARY_PATH= /usr/bin/curl "$@"; }
+# The CXI hook injects host (SLES) libcurl through the container's ld.so cache, so even a
+# clean-env /usr/bin/curl dies on libldap_r-2.4 (seen live, job 583987). python3 is immune.
+http_get() { python3 -c '
+import sys, urllib.request
+try:
+    urllib.request.urlopen(sys.argv[1], timeout=float(sys.argv[2])).read()
+except Exception:
+    raise SystemExit(1)
+' "$1" "$2"; }
+http_post_json() { python3 -c '
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1], data=open(sys.argv[2], "rb").read(),
+                             headers={"Content-Type": "application/json"})
+try:
+    body = urllib.request.urlopen(req, timeout=float(sys.argv[4])).read()
+except Exception as err:
+    sys.stderr.write("POST failed: %s\n" % err)
+    raise SystemExit(1)
+open(sys.argv[3], "wb").write(body)
+' "$1" "$2" "$3" "$4"; }
 
 VLLM_URL="http://${NODE0}:${API_PORT}/v1"
 AGENT_CWD="${RUN_DIR}/agent-cwd"
@@ -340,7 +357,7 @@ PROXY_PID=$!
 
 deadline=$((SECONDS + 240))
 while :; do
-    if curl -fsS --max-time 5 "http://127.0.0.1:${LITELLM_PORT}/v1/models" -o /dev/null; then
+    if http_get "http://127.0.0.1:${LITELLM_PORT}/v1/models" 5; then
         LITELLM_OK=1
         echo "PASS: litellm is serving on 127.0.0.1:${LITELLM_PORT}"
         break
@@ -382,9 +399,8 @@ direct_call() {
   "max_tokens": 512
 }
 EOF
-    curl -sS --max-time 300 -X POST -H 'Content-Type: application/json' \
-        --data @"${RUN_DIR}/direct-payload.json" \
-        "http://${NODE0}:${API_PORT}/v1/chat/completions" -o "${out}"
+    http_post_json "http://${NODE0}:${API_PORT}/v1/chat/completions" \
+        "${RUN_DIR}/direct-payload.json" "${out}" 300 || return 1
 
     python3 - "${out}" <<'PY_ASSERT'
 import json
