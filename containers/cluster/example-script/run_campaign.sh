@@ -75,4 +75,4 @@ problems=$(wc -l <"${SCRIPT_DIR}/${PROBLEMS_FILE}")
 cp "${ENV_FILE}" "${SCRIPT_DIR}/.env"
 
 echo "variant=${VARIANT} nodes=${nodes} problems=${problems} time=${time_limit}"
-sbatch --nodes="${nodes}" --time="${time_limit}" "$@" "${SCRIPT_DIR}/beverin.sbatch"
+CLUSTER_SCRIPT_DIR="${SCRIPT_DIR}" sbatch --nodes="${nodes}" --time="${time_limit}" "$@" "${SCRIPT_DIR}/beverin.sbatch"
