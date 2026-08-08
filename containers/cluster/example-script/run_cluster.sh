@@ -117,6 +117,11 @@ PY
         command+=("${extra[@]}")
     fi
 
+    # EMPTY is the fleet-wide no-auth sentinel, but the vLLM server natively reads VLLM_API_KEY
+    # and would require the literal key "EMPTY" while every client sends no header (401, 585048).
+    if [[ "${VLLM_API_KEY:-EMPTY}" == "EMPTY" ]]; then
+        unset VLLM_API_KEY
+    fi
     export VLLM_DISABLE_PYNCCL="${VLLM_DISABLE_PYNCCL:-1}"
     export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
     export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
