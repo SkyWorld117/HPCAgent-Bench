@@ -4,6 +4,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
+#SBATCH --mem=0
 #SBATCH --time=04:00:00
 #SBATCH --output=results/beverin-services-%j.out
 #SBATCH --error=results/beverin-services-%j.err
