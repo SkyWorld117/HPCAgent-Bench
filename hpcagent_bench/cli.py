@@ -19,6 +19,7 @@ adapter, which also advertises its :attr:`Framework.SUPPORTED_PRECISIONS`.
 import argparse
 import dataclasses
 import json
+import os
 import pathlib
 import shutil
 import sys
@@ -442,6 +443,14 @@ def cmd_agent(args) -> int:
         if args.save_submissions or args.record:
             print("[static] --save-submissions / --record are not wired in the distributed path; "
                   "writing graded rows only")
+        # On this path the JUDGE writes the rows, and it files them under what the POST body named.
+        # This process IS the launcher, so it hands the identity over the one channel the client
+        # reads (hpcagent_bench.harness.tools.identity_fields), exactly as the cluster launcher
+        # does -- otherwise every distributed row is `adhoc` however --run-id was set. An already
+        # exported value wins, so an outer launcher's identity is never overwritten here.
+        if args.run_id != "adhoc":
+            os.environ.setdefault("OPTARENA_RUN_ID", args.run_id)
+        os.environ.setdefault("OPTARENA_OPTIMIZER", agent.name)  # the SAME label the serial path records
         rows = run_static_and_write(make_agent_builder(registry, args.agent),
                                     tasks,
                                     out,

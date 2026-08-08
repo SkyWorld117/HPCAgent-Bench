@@ -39,6 +39,15 @@ export JUDGE_RANK="${JUDGE_RANK:-0}"
 # agent declare one. Defaults to the enforcing mode because the judge's own default is `source` --
 # guessing "free" would offer the model a field the track then refuses.
 export JUDGE_INPUT_MODE="${JUDGE_INPUT_MODE:-source}"
+# Who the judge files a recorded row under. The tools put these in every judge POST body from the
+# environment, and the judge stores exactly what the body named -- an agent started without them is
+# recorded as `adhoc` with a NULL optimizer, and no worker can be told from another afterwards.
+# CAMPAIGN_ARM is the same arm label the cluster launcher uses; the run id keeps that launcher's
+# four-field shape (<arm>.n<node>.p<problem>.w<worker>) so both paths read alike, with node and
+# problem 0 because this launcher is ONE node running ONE task. The worker field is set per agent
+# below. `adhoc` stays the default arm: an unlabelled run must not claim an arm it never had.
+CAMPAIGN_ARM="${CAMPAIGN_ARM:-adhoc}"
+export OPTARENA_OPTIMIZER="${OPTARENA_OPTIMIZER:-${CLAUDE_MODEL}}"
 
 load_task() {
   if [ -n "${TASK_FILE:-}" ]; then
@@ -90,6 +99,8 @@ for idx in $(seq 0 "$((AGENT_COUNT - 1))"); do
 
   (
     cd "${workdir}"
+    # In the subshell, so one agent's slot cannot leak into the next; an explicitly set id wins.
+    export OPTARENA_RUN_ID="${OPTARENA_RUN_ID:-${CAMPAIGN_ARM}.n0.p0.w${idx}}"
     "${CLAUDE_BIN}" \
       --bare \
       --print \

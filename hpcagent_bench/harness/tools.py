@@ -41,6 +41,12 @@ into the judge endpoint list the round-robin assigned it, sent on EVERY request 
 and checked by the judge against its own ``serve --rank``. The rank never selects a judge;
 it only asserts that the URL selected the right one. A mismatch is HTTP 421 and nothing is
 graded.
+
+**The run identity rides along too.** ``run_id`` and ``optimizer`` come from the environment the
+launcher set (:func:`identity_fields`) and are merged into every POST, the same way the rank is and
+exactly as the container-side twin ``containers/agent/tools/http_json.py`` does. A recorded row
+keeps only what the body named, so a client that sends neither is filed under the judge's ``adhoc``
+default and no arm, node or worker can be recovered from the DB afterwards.
 """
 import io
 import json
@@ -58,6 +64,29 @@ DEFAULT_URL = "http://127.0.0.1:8800"
 #: ``serve --rank`` default, so a single-judge run needs no rank anywhere and still validates.
 #: Any multi-judge deployment that forgets to set them disagrees on every judge but the first.
 DEFAULT_RANK = 0
+
+#: Judge body fields carrying the run identity, and the environment variable each is read from.
+#: The SAME two names ``containers/agent/tools/http_json.py`` reads, so a row records identically
+#: whichever of the two clients made the call.
+IDENTITY_ENV = (("run_id", "OPTARENA_RUN_ID"), ("optimizer", "OPTARENA_OPTIMIZER"))
+
+
+def identity_fields() -> Dict[str, str]:
+    """Who this client is, for the row the judge writes: ``run_id`` and ``optimizer``.
+
+    A recorded row keeps only what the POST body named, so a client that sends neither lands under
+    the judge's ``adhoc`` default with a NULL optimizer and no arm, node, problem or worker can be
+    told from another afterwards. They come from the ENVIRONMENT the launcher set, never from a
+    caller argument -- a value a caller could write is a label it could choose. An unset variable is
+    OMITTED rather than sent empty: an empty string would be recorded AS the identity, while an
+    absent field leaves the judge on its own default.
+    """
+    fields: Dict[str, str] = {}
+    for key, name in IDENTITY_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            fields[key] = value
+    return fields
 
 
 def error_with_body(exc: urllib.error.HTTPError) -> urllib.error.HTTPError:
@@ -97,11 +126,12 @@ class JudgeClient:
             raise error_with_body(exc) from None
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        """POST ``body`` plus this client's ``rank`` -- merged HERE, so no endpoint method can
-        forget it."""
+        """POST ``body`` plus this client's ``rank`` and run identity -- merged HERE, after the
+        caller's fields, so no endpoint method can forget them and no caller can relabel a row."""
         req = urllib.request.Request(f"{self.base_url}{path}",
                                      data=json.dumps({
-                                         **body, "rank": self.rank
+                                         **body,
+                                         **identity_fields(), "rank": self.rank
                                      }).encode("utf-8"),
                                      headers={"Content-Type": "application/json"},
                                      method="POST")
