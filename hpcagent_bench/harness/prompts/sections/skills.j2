@@ -4,6 +4,7 @@
 {{ general_skill.body }}
 {% endif %}
 {% if other_skills %}
+{% if optimization_guidance %}
 
 ## Skills
 Focused guides for the transforms below. Each is a self-contained note; use the one that
@@ -11,6 +12,10 @@ matches what the profile says is slow.
 {% for skill in other_skills %}
 - **{{ skill.name }}** -- {{ skill.description }}
 {% endfor %}
+{% endif %}
+{# The heading + index above are how-to-optimize guidance, gated like optimizations.j2. With
+   guidance off, other_skills is already trimmed to the language pages (prompts.py), so the loop
+   below still inlines them -- only the "## Skills" heading and name/description index drop. #}
 {# An instrument manual is INDEXED above but inlined only when profiling guidance is asked for:
    they are the bulk of the skill text, and a reader has at most one GPU vendor. #}
 {# A language page is inlined only when THIS task's language selects it (language_skills); the other
