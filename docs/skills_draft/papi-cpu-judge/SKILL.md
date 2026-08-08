@@ -363,13 +363,43 @@ RATIOS, never their raw counts -- different phases do different amounts of work,
 Start by bracketing the whole kernel body once, then bracket phases in DESCENDING order of their
 share of cycles. Rule of thumb, not a law: a phase under ~20% rarely repays a run.
 
-## One event per run
+## How many events fit in one run
 
-A CPU has a handful of counter registers -- `papi_avail` prints the number (`Number Hardware
-Counters : 5` on an AMD Zen4 part). Two events in one set may not fit, and asking PAPI to squeeze
-them in means multiplexing, which turns counts into estimates. So: **one event, one run.** And
-because every event came from a different run, **always count `PAPI_TOT_CYC` and `PAPI_TOT_INS`
-too** -- they are the denominators that make counts from different runs comparable.
+`papi_avail` prints the number of counter registers (`Number Hardware Counters : 5` on this Zen4
+part). That 5 is 6 minus one: libpfm4 declares 6 counters for Zen4 and PAPI decrements when it
+detects the NMI watchdog (`perf_event.c`, *"Detect NMI watchdog which can steal counters"*).
+`sysctl kernel.nmi_watchdog=0` gives the sixth back -- it needs root, so ASK THE USER to run it;
+never try sudo yourself.
+
+**Prefer ONE SET that a tool proves fits, over one event per run.** Measured, all five added and
+counted in a single invocation:
+
+```sh
+papi_command_line PAPI_TOT_CYC PAPI_TOT_INS PAPI_L1_DCM PAPI_BR_MSP PAPI_BR_INS
+```
+
+A sixth (`PAPI_L2_TCM`) fails with `because: Event exists, but cannot be counted due to hardware
+resource limits`. One set is one run, one denominator, and ratios that are internally consistent.
+Events from different runs give you ratios that mix runs: measured, a stall umask over
+`PAPI_TOT_CYC` came out at **1.0629** -- a fraction of time above 1, which is arithmetic proof the
+numerator and denominator are from different runs, not a hardware quirk.
+
+Budget the slots before believing a set fits. A derived preset costs one slot per constituent
+native -- `papi_avail -e` prints `Number of Native Events` (`PAPI_L2_TCM` 2, `PAPI_FMA_INS` 2). And
+`PAPI_FP_OPS` silently costs TWO on Zen4 even though `papi_avail` prints `Deriv=No`: its native
+`RETIRED_SSE_AVX_FLOPS` is an AMD MergeEvent, which pairs two adjacent counters. Measured:
+`PAPI_L1_DCM TOT_CYC TOT_INS BR_INS BR_MSP` -> all five add; swap `PAPI_L1_DCM` for `PAPI_FP_OPS`
+-> `BR_MSP` fails; drop `BR_MSP` -> the remaining four add.
+
+The probe above counts one event. For a set, make `hpc_val` `[HPC_MAXTHREADS][n]`, call
+`PAPI_add_named_event` once per name and grow `got[]` to `n`. Nothing else changes.
+
+When the set does not fit, fall back to one event per run -- and then **always count
+`PAPI_TOT_CYC` and `PAPI_TOT_INS` in every run**, take medians of >=3 runs for anything
+cycle-denominated, and treat a cycle fraction above 1 as a run mismatch until proven otherwise.
+
+**Never multiplex.** It turns counts into estimates, and worse: multiplexed `DERIVED_SUB` presets
+return NEGATIVE counts, unclamped and unwarned -- PAPI issue #539, open in 7.2.0.
 
 ## The events worth asking for
 
@@ -381,12 +411,14 @@ too** -- they are the denominators that make counts from different runs comparab
 | `PAPI_L1_DCM` | L1 data cache misses | first-level locality |
 | `PAPI_L2_TCM` | L2 total cache misses | what got past L1 -- tiling moves this first |
 | `PAPI_L3_TCM` | L3 total cache misses | what became DRAM traffic |
-| `PAPI_L1_DCA` | L1 data cache accesses | with `PAPI_L1_DCM` gives the hit rate |
+| `PAPI_L1_DCA` | L1 data cache accesses | lines-per-access with `PAPI_L1_DCM`, NOT a hit rate -- see below |
+| `PAPI_L2_TCH` / `PAPI_L2_DCH` / `PAPI_L2_ICH` | L2 cache hits | present on Zen4; with `PAPI_L2_TCM` gives an L2 hit rate that IS a rate |
 | `PAPI_TLB_DM` | data TLB misses | L1-DTLB misses, NOT page walks -- read the caveats below |
 | `PAPI_BR_INS` | branch instructions | denominator for the misprediction rate |
 | `PAPI_BR_MSP` | mispredicted branches | branchless-rewrite candidates |
 | `PAPI_DP_OPS` / `PAPI_SP_OPS` | fp64 / fp32 operations | your actual work; the roofline numerator |
 | `PAPI_FMA_INS` | FMA instructions | vector FMA count, not a flop count |
+| `PAPI_VEC_INS` | FP vector ops on Zen4 | weak vectorization check; reads 0 on integer SIMD -- see below |
 
 **Part of that table does not exist on AMD.** Measured on a Zen4 part (PAPI 7.2, 30 presets
 available): `PAPI_L3_TCM`, `PAPI_RES_STL`, `PAPI_DP_OPS` and `PAPI_SP_OPS` are all absent, so
@@ -395,8 +427,35 @@ every ratio built on them is unavailable there.
 | Missing | Use instead | Evidence |
 |---|---|---|
 | `PAPI_DP_OPS` | `PAPI_FP_OPS` | 268,435,456 on a 512^3 gemm = exactly `2*M^3` |
-| `PAPI_L3_TCM` | nothing -- get bandwidth from the footprint, step 3 | see below |
-| `PAPI_RES_STL` | nothing -- use step 6 instead | `perf::PERF_COUNT_HW_STALLED_CYCLES_BACKEND` passes the query and fails to add |
+| `PAPI_L3_TCM` | nothing on ANY AMD Zen -- bandwidth from the footprint, step 3 | no `PAPI_L3_*` row for Zen1..Zen5 in `papi_events.csv`; libpfm4 has no Zen4 L3 PMU |
+| `PAPI_RES_STL` | `CYCLES_NO_RETIRE:<umask>` -- see the table below | `perf::PERF_COUNT_HW_STALLED_CYCLES_BACKEND` passes the query and fails to add |
+| `PAPI_REF_CYC` | `P0_FREQ_CYCLES_NOT_IN_HALT:P0_FREQ_CYCLES` | AMD: *"same as MPERF"*. `PAPI_TOT_CYC` over it = clock during the bracket, measured **1.231x** base |
+
+**The stall counter the preset table says AMD does not have.** `CYCLES_NO_RETIRE` adds cleanly with
+umasks `:EMPTY`, `:NOT_COMPLETE_MISSING_LOAD`, `:NOT_COMPLETE_LOAD_AND_ALU`, `:OTHER`,
+`:THREAD_NOT_SELECTED`, and it separates memory stalls from dependency stalls from
+frontend/redirect stalls in one look. Measured on three phases with three designed bottlenecks,
+each umask divided by that phase's `PAPI_TOT_CYC`:
+
+| umask | A: column-major walk | B: serial FMA chain | C: unpredictable branch |
+|---|---|---|---|
+| `:NOT_COMPLETE_MISSING_LOAD` | **1.0629** | 0.0016 | 0.0775 |
+| `:NOT_COMPLETE_LOAD_AND_ALU` | 0.9731 | **0.7481** | 0.1776 |
+| `:EMPTY` (retire queue empty = redirect) | 0.0103 | 0.0010 | **0.2896** |
+
+Two caveats, both load-bearing. First, the umasks are mutually exclusive and priority-ordered per
+cycle -- AMD's own event text: *"Event can only track one reason at a time. If multiple reasons
+apply for a given cycle, the lowest numbered reason is counted."* So never sum them (phase A's
+three sum to 204.6% of its cycles) and never read `:EMPTY` as "all frontend stalls". Second, a
+single umask over `PAPI_TOT_CYC` can exceed 1.0 -- 1.0629 above, 1.1814 on the optimized variant --
+whenever the two came from different runs. Rank the umasks within a phase; do not read one as a
+fraction of time.
+
+**`PAPI_VEC_INS` is FP-only on Zen4** despite its own description ("could include integer"): it is
+`RETIRED_FP_OPS_BY_TYPE:VECTOR_ALL`, so an integer-SIMD kernel reads 0 and looks unvectorized. The
+honest did-it-vectorize check is `RETIRED_FP_OPS_BY_WIDTH:{SCALAR,PACK128,PACK256,PACK512}_UOPS_RETIRED`
+-- shares of FP micro-ops, immune to the instruction-count confound that breaks any comparison
+built on `PAPI_TOT_INS` or `PAPI_FMA_INS`.
 
 **`perf::CACHE-MISSES` is NOT a DRAM counter and must not be substituted for `PAPI_L3_TCM`.**
 On AMD it counts demand L2 misses. Measured single-threaded, one binary, two working sets: a
@@ -407,31 +466,94 @@ call it DRAM) while the real fill counter `ANY_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM
 the cache-resident kernel as the heavier DRAM user. Agreeing with `perf stat -e cache-misses`
 proves only that PAPI reports the same event `perf` does, which says nothing about DRAM. The fill
 counter is closer but still low -- 0.53 GB against 1.9 GB of compulsory fills, because a line an
-L2 prefetch pulled from DRAM is credited to the L2 by the time it reaches L1.
+L2 prefetch pulled from DRAM is credited to the L2 by the time it reaches L1. The two halves are
+separately countable: `DEMAND_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR` plus
+`HARDWARE_PREFETCH_DATA_CACHE_FILLS:DRAM_IO_NEAR`, times the line size. Count only the demand one
+and you halve the traffic.
 
-Native names go straight into `papi_init`. List what this machine really has before you write the
-event loop: `papi_avail -a` for the presets this CPU can count, `papi_native_avail` for the raw
-vendor events behind a missing preset.
+Native names go straight into `papi_init`.
+
+## Enumerate events on THIS machine
+
+Every caveat on this page was found with these commands. None of them needs your program; run them
+before you write the event loop.
+
+| Command | What it answers |
+|---|---|
+| `papi_avail` | all 114 presets with `Avail` and `Deriv` columns |
+| `papi_avail -a` | only what this CPU can count (30 here, 12 derived); drops the `Avail` column |
+| `papi_avail -c` | the same list built by actually ADDING each event -- the honest one |
+| `papi_avail -e PAPI_L1_DCM` | what one preset MEANS and what it costs |
+| `papi_hardware_avail` | cache sizes, line size, NUMA -- replaces `cat /sys/.../coherency_line_size` |
+
+`papi_avail -e` is what turns a hand-measured caveat into something you can re-derive:
+
+```
+Event name:              PAPI_L2_TCM      Number of Native Events: 2
+Derived Type:           |DERIVED_ADD|
+ Native Code[0]: 0x40000016 |CORE_TO_L2_CACHEABLE_REQUEST_ACCESS_STATUS:LS_RD_BLK_C|
+ Native Event Description: |L2 cache request outcomes. This event does not count accesses
+  to the L2 cache by the L2 prefetcher, masks:Number of data cache requests missing in the L2|
+```
+
+Three answers in one screen: `Number of Native Events` is the counter-slot cost, `Derived Type`
+says whether PAPI is doing arithmetic behind your back, and the vendor's own description is where
+"does not count accesses by the L2 prefetcher" and `PAPI_L1_DCM`'s "including software and hardware
+prefetches" come from. An unavailable preset ends with
+`PRESET event PAPI_L3_TCM is NOT available on this architecture!`.
+
+For natives, dump ONCE and grep -- `papi_native_avail > nat.txt` is **440,422 lines and 42 s** here,
+of which the `cuda` component is 98.8% and the CPU component is 77 event groups. `-i STR` filters
+and is CASE-SENSITIVE: `-i tlb` returns 0 events, `-i TLB` returns 5, because AMD native names are
+UPPERCASE. `-e NAME` fails on umask-bearing AMD events (`-e L1_DTLB_MISS` ->
+`Sorry, an event by the name 'L1_DTLB_MISS' could not be found.`) while `-i L1_DTLB` lists it with
+all eight umasks. Use `-i`.
+
+Fit questions need both of these:
+
+```sh
+papi_event_chooser PRESET PAPI_TOT_CYC PAPI_TOT_INS PAPI_L1_DCM PAPI_L2_TCM   # what STILL fits
+papi_command_line  PAPI_TOT_CYC PAPI_TOT_INS PAPI_L1_DCM PAPI_L2_TCM PAPI_BR_MSP
+```
+
+The chooser (`papi_event_chooser NATIVE|PRESET ev...`) prints every event that could still be added
+to your seed set plus `Total events reported: N`; measured shrink as seeds are added, 3 seeds -> 27
+candidates, 4 -> 15, 5 -> 1. When the seeds themselves do not fit it prints nothing after the header
+and exits 1 -- and it does exactly the same for an event that does not exist, so the two are
+indistinguishable from the chooser (and piping to `tail` hides the exit code anyway).
+`papi_command_line` separates them in words: it creates the set, starts it and prints
+`Failed adding: PAPI_TOT_CYC` / `because: Event exists, but cannot be counted due to hardware
+resource limits`. It also runs its OWN built-in workload, so the counts it prints are not your
+program's.
 
 ## Prove the count is real
 
 A counter counts what executed. Before believing a number:
 
-- **Cross-check the total against `perf stat` on the UNINSTRUMENTED build.** One extra run, and
-  it is the only check that catches both failure directions:
+- **Cross-check the total against `perf stat` on the UNINSTRUMENTED build.** Two extra runs, and
+  it is the only check that catches every failure direction:
 
   ```sh
-  perf stat -e instructions:u ./original_binary          # truth
+  perf stat -e instructions:u ./original_binary 20        # whole run
+  perf stat -e instructions:u ./original_binary 0         # setup only, zero reps
   OMP_WAIT_POLICY=passive OMP_PROC_BIND=close OMP_PLACES=cores ./probe PAPI_TOT_INS
   ```
 
-  They must agree within about 1%. Measured: **+0.12%** with one bracket, **+0.17%** with the
-  bracket inside a 200-visit loop. **Too HIGH means threads that did no work were counted** --
-  3.1x with the wait policy left unset. **Too LOW means threads that DID work were not** -- armed
-  4 while the kernel forced 8 gave exactly **50.0%** of truth, with the line still saying
-  `counted 4`. Use instructions, not cycles: instructions repeated to 5 significant figures across
-  runs, while cycles came out 4% high even with a correct run line because the bracket's own
-  parallel regions are real work.
+  Compare the PAPI total against **(whole run) minus (reps=0 run)**, not against the whole run:
+  `perf stat` counts the process, your bracket counts the kernel. Measured: whole run
+  1,373,447,854, reps=0 72,345,141, PAPI 1,300,868,732 -- **-0.018%** after the subtraction,
+  **-5.28%** without it, with the guard line correctly reading `armed 1 threads, counted 1`. They
+  must agree within about 1%, and there are three ways to miss:
+
+  - **Short, with the guard line healthy -- work outside the bracket.** Setup, teardown, the
+    checksum loop, libc startup. The common case, and what the subtraction removes.
+  - **Too HIGH -- threads that did no work were counted.** 3.1x with the wait policy left unset.
+  - **Too LOW -- threads that DID work were not.** Armed 4 while the kernel forced 8 gave exactly
+    **50.0%** of truth, with the line still saying `counted 4`.
+
+  Use instructions, not cycles: instructions repeated to 5 significant figures across runs, while
+  cycles came out 4% high even with a correct run line because the bracket's own parallel regions
+  are real work.
 - **The per-thread dump cannot substitute for that check.** Under a spinning wait policy the 15
   idle threads carried 3.68-3.85 G cycles each against the working thread's 3.74 G -- an imbalance
   of 1.0, which reads as a perfectly balanced parallel kernel.
@@ -454,29 +576,52 @@ Each ratio has a denominator on purpose -- a raw count is the number people most
 | Ratio | Formula | How to read it |
 |---|---|---|
 | IPC | `PAPI_TOT_INS / PAPI_TOT_CYC` | below 1 the core is stalled; 2-4 healthy; near the issue width, compute-bound |
-| stall fraction | `PAPI_RES_STL / PAPI_TOT_CYC` | share of cycles that issued nothing; pair with a miss rate to say why |
-| L1 hit rate | `(PAPI_L1_DCA - PAPI_L1_DCM) / PAPI_L1_DCA` | falls off a cliff when the working set crosses a level -- but see the AMD note |
-| L1 misses / 1k ins | `1000 * PAPI_L1_DCM / PAPI_TOT_INS` | ranks phases; it is NOT an absolute memory-bound test |
+| stall fraction | `PAPI_RES_STL / PAPI_TOT_CYC`, on AMD `CYCLES_NO_RETIRE:<umask> / PAPI_TOT_CYC` | share of cycles that retired nothing; the umask says why |
+| L1 lines per access | `PAPI_L1_DCM / PAPI_L1_DCA` | >>1 is prefetcher thrashing: 4.47 column-major, 0.59 interchanged. A hit RATE is not computable on Zen4 -- below |
+| L1 misses / 1k ins | `1000 * PAPI_L1_DCM / PAPI_TOT_INS` | ranks phases; it is NOT an absolute memory-bound test, and NOT an A/B metric |
 | L2 misses / 1k ins | `1000 * PAPI_L2_TCM / PAPI_TOT_INS` | demand misses only; understates a prefetched stream badly |
-| branch misprediction rate | `PAPI_BR_MSP / PAPI_BR_INS` | above 0.02 hurts |
+| branch misprediction rate | `PAPI_BR_MSP / PAPI_BR_INS` | rule of thumb, above 0.02 hurts -- provenance below |
 | cycles per element | `PAPI_TOT_CYC / elements` | with clean miss and branch rates, compare against an FP latency -- step 6 |
 | flops per cycle | `PAPI_FP_OPS / PAPI_TOT_CYC` | against the machine's peak, not against zero |
 | thread imbalance | `max(thread cycles) / mean(thread cycles)` | above ~1.2, fix the decomposition before anything else |
 
+**Where those thresholds come from.** The IPC bands and the miss-rate bands are folklore that
+happens to work; no vendor publishes them. The 0.02 mispredict line in particular has no source:
+perf's own `Default` metric group ships `branch_miss_rate > 0.05`, and Intel's Top-Down uses a slot
+fraction, `tma_branch_mispredicts > 0.1` gated on `tma_bad_speculation > 0.15` -- a different
+quantity again. Keep 0.02 as a rule of thumb for ranking, not as a verdict. **AMD publishes no
+counter thresholds anywhere**: every metric in the kernel's `amdzen4/pipeline.json` and
+`amdzen4/recommended.json` has `MetricThreshold` absent, 75 metrics, none. On AMD the honest framing
+is comparative -- this phase against that phase, version A against version B -- never absolute.
+
 **AMD counter semantics break four of those thresholds.** Measured on the Zen4 part:
 
-- `PAPI_TLB_DM` is `ls_l1_d_tlb_miss.all` -- L1-DTLB misses INCLUDING the ones the L2 TLB serves
-  in a few cycles. A gather kernel read 100,270,443 of them, **39 per 1k instructions**, against a
-  "the page walk is real work" threshold of 1; its actual page walks
-  (`ls_l1_d_tlb_miss.all_l2_miss`) were 885,805, **0.35 per 1k**, UNDER the threshold. 99.1% never
-  reached a page table. Test the page-walk event before reaching for huge pages.
+- `PAPI_TLB_DM` is `L1_DTLB_MISS` with all eight umasks -- L1-DTLB misses INCLUDING the ones the L2
+  TLB serves in a few cycles. **The preset never answers the huge-pages question in either
+  direction.** Always measure the `*_L2_MISS` umasks, which are the real page walks:
+  `L1_DTLB_MISS:TLB_RELOAD_4K_L2_MISS:TLB_RELOAD_2M_L2_MISS:TLB_RELOAD_1G_L2_MISS:TLB_RELOAD_COALESCED_PAGE_MISS`.
+  The two measured poles, same box, same preset: a gather kernel read **39 TLB_DM per 1k
+  instructions** and **0.35 walks per 1k**, under the "a page walk is real work" threshold of 1 --
+  99.1% never reached a page table. A column-major 2D walk read **267.71 per 1k** and **254.48 walks
+  per 1k** -- 95.1% ARE walks, 254x the threshold. Note the umasks are per PAGE SIZE: a run under
+  transparent huge pages needs the `2M`/`1G` umasks or the 4K one reads near zero, which is exactly
+  the configuration you were testing for.
 - `PAPI_L1_DCM` counts lines filled including hardware prefetch, so "above 50 per 1k ins,
   memory-bound" fires on kernels that are not: a 0.79 MB triad living entirely in L2, moving
-  nothing to DRAM, read **502 per 1k**.
-- `PAPI_L1_DCA` counts access micro-ops while `PAPI_L1_DCM` counts lines, so the hit rate is not
-  a rate: a 64-byte-stride pass gave DCM 32,139,354 > DCA 31,847,497, a hit rate of **-0.9%**.
+  nothing to DRAM, read **502 per 1k**. This is not an AMD quirk -- on Intel the same preset is
+  `L1D:REPLACEMENT`, fills including prefetch.
+- `PAPI_L1_DCA` counts access micro-ops while `PAPI_L1_DCM` counts lines, so on Zen4 the L1 hit rate
+  is not computable at all: a 64-byte-stride pass gave DCM 32,139,354 > DCA 31,847,497, a hit rate
+  of **-0.9%**, and a column-major walk gave **-347.3%**. Read `DCM / DCA` as lines fetched per
+  access instead. `PAPI_LD_INS`, `PAPI_SR_INS` and `PAPI_LST_INS` are absent here too, so there is
+  no preset load count to fall back on.
 - `PAPI_L2_TCM` is demand-only. A 201 MB stream moved 31.5 M lines and it reported 1,056,215 --
-  **3.3%**. Near-zero L2 misses do not mean a small working set.
+  **3.3%**. Near-zero L2 misses do not mean a small working set. AMD's own metric file defines
+  `all_l2_cache_misses = l2_cache_req_stat.ic_dc_miss_in_l2 + l2_pf_miss_l2_hit_l3.all +
+  l2_pf_miss_l2_l3.all`, so the repair is `PAPI_L2_TCM` plus the two `L2_PREFETCH_*_L3` groups.
+  It also includes INSTRUCTION-cache fill misses: `papi_avail -e` shows it is a `DERIVED_ADD` of
+  `:LS_RD_BLK_C` + `:IC_FILL_MISS`, and for a data-locality argument the `LS_RD_BLK_C` umask alone
+  is the right event.
 
 Work down this list and stop at the first step that names your bottleneck:
 
@@ -487,7 +632,20 @@ Work down this list and stop at the first step that names your bottleneck:
    (distinct bytes touched per pass, times passes) over the UNCOUNTED build's wall clock, against
    the socket's STREAM number -- at 80% of it, stop tuning instructions and cut traffic. A
    footprint smaller than the last-level cache cannot be bandwidth-bound however bad the miss rate
-   looks.
+   looks. **No STREAM number to hand?** Use your own best-known variant of the SAME kernel on the
+   SAME footprint as the yardstick. Measured: a column-major walk over 32 MiB delivered 3.641 GB/s
+   while the interchanged version of the same loop sustained **24.14 GB/s** single-threaded -- 15%
+   of achievable, so not bandwidth-bound. Do not compare a serial kernel against a socket STREAM
+   figure: one core is bounded by line-fill-buffer occupancy over DRAM latency and cannot reach it,
+   which makes every serial kernel look further from the roof than it is.
+
+   **3b. Miss rates high but step 3 says NOT bandwidth-bound -> you are latency-bound.** Check the
+   access stride against 64 B and against 4 KiB: a stride that touches a new line every element
+   defeats the prefetcher, and one that touches a new page every access defeats the DTLB as well.
+   Confirm with page walks per 1k ins (>1 is real work) and
+   `CYCLES_NO_RETIRE:NOT_COMPLETE_MISSING_LOAD`. Measured on that same column-major walk: 254.48
+   walks per 1k ins, and MISSING_LOAD stalls at 1.06x cycles against `:EMPTY` 0.0103 -- blocked on
+   loads, not on the front end. Loop interchange: **6.63x**.
 4. **Branch misprediction rate** above 0.02 -- an unpredictable inner-loop branch.
 5. **Flops per cycle** against peak. An eighth of peak is not compute-bound.
 6. **Still nothing named?** Cycles per element near an FP latency, with clean miss and branch
@@ -498,8 +656,79 @@ Work down this list and stop at the first step that names your bottleneck:
    (`-ffast-math`, or an explicit multi-accumulator rewrite) took it to 0.415, **7.2x fewer
    cycles**.
 
-The 64 in any bytes-from-lines calculation is the cache line size; read it, do not assume it:
+The 64 in any bytes-from-lines calculation is the cache line size, and the LLC size step 3 needs is
+next to it; read both, do not assume them: `papi_hardware_avail` prints the whole hierarchy
+(`L1d Cache : Size/LineSize/Lines/Assoc 32KB/64B/512/8`, `L3 ... 16384KB/64B/...`). It can be
+absent -- `Error! Sysdetect component not enabled` -- in which case
 `cat /sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size`.
+
+### Top-down, before the ladder (Zen4: one run, 5 counters)
+
+The ladder asks "which counter is bad". Top-down asks "which part of the core is idle", and it
+answers before you have picked a cache counter at all. Zen4 has no top-down preset and LIKWID ships no top-down group for
+it, but the buckets fit in one 5-counter set. The formulas are AMD's, via the kernel's Zen4 metric
+definitions: every bucket is a share of `6 * CYCLES_NOT_IN_HALT`, since Zen4 dispatches up to 6 ops
+per cycle.
+
+| bucket | event | measured | share |
+|---|---|---|---|
+| frontend | `DISPATCH_STALLS_1:FE_NO_OPS` | 1,860,769 | 0.13% |
+| backend | `DISPATCH_STALLS_1:BE_STALLS` | 1,171,969,382 | 80.2% |
+| SMT contention | `DISPATCH_STALLS_1:SMT_CONTENTION` | 66,023,163 | 4.5% |
+| retiring | `RETIRED_OPS` | 221,000,942 | 15.1% |
+| bad speculation | the residual | -- | -- |
+
+Measured against `CYCLES_NOT_IN_HALT` 243,508,222: the four buckets sum to 1,460,854,256 versus
+`6 * cycles` = 1,461,049,332, closing to **99.99%**. So bad speculation need not be measured -- it
+is the residual, and the fifth counter stays free. A non-zero `SMT_CONTENTION` means the sibling
+thread is in your numbers.
+
+Intel instead: PAPI 7.2's `topdown` component, which is NOT built by default
+(`--with-components=topdown`). Its `TOPDOWN_*_PERC` events return **FP64 percentages, not
+`long long`** -- the accumulate-and-sum pattern in the probe above is wrong for them -- and on
+hybrid parts you must pin to p-cores or PAPI exits to avoid a segfault. Intel is also the only
+vendor that publishes thresholds, and they NEST: a child bucket is meaningful only when its parent
+fired. `tma_dtlb_load > 0.1` counts only inside `tma_l1_bound > 0.1`, inside
+`tma_memory_bound > 0.2`, inside `tma_backend_bound > 0.2`. That is the gated form of this ladder --
+the steps are not merely ordered, each one presumes the one above it fired.
+
+## Comparing two versions of the same kernel
+
+Ranking phases and comparing versions are different jobs with different rules. `per 1k ins` ranks
+phases inside ONE binary; in an A/B the instruction count is one of the things you changed, so it is
+the wrong denominator. Measured: L1 misses per 1k ins went 1381.34 -> 432.77 and called a **6.63x**
+win "3.2x".
+
+1. **Identical output first.** Same inputs, same buffers, bit-identical checksum -- not "close". A
+   rewrite that reassociates FP is a different computation and no counter comparison of it is honest.
+2. **Verify the work invariant before reading anything else.** `PAPI_FP_OPS` must MATCH: measured
+   83,886,080 for both versions, and that is what licenses every other comparison. If it moved, an
+   FMA contraction, a reassociation or a precision change happened -- explain that first.
+3. **The verdict is wall clock on the UNCOUNTED builds**, median of >=5 runs, same box, same run
+   line, same thread count. Never a counter. Counters explain the verdict; they do not deliver it.
+4. **Normalize per element of fixed work** -- elements, cells, timesteps, flops. Never per
+   instruction, never per cycle.
+5. **Read the deltas in this order**: cycles per element (does it track the wall clock?), then the
+   counter you predicted would move, then the stall counter that names the cause. Measured: 10.170
+   -> 1.663 cycles/element, page walks -98.45%, `NOT_COMPLETE_MISSING_LOAD` -81.82%. Three numbers,
+   one story.
+6. **Expect one counter to move the "wrong" way, and read it as information.** `PAPI_L1_DCA`
+   DOUBLED (+107.75%) in the version that got 6.63x faster: the accumulator moved from a register
+   into a 16 KiB L1-resident vector. Misses became hits; raw DCA spells that as a loss.
+
+**A speedup much larger than the traffic cut means you fixed latency and overlap, not traffic.**
+Measured: 6.63x out of a 33.6% cut in DRAM fills, on an array both versions must read in full.
+
+| Counter, per element | Better | The caveat that inverts it |
+|---|---|---|
+| `PAPI_TOT_CYC` | lower | only at equal clock. Check `PAPI_TOT_CYC / P0_FREQ_CYCLES_NOT_IN_HALT:P0_FREQ_CYCLES` (= MPERF); measured **1.231x** base here, and A and B must match |
+| `PAPI_TOT_INS` | lower | vectorization cuts it legitimately, a spin loop inflates it, a wrong answer minimizes it. Never a standalone verdict -- verify the output |
+| IPC | higher | not a goal. Spinning has excellent IPC; a vectorized kernel usually has LOWER IPC than the scalar one it replaced and is faster |
+| `PAPI_L1_DCM`, `PAPI_L2_TCM` | lower | DCM includes prefetched fills, L2_TCM excludes prefetcher accesses; a prefetch-friendly rewrite can move either the wrong way and win |
+| `PAPI_L2_TCH` (hits) | higher | only at EQUAL access count -- more hits out of more accesses says nothing |
+| `PAPI_BR_MSP` | lower | report the rate AND the absolute count: a branchless rewrite deletes the easy branches, so the rate can rise while absolute mispredicts fall |
+| `PAPI_FP_OPS` | UNCHANGED | it is the invariant, not a metric; it moves only under an algebraic rewrite |
+| `RETIRED_FP_OPS_BY_WIDTH:PACK*` vs `:SCALAR` | more packed | the did-it-vectorize check that survives an instruction-count change |
 
 ## Traps
 
@@ -518,13 +747,44 @@ The 64 in any bytes-from-lines calculation is the cache line size; read it, do n
 - **Frequency scaling.** Cycle-derived ratios (IPC, misses per instruction) survive a clock
   change; per-second numbers (GB/s, GFLOP/s) do not. Check the governor:
   `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`.
-- **Counters may be gated off.** `cat /proc/sys/kernel/perf_event_paranoid` -- above 2 you get
-  nothing. Lower it with `sysctl -w kernel.perf_event_paranoid=1`, or in a container add
-  `--cap-add=CAP_PERFMON`. A gated-off counter reads exactly like a kernel that did no work.
+- **Counters may be gated off, and `papi_avail` will not tell you.** At
+  `perf_event_paranoid = 4` the `perf_event` component still reports active and `papi_native_avail`
+  still lists every event -- they simply never count (PAPI issue #354). The check that works is
+  `papi_command_line PAPI_TOT_CYC` returning a non-zero count. If it does not:
+  `cat /proc/sys/kernel/perf_event_paranoid`, then **ask the user** to run
+  `sysctl -w kernel.perf_event_paranoid=1` (or to add `--cap-add=CAP_PERFMON` in a container).
+  That needs root -- never attempt sudo yourself. A gated-off counter reads exactly like a kernel
+  that did no work.
+- **gcc if-converts an unpredictable branch at -O3.** Measured while building a branch-bound test
+  phase: the branch becomes a `cmov` and the misprediction rate collapses under the 0.02 line, so
+  the phase reads as memory-bound. An empty asm in one arm -- `__asm__ volatile("" : "+r"(x))` --
+  is what keeps a real branch. Same class as the `-march=native` / `PAPI_FMA_INS = 0` trap above:
+  the build decided what you were allowed to measure.
+- **Preset names are portable; preset SEMANTICS are not.** Nothing in the API warns you when a name
+  changed meaning across vendors:
+
+  | Preset | AMD Zen4 | Intel |
+  |---|---|---|
+  | `PAPI_L2_TCM` | L2 demand misses (data + IC fill) | `ix86arch::LLC_REFERENCES` -- last-level cache REFERENCES, not L2 misses |
+  | `PAPI_BR_MSP` | all mispredicted branches | conditional only, while `PAPI_BR_INS` stays all-branches -- the ratio understates there; use `PAPI_BR_CN` |
+  | `PAPI_L1_DCM` | fills including prefetch | `L1D:REPLACEMENT`, also fills including prefetch |
+  | `PAPI_L3_*` | absent on ANY AMD Zen, not just this part | present |
+
+  Re-read `papi_avail -e` on the new box before carrying any threshold across.
 
 ## Documentation
 
 - PAPI project home and user guides -- https://icl.utk.edu/papi/
 - PAPI wiki: preset event definitions, which are derived and which are native -- https://github.com/icl-utk-edu/papi/wiki
 - PAPI API reference (`PAPI_thread_init`, `PAPI_add_named_event`, return codes) -- https://icl.utk.edu/papi/docs/
-- `perf_event_paranoid` and the capability that lifts it -- https://man7.org/linux/man-pages/man2/perf_event_open.2.html
+- Per-architecture availability comes from `papi_avail -a` on the box or `src/papi_events.csv` in
+  the installed version. PAPI's own "Standard Events by Architecture" page lists nothing newer than
+  Itanium2 -- do not cite it -- https://github.com/icl-utk-edu/papi/blob/master/src/papi_events.csv
+- `papi_event_chooser` / `papi_command_line` usage and exit codes -- https://github.com/icl-utk-edu/papi/tree/master/src/utils
+- PAPI issues that change the advice here -- #539 negative multiplexed counts, #354 `papi_avail` is
+  not a permission check, #160 spurious `PAPI_TOT_INS` on EPYC:
+  https://github.com/icl-utk-edu/papi/issues/539 https://github.com/icl-utk-edu/papi/issues/354 https://github.com/icl-utk-edu/papi/issues/160
+- AMD's own Zen4 metric definitions (`all_l2_cache_misses`, page walks, DRAM fills) -- https://raw.githubusercontent.com/torvalds/linux/master/tools/perf/pmu-events/arch/x86/amdzen4/recommended.json
+- LIKWID's hand-curated Zen4 event groups, and its rate-vs-ratio guidance -- https://github.com/RRZE-HPC/likwid/tree/master/groups/zen4
+- Intel Top-Down metrics with their published, nested thresholds -- https://github.com/intel/perfmon
+  and https://raw.githubusercontent.com/torvalds/linux/master/tools/perf/pmu-events/arch/x86/sapphirerapids/spr-metrics.json

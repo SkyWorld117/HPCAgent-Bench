@@ -12,11 +12,12 @@ identical; the component, the event names and the environment traps are not.
 
 ## What was measured here, and what was not
 
-**There is no AMD GPU on the box this was written on.** Nothing below was executed against ROCm.
-So every AMD claim here is a quote from a named upstream file with that file's URL beside it --
-PAPI's `rocp_sdk` sources and README, ROCm's `counter_defs.yaml`, rocprof-compute's `gfx942`
-panels. What could not be quoted was DELETED rather than fenced: a warning label at the top does
-not tell you which fenced line was right.
+**No AMD counter was ever read on the box this was written on.** There IS an AMD GPU on it -- a
+Radeon 780M under ROCm 7.2.4 -- and that part exposes no performance counters at all, which is the
+one AMD fact measured here and the whole of the next section. Every other AMD claim below is a quote
+from a named upstream file with that file's URL beside it -- PAPI's `rocp_sdk` sources and README,
+ROCm's `counter_defs.yaml`, rocprof-compute's `gfx942` panels. What could not be quoted was DELETED
+rather than fenced: a warning label at the top does not tell you which fenced line was right.
 
 What IS carried over from measurement is the METHOD: the start/stop-versus-read-delta result below
 was measured on NVIDIA hardware here, against known ground truth. The MECHANISM behind it is a
@@ -24,12 +25,37 @@ different one on AMD -- see the end of that section -- which is why the self-tes
 `gpu_papi_init` is what makes the method portable: it fails loudly on a box this page could not be
 tested on. **Run it before you believe a number.**
 
+## First, ask whether this part has counters AT ALL
+
+```sh
+rocprofv3-avail info --pmc          # ROCm >= 6.x; older: rocprofv3 --list-avail
+```
+
+Run it BEFORE you build anything. It asks the driver the same question PAPI does, and on a part
+without counters it does not fail -- it returns an EMPTY LIST. Measured here, Radeon 780M (gfx1103,
+RDNA3 integrated), ROCm 7.2.4:
+
+```
+W... metadata.cpp:254] rocprofiler_iterate_agent_supported_counters failed for agent 1 (gfx1103)
+    :: Agent HW architecture is not supported, no counter metrics found.
+GPU:0
+Name:gfx1103
+```
+
+`rocminfo` reports the agent as `amdgcn-amd-amdhsa--gfx1103`, HIP runs kernels, everything works
+except the thing this page is about. PAPI's component initialises, enumerates ZERO events, and every
+name you try fails to resolve -- a build that took twenty minutes to produce nothing. `rocp_sdk`
+supports CDNA2 and CDNA3 only, so consumer RDNA parts and APUs are out of scope by design and not by
+bug. If that warning prints, stop here.
+
 ## Start and stop the event set per region -- a read-delta does NOT attribute
 
-`PAPI_read` leaves the set counting and looks like it brackets a region. On a GPU component it
-does not, because the counter value is flushed ASYNCHRONOUSLY and a device synchronise does not
-flush it. A read-delta returns whatever happened to be flushed between the two reads, which has no
-relationship to what ran between them.
+`PAPI_read` leaves the set counting and looks like it brackets a region. On a GPU component it does
+not: on either vendor the read returns an ACCUMULATED total cut at a host-side boundary with no
+fixed relationship to kernel completion, so a "delta" is the difference of two accumulations sliced
+somewhere other than where you think. The two components get there differently -- the NVIDIA twin
+closes and reopens the CUPTI range inside the read, `rocp_sdk` subtracts two snapshots of a buffer
+an asynchronous callback fills -- and the AMD half is spelled out at the end of this section.
 
 Measured on the NVIDIA twin of this component (RTX 4050, PAPI 7.2.0.0), four kernels of
 deliberately different shape, 25 regions each, against each kernel's compulsory traffic:
@@ -86,21 +112,88 @@ that device lands inside it. That is what the empty half of the self-test below 
 papi_component_avail | grep -A2 -E 'Name:[[:space:]]+(rocm|rocp_sdk)'
 ```
 
-| component | build | use it when |
+| component | build | what it is, and where it works |
 | --- | --- | --- |
-| `rocp_sdk` | `./configure --with-components="rocp_sdk"` | **default.** Sits on ROCprofiler-SDK |
-| `rocm` | `./configure --with-components="rocm"` | pre-MI300 only, and only if `rocp_sdk` is absent |
+| `rocp_sdk` | `--with-components="rocp_sdk"` | **default.** ROCprofiler-SDK. CDNA2 and CDNA3 ONLY -- MI210, MI250X, MI300A -- on ROCm 6.3.2 to 7.2.0 |
+| `rocm` | `--with-components="rocm"` | DEPRECATED. rocprofiler v1, pre-MI300 parts, and only when `rocp_sdk` is unavailable |
 
 Upstream: "The `rocm` component is deprecated starting at the AMD Instinct MI300A and will continue
 to be for any future AMD device releases. Please instead use the `rocp_sdk` component", and "For AMD
 devices older than the AMD Instinct MI300A, PAPI should not be configured with both `rocm` and
 `rocp_sdk`" (https://github.com/icl-utk-edu/papi/blob/master/src/components/rocm/README.md). Neither
 is built by default: like the `cuda` component, a distribution PAPI on a box with a perfectly good
-GPU usually has neither, and rebuilding is the only fix.
+GPU usually has neither, and rebuilding is the only fix -- next section. `rocm_smi` is a third
+component and not a third choice: power, temperature and clocks, no performance counters, its own
+root `PAPI_ROCMSMI_ROOT`.
 
-Set `PAPI_ROCP_SDK_ROOT` (or `PAPI_ROCM_ROOT` for the old component) to the ROCm install, at BOTH
-compile and run time. `PAPI_ROCP_SDK_LIB` gives the full path to `librocprofiler-sdk.so` when the
-install is not where PAPI expects.
+## Building a PAPI that has an AMD component
+
+`configure` lives in `src/`, not at the tarball root, and `--with-components` takes ONE quoted
+space-separated list. The build itself needs no root and writes nothing outside `--prefix`.
+
+**A runtime ROCm is not a buildable ROCm.** Both components compile against headers the runtime
+packages do not ship: measured here, a stock `/opt/rocm-7.2.4` runtime install has neither
+`include/hsa` nor `include/rocprofiler`, so a `rocm` build stops at `#include <rocprofiler.h>`.
+`rocp_sdk` needs `hsa-rocr-dev` too even though it never touches rocprofiler v1, because
+`include/rocprofiler-sdk/hsa.h` includes `<hsa/hsa.h>`. Installing those needs root, so ASK THE USER
+to run it:
+
+```sh
+sudo apt install hsa-rocr-dev rocprofiler-sdk       # for rocp_sdk
+sudo apt install hsa-rocr-dev rocprofiler-dev       # for the deprecated rocm component
+```
+
+```sh
+curl -LO https://github.com/icl-utk-edu/papi/releases/download/papi-7-2-0-t/papi-7.2.0.tar.gz
+tar xf papi-7.2.0.tar.gz && cd papi-7.2.0/src       # configure is HERE, not one level up
+export PAPI_ROCP_SDK_ROOT=/opt/rocm                 # PAPI_ROCM_ROOT for the old component
+./configure --prefix=$HOME/papi --with-components="rocp_sdk"
+make -j8 && make install
+```
+
+`Rules.rocp_sdk` compiles `sdk_class.cpp` with `$(CXX)`, so a C++ compiler is a hard build
+requirement for this component -- neither README says so. If ROCprofiler-SDK lives outside ROCm, set
+`PAPI_ROCP_SDK_ROOT` and `PAPI_ROCM_ROOT` both.
+
+The roots are read at RUN time too, and the two components differ in how forgiving they are:
+
+- `rocp_sdk` dlopens `$PAPI_ROCP_SDK_ROOT/lib/librocprofiler-sdk.so`; `PAPI_ROCP_SDK_LIB` (a FULL
+  path) takes precedence, and with neither set it falls back to a bare `dlopen`, i.e. ldconfig and
+  `LD_LIBRARY_PATH`.
+- `PAPI_ROCM_ROOT` is MANDATORY for `rocm` with NO ld.so fallback -- unset, the component disables
+  itself with `Can't load libhsa-runtime64.so, PAPI_ROCM_ROOT not set.` It sets `HSA_TOOLS_LIB` and
+  `ROCP_METRICS` for you; let it. Measured here on ROCm 7.2.4 the unversioned
+  `lib/librocprofiler64.so` exists only with `rocprofiler-dev` installed, while PAPI's own search
+  tries `.so.1` first and succeeds -- so an `HSA_TOOLS_LIB` you export by hand points at nothing.
+
+`PAPI_ROCP_SDK_DISPATCH_MODE=1` selects per-kernel dispatch counting; the DEFAULT is device sampling
+over a time range, which is a different question (see the first section). Export it, and call
+`PAPI_library_init()` before any HIP call -- see the environment traps below, that ordering is the
+one every other rule here depends on.
+
+**The PAPI utilities are STATICALLY linked, so `papi_component_avail` reports its OWN build.**
+`LD_LIBRARY_PATH` cannot move it, and a distro copy earlier on `PATH` will keep saying there is no
+AMD component whatever you export. Call yours by absolute path; link the probe with an rpath or it
+loads whichever `libpapi.so` `ld.so` finds first and then reports the same non-existent problem.
+
+```sh
+$HOME/papi/bin/papi_component_avail | grep -A3 -E 'Name:[[:space:]]+(rocm|rocp_sdk)'
+$HOME/papi/bin/papi_native_avail -i rocp_sdk:::
+hipcc -O2 -o probe probe.cpp -I$HOME/papi/include -L$HOME/papi/lib -lpapi -Wl,-rpath,$HOME/papi/lib
+ldd ./probe | grep papi        # must be YOUR prefix
+```
+
+| symptom, exact string | fix |
+| --- | --- |
+| build: `hsa/hsa.h: No such file or directory` | ASK THE USER: `sudo apt install hsa-rocr-dev` |
+| build: `rocprofiler.h: No such file or directory` | ASK THE USER: `sudo apt install rocprofiler-dev hsa-rocr-dev` |
+| `\-> Disabled: Can't load libhsa-runtime64.so, PAPI_ROCM_ROOT not set.` | export `PAPI_ROCM_ROOT` at RUN time, not only at build time |
+| `\-> Disabled: Could not dlopen() librocprofiler-sdk.so. Set either PAPI_ROCP_SDK_ROOT, or PAPI_ROCP_SDK_LIB.` | `export PAPI_ROCP_SDK_LIB=/opt/rocm/lib/librocprofiler-sdk.so` -- full path, wins over the root |
+| `\-> Disabled: Invalid path in PAPI_ROCP_SDK_LIB: <path>` | an explicit override that does not open has no fallback. Fix it or unset it |
+| `\-> Disabled: Rocprofiler metrics.xml file not found.` | `export ROCP_METRICS=$PAPI_ROCM_ROOT/lib/rocprofiler/metrics.xml` (ROCm >= 5.2.0) |
+| `Could not obtain all functions from librocprofiler-sdk.so. Possible library version mismatch.` | ROCm older than 6.3.2, upstream's floor. Upgrade ROCprofiler-SDK |
+| component Active, `Native: 0` | the part has no counters -- run the `rocprofv3-avail` check above |
+| a probe prints "no component" while your own `papi_component_avail` shows it | it linked a different `libpapi.so`. Rebuild with `-Wl,-rpath` |
 
 ## The two environment traps that return silent zeros
 
@@ -496,7 +589,11 @@ Two rules override all of it:
 - The component's own test runner -- the authority for event-name and `DIMENSION_*=` spelling:
   https://github.com/icl-utk-edu/papi/blob/master/src/components/rocp_sdk/tests/run_rocp_sdk_tests.sh
 - `papi.c`: `PAPI_stop` reads before it stops -- https://github.com/icl-utk-edu/papi/blob/master/src/papi.c
+- `rocp_sdk` support matrix: CDNA2/CDNA3, MI210/MI250X/MI300A, ROCm 6.3.2 to 7.2.0 -- https://github.com/icl-utk-edu/papi/wiki/Hardware-and-Software-Support-%E2%80%90-ROCP_SDK-Component
 - PAPI `rocm` component (deprecated from MI300A), `AQLPROFILE_READ_API` -- https://github.com/icl-utk-edu/papi/blob/master/src/components/rocm/README.md
+- PAPI `rocm_smi` component -- power, clocks, temperature, not counters -- https://github.com/icl-utk-edu/papi/blob/master/src/components/rocm_smi/README.md
+- ROCprofiler-SDK, the library `rocp_sdk` sits on -- https://github.com/ROCm/rocprofiler-sdk
+- ROCm installation, which packages ship headers versus runtime -- https://rocm.docs.amd.com/projects/install-on-linux/en/latest/
 - `roc_profiler.c`: intercept mode is selected by `ROCP_HSA_INTERCEPT`, sampling is the fallback --
   https://github.com/icl-utk-edu/papi/blob/master/src/components/rocm/roc_profiler.c
 - ROCprofiler-SDK counter collection services: dispatch versus device counting, kernel serialisation --
