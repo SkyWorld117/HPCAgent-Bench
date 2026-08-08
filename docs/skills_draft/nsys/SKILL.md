@@ -293,6 +293,9 @@ open kernel module publishes the internal name `RmProfilingAdminOnly` instead --
 
 ## Traps
 
+- **The intermediate `.qdstrm` is staged under `/tmp`** (`Generating '/tmp/nsys-report-62d2.qdstrm'`
+  on the way to the `.nsys-rep`), so where `/tmp` is a tmpfs a long trace is charged to RAM;
+  `TMPDIR=/some/disk/path nsys profile ...` puts it on disk instead.
 - **The trace covers warmup too.** Any per-rep number you compute divides by `reps + warmup`.
 - **Tracing is not free**, only cheap. Compare a traced run against a traced run; take speedups
   from the untraced timing.

@@ -63,6 +63,11 @@ ncu -k regex:jacobi -c 1 -s 20 --set basic -o prof -f -- ./app input
   the `function` basis by default -- "function name without parameters, templates etc.", so BOTH the
   parameter list and the template arguments are stripped, and `regex:mykernel<float>` matches
   nothing. Anchor on the bare name. `--kernel-name-base demangled|mangled` switches.
+  **`regex:` is UNANCHORED -- it is a substring match, and a sibling whose name merely CONTAINS
+  yours is matched too.** Measured: `-k regex:k_bank -c 3` profiled `k_bankpad` as its second
+  result, and only the report header said so; `-c`/`-s` count across the union of the matches, so a
+  skip meant for one kernel steps through another. `-k k_bank` (bare name = exact) and
+  `-k 'regex:^k_bank$'` both hit only the intended kernel.
 - **`-c` / `--launch-count`** caps how many matching launches are profiled. Almost always `1`.
   `--filter-mode` (default `global`, else `per-gpu` / `per-launch-config`) decides whether `-c`/`-s`
   count collectively or per device / per shape.
@@ -110,14 +115,26 @@ their estimates degrade from GLOBAL to LOCAL. Ask by name rather than paying for
 ncu -k regex:jacobi -c 1 \
     --section SpeedOfLight --section LaunchStats --section Occupancy \
     --section SchedulerStats --section WarpStateStats \
-    --section MemoryWorkloadAnalysis_Tables \
+    --section MemoryWorkloadAnalysis --section MemoryWorkloadAnalysis_Tables \
     -- ./app input
 ```
 
-`ncu --list-sections` prints the identifiers `--section` takes. Asking for two sections beats
-`--set full` every time. `--metrics a,b,c` is cheapest of all, and if the selection fits in ONE pass
-`ncu` skips the save-and-restore entirely. `ncu --list-metrics` lists the metric NAMES the current
-section selection would collect -- names only, not a cost or a pass count.
+**A `--section` selection collects that section's METRICS but not its RULES: a rule runs only if its
+PARENTS were collected too, and the whole tree roots in SpeedOfLight.** The shipped chain is
+`SOLBottleneck -> Memory -> {SharedMemoryConflicts, UncoalescedAccess}`, so both coalescing rules
+need SpeedOfLight AND MemoryWorkloadAnalysis above them. Measured on a kernel with 96.87% of its
+shared-load wavefronts in conflicts: `--section MemoryWorkloadAnalysis --section
+MemoryWorkloadAnalysis_Tables --section SourceCounters` fired **ZERO** rules -- every table, no
+verdict. Adding `--section SpeedOfLight` fired `Est. Speedup: 95.35% -- ... on average a 32.0 - way
+bank conflict across all 1048576 shared load requests ... 96.88% of the overall 33559407 wavefronts
+for shared loads`. **Put SpeedOfLight in every named-section run.** A childless section prints
+numbers and no diagnosis, which is the failure that looks most like a clean kernel.
+
+`ncu --list-sections` prints the identifiers `--section` takes. Asking for a few sections beats
+`--set full` every time, as long as you ask for the parents too. `--metrics a,b,c` is cheapest of
+all, and if the selection fits in ONE pass `ncu` skips the save-and-restore entirely.
+`ncu --list-metrics` lists the metric NAMES the current section selection would collect -- names
+only, not a cost or a pass count.
 
 ## Reading the text output
 
@@ -229,14 +246,23 @@ Same kernel, same binary, 6 MB of buffers against this part's 24 MB of L2:
 | `all` (the DEFAULT) | 4.20 MB | **90.04%** |
 | `none` | 2.05 MB | **0.14%** |
 
-A 640x swing in the one number that decides whether you are memory-bound, from a flag nobody sets.
-Scale the same kernel to a 96 MB working set and the two agree (94.53% against 94.33%), because
-then the data genuinely does not fit and the flush changes nothing.
+A 640x swing on THAT kernel in the number that decides whether you are memory-bound, from a flag
+nobody sets. Scale the same kernel to a 96 MB working set and the two agree (94.53% against
+94.33%), because then the data genuinely does not fit and the flush changes nothing.
 
-So: **a high `DRAM Throughput` on a kernel whose working set fits in L2 is an artefact of the
-default.** It is the common shape in a timestep loop, where the same arrays are revisited every
-step and are hot by the second iteration. Re-run with `--cache-control none` before you spend a day
-cutting DRAM traffic that the real run never moves.
+**The artefact is guaranteed in the BYTES and only sometimes visible in the percentage.**
+`DRAM Throughput` is bytes over TIME, and dropping the flush shortens the launch as well as feeding
+it, so the two can move together and cancel. A second 6 MiB kernel measured here: `all` reads
+`dram__bytes_read` 4.20 MB / DRAM Throughput 89.18% / Duration 24.64 us, `none` reads 2.56 KB /
+76.91% / 9.38 us -- the byte count moves **1640x** while the percentage moves 1.16x, because the
+duration collapsed 2.6x with it. On the kernel in the table the percentage did collapse. Read the
+byte counters; treat the percentage as the reading that may or may not survive the flag.
+
+So: **a high `DRAM Throughput` on a kernel whose working set fits in L2 is not evidence of DRAM
+traffic** -- check `dram__bytes_read` under `none` before you believe it. It is the common shape in
+a timestep loop, where the same arrays are revisited every step and are hot by the second
+iteration. Re-run with `--cache-control none` before you spend a day cutting DRAM traffic that the
+real run never moves.
 
 **`--cache-control none` is only valid on a SINGLE-PASS collection.** NVIDIA: valid "if only a
 single kernel replay pass is necessary", otherwise it "can lead to inconsistent and out-of-bounds
@@ -391,10 +417,13 @@ Two corrections to the limiter reading:
   causal claim is softer than it looks: a register-starved kernel can read below one wave partly
   BECAUSE its occupancy is low.
 
-## Coalescing: the metric everyone quotes is not shipped
+## Coalescing: the metric everyone quotes is in no section, and still answers
 
-`l1tex__average_t_sectors_per_request*` appears in ZERO sections, rules or guides on either install.
-What the live rules actually read:
+`l1tex__average_t_sectors_per_request*` appears in ZERO sections, rules or guides on either install
+-- but it is a valid metric NAME, and `--metrics` resolves it in one pass. Measured:
+`l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio` read **32.00** on the
+uncoalesced kernel and **4.00** on its coalesced twin. So it is the one-metric spot check, and it is
+not what any rule computed. What the live rules actually read:
 
 - **Bytes per sector** (MWA_Tables, `MemoryCacheAccessPattern`):
   `smsp__sass_average_data_bytes_per_sector_mem_{global,local}_op_{ld,st}.ratio` against the
@@ -403,7 +432,8 @@ What the live rules actually read:
   level where the inefficiency costs most (`L1TEX Global Load Access Pattern`, `DRAM Global Store
   Access Pattern`, ...). The L2 and DRAM variants add "This applies to the {X}% of sectors missed in
   L1TEX/L2" -- a low L1 hit rate is what promotes a coalescing problem from an L1 nuisance to a DRAM
-  cost.
+  cost. This row is a GLOBAL-access row and answers nothing else: measured on a 32-way
+  shared-memory bank conflict and its padded twin, both read Average = Maximum = 32 byte/sector.
 - **Excessive sectors and wavefronts** (SourceCounters, `UncoalescedGlobalAccess` /
   `UncoalescedSharedAccess`): `memory_l2_theoretical_sectors_global` against its `..._ideal`,
   exposed as `derived__memory_l2_theoretical_sectors_global_excessive`; the shared analogue is
@@ -412,15 +442,24 @@ What the live rules actually read:
 
 Both fire on any excess whatsoever, so the number to report is the percentage, never the message.
 
-**One-pass cross-check with a hard floor, no section needed** -- sectors per request:
+**One-pass cross-check with a hard floor, no section needed** -- sectors per request, either form:
 
 ```sh
-ncu -k regex:jacobi -c 1 --metrics \
+ncu -k jacobi -c 1 --metrics \
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio \
+    -- ./app input                                       # the ratio, already divided
+
+ncu -k jacobi -c 1 --metrics \
     l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum,l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum \
-    -- ./app input
+    -- ./app input                                       # its two constituents, absolute
 ```
 
-Divide. A warp-wide 32-bit load needs 128 bytes, and a sector is 32 B, so the floor is **4**; 8 for
+The pair is the same number with the counts visible -- 16,777,216 sectors over 524,288 requests on
+the uncoalesced kernel here, 2,097,152 over the same 524,288 on the coalesced one -- and sectors are
+the unit the shipped rules work in, so quote the pair when you report a finding and the ratio when
+you are only checking.
+
+A warp-wide 32-bit load needs 128 bytes, and a sector is 32 B, so the floor is **4**; 8 for
 64-bit, 16 for 128-bit. **32 means fully scattered** -- one sector per lane. NVIDIA's own worked
 example went 32 -> 4 by making `threadIdx.x` the fastest-varying subscript, for an 87.5% cut in
 transactions and 68% in duration. Two metrics, one pass, no save-and-restore: cheap enough to run
@@ -441,6 +480,13 @@ large absolute cycle count and a small share is not your finding. Rule titles ar
 Stalls` -- so match them case-insensitively.
 
 **There are 19 rows on this chip, not 11**, and one of them is not a stall at all.
+
+**A shared-memory bank conflict does not surface on the row that names it.** Measured on a 32-way
+conflict: `mio_throttle` TOP at 71.0%, whose action below is "wider shared loads" -- the wrong
+change -- and `short_scoreboard` second at 24.4%. The conflict rule named it exactly (`32.0 - way
+bank conflict`, 96.88% of shared-load wavefronts, `Est. Speedup: 95.35%`) and costs MWA_Tables plus
+its SpeedOfLight parent. When either row fires with shared memory in play, run that rule before you
+act on the stall row.
 
 | high share of | it means | you change |
 | --- | --- | --- |
@@ -644,12 +690,14 @@ Only the ones that change an action, from `<install>/docs/ReleaseNotes/index.htm
 - **A metric absent here can be present on the next box**, and the query defaults hide metrics. Ask
   `ncu --query-metrics --chips <chip>` -- it needs no GPU and no counter permission -- and note that
   the default `--query-metrics-collection profiling` does NOT list the occupancy limiters or
-  `Waves Per SM`. Measured here: `--query-metrics-collection launch` returns 61 rows and is the only
-  place `launch__occupancy_limit_*` and `launch__waves_per_multiprocessor` appear;
-  `--query-metrics-collection occupancy` returns 5, holding `sm__maximum_warps_per_active_cycle_pct`
-  and `smsp__maximum_warps_avg_per_active_cycle` -- the step-3 denominator. That `occupancy`
-  collection is **new in 2026.1** and absent from the 2025.4.1 HPC-SDK copy. `--list-chips` names
-  the chips you can ask about.
+  `Waves Per SM`. The collection NAMES are stable, the row counts are a version fact: measured on
+  2026.2.1 here, `--query-metrics-collection launch` returns **91** rows and `occupancy` returns
+  **8** lines / 3 metrics, against 61 and 5 on the other install for the same chip -- re-run it
+  rather than porting a count. `launch` is the only place `launch__occupancy_limit_*` and
+  `launch__waves_per_multiprocessor` appear; `occupancy` holds
+  `sm__maximum_warps_per_active_cycle_pct` and `smsp__maximum_warps_avg_per_active_cycle` -- the
+  step-3 denominator. That `occupancy` collection is **new in 2026.1** and absent from the 2025.4.1
+  HPC-SDK copy. `--list-chips` names the chips you can ask about.
 
 ## Documentation
 
