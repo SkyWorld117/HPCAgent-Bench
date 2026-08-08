@@ -202,7 +202,10 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     command = [
         os.environ.get("CLAUDE_BIN", "claude"),
         "--bare",
+        # The prompt must precede the variadic tool flags: after --disallowedTools it is consumed
+        # as deny rules and claude exits 1 with no input (all 10 agents, 585091).
         "--print",
+        prompt,
         "--model",
         os.environ.get("CLAUDE_MODEL", "optarena-llm"),
         "--max-turns",
@@ -220,7 +223,6 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
         "WebSearch",
         "Task",
         "Agent",
-        prompt,
     ]
     # Striped by the problem's index in the FULL list, not by the worker slot: a slot is reused by
     # whatever problem lands in it next, so slot striping spreads the POOL over the judges while
