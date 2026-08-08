@@ -51,9 +51,13 @@ Every part of that line is a decision:
 - **One `nsys stats` invocation for all four reports.** The first use exports the recording to
   SQLite; asking four times pays that export four times.
 - **CSV, not the pretty summary.** The human format right-aligns and thousands-separates numbers a
-  parser then has to un-format. On stdout the four reports arrive one after another under
-  `** Title (report_name):` banners: split on those, or the next report's header reads as a data
-  row.
+  parser then has to un-format. There are no `** Title (report_name):` banners in CSV -- that
+  banner belongs to the column/table format, which is what `nsys profile --stats=true` prints. The
+  four CSV reports arrive on stdout back to back, separated only by nsys's own progress lines
+  (`Generating SQLite file ...`, a `NOTICE:` block, one `Processing [db] with [...report.py]...`
+  per report), which land on STDOUT too and are not CSV. Split on the `Processing [` lines and
+  take each block's first comma-containing line as its header; or `-q`, which drops them and
+  leaves one blank line between reports; or `--output .` for one file per report.
 - **`--force-export=true`, or you read the LAST run's numbers.** The `.sqlite` export sits beside
   the recording and is reused; without the flag a freshly re-profiled `.nsys-rep` is summarised from
   the stale one, silently, exit 0. Writing the reports to files instead (`--output .`) needs
@@ -208,12 +212,17 @@ Where it goes:
 
 **Launch-bound is settled by the TOTALS, not by the gap size.** `cuda_api_sum`'s `cudaLaunchKernel`
 total against the kernel total: measured on a 3351-launch trace, 7.20 ms of host time spent
-launching 4.74 ms of device work, which is the textbook signature. Gap size does not show this and
+launching 4.74 ms of device work, which is the textbook signature -- this skill's rule of thumb,
+not a documented NVIDIA test, but it is what settles the verdict. Gap size does not show this and
 usually points the other way -- on that same trace the median kernel-to-kernel gap was 640 ns
 against a mean `cudaLaunchKernel` of 2149 ns, because the host runs far ahead and the queue hides
 the launch cost from the device timeline. `cuda_kern_exec_sum` splits a launch into API, queue and
-kernel time and showed the hot kernel waiting 92.3 us in queue to run 1.0 us. The fix is fewer,
-bigger launches, or a CUDA graph -- nothing about the bodies matters until the count drops.
+kernel time, but a deep queue is NOT the evidence: NVIDIA's help for that report says queue time
+"is not inherently bad", it means "the GPU was busy running other tasks", and "if every kernel
+launch is immediate, without any queue time, that _may_ indicate an idle GPU with poor
+utilization". The column that signals is `QCount`, the launches that had any queue time at all: a
+large `Count - QCount` alongside device-side gaps is the host starving the device. The fix is
+fewer, bigger launches, or a CUDA graph -- nothing about the bodies matters until the count drops.
 
 If you do capture a graph, `--cuda-graph-trace` defaults to `graph` on CUDA driver 11.7+: the graph
 traces as ONE activity and its kernels leave `cuda_gpu_kern_sum` entirely. `--cuda-graph-trace=node`
@@ -392,7 +401,8 @@ environment, not about your kernel.
 
 - Nsight Systems user guide, including the full CLI --
   https://docs.nvidia.com/nsight-systems/UserGuide/index.html
-- Reading the timeline, and what a gap between kernels means --
+- Post-collection analysis: from 2025.5 the `nsys stats` report definitions, the `nsys analyze`
+  rules and the SQLite schema live here rather than in the user guide --
   https://docs.nvidia.com/nsight-systems/AnalysisGuide/index.html
 - The profiling permission gate --
   https://developer.nvidia.com/nvidia-development-tools-solutions-err_nvgpuctrperm-permission-issue-performance-counters
