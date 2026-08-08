@@ -124,8 +124,8 @@ CREATE TABLE IF NOT EXISTS submissions (
 """
 
 #: Audit log: every submission NOT recorded as a leaderboard row. ``reason``
-#: names the gate it failed (build / incorrect / a verify reason); kept out of
-#: rankings, useful for measuring agent progress.
+#: names the gate it failed (build / overfit / incorrect / a verify reason); kept
+#: out of rankings, useful for measuring agent progress.
 _ATTEMPTS_DDL = """
 CREATE TABLE IF NOT EXISTS attempts (
     id          INTEGER PRIMARY KEY,
@@ -702,8 +702,11 @@ def record(score: Score,
 
         if not config.get("record.log_attempts", True):
             return "skipped", "log_attempts disabled"
+        # public-correct but held-out-failing = overfit (the visible oracle was gamed); same
+        # condition runner.status_of uses, kept local here to avoid a recording->runner import.
+        overfit = score.public_correct and not score.hidden_correct
         reason = (verify.reason if (verify is not None and not verify.ok) else
-                  ("build" if not score.build_ok else "incorrect"))
+                  ("build" if not score.build_ok else ("overfit" if overfit else "incorrect")))
         conn.execute(
             """INSERT INTO attempts(
                 run_id, ts, benchmark, preset, datatype, language, source_mode, optimizer,
