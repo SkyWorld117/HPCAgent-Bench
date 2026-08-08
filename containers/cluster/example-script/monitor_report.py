@@ -16,6 +16,7 @@ import argparse
 import csv
 import re
 import statistics
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -207,7 +208,18 @@ def main() -> None:
         print(f"no CSV files found under {args.monitor_dir}")
         return
 
-    nodes = [compute_node_stats(path) for path in csv_paths]
+    nodes: list[NodeStats] = []
+    skipped: list[str] = []
+    for path in csv_paths:
+        try:
+            nodes.append(compute_node_stats(path))
+        except (OSError, UnicodeDecodeError, csv.Error) as exc:
+            print(f"skipped {path}: {exc}", file=sys.stderr)
+            skipped.append(str(path))
+
+    if not nodes:
+        raise SystemExit(f"all {len(csv_paths)} CSV files were unreadable; nothing to report")
+
     groups: dict[str, list[NodeStats]] = {}
     for node in nodes:
         groups.setdefault(node.role, []).append(node)
@@ -216,6 +228,9 @@ def main() -> None:
     print_gpu_balance(nodes)
     print_role_summary(groups)
     print_verdicts(groups)
+    if skipped:
+        print()
+        print(f"skipped {len(skipped)}/{len(csv_paths)} CSV files (unreadable, see stderr)")
 
 
 if __name__ == "__main__":

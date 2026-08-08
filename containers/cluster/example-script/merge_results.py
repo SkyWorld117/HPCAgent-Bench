@@ -151,7 +151,13 @@ def merge(run_dir: pathlib.Path, out: pathlib.Path) -> int:
         # nothing except an ordering constraint between tables.
         conn.execute("PRAGMA foreign_keys = OFF")
         for shard in shards:
-            inserted = merge_shard(conn, shard)
+            try:
+                inserted = merge_shard(conn, shard)
+            except sqlite3.Error as exc:
+                # loud and stop here: a shard that fails to read (e.g. truncated by an OOM-killed
+                # rank) must not be quietly dropped -- that would leave a merged file that looks
+                # complete but is missing that shard's rows.
+                raise SystemExit(f"corrupt shard, aborting merge: {shard}: {exc}") from exc
             copied = merge_prompt_store(shard, out)
             rows = sum(inserted.values())
             detail = ", ".join(f"{table}={count}" for table, count in sorted(inserted.items()) if count)

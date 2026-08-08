@@ -9,7 +9,9 @@ FAILs, gracefully, with no traceback.
 """
 import importlib.util
 import pathlib
+import subprocess
 import sys
+from types import ModuleType
 
 import pytest
 
@@ -20,12 +22,17 @@ EXAMPLE = pathlib.Path(__file__).resolve().parents[1] / "containers/cluster/exam
 MONITOR_HEADER = "ts,cpu_pct,load1,mem_used_mib,mem_total_mib,gpu_pct,vram_used_mib,vram_total_mib"
 MONITOR_ROW = "2026-01-01T00:00:00Z,10.0,0.1,100,1000,0.0,0,0"
 
+#: bytes that are neither a valid sqlite header nor valid UTF-8 -- a stand-in for a shard truncated
+#: mid-write or a monitor CSV read off a corrupted disk. Fixed, not random, so a failure is reproducible.
+GARBAGE_BYTES = b"\xff\xfe" * 100
 
-def load_validate_run():
-    """``sys.modules`` must carry the module BEFORE exec: ``CheckResult`` is a ``@dataclass`` under
-    ``from __future__ import annotations``, and dataclass field resolution looks up
-    ``sys.modules[cls.__module__]`` -- an unregistered module makes that lookup ``None`` and crashes."""
-    spec = importlib.util.spec_from_file_location("validate_run", EXAMPLE / "validate_run.py")
+
+def load_example_module(name: str) -> ModuleType:
+    """``sys.modules`` must carry the module BEFORE exec: several of these modules declare a
+    ``@dataclass`` under ``from __future__ import annotations``, and dataclass field resolution looks
+    up ``sys.modules[cls.__module__]`` -- an unregistered module makes that lookup ``None`` and
+    crashes."""
+    spec = importlib.util.spec_from_file_location(name, EXAMPLE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -34,7 +41,12 @@ def load_validate_run():
 
 @pytest.fixture(name="validate_run")
 def validate_run_fixture():
-    return load_validate_run()
+    return load_example_module("validate_run")
+
+
+@pytest.fixture(name="monitor_report")
+def monitor_report_fixture():
+    return load_example_module("monitor_report")
 
 
 def seed_shard(path: pathlib.Path, *, run_id: str, kernel: str = "gemm", ts: int = 1) -> None:
@@ -175,3 +187,50 @@ def test_monitor_csv_with_no_data_rows_is_flagged(tmp_path, validate_run):
     result = validate_run.check_monitor(run_dir)
     assert not result.ok
     assert "judge-nid002.csv" in result.summary
+
+
+# --- a corrupt shard must fail loudly, not disappear into a partial merge -----------------------------
+def test_merge_results_standalone_reports_corrupt_shard_and_fails_cleanly(tmp_path):
+    run_dir = build_run_dir(tmp_path, ranks=2)
+    bad_shard = run_dir / "judge" / "rank-1" / "hpcagent_bench.db"
+    bad_shard.write_bytes(GARBAGE_BYTES)  # truncated/OOM-killed shard, not a valid sqlite file
+
+    result = subprocess.run([sys.executable, str(EXAMPLE / "merge_results.py"),
+                             str(run_dir)],
+                            capture_output=True,
+                            text=True,
+                            check=False)
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "rank-1" in result.stderr and "hpcagent_bench.db" in result.stderr
+
+
+# --- monitor_report must skip a garbage CSV, not lose the good ones with it ---------------------------
+def test_monitor_report_skips_garbage_csv_and_still_reports_the_rest(tmp_path, monitor_report, capsys, monkeypatch):
+    monitor_dir = tmp_path / "monitor"
+    monitor_dir.mkdir()
+    (monitor_dir / "vllm-nid001.csv").write_text(f"{MONITOR_HEADER}\n{MONITOR_ROW}\n")
+    (monitor_dir / "judge-nid002.csv").write_bytes(GARBAGE_BYTES)
+
+    monkeypatch.setattr(sys, "argv", ["monitor_report.py", str(monitor_dir)])
+    monitor_report.main()
+
+    out, err = capsys.readouterr()
+    assert "nid001" in out
+    assert "skipped 1/2 CSV files" in out
+    assert "skipped" in err and "nid002" in err
+
+
+def test_monitor_report_exits_nonzero_when_every_csv_is_bad(tmp_path, monitor_report, capsys, monkeypatch):
+    monitor_dir = tmp_path / "monitor"
+    monitor_dir.mkdir()
+    (monitor_dir / "judge-nid002.csv").write_bytes(GARBAGE_BYTES)
+
+    monkeypatch.setattr(sys, "argv", ["monitor_report.py", str(monitor_dir)])
+    with pytest.raises(SystemExit) as excinfo:
+        monitor_report.main()
+
+    err = capsys.readouterr().err
+    assert "nid002" in err  # the one bad file is named on stderr as it is skipped
+    assert "unreadable" in str(excinfo.value)  # and the all-skipped case says so plainly
