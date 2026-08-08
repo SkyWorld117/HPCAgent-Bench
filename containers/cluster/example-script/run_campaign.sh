@@ -63,6 +63,7 @@ case "${VARIANT}" in
         fi
         "${PYTHON}" "${SCRIPT_DIR}/make_problems.py" \
             --track loop_level_reasoning "${lang_args[@]}" \
+            --note "Wall-clock limit: about 55 minutes. Budget your iterations and make sure an improved, correct submission is SUBMITTED well before the limit; an unsubmitted improvement scores zero." \
             >"${SCRIPT_DIR}/${PROBLEMS_FILE}"
         ;;
     *)
