@@ -56,6 +56,12 @@ run_vllm_node() {
     # cancel reaches it and its own TERM trap exits it cleanly.
     ROLE=vllm OUT_DIR="${RUN_DIR}/monitor" "${SCRIPT_DIR}/node_monitor.sh" &
 
+    # HF_HOME MUST be exported before the snapshot resolution below: inside the CE container
+    # ~/.cache is the RAM-backed overlay, and resolving there made the fallback download 60 GB
+    # of weights into the job cgroup - the OOM that killed 585035.
+    export HF_HOME="${HF_HOME:-${SCRATCH}/hf}"
+    export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
     : "${VLLM_MODEL:?VLLM_MODEL must be set}"
@@ -113,9 +119,6 @@ PY
 
     export VLLM_DISABLE_PYNCCL="${VLLM_DISABLE_PYNCCL:-1}"
     export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
-    # Same HF cache the roundtrip gate used; without it the container resolves ~/.cache instead.
-    export HF_HOME="${HF_HOME:-${SCRATCH}/hf}"
-    export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
     export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
     export NCCL_DEBUG_FILE="${log_dir}/nccl.%h.%p.log"
 
