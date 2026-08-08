@@ -102,7 +102,7 @@ runs:
         # --recurse-submodules stays MANDATORY either way: dace vendors its runtime headers as
         # submodules (external/moodycamel/blockingconcurrentqueue.h is included by
         # dace/runtime/include/dace/stream.h), so without them every SDFG build dies on a missing header.
-        DACE_SHA="${DACE_SHA:-a3b3d9a23894cc68800e3bcbb843c7897bab2ec3}"
+        DACE_SHA="${DACE_SHA:-a4740d4e7dd087350c707562c1c3706a21c4de87}"
         mkdir -p "$RUNNER_TEMP/dace"
         git -C "$RUNNER_TEMP/dace" init -q
         git -C "$RUNNER_TEMP/dace" remote add origin https://github.com/spcl/dace.git

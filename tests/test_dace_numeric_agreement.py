@@ -74,6 +74,11 @@ NUMERIC_BAD: Dict[str, str] = {
     # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
     # predicate". Neither is issue 07's operator gap.
     "stockham_fft": "compile_fail",
+    # np.einsum('xyzk,xyzk->xyz', ...) -- a row-wise dot -- lowers to a MatMul node that simplify
+    # collapses to [Lb**3, k] x [Lb**3, k], and the MatMul dispatch has no case for it
+    # (NotImplementedError at dace/libraries/blas/nodes/matmul.py:296). Only fires with simplify ON;
+    # filed as dace issue einsum_rowdot_matmul_dispatch. Verified vs extended a4740d4e7 2026-08-08.
+    "fragment_patch_density": "compile_fail",
     # `SympifyError: cannot sympify object of type <class 'function'>` out of the frontend.
     "crc16": "parse_fail",
     "dfa": "parse_fail",
