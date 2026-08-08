@@ -45,7 +45,7 @@ nodes=$(( ${INFERENCE_NODES:-2} + ${AGENT_NODES:-1} + ${JUDGE_NODES:-1} ))
 
 case "${VARIANT}" in
     smoke)
-        time_limit="00:45:00"
+        time_limit="01:00:00"
         # 10 copies of one kernel: every agent optimizes the same task once, striped over the
         # judge ranks. The note is the SOFT deadline; AGENT_TIMEOUT_SECONDS in the env is the hard one.
         "${PYTHON}" "${SCRIPT_DIR}/make_problems.py" \

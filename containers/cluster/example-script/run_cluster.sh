@@ -56,8 +56,27 @@ run_vllm_node() {
     # cancel reaches it and its own TERM trap exits it cleanly.
     ROLE=vllm OUT_DIR="${RUN_DIR}/monitor" "${SCRIPT_DIR}/node_monitor.sh" &
 
+    # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
+    # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
+    : "${VLLM_MODEL:?VLLM_MODEL must be set}"
+    local model_path
+    model_path="$(python3 - <<'PY'
+import os
+
+from huggingface_hub import snapshot_download
+
+repo = os.environ["VLLM_MODEL"]
+try:
+    print(snapshot_download(repo_id=repo, local_files_only=True))
+except Exception:
+    print(snapshot_download(repo_id=repo, max_workers=8))
+PY
+)"
+    model_path="$(printf '%s\n' "${model_path}" | tail -n 1)"
+    test -d "${model_path}"
+
     command=(
-        vllm serve "${VLLM_MODEL:?VLLM_MODEL must be set}"
+        vllm serve "${model_path}"
         --served-model-name "${VLLM_SERVED_MODEL:-optarena-vllm}"
         --tensor-parallel-size "${GPUS_PER_NODE}"
     )
