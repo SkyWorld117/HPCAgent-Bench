@@ -404,6 +404,17 @@ jobs:
           python -m pytest -q -p no:cacheprovider -rfEs --maxfail=10 -m torch_agreement \
             --timeout=600 tests/test_kernelbench_torch_agreement.py
 
+      - name: Upload the generated DaCe corpus
+        # *_dace.py is gitignored and re-emitted per run, so a kernel that only fails here cannot be
+        # diffed against the local emit that passes without the files THIS runner produced.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dace-corpus-portfid
+          path: hpcagent_bench/benchmarks/**/*_dace.py
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Upload coverage data
         if: always()
         uses: actions/upload-artifact@v4
@@ -471,6 +482,18 @@ jobs:
       - name: ccache statistics
         if: always()
         run: ccache --show-stats
+
+      - name: Upload the generated DaCe corpus
+        # Same reason as port-fidelity's copy: the corpus this runner emitted is the only way to tell
+        # a generator difference from an environment difference when a kernel is red here and green
+        # locally at the same dace SHA.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dace-corpus-numeric
+          path: hpcagent_bench/benchmarks/**/*_dace.py
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload coverage data
         if: always()
