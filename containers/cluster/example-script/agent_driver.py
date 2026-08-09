@@ -214,6 +214,12 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
         # pauses to ask simply ends its run unsubmitted (5 of 10 agents, 585108).
         "--permission-mode",
         "bypassPermissions",
+        # Full per-turn JSONL transcript in claude.log: the judge records /submit only, so iteration
+        # counts (turns, score calls) exist nowhere else on the cluster path. Logging format only --
+        # the agent loop is unchanged. stream-json requires --verbose under --print.
+        "--verbose",
+        "--output-format",
+        "stream-json",
         "--mcp-config",
         str(mcp_config),
         "--strict-mcp-config",
