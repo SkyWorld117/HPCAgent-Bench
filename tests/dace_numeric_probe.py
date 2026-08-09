@@ -20,10 +20,11 @@ import importlib
 import json
 import pathlib
 import pickle
+import re
 import sys
 import time
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -151,12 +152,47 @@ def main() -> int:
     return 0
 
 
+#: A line that names a CAUSE in a build log, as opposed to the ninja/cmake progress lines a
+#: compile failure is buried under. DaCe's CompilationError carries the whole transcript and leads
+#: with the progress, so a head-truncated ``str(exc)`` reported ``Compiler failure:`` and nothing
+#: else -- which is what made every CI compile_fail unreadable.
+DECISIVE_RE = re.compile(r"error:|undefined reference|fatal|No such file", re.IGNORECASE)
+
+#: Bounded twice -- at most this many lines, each clipped -- so one runaway template error cannot
+#: push a megabyte of log through the verdict into an assert message. The clip is centred on the
+#: marker, not on the start of the line: DaCe builds under a generated path longer than the
+#: message, so a head clip keeps the build directory and drops the diagnosis.
+DECISIVE_MAX = 15
+DECISIVE_LINE_CHARS = 200
+DECISIVE_HEAD_CHARS = 40
+DETAIL_CHARS = 3200
+
+
+def decisive_lines(text: str) -> str:
+    """The lines of ``text`` that announce a cause, joined by ``|``; ``""`` when none do."""
+    hits: List[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        marker = DECISIVE_RE.search(line)
+        if marker is None:
+            continue
+        start = max(0, marker.start() - DECISIVE_HEAD_CHARS)
+        hits.append(("..." if start else "") + line[start:start + DECISIVE_LINE_CHARS])
+        if len(hits) == DECISIVE_MAX:
+            break
+    return " | ".join(hits)
+
+
 def report(rec: Dict[str, Any], verdict: str, exc: BaseException) -> int:
     """Record ``exc`` under ``verdict`` and print the line. Always exit 0: the verdict IS the
-    payload, and an exit status the parent has to interpret is a second, weaker channel."""
+    payload, and an exit status the parent has to interpret is a second, weaker channel.
+
+    The detail keeps the exception TYPE first and then the decisive lines, falling back to the
+    flattened message when nothing announces an error (a python traceback, a validation refusal)."""
+    body = decisive_lines(str(exc)) or " ".join(str(exc).split())
     rec["verdict"] = verdict
     rec["errtype"] = type(exc).__name__
-    rec["detail"] = f"{type(exc).__name__}: {exc}"[:400]
+    rec["detail"] = f"{type(exc).__name__}: {body}"[:DETAIL_CHARS]
     rec["frame"] = traceback.format_exc().strip().splitlines()[-3][:200]
     print(json.dumps(rec), flush=True)
     return 0

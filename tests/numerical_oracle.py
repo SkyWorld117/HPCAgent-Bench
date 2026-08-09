@@ -1199,7 +1199,10 @@ def _run_dace_backend(short, info, by, syms, expected, compare, rtol, atol) -> s
         if line.startswith("{"):
             rec = json.loads(line)
             # The verdict NAME is what the ratchet keys on, so it stays the second field verbatim.
-            return "ok" if rec["verdict"] == "ok" else f'FAIL:{rec["verdict"]}:{rec.get("detail", "")[:160]}'
+            # The detail arrives already filtered to its decisive lines and bounded by the probe
+            # (dace_numeric_probe.DETAIL_CHARS); clipping it to 160 here threw the compiler's own
+            # error away and left "CompilationError: Compiler failure:" as the whole diagnosis.
+            return "ok" if rec["verdict"] == "ok" else f'FAIL:{rec["verdict"]}:{rec.get("detail", "")[:3200]}'
     return "FAIL:crash:" + (proc.stderr or proc.stdout)[-160:].replace("\n", " ")
 
 
