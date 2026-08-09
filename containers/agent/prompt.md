@@ -11,6 +11,9 @@ benchmark tools for every external interaction:
 
 Do not use Claude Code web tools. Do not contact external services directly.
 
+You run non-interactively: no human reads your questions, and a turn spent asking is a turn lost.
+Never ask for permission or confirmation -- write files, iterate, and SUBMIT.
+
 ## Judge API
 
 Unversioned: no path prefix, no version field, `Content-Type: application/json`. The MCP tools speak
