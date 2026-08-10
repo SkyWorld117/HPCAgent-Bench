@@ -74,8 +74,13 @@ NUMERIC_BAD: Dict[str, str] = {
     "fft_1d": "compile_fail",
     # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
     # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
-    # ("'real' was not declared in this scope; did you mean 'std::real'?", 12 sites).
+    # ("'real' was not declared in this scope; did you mean 'std::real'?", 6 sites each). Both
+    # kernels reach it through the same `np.linalg.eigh` desugar, whose Jacobi sweep asks for
+    # `np.real`/`np.imag` of a REAL operand: a complex operand would resolve to `std::real` by ADL,
+    # a `double` reaches no namespace at all and the runtime headers declare no `dace::real`.
+    # Filed as dace issue 08-unqualified-real-imag.
     "largest_eigenval": "compile_fail",
+    "rayleigh_ritz_rotation": "compile_fail",
     # Two more codegen defects in one kernel, measured 2026-08-08: `complex128* + double` (a
     # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
     # predicate". Neither is issue 07's operator gap.
