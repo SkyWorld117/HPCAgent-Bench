@@ -408,9 +408,13 @@ derived_edf() {
         exit 2
     fi
     mkdir -p "${RUN_DIR}/edf"
+    # The agent tools are baked into the image at build time; mounting the checkout's copy on top
+    # keeps them in lockstep with the repo the other roles already run from (585108: a .sqsh six
+    # hours older than the identity fix recorded every row as 'adhoc').
     awk -v entry="    \"${SHARED_HOST_DIR}:${SHARED_MOUNT}\"," \
+        -v agent_entry="    \"${HPCAGENT_BENCH_REPO}/containers/agent:/opt/optarena-agent\"," \
         '!added && /^[[:space:]]*mounts[[:space:]]*=[[:space:]]*\[[[:space:]]*$/ {
-             print; print entry; added = 1; next
+             print; print entry; print agent_entry; added = 1; next
          }
          { print }' "${src}" >"${EDF_FILE}"
     # Refuse to launch: without the mount the judge sees no submitted file and blames the agent.

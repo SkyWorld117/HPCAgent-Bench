@@ -210,6 +210,16 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
         os.environ.get("CLAUDE_MODEL", "optarena-llm"),
         "--max-turns",
         os.environ.get("CLAUDE_MAX_TURNS", "40"),
+        # Non-interactive: a permission prompt has no one to answer it, and a --print agent that
+        # pauses to ask simply ends its run unsubmitted (5 of 10 agents, 585108).
+        "--permission-mode",
+        "bypassPermissions",
+        # Full per-turn JSONL transcript in claude.log: the judge records /submit only, so iteration
+        # counts (turns, score calls) exist nowhere else on the cluster path. Logging format only --
+        # the agent loop is unchanged. stream-json requires --verbose under --print.
+        "--verbose",
+        "--output-format",
+        "stream-json",
         "--mcp-config",
         str(mcp_config),
         "--strict-mcp-config",
@@ -335,7 +345,11 @@ def main() -> int:
         for future in concurrent.futures.as_completed(futures):
             if future.result() != 0:
                 failures += 1
-    return 1 if failures else 0
+    print(f"node {node}: {failures}/{len(local_problems)} agents exited nonzero", flush=True)
+    # One agent hitting its turn or wall-clock budget is campaign DATA (a censored problem), not a
+    # pipeline fault -- propagating it kills the whole allocation mid-arm (585108: 1 rc=1 out of 10
+    # cancelled every service). Only every-agent-failed still signals broken infrastructure.
+    return 1 if failures == len(local_problems) else 0
 
 
 if __name__ == "__main__":
