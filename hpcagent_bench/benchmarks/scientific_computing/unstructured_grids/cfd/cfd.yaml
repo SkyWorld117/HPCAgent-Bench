@@ -9,7 +9,7 @@ parameters:
     gamma: 1.4
     alpha: 1.0
   M:
-    ncells: 3500000
+    ncells: 816500
     gamma: 1.4
     alpha: 1.0
   L:

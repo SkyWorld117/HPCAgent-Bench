@@ -12,8 +12,8 @@ parameters:
     nu: 0.1
     F: 1.0
   M:
-    ny: 101
-    nx: 101
+    ny: 81
+    nx: 81
     nit: 50
     rho: 1.0
     nu: 0.1

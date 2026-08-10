@@ -10,8 +10,8 @@ parameters:
     k: 8
     m: 6
   M:
-    N: 64
-    k: 32
+    N: 50
+    k: 20
     m: 10
   L:
     N: 119
