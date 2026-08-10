@@ -260,6 +260,97 @@ def test_search_failure_is_a_bad_gateway(client, service, monkeypatch):
     assert client.post("/search", json={"query": "x"}).status_code == 502
 
 
+@pytest.fixture()
+def calls_db(tmp_path, monkeypatch):
+    """Turn the router's call log on against a throwaway DB; returns the shard file it writes.
+
+    The router resolves the DB the way the judge does (config + rank), so the test drives it the
+    same way rather than passing a path the production path never passes."""
+    from hpcagent_bench import config
+    from hpcagent_bench.harness import recording
+    overrides = {"record.enabled": True, "record.allow_memory_db": True, "record.db_path": str(tmp_path / "r.db")}
+    for key, value in overrides.items():
+        config.set_override(key, value)
+    monkeypatch.delenv("HPCAGENT_BENCH_DB_SHARD", raising=False)
+    try:
+        yield recording.db_path
+    finally:
+        for key in overrides:
+            config.clear_override(key)
+
+
+def logged_calls(db: str) -> List[Dict[str, Any]]:
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM calls ORDER BY round")]
+    finally:
+        conn.close()
+
+
+def test_a_score_grade_is_logged_as_a_call(client, calls_db):
+    """The judge upstream records only /submit, so an agent's ITERATION history exists only if this
+    router logs it: without this row the failures before a success are unmeasurable."""
+    StubJudge.reply = (200, {**GRADE, "hidden_total": 0, "hidden_passed": 0})
+    body = {**SUBMISSION, "run_id": "llr2-c.n0.p3.w1", "optimizer": "gpt-oss-120b"}
+    assert client.post("/score", json=body).status_code == 200
+    row, = logged_calls(calls_db())
+    assert (row["route"], row["status"], row["round"]) == ("score", "ok", 1)
+    assert row["run_id"] == "llr2-c.n0.p3.w1" and row["optimizer"] == "gpt-oss-120b"
+    assert row["benchmark"] == "gemm" and row["language"] == "c" and row["speedup"] == 4.5
+
+
+def test_a_failed_score_grade_is_logged_too(client, calls_db):
+    """A build failure is a graded outcome (200, correct=false), and the point of the trajectory."""
+    StubJudge.reply = (200, {"correct": False, "max_rel_error": 1e30, "native_ns": 0, "build_ok": False})
+    client.post("/score", json=SUBMISSION)
+    row, = logged_calls(calls_db())
+    assert (row["route"], row["status"], row["correct"]) == ("score", "build_error", 0)
+
+
+def test_submit_and_verify_log_calls_and_still_forward(client, calls_db):
+    """/submit keeps its upstream grade (where the leaderboard row is written) and gains a
+    trajectory point; /verify grades on the same upstream route and is its own call."""
+    client.post("/verify", json=SUBMISSION)
+    client.post("/submit", json=SUBMISSION)
+    assert [call["path"] for call in StubJudge.calls] == ["/submit", "/submit"]
+    assert [(row["route"], row["round"]) for row in logged_calls(calls_db())] == [("verify", 1), ("submit", 2)]
+
+
+def test_a_refused_grade_is_logged_as_a_score_error(client, calls_db):
+    """An attempt the judge refused still cost the agent a turn, so it is part of the history."""
+    StubJudge.reply = (400, {"error": "deliver the code ONE way"})
+    assert client.post("/submit", json=SUBMISSION).status_code == 400
+    row, = logged_calls(calls_db())
+    assert (row["route"], row["status"], row["speedup"]) == ("submit", "score_error", 0.0)
+
+
+def test_a_broken_call_log_never_breaks_a_grade(client, calls_db, monkeypatch, service):
+    """Bookkeeping is not the grade: a DB that cannot be written must not cost the agent its run."""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(service, "log_grade", boom)
+    response = client.post("/submit", json=SUBMISSION)
+    assert response.status_code == 200 and response.json() == RELAYED_GRADE
+
+
+def test_the_call_log_is_off_unless_recording_is_on(client, tmp_path):
+    """``record.enabled`` gates this router exactly as it gates the judge's own writes."""
+    from hpcagent_bench import config
+    from hpcagent_bench.harness import recording
+    config.set_override("record.db_path", str(tmp_path / "r.db"))
+    config.set_override("record.allow_memory_db", True)
+    try:
+        client.post("/score", json=SUBMISSION)
+        assert not pathlib.Path(recording.db_path()).exists()
+    finally:
+        config.clear_override("record.db_path")
+        config.clear_override("record.allow_memory_db")
+
+
 def test_health_reports_the_upstream_it_forwards_to(client, upstream):
     body = client.get("/health").json()
     assert body["status"] == "ok"

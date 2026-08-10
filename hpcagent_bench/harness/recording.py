@@ -174,6 +174,12 @@ CREATE TABLE IF NOT EXISTS calls (
     speedup     REAL,                         -- speedup at this call (0 if not scored)
     correct     INTEGER CHECK(correct IN (0,1)),
     status      TEXT,                         -- ok | build_error | incorrect | overfit | agent_error | score_error
+    -- which judge ROUTE produced this grade: submit (terminal, public + held-out seed),
+    -- score (the public-only iteration grade) or verify (submit's correctness slice). A
+    -- served run's trajectory mixes all three and they are not the same measurement, so the
+    -- speedup-over-time curve is only readable with the route beside it. NULL = the grade did
+    -- not come from a route (record_trajectory's in-process runner).
+    route       TEXT,
     baseline    TEXT,
     cpu         TEXT,
     commit_sha  TEXT,
@@ -765,5 +771,58 @@ def record_trajectory(task: Task,
                   p.correct), p.status, baseline, cpu, sha, prompt_hash, execution) for p in points])
         conn.commit()
         return len(points)
+    finally:
+        conn.close()
+
+
+def record_call(score: Optional[Score],
+                task: Task,
+                *,
+                status: str,
+                route: str,
+                run_id: str = "adhoc",
+                optimizer: Optional[str] = None,
+                preset: str = "S",
+                datatype: str = "float64",
+                delivered_language: str = "",
+                path: Optional[str] = None) -> int:
+    """Persist ONE served grade as a ``calls`` row; return its ``round`` (0 = not logged).
+
+    The judge-side twin of :func:`record_trajectory`: an in-process run knows its whole
+    trajectory at the end and writes it in one go, a SERVED run learns it one graded request
+    at a time. Both record EVERY grade -- ``/score`` iterations included, failures included --
+    because the failures-before-success and the speedup-over-time curve are what a trajectory
+    IS. Not verify-gated: that gate belongs to the leaderboard, and :func:`record` still owns
+    it (a served ``/submit`` writes both rows, one here and one there).
+
+    ``round`` is 1 + the calls already stored for ``(run_id, benchmark)``. A judge is the single
+    writer of its own shard (see :func:`db_path`), so the COUNT is the whole sequence.
+
+    ``tokens`` is 0: the spend is the AGENT's and no judge request carries it, so a served row
+    logs a number it can see rather than inventing one (``record_trajectory`` has real tokens
+    because the runner it serves counted the calls itself).
+
+    ``score`` is ``None`` when the request produced no verdict at all (``status``
+    ``score_error``): speedup 0, correct 0, no baseline. Gated on ``record.log_calls``.
+    """
+    if not config.get("record.log_calls", True):
+        return 0
+    conn = connect(path)
+    try:
+        spec, ts, cpu, sha, execution, prompt_hash = prepare_row(conn, task, None, None, None, task.language,
+                                                                 task.source_mode, path)
+        (prior, ) = conn.execute("SELECT COUNT(*) FROM calls WHERE run_id = ? AND benchmark = ?",
+                                 (run_id, spec.short_name)).fetchone()
+        conn.execute(
+            """INSERT INTO calls(
+                run_id, ts, benchmark, preset, datatype, language, delivered_language, source_mode, optimizer,
+                round, tokens, speedup, correct, status, route, baseline, cpu, commit_sha, prompt_hash, execution)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, ts, spec.short_name, preset, datatype, task.language, delivered_language, task.source_mode,
+             optimizer, int(prior) + 1, 0, float(score.speedup if score is not None else 0.0),
+             int(bool(score.correct) if score is not None else 0), status, route,
+             (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution))
+        conn.commit()
+        return int(prior) + 1
     finally:
         conn.close()

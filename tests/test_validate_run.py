@@ -9,6 +9,7 @@ FAILs, gracefully, with no traceback.
 """
 import importlib.util
 import pathlib
+import sqlite3
 import subprocess
 import sys
 from types import ModuleType
@@ -204,6 +205,39 @@ def test_merge_results_standalone_reports_corrupt_shard_and_fails_cleanly(tmp_pa
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
     assert "rank-1" in result.stderr and "hpcagent_bench.db" in result.stderr
+
+
+# --- the per-call trajectory must survive the merge, not just the leaderboard rows --------------------
+def test_merge_results_carries_the_call_trajectory(tmp_path):
+    """The judge writes a ``calls`` row for EVERY grade, so that table -- not ``submissions`` -- is
+    where an arm's failures-before-success live. A merge that copied only the tables it was written
+    against would drop the whole history when the run ends."""
+    run_dir = build_run_dir(tmp_path, ranks=2)
+    for rank in range(2):
+        conn = recording.connect(str(run_dir / "judge" / f"rank-{rank}" / "hpcagent_bench.db"))
+        try:
+            conn.execute(
+                "INSERT INTO calls(run_id, ts, benchmark, preset, datatype, language, source_mode, "
+                "round, tokens, status, route) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"r{rank}", 1, "gemm", "S", "float64", "c", "restricted", 1, 0, "build_error", "score"))
+            conn.commit()
+        finally:
+            conn.close()
+
+    out = tmp_path / "merged.db"
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE / "merge_results.py"),
+         str(run_dir), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        check=False)
+
+    assert result.returncode == 0, result.stderr
+    conn = sqlite3.connect(str(out))
+    try:
+        assert [row[0] for row in conn.execute("SELECT route FROM calls ORDER BY run_id")] == ["score", "score"]
+    finally:
+        conn.close()
 
 
 # --- monitor_report must skip a garbage CSV, not lose the good ones with it ---------------------------
