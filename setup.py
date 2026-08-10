@@ -54,6 +54,9 @@ setup(
             # Skills + tool fragments injected into the agent prompt (harness/prompts.py
             # load_skills / tool_fragments). Top-level package data, not source.
             'skills/*/SKILL.md',
+            # Scripts a skill page tells the reader to RUN (opt-reports/loop_report.py). Data from
+            # the package's point of view; without them the page documents a missing command.
+            'skills/*/*.py',
             'tools/*.md',
         ],
     },

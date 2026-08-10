@@ -19,4 +19,7 @@ recursive-include hpcagent_bench/helpers *.h
 # Skills + tool fragments the agent prompt is built from (harness/prompts.py); dropped from
 # the wheel, an installed hpcagent_bench ships a prompt with no optimization guidance.
 recursive-include hpcagent_bench/skills *.md
+# Scripts a skill page tells the reader to run (opt-reports/loop_report.py); without them the
+# page documents a command that is not installed.
+recursive-include hpcagent_bench/skills *.py
 recursive-include hpcagent_bench/tools *.md

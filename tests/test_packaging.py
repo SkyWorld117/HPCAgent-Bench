@@ -39,6 +39,8 @@ def test_wheel_is_pip_installable_and_complete(tmp_path):
             # dropped from the wheel, an installed hpcagent_bench ships a prompt with no
             # optimization guidance and no documented judge tools.
             "hpcagent_bench/skills/general/SKILL.md",
+            # A skill page that tells the reader to RUN a script needs the script in the wheel too.
+            "hpcagent_bench/skills/opt-reports/loop_report.py",
             "hpcagent_bench/tools/task.md"):
         assert mod in names, f"{mod} missing from the wheel"
     # A broken package_dir remap drops the numpyto_* translators from the wheel silently.

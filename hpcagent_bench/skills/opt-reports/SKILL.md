@@ -74,6 +74,69 @@ both compilers.
 `languages.report_flags()` returns an empty string and the caller answers "no report channel" -- it
 never guesses a flag the compiler may reject. You can still pass the right-hand column yourself.
 
+## Summarize one, per loop nest
+
+Comparing two versions of a kernel by hand means diffing two stderr dumps in which the same loop
+appears three times under two spellings. `loop_report.py`, next to this page, compiles the source
+with the flags above, keeps the FULL stderr on disk, and prints one short block per loop nest:
+
+```sh
+python hpcagent_bench/skills/opt-reports/loop_report.py kernel.c
+python hpcagent_bench/skills/opt-reports/loop_report.py --compiler clang --cflags '-O3 -march=native' kernel.c
+```
+
+```
+loop-nest summary: compiler=gcc family=gcc remarks=9
+
+kernel.c:3  nest depth 2  function unknown
+  L3 d1 missed: couldn't vectorize loop
+  L4 d2 vec: 32B; 64B
+  L4 d2 note: loop versioned for vectorization because of possible aliasing
+kernel.c:11  nest depth 1  function unknown  (no remarks)
+
+0 remarks without source location
+0 unparsed remarks (see raw report)
+raw report: opt_reports/kernel.c.gcc.optreport.txt
+```
+
+`L<line> d<depth>` is one loop; `vec:` carries the width (and clang's interleave, gcc 16's unroll
+factor), `missed:` the refusal REASON, `other:` a per-pass count for anything that is not the
+vectorizer. Widen with `--cflags '-Rpass=inline'` and those remarks show up in `other:`, not on top
+of the verdict you came for. The last line is the raw report -- read it for the loop you care
+about; the summary never replaces it.
+
+- The VERDICT is the compiler's own label (`optimized:`/`missed:`/`note:`, or clang's
+  `-Rpass`/`-Rpass-missed`/`-Rpass-analysis` flavor); only the DETAIL is read out of the sentence.
+  A wording it cannot parse prints as `vec: (unparsed detail) <raw sentence>` -- you lose the
+  width, never the fact that the loop vectorized.
+- A nest with NO remarks is still printed. Comparing versions, silence is a finding.
+- Nothing is capped or dropped: an unrecognized line is counted (`N unparsed remarks`), a remark
+  the compiler gave no location for is counted apart. Both point back at the raw report.
+- Deterministic by construction: sorted by (file, line, column), relative paths, no timestamps. The
+  same stderr renders the same BYTES, so a diff shows a code change and nothing else.
+- Nests come from `for`/`while`/`do` headers and their INDENTATION -- no braces, no functions
+  (hence `function unknown`). Allman-braced code truncates a body, a loop inside an `if` can read
+  one level too deep, and a one-line `for (...) x++;` has no body. Each of those moves a remark
+  between blocks; none of them loses one.
+
+Both wordings the parser has to know, because a report it cannot read looks like a report with
+nothing in it:
+
+- **gcc 16 drift.** `loop vectorized using N byte vectors` became `[epilogue ]loop vectorized
+  using [masked ]N byte vectors and unroll factor U` in commit r16-645 -- the format string is
+  `%sloop vectorized using %s%wu byte vectors and unroll factor %u`, so the two kind words sit on
+  OPPOSITE sides of the verb and the unroll suffix is always appended. It is NOT in gcc's
+  `changes.html`, so the release notes will not warn you. Verified against gcc 16.0.1 here, and
+  against cc1's own format strings on both 15 and 16. `couldn't vectorize loop` is unchanged, and
+  gcc still writes the reason with either separator: `not vectorized: <reason>` and
+  `not vectorized, <reason>`.
+- **clang 21 and 22.** `-Rpass` / `-Rpass-missed` / `-Rpass-analysis` and the pass names
+  (`loop-vectorize`, `slp-vectorizer`, `inline`, `licm`, `loop-unroll`) are unchanged, as is
+  `vectorized <kind>loop (vectorization width: N, interleaved count: M)`.
+- **Locations need debug info.** The script adds `-gline-tables-only` (clang) / `-g1` (gcc) so
+  every remark carries `file:line:col`. A remark raised where the pass had no DebugLoc still
+  arrives without one; it is counted, not placed in a nest, and never guessed at.
+
 ## What the harness captures on its own
 
 Three independent dumps, each with its own switch, all OFF by default:
