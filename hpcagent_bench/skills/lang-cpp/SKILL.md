@@ -5,161 +5,70 @@ description: "Writing correct C++23 for this harness: static_cast over silent co
 
 # lang-cpp
 
-Two jobs: (A) QUALITY-CHECK an existing C++ file through six gates; (B) enforce
-modern C++23 idioms when WRITING C++. `<file>.cpp` is the placeholder for the
-target throughout -- swap in the real path. Every command is copy-pasteable.
+Two jobs: (A) quality-check a C++ file through six gates; (B) write correct C++23 for
+this harness. `<file>.cpp` is the placeholder for the target file.
 
-## Golden rule
+## Workflow
 
-**All six gates run. Warnings are errors. A clean pass = zero diagnostics from
-every tool + a clean ASan run + a clean UBSan run.** Do not report "looks good"
-until all six are green. Fix findings at the source (no suppress-to-pass); the
-cppcheck suppressions below are only for third-party/system noise.
+Run `syntax_check` (free, instant, `-fsyntax-only -fopenmp -Wall`, same turn) on every
+source file before `score` or `submit` -- a grade that dies on a compile error burns a
+full judge round-trip for less information than syntax_check already gave you. Iterate
+with `score`; `submit` finalizes one build against both seeds. Submit a working,
+already-scored version well before the wall-clock limit -- an unsubmitted improvement
+scores zero.
 
-**First decide which kind of C++ this is -- it changes the clang-tidy/cppcheck set
-AND whether Section B applies:**
+## Harness facts
 
-- **Agent SELF-WRITTEN code** (the default -- C++ an agent/human authored by hand,
-  including an optimization agent's own code): the **COMPREHENSIVE** set below, AND
-  the modern-C++ writing rules in Section B are in force. The author writes ordinary,
-  idiomatic C++ -- it does NOT need to know anything about DaCe or any code generator;
-  it is judged as plain hand-written C++.
+- `-fopenmp` is always on in the judge build; it is never something you add or remove.
+  Under single-core grading `OMP_NUM_THREADS=1` is pinned, so an OpenMP loop must stay
+  correct but shows no speedup until multi-core mode runs it.
+- `<execution>` policies (`std::execution::par`, `par_unseq`) on `std::transform` /
+  `std::for_each` / `std::reduce` and friends dispatch into oneTBB; the judge links
+  `-ltbb` automatically, nothing to declare yourself. OpenMP and stdpar are both real
+  parallel paths here -- use whichever fits the loop.
+- `-ffast-math` is never on. Do not depend on it for correctness or speed.
+- You are scored against a SERIAL same-toolchain baseline, not an arbitrary reference.
 
-- **Machine-GENERATED outside code** (emitted by a tool the agent does not author and
-  is not expected to understand internally -- e.g. DaCe codegen in
-  `.dacecache/<name>/src/cpu/*.cpp`): treat as OPAQUE. Narrow clang-tidy to
-  `clang-analyzer-*` only -- `bugprone-*` OFF, style/naming/modernize OFF -- because
-  emitted code trips every style rule and even `bugprone-*` is ~all false positives
-  (200+ lines of noise). **Section B does NOT apply** (do not "modernize" generated
-  output; fix its generator instead). The path-sensitive analyzer is the only useful
-  compile-time gate; the **ASan run is the real gate**. The whole check set is the
-  GENERATED-code variant under gate 2 below (`--checks='-*,clang-analyzer-*'`,
-  `--header-filter='$^'`) plus the sanitizer runs in gates 5 and 6.
+## Self-written vs generated
 
-Rule of thumb: if the agent wrote it (or would edit it by hand), it's self-written --
-full gates + Section B. If a generator emitted it, it's machine-generated -- analyzer
-+ sanitizers only, and never restyle it.
+Full six gates + Section B apply to code you write by hand. Code emitted by a tool you
+don't hand-edit gets the narrow clang-tidy set only (`clang-analyzer-*`, everything else
+off -- style/bugprone are near-100% false positives on emitted code) plus the sanitizer
+runs; do not "modernize" generated output, fix its generator instead.
 
 ## A. The six gates (run in this order)
 
-### 1. clang-format (format first, in place)
-Use the project's `.clang-format` if one exists at or above the file; else a modern default.
-```bash
-# project style if present, else a modern default (fallback only when none is found):
-if git -C "$(dirname <file>.cpp)" ls-files --error-unmatch .clang-format >/dev/null 2>&1 \
-   || find "$(dirname <file>.cpp)" -name .clang-format | grep -q .; then
-  clang-format -i --style=file <file>.cpp
-else
-  clang-format -i --style='{BasedOnStyle: LLVM, Standard: c++23, ColumnLimit: 120}' <file>.cpp
-fi
-```
+1. **clang-format** -- project `.clang-format` if present, else
+   `--style='{BasedOnStyle: LLVM, Standard: c++23, ColumnLimit: 120}'`.
+2. **clang-tidy**, hand-written:
+   `--checks='-*,bugprone-*,cppcoreguidelines-*,modernize-*,performance-*,portability-*,readability-*,clang-analyzer-*' --header-filter='.*' --warnings-as-errors='*' <file>.cpp -- -std=c++23 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast`.
+   Generated code: `--checks='-*,clang-analyzer-*' --header-filter='$^'`.
+3. **cppcheck**:
+   `--enable=warning,performance,portability,style --std=c++23 --language=c++ --inline-suppr --error-exitcode=1 --quiet --suppress=preprocessorErrorDirective --suppress=missingIncludeSystem --suppress='*:*/external/*' <file>.cpp`.
+4. **g++ `-fanalyzer`** (syntax-only, no build): same warning flags as gate 2 plus
+   `-fsyntax-only -fanalyzer`. Every `-Wanalyzer-*` hit is a real defect.
+5. **ASan, build and RUN**:
+   `g++ -std=c++23 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_asan && ASAN_OPTIONS=detect_leaks=1 /tmp/cppq_asan`.
+6. **UBSan, build and RUN**:
+   `g++ -std=c++23 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_ubsan && UBSAN_OPTIONS=halt_on_error=1 /tmp/cppq_ubsan`.
 
-### 2. clang-tidy (COMPREHENSIVE for hand-written code)
-```bash
-clang-tidy \
-  --checks='-*,bugprone-*,cppcoreguidelines-*,modernize-*,performance-*,portability-*,readability-*,clang-analyzer-*' \
-  --header-filter='.*' \
-  --warnings-as-errors='*' \
-  <file>.cpp -- -std=c++23 -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast
-```
-`-header-filter=.*` so the file's own headers are checked too. Prefer `clang-tidy-21`
-if installed (`clang-tidy-21 ...`). If a CMake compile DB exists, add `-p <build-dir>`
-so includes/macros resolve (the build dir needs
-`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <build-dir>`).
+Warnings are errors on all six; fix at the source. "Clean" = zero output on all six.
 
-GENERATED-code variant (narrow set, analyzer only):
-```bash
-clang-tidy --checks='-*,clang-analyzer-*' --header-filter='$^' -p <build-dir> <generated>.cpp
-```
+## B. Writing modern C++23
 
-### 3. cppcheck
-```bash
-cppcheck --enable=warning,performance,portability,style \
-  --std=c++23 --language=c++ \
-  --inline-suppr --error-exitcode=1 --quiet \
-  --suppress=preprocessorErrorDirective \
-  --suppress=missingIncludeSystem \
-  --suppress='*:*/external/*' \
-  <file>.cpp
-```
-Suppressions cover third-party/system noise only (vendored-header platform `#error`s,
-findings inside `external/`, system-include gaps) -- never our own bugs. If a compile
-DB exists, prefer `--project=<build-dir>/compile_commands.json` over the bare file.
-
-### 4. gcc static analyzer (syntax-only, no build)
-```bash
-g++ -std=c++23 -fsyntax-only -fanalyzer -Wall -Wextra -Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast <file>.cpp
-```
-`-fanalyzer` turns on the `-Wanalyzer-*` family (double-free, use-after-free,
-null-deref, leaks, taint). Treat every `-Wanalyzer-*` line as a defect to fix.
-Add `-Werror` to make it hard-fail.
-
-### 5. AddressSanitizer -- build and RUN once
-Static analysis is not enough; the file must actually run under ASan.
-```bash
-g++ -std=c++23 -fsanitize=address -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_asan
-ASAN_OPTIONS=detect_leaks=1 /tmp/cppq_asan   # exercise the real entry point / test
-```
-`detect_leaks=1` by default. Use `detect_leaks=0` ONLY when the process is
-dominated by an external runtime whose leaks you don't own (e.g. a kernel dlopen'd
-into a leaky Python host) -- state the rationale when you do. For a dlopen'd kernel,
-build it with the same flags and `LD_PRELOAD=$(gcc -print-file-name=libasan.so)`
-into the host process (use the matching clang RT if the code is built with clang).
-
-### 6. UndefinedBehaviorSanitizer -- build and RUN once
-```bash
-g++ -std=c++23 -fsanitize=undefined -fno-omit-frame-pointer -g -O1 <file>.cpp -o /tmp/cppq_ubsan
-UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 /tmp/cppq_ubsan
-```
-`halt_on_error=1` so the first UB aborts with a trace -- any hit is a bug.
-ASan and UBSan can be combined in one build (`-fsanitize=address,undefined`) when
-convenient; keeping them separate isolates which sanitizer fired.
-
-**Report** each gate's status. Only "clean" when all six pass with zero output.
-
-## B. Writing modern C++23 (no OO bloat)
-
-Prefer plain functions + small concrete data types + RAII. Do NOT invent class
-hierarchies, factories, or indirection layers that aren't needed (YAGNI). Apply:
-
-- **Concepts** to constrain templates; drop SFINAE/`enable_if` trickery.
-- **`if constexpr`** over tag-dispatch / overload-set tricks for compile-time branching.
-- **`constexpr` / `consteval`** on anything evaluable at compile time; add
-  **`static_assert`** to lock in invariants (sizes, ranges, type traits).
-- **NO macros.** Replace `#define` constants with `constexpr` values; replace
-  function-like macros with `constexpr`/`consteval` (or `inline`) functions.
-- **Ranges & views** (`std::ranges`, `|` pipelines) over hand-rolled index loops.
-- **`std::format`** for formatting; **`std::expected`** for recoverable errors;
-  **`std::span`** for non-owning array views; **`std::string_view`** for borrowed text.
-- **No implicit conversions -- make every cast EXPLICIT.** Never rely on a silent
-  narrowing / sign-changing / int<->float / promotion conversion. Write it out with a
-  named cast (`static_cast<T>`, `gsl::narrow_cast`/`narrow` when intended), never a
+- **No implicit conversions -- make every cast explicit.** `static_cast<T>` (never a
   C-style or functional cast, never `const_cast`/`reinterpret_cast` unless truly
-  unavoidable (justify). Brace-initialize (`T x{expr};`, `{}` in ctor args) so a
-  narrowing conversion is a compile error, not a silent truncation. The
+  unavoidable), brace-init (`T x{expr};`) so a narrowing conversion is a compile error.
   `-Wconversion -Wsign-conversion -Wfloat-conversion -Wdouble-promotion -Wold-style-cast`
-  flags above make implicit conversions fail the build; fix them at the source with an
-  explicit cast, do not silence the warning.
-- **Value semantics + RAII.** Prefer values and RAII for resource lifetime. **Raw
-  pointers are fine** -- for non-owning/observing references and performance-sensitive
-  interfaces; do not force `unique_ptr`/`shared_ptr` where a raw pointer or reference
-  is clearer. Use smart pointers when they genuinely simplify ownership. Avoid leaking
-  manual `new`/`delete`; no C-style casts (see the explicit-cast rule above).
+  fail the build on anything implicit.
+- **Concepts** over SFINAE/`enable_if`; **`if constexpr`** over tag dispatch;
+  **`constexpr`/`consteval`** plus `static_assert` to lock in compile-time invariants.
+- **No macros** -- `constexpr` values instead of `#define` constants,
+  `constexpr`/`consteval`/`inline` functions instead of function-like macros.
+- **`std::ranges`**, `std::span`, `std::string_view`, `std::format`, `std::expected`.
+- **Value semantics + RAII.** Raw pointers are fine for non-owning references and
+  perf-sensitive interfaces -- don't force `unique_ptr`/`shared_ptr` where a raw
+  pointer/reference is clearer. No manual `new`/`delete` leaks.
 - `auto`, range-`for`, `enum class`, `[[nodiscard]]`, `noexcept` where it holds.
 
-After writing or modernizing, run all six gates in section A on the result.
-
-## C. Parallel algorithms (`<execution>`)
-
-The parallel execution policies (`std::execution::par`, `par_unseq`) passed to
-`std::transform`/`std::for_each`/`std::reduce` and friends are implemented over
-**oneTBB** -- `libtbb` (`-ltbb`) is their runtime dependency. On this benchmark's
-judge TBB is installed and linked automatically, so `par`/`par_unseq` just work;
-you do not need to declare `-ltbb` yourself.
-
-Know the failure mode anyway: libstdc++ picks the backend per translation unit from
-`__has_include(<tbb/tbb.h>)`, so where the TBB headers are absent every policy
-**silently degrades to the serial backend**. The code still compiles, still links,
-and still returns the right answers -- on one thread, with nothing in the flags or
-the exit code to say so. Never assume a policy parallelized anything; check
-(`nm -u` on the object should show `_ZN3tbb...` references) or measure it.
+After writing or modernizing, run the six gates in section A on the result.
