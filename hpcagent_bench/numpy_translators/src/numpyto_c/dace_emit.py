@@ -680,7 +680,9 @@ class ResolveShapeReads(ast.NodeTransformer):
             self.alias_seen.add(name)
             return
         self.alias_seen.add(name)
-        self.aliases[name] = _SubstituteNames(self.aliases).visit(copy.deepcopy(value))
+        # Folded on the way in: without it alias N carries alias N-1's whole expansion, so the AST
+        # deepens once per layer and resnet101's 101 layers overflow the deepcopy in _SubstituteNames.
+        self.aliases[name] = fold_expr(_SubstituteNames(self.aliases).visit(copy.deepcopy(value)))
 
     def visit_Call(self, node: ast.Call):
         """``np.swapaxes(x, i, j)`` -> ``np.transpose(x, perm)``. Needs the operand RANK, and this
