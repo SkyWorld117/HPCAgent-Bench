@@ -108,9 +108,16 @@ _NINJA_LOG = ("Compiler failure:\n"
 
 def test_dace_probe_verdict_carries_the_decisive_compiler_lines(capsys):
     """A ``compile_fail`` verdict must name the cause. Head-truncating this log reported
-    ``CompilationError: Compiler failure:`` -- the phase again, with the diagnosis thrown away."""
+    ``CompilationError: Compiler failure:`` -- the phase again, with the diagnosis thrown away.
+
+    Pure unit test: ``_NINJA_LOG`` stands in for a real DaCe ``CompilationError`` transcript, so
+    this pins the extraction/bounding/centring behaviour without a real dace compile. That was
+    tried first (fft_1d, largest_eigenval) and timed out CI's unit leg -- importing
+    ``tests.test_dace_numeric_agreement`` for ``verdict_class`` alone regenerates the whole gated
+    corpus at collection, which is also why that import comes from ``dace_numeric_probe`` here and
+    not from the agreement test module.
+    """
     from tests import dace_numeric_probe
-    from tests.test_dace_numeric_agreement import verdict_class
 
     rec = {}
     try:
@@ -126,7 +133,7 @@ def test_dace_probe_verdict_carries_the_decisive_compiler_lines(capsys):
     assert "'real' was not declared" in rec["detail"], rec["detail"]
     assert "Building CXX object" not in rec["detail"], rec["detail"]
     # The ratchet keys on the class in FAIL:<verdict>:<detail>, so the detail must not disturb it.
-    assert verdict_class(f'FAIL:{rec["verdict"]}:{rec["detail"]}') == "compile_fail"
+    assert dace_numeric_probe.verdict_class(f'FAIL:{rec["verdict"]}:{rec["detail"]}') == "compile_fail"
 
 
 def test_dace_probe_detail_is_bounded_and_falls_back():

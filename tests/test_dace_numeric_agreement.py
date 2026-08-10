@@ -26,6 +26,7 @@ from typing import Dict, List, Tuple
 import pytest
 
 from hpcagent_bench.spec import KERNELS, BenchSpec
+from tests.dace_numeric_probe import verdict_class
 from tests.numerical_oracle import DACE, run_kernel
 from tests.test_dace_frontend_validity import REFUSED, generated_programs, kernel_of
 
@@ -177,11 +178,6 @@ def selected_kernels() -> List[str]:
     if NUMERIC_SET == "smoke":
         return [k for k in gated if k in SMOKE]
     return gated
-
-
-def verdict_class(status: str) -> str:
-    """The probe verdict inside an oracle status string (``FAIL:<verdict>:<detail>``)."""
-    return status.split(":")[1] if status.startswith("FAIL:") else status
 
 
 def test_kernel_stems_are_unique() -> None:
