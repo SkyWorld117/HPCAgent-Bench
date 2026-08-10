@@ -23,17 +23,38 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 
+def has_scop(scop_c: str) -> bool:
+    """True when ``scop_c`` marks at least one region for polycc.
+
+    A translation unit can now come back with NONE -- the emitter scopes each nest on its own merits
+    (``numpyto_c.emit.pluto_scop_regions``) and a kernel built entirely from constructs pet cannot
+    model has no scopable nest at all. Handing such a file to polycc gets a byte-identical file back,
+    so a caller that did not check would compile and grade UNtransformed C under Pluto's name.
+    """
+    return "#pragma scop" in scop_c
+
+
 def scop_nonaffine_reason(scop_c: str) -> Optional[str]:
-    """Return the first non-affine array-subscript pattern in a ``#pragma scop`` body, or ``None`` when
-    every subscript index is affine.
+    """Return the first non-affine array-subscript pattern across EVERY ``#pragma scop`` body in
+    ``scop_c``, or ``None`` when every subscript index in every region is affine.
 
     The patterns, outside Pluto's polyhedral model, are ``indirection`` (``b[ip[i]]``), ``modulo``
     (``a[i % k]``) and ``integer-division`` (``a[i / k]``). Only the index INSIDE ``[...]`` matters --
     value-side ``/`` and ``%`` are ignored, so an affine program Pluto merely miscompiles stays a tracked
-    FAIL, not a skip. When no ``#pragma scop``/``#pragma endscop`` pair is present the whole string is
-    scanned (an already-extracted scop body)."""
-    m = re.search(r"#pragma scop(.*?)#pragma endscop", scop_c, re.S)
-    body = m.group(1) if m else scop_c
+    FAIL, not a skip. Text OUTSIDE the regions is not scanned: a translation unit may carry several
+    scops (``numpyto_c.emit.pluto_scop_regions``) and what sits between them is plain C polycc never
+    models. When no ``#pragma scop``/``#pragma endscop`` pair is present the whole string is scanned
+    (an already-extracted scop body)."""
+    bodies = re.findall(r"#pragma scop(.*?)#pragma endscop", scop_c, re.S) or [scop_c]
+    for body in bodies:
+        reason = body_nonaffine_reason(body)
+        if reason is not None:
+            return reason
+    return None
+
+
+def body_nonaffine_reason(body: str) -> Optional[str]:
+    """:func:`scop_nonaffine_reason` for ONE already-delimited scop body."""
     i, n = 0, len(body)
     while i < n:
         if body[i] != "[":
@@ -191,10 +212,12 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
                      "hoisting only the malloc leaves the assign to be dropped by POLYCC-009. Removing M "
                      "by forward substitution transforms and validates, but _ForwardSubstituteInvariantScalars "
                      "excludes a function-level assign by design (it would replay deriche's exp() "
-                     "coefficients down a nest), so there is no fix on this entry's own ground."),
+                     "coefficients down a nest), so there is no fix on this entry's own ground. CLOSED "
+                     "on other ground 08-10: the scop no longer spans the program, so the malloc sits "
+                     "BETWEEN regions and costs only the nest it is in."),
             repro=f"{_BENCH}/dynamic_programming/needleman_wunsch -- polycc --pet extracts no scop from "
             "its pluto input; invariant stated in numpyto_c.emit.emit_pluto",
-            avoided_by="",
+            avoided_by="numpyto_c.emit.pluto_scop_regions",
             upstream="n/a",
         ),
         PolyccIssue(
@@ -253,6 +276,62 @@ KNOWN_POLYCC_ISSUES: Dict[str, PolyccIssue] = {
                      "compiling unmasks: its __cb8 accumulator is dropped from the transformed output."),
             repro=f"{_TRANS_TESTS}/test_pluto_no_helper_calls_in_scop.py",
             avoided_by="numpyto_c.emit.pluto_call_free",
+            upstream="not filed",
+        ),
+        PolyccIssue(
+            id="POLYCC-011",
+            kind="bug",
+            component="polycc",
+            severity="refusal",
+            symptom=("polycc transforms a MULTI-scop translation unit one scop at a time, re-parsing its "
+                     "own output for the next one -- and that output opens with the #include <omp.h> "
+                     "polycc itself prepends, which pet's flag-less libclang does not find. Every scop "
+                     "after the first is then lost with 'No SCoPs extracted or error extracting SCoPs'. "
+                     "Measured 08-10 on correlation the moment scope-aware emission produced 2 regions; "
+                     "with a parse-only omp.h on C_INCLUDE_PATH the same file transforms (rc 0, 9 omp "
+                     "pragmas). Nothing polycc emits CALLS the runtime, so the stub costs nothing."),
+            repro=f"{_BENCH}/dense_linear_algebra/correlation -- polycc --pet --tile --parallel on its "
+            "2-region pluto input, with and without pluto_transform.PET_OMP_SHIM",
+            avoided_by="hpcagent_bench.pluto_transform.pet_parse_env",
+            upstream="not filed",
+        ),
+        PolyccIssue(
+            id="POLYCC-012",
+            kind="bug",
+            component="polycc",
+            severity="refusal",
+            symptom=("polycc declares its scratch counters (t1..tN, lb/ub/lbp/ubp/lb2/ub2, register lbv/"
+                     "ubv) at FUNCTION scope for each scop it transforms, so a SECOND transformed scop in "
+                     "the same function redeclares them. Measured 08-10 the moment scope-aware emission "
+                     "produced several regions. Two faces: the OUTPUT does not compile ('redeclaration of "
+                     "t1' -- correlation, force_lj, mandelbrot1, needleman_wunsch), which is repaired by "
+                     "merging the declarations, and polycc's own re-parse of that output fails the same "
+                     "way mid-run ('redefinition of lb2', rc 1 -- eigh_test, largest_eigenval, "
+                     "rayleigh_ritz_rotation at 6, 7 and 11 regions), which is NOT repairable from "
+                     "outside. Not avoidable from the emitter either: bracketing each region in its own "
+                     "{ } does not survive, because the --pet path regenerates the function from pet's "
+                     "AST rather than splicing text."),
+            repro=f"{_BENCH}/n_body_methods/force_lj -- its transformed output redeclares t1 without the "
+            "merge; largest_eigenval is the unrepairable half",
+            avoided_by="hpcagent_bench.pluto_transform.dedupe_scratch_declarations",
+            upstream="not filed",
+        ),
+        PolyccIssue(
+            id="POLYCC-013",
+            kind="bug",
+            component="pet",
+            severity="refusal",
+            symptom=("An if whose condition is not integer-affine -- it reads an array element or a float "
+                     "-- is 'data dependent conditions not supported' (pet_to_pluto.cpp:565) followed by "
+                     "an isl assert (constraints_isl.c:429), a core dump rather than a refusal. Reduced "
+                     "08-10 to `if (b[i] > 0.0) c[i] = b[i];` and to `if (t > 0.5)` on a float scalar; "
+                     "`if (i < K)` on integers and the ternary form both transform. Measured over the "
+                     "corpus, 67 kernels carry one and every one of them was already rejected outright, "
+                     "so excluding the nest that holds it costs nothing and recovers its neighbours -- "
+                     "correlation goes from no transform at all to rc 0 with 9 parallel loops."),
+            repro=f"{_TRANS_TESTS}/test_pluto_scope_aware_regions.py -- "
+            "test_an_unmodellable_nest_does_not_cost_its_scopable_neighbours",
+            avoided_by="numpyto_c.emit.pluto_scop_regions",
             upstream="not filed",
         ),
         PolyccIssue(

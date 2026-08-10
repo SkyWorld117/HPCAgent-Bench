@@ -79,6 +79,31 @@ of the scop so `pet`/`pluto` stops miscompiling it. Gated on the pluto backend w
 | #2 non-unit-stride loop -> unit counter + affine induction | tsvc_2_s116 (+probe unrolled_dense, reroll_saxpy7, strided tsvc) | when `self.pluto` and `abs(step)!=1` constant, emit `int64 v=lo+step*__piv;` over a unit `__piv` (pet models `i+=4` as unit stride -> wrong indices) | `numpyto_c/emit.py` `_emit_for` | planned |
 | #3 scalar full-reduction -> accumulate into destination element | lda_xc_potential (+likely ecrad_clamped_reduction, quasi_affine_reduce_*, atax-class) | retarget `float(np.sum(...))` temp to `out[0]` when it has a single downstream array-element store (pet drops the scalar `__cb=0` init+accum -> uninit read) | lib_nodes / numpy_desugar | planned |
 
+### 1c-2. Scope-aware scop emission (landed 08-10)
+
+The pluto emit used to bracket the whole function in one `#pragma scop`. pet rejects the **entire**
+region a construct it cannot model lands in, so a single `memset` or `malloc` anywhere in a kernel
+cost every loop nest in it -- 8 corpus kernels sat in a "pet-unsupported" bucket for that reason
+alone. The emit is now per-NEST: `numpyto_c.emit.pluto_scop_regions` runs at every block depth from
+`_CBodyEmitter.emit_block` and wraps each *scopable run* of statements in its own region.
+**Several scops per translation unit is the normal output, not a fallback.**
+
+| Piece | What it does | Location |
+|---|---|---|
+| region splitting | maximal runs of scopable statements, split at each unscopable one; region spans first loop to last loop, so a loop-less statement at either end stays outside where POLYCC-009 cannot drop it | `numpyto_c/emit.py` `pluto_scop_regions` |
+| per-nest, every depth | called from `emit_block`, so a malloc before an *inner* nest scopes that inner nest rather than losing the whole outer one; an enclosing run subsumes what its children marked (scops do not nest) | `numpyto_c/emit.py` `_CBodyEmitter.emit_block` |
+| unscopable set | `malloc`/`calloc`/`realloc`/`free`/`memset`/`memcpy`/`memmove`/`while`, plus an `if` whose condition reads an array or a float (POLYCC-013) | `_PLUTO_UNSCOPABLE_RE`, `_pluto_unscopable` |
+| memset desugar | a zero/one fill emitted **in the body** becomes the affine loop nest it is, so it can stay inside a region instead of splitting it; the fill in the pre-scop declaration block keeps `memset` | `numpyto_c/emit.py` `_fill_loop_stmt`, `_body_fill_stmt` |
+| multi-scop detector | `scop_nonaffine_reason` scans **every** region, not just the first (a gather in the second one used to go unseen) | `hpcagent_bench/pluto_affine.py` |
+| no-region decline | a TU that marks no region is not a scop input -- polycc would hand it straight back and the column would time untransformed C | `pluto_affine.has_scop`, `pluto_transform.scop_inputs`, `numerical_oracle._run_pluto` |
+| pet re-parse `omp.h` | polycc re-parses its own output per additional scop; the stub header makes multi-region TUs transform (POLYCC-011) | `pluto_transform.PET_OMP_SHIM` |
+
+**POLYCC-012** -- polycc's own scratch declarations collide at function scope between two
+transformed scops. Bracketing each region in `{ }` does not help (the `--pet` path regenerates the
+function from pet's AST rather than splicing text), so the *output* half is repaired by merging the
+duplicate declarations in `pluto_transform.dedupe_scratch_declarations`. The other half, where
+polycc's own re-parse of that output fails mid-run, is documented and not worked around.
+
 ### 1d. JAX compile-time heuristics (help XLA emit faster) (planned)
 
 Root cause: the oracle exercises the **eager** path (`numpyto_jax/core.py` `_emit_eager_body`),

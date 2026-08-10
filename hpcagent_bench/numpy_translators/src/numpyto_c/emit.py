@@ -6,7 +6,7 @@ import math
 import pathlib
 import re
 from functools import lru_cache
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
@@ -66,6 +66,66 @@ def pluto_call_free(name: str, args: str, hoisted: Optional[Dict[str, str]] = No
     if hoisted is None:
         return call
     return hoisted.setdefault(call, f"__pl{len(hoisted)}")
+
+
+#: Constructs pet cannot model; the whole scop one lands in is rejected (POLYCC-007, POLYCC-013).
+_PLUTO_UNSCOPABLE_RE = re.compile(r"\b(?:malloc|calloc|realloc|free|memset|memcpy|memmove|while)\s*\(")
+
+#: pet DROPS a statement whose only write is a scop-external scalar (POLYCC-009), so a loop-less
+#: region would lose it and buy no schedule.
+_PLUTO_LOOP_RE = re.compile(r"\bfor\s*\(")
+
+#: An enclosing region subsumes the ones its children marked -- scops do not nest.
+_PLUTO_SCOP_MARKERS = ("#pragma scop", "#pragma endscop")
+
+#: A float in an ``if`` condition, which pet refuses along with every other non-affine one.
+_PLUTO_FLOAT_LITERAL_RE = re.compile(r"\.\d|\d\.|\d[eE][-+]?\d")
+
+
+def pluto_if_conditions(text: str) -> List[str]:
+    """Every ``if`` condition in an emitted block, as source text."""
+    out: List[str] = []
+    for m in re.finditer(r"\bif \(", text):
+        depth, start = 0, m.end() - 1
+        for j in range(start, len(text)):
+            depth += (text[j] == "(") - (text[j] == ")")
+            if not depth:
+                out.append(text[start + 1:j])
+                break
+    return out
+
+
+def pluto_scop_regions(texts: List[str], indent: str, unscopable: Callable[[str], bool]) -> str:
+    """One block's emitted statements, each scopable RUN of them wrapped in its own ``#pragma scop``.
+
+    Called at every block depth, so an unscopable statement costs the nests beside it and nothing
+    else. Runs are MAXIMAL: adjacent nests stay fusable, and a loop-less statement inside a run
+    stays inside it -- pushing a leading scalar assign OUT makes its target a second pluto
+    parameter, whose schedule comes back with 2**64-scale coefficients (POLYCC-007, measured on
+    cholesky and smith_waterman).
+    """
+    out: List[str] = []
+    run: List[str] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        text = "\n".join(run)
+        if _PLUTO_LOOP_RE.search(text):
+            inner = "\n".join(ln for ln in text.split("\n") if ln.strip() not in _PLUTO_SCOP_MARKERS)
+            out.append(f"{indent}{_PLUTO_SCOP_MARKERS[0]}\n{inner}\n{indent}{_PLUTO_SCOP_MARKERS[1]}")
+        else:
+            out.extend(run)
+        run.clear()
+
+    for text in texts:
+        if unscopable(text):
+            flush()
+            out.append(text)
+        else:
+            run.append(text)
+    flush()
+    return "\n".join(out)
 
 
 def _is_int_cast(node: ast.AST) -> bool:
@@ -370,6 +430,25 @@ class _CBodyEmitter(BaseEmitter):
         self._reassign_shapes: Dict[str, List[Tuple[str, ...]]] = {k: list(v) for k, v in kir.reassign_shapes.items()}
 
     # ----- statement-level ------------------------------------------------
+
+    def emit_block(self, stmts: List[ast.stmt], indent: str) -> str:
+        """The base walk, plus (pluto only) a ``#pragma scop`` around each scopable run of the block."""
+        texts = [t for t in (self.emit_stmt(s, indent) for s in stmts) if t]
+        if not self.pluto:
+            return "\n".join(texts)
+        return pluto_scop_regions(texts, indent, self._pluto_unscopable)
+
+    def _pluto_unscopable(self, text: str) -> bool:
+        """True when this emitted statement holds a construct no ``#pragma scop`` may contain."""
+        if _PLUTO_UNSCOPABLE_RE.search(text):
+            return True
+        return any(self._data_dependent_cond(c) for c in pluto_if_conditions(text))
+
+    def _data_dependent_cond(self, cond: str) -> bool:
+        """True when an ``if`` condition is not integer-affine: it reads an array or a float."""
+        if "[" in cond or _PLUTO_FLOAT_LITERAL_RE.search(cond):
+            return True
+        return any(self.scalar_ctypes.get(n, "").startswith(("double", "float")) for n in _IDENT_RE.findall(cond))
 
     def _emit_for(self, node: ast.For, indent: str) -> str:
         target = node.target
@@ -862,6 +941,13 @@ class _CBodyEmitter(BaseEmitter):
             return body
         return "\n".join([body] + [f"{indent}free({name});" for name in owned])
 
+    def _body_fill_stmt(self, name: str, size: str, c_type: str, kind: str, indent: str) -> str:
+        """A zeros/ones fill emitted INSIDE the body; pluto desugars it to a loop nest (see _fill_loop_stmt)."""
+        if not self.pluto:
+            return _zero_fill_stmt(name, size, c_type, kind, indent)
+        dims = self.array_shapes.get(name, []) if name in self.multidim_arrays else []
+        return _fill_loop_stmt(name, list(dims), size, "1" if kind in ("ones", "ones_like") else "0", indent)
+
     def _emit_assign(self, node: ast.Assign, indent: str) -> str:
         if len(node.targets) != 1:
             raise NotImplementedError("chained assignment not supported")
@@ -887,7 +973,7 @@ class _CBodyEmitter(BaseEmitter):
                         # Reuse in place: a reassign reads its own old values (no refill); a genuine reset still refills.
                         if is_reassign or fill is None:
                             return ""
-                        return _zero_fill_stmt(t, size, c_type, fill, indent)
+                        return self._body_fill_stmt(t, size, c_type, fill, indent)
                     sizes[t] = size
                     # Free before EVERY deferred allocation, not only where a second marker made the
                     # reallocation visible in the emitted text. A marker whose one occurrence sits
@@ -899,7 +985,7 @@ class _CBodyEmitter(BaseEmitter):
                     cast = (f"({c_type} (*){self.md_trailing[t]})" if t in self.md_trailing else f"({c_type} *)")
                     lines.append(f"{indent}{t} = {cast}malloc({_byte_count(size, c_type)});")
                     if fill is not None:
-                        lines.append(_zero_fill_stmt(t, size, c_type, fill, indent))
+                        lines.append(self._body_fill_stmt(t, size, c_type, fill, indent))
                     return "\n".join(lines)
                 # Branch-scoped local: declare and allocate it HERE, inside the branch that owns it,
                 # so the branches that never run allocate nothing. C99 onward permits a declaration
@@ -909,7 +995,7 @@ class _CBodyEmitter(BaseEmitter):
                     size, c_type, fill = self.branch_local_decls[t]
                     lines = [f"{indent}{c_type} *{t} = ({c_type} *)malloc(({size}) * sizeof({c_type}));"]
                     if fill is not None:
-                        lines.append(_zero_fill_stmt(t, size, c_type, fill, indent))
+                        lines.append(self._body_fill_stmt(t, size, c_type, fill, indent))
                     return "\n".join(lines)
                 # Inline-declare this local here if its shape depends on a loop var only in scope inside this block (C99 VLA).
                 inline_locals = vars(self).get("inline_local_decls", {})
@@ -926,7 +1012,7 @@ class _CBodyEmitter(BaseEmitter):
                 refill = vars(self).get("zeros_refill", {})
                 if t in refill and not is_reassign:
                     size, c_type, kind = refill[t]
-                    return _zero_fill_stmt(t, size, c_type, kind, indent)
+                    return self._body_fill_stmt(t, size, c_type, kind, indent)
             return ""  # local already declared at top of function
         # Name = Name alias: inherit the source's current shape so downstream LHS subscripts flatten correctly.
         if (isinstance(target, ast.Name) and isinstance(node.value, ast.Name) and node.value.id in self.array_shapes):
@@ -1830,9 +1916,24 @@ def _byte_count(size: str, c_type: str) -> str:
 def _zero_fill_stmt(name: str, size: str, c_type: str, kind: str, indent: str) -> str:
     """C statement that fills name[0:size] per the numpy constructor kind: ones -> 1, else memset to 0."""
     if kind in ("ones", "ones_like"):
-        return (f"{indent}for (int64_t __zf = 0; __zf < ({size}); ++__zf) "
-                f"{name}[__zf] = 1;")
+        return _fill_loop_stmt(name, (), size, "1", indent)
     return f"{indent}memset({name}, 0, {_byte_count(size, c_type)});"
+
+
+def _fill_loop_stmt(name: str, dims, size: str, value: str, indent: str) -> str:
+    """Affine loop nest writing ``value`` into every element of ``name`` -- the pluto desugar of a
+    memset, so a fill between compute nests need not split their region. ``dims`` are a
+    pointer-to-array local's extents (its subscript stays multidimensional); empty means flat."""
+    if not dims:
+        return (f"{indent}for (int64_t __zf = 0; __zf < ({size}); ++__zf) "
+                f"{name}[__zf] = {value};")
+    ivs = [f"__zf{k}" for k in range(len(dims))]
+    lines = [
+        f"{indent}{'  ' * k}for (int64_t {iv} = 0; {iv} < ({_c_shape_token(d)}); ++{iv})"
+        for k, (iv, d) in enumerate(zip(ivs, dims))
+    ]
+    lines.append(f"{indent}{'  ' * len(ivs)}{name}{''.join(f'[{iv}]' for iv in ivs)} = {value};")
+    return "\n".join(lines)
 
 
 def _md_trailing(shape) -> str:
@@ -2741,9 +2842,9 @@ def emit_pluto(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     multidim = {a.name for a in kir.arrays if len(a.shape) >= 2}
     signature = _emit_pluto_signature(kir, name, multidim)
     decls, body, frees = _emit_body(kir, indent="        ", multidim_arrays=multidim, pluto=True, return_parts=True)
-    # Local allocations/frees live outside #pragma scop (malloc/free are non-affine); only affine loop nests stay inside.
+    # Local allocations/frees live outside #pragma scop (malloc/free are non-affine); only affine loop nests stay
+    # inside, and the body already carries its own scop markers (see _CBodyEmitter.emit_block).
     decl_block = (decls + "\n") if decls else ""
     free_block = (frees + "\n") if frees else ""
     return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{signature} {{\n{_C_PRELUDE}"
-            f"{decl_block}    #pragma scop\n{body}\n    #pragma endscop\n"
-            f"{free_block}{_C_EPILOGUE}}}\n")
+            f"{decl_block}{body}\n{free_block}{_C_EPILOGUE}}}\n")
