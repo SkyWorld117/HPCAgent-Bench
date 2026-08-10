@@ -30,7 +30,10 @@ BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
 
 #: Seconds one kernel's PARSE may take before it counts as a hang. Generous next to the ~2 s a
 #: kernel actually takes: the budget is here to bound a wedged frontend, not to time anything.
-PARSE_TIMEOUT_S = 180.0
+#: 360 not 180: mobilenet_v2 legitimately parses in 171 s on an idle box, so 180 flipped it to
+#: ``timeout`` whenever a hang co-scheduled with it (measured twice locally, seen on CI runners
+#: since 2026-08-08). The slowest legit parse must clear the budget WITH contention margin.
+PARSE_TIMEOUT_S = 360.0
 
 #: How many kernels are in flight at once. The sweep is a SUBPROCESS per program already, so this
 #: changes no verdict and no per-kernel budget -- it only stops the five ``hang`` entries, at
