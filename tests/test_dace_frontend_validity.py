@@ -64,6 +64,10 @@ PARSE_WORKERS = 2
 #:   chained_compare 1 -- a chain whose middle operand repeats work, so the generator leaves it
 #:   clip_syntax     1 -- the emitted clip tasklet is not valid Python
 #:   keepdims        1 -- ``keepdims=`` on a reduction whose replacement does not take it
+#:   sparse_layout   1 -- the dace emitter has no sparse lowering: it takes the layout's member
+#:                        buffers into the signature (from bench_info) but leaves the body reading
+#:                        the logical dense array, which is then an undefined name. C and Fortran
+#:                        expand the access in ``numpyto_common.lowering``; dace does not
 #:   where_scalars   1 -- ``np.where(cond, scalar, scalar)``
 REFUSED: Dict[str, str] = {
     "machine_learning/average_pooling_1d": "broadcast",
@@ -200,6 +204,7 @@ REFUSED: Dict[str, str] = {
     "scientific_computing/dynamic_programming/needleman_wunsch": "misc",
     "scientific_computing/dynamic_programming/smith_waterman": "misc",
     "scientific_computing/map_reduce/histogram_equalization": "undefined",
+    "scientific_computing/sparse_linear_algebra/bicg": "sparse_layout",
     "scientific_computing/sparse_linear_algebra/bicgstab": "undefined",
     "scientific_computing/sparse_linear_algebra/cg": "undefined",
     "scientific_computing/sparse_linear_algebra/dbcsr": "broadcast",
