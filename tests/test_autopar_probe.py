@@ -169,3 +169,20 @@ def test_probe_source_uses_a_parallel_policy():
     execution policy: a probe rewritten to ``std::execution::seq`` would report VACUOUS forever
     and read as "this host cannot do isopar" on every host."""
     assert "std::execution::par_unseq" in flags.STDPAR_PROBE_SOURCE
+
+
+def test_every_cpp_submission_link_carries_the_stdpar_runtime(tmp_path, monkeypatch):
+    """The task text tells a C++ agent that ``std::execution::par`` / ``par_unseq`` work and need no
+    ``build`` declaration, so the promise has to hold for an ORDINARY submission link, not only for
+    the ``cpp_isopar`` emit -- an unresolved ``_ZN3tbb...`` is a build failure the agent cannot fix
+    from the source field. C is unaffected (its block declares no ``stdpar_link_ref``)."""
+    monkeypatch.setattr(languages, "_stdpar_backend_is_tbb", lambda cc: True)
+    cpp_link = languages.build_shared_lib_commands("cpp", tmp_path / "k.cpp", tmp_path / "k.so")[-1]
+    assert "-ltbb" in cpp_link
+    assert cpp_link.count("-ltbb") == 1
+    assert "-ltbb" not in languages.build_shared_lib_commands("c", tmp_path / "k.c", tmp_path / "k.so")[-1]
+
+    # A host whose <execution> backend is not TBB must NOT get the flag: `cannot find -ltbb` would
+    # fail every C++ build on it.
+    monkeypatch.setattr(languages, "_stdpar_backend_is_tbb", lambda cc: False)
+    assert "-ltbb" not in languages.build_shared_lib_commands("cpp", tmp_path / "k.cpp", tmp_path / "k.so")[-1]

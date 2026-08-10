@@ -650,7 +650,7 @@ def write_task(task_id: str,
             # default 1-D block distribution, built by the SAME builder the no-op MPI optimizer
             # submits, so it is always valid and gradeable. The agent may keep or replace it.
             spec, binding = _mpi_binding(kt)
-            (env_kdir / f"submission.{_ext(language)}").write_text(gen_kernel_mpi_stub(binding))
+            (env_kdir / f"submission.{_ext(language)}").write_text(gen_kernel_mpi_stub(binding, language))
             (env_kdir / "distribution.json").write_text(
                 json.dumps(distribution_for_kernel(spec.mpi, binding, ranks), indent=2))
         else:

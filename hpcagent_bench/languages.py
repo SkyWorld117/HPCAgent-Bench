@@ -32,7 +32,7 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -72,6 +72,42 @@ def _load_compilers() -> Dict[str, dict]:
     that every build call reads, so it is parsed once. Callers treat the result as
     read-only (they only look blocks up, never mutate them)."""
     return yaml.safe_load(COMPILERS_YAML.read_text())
+
+
+#: The toolchain families a submission may request (its ``compiler`` field), family -> the
+#: ``install.spack`` name its ``compilers.yaml`` blocks carry. Order is the order the task text
+#: lists them in; the FIRST is the default when a submission names none.
+COMPILER_FAMILIES = {
+    "gcc": "gcc",
+    "llvm": "llvm",
+    "nvhpc": "nvhpc",
+    "oneapi": "intel-oneapi-compilers",
+}
+
+
+def compiler_for_family(lang: str, family: str) -> Optional[str]:
+    """The ``compilers.yaml`` block name that builds ``lang`` with toolchain ``family``, or ``None``
+    when this image wires no such block.
+
+    Matched on the block's ``install.spack`` name (:data:`COMPILER_FAMILIES`), so the mapping is
+    read off the same table the build runs from instead of a second list that can drift. MPI
+    wrapper blocks are skipped -- they are selected by the distributed build path alone -- and the
+    FIRST match wins, matching the single-node lookup (so ``clang`` beats ``clang-pluto``).
+    """
+    spack = COMPILER_FAMILIES.get(family)
+    if spack is None:
+        raise KeyError(f"unknown compiler family {family!r}; expected one of {tuple(COMPILER_FAMILIES)}")
+    for name, block in _load_compilers().items():
+        if block.get("lang") != lang or block.get("mpi"):
+            continue
+        if (block.get("install") or {}).get("spack") == spack:
+            return name
+    return None
+
+
+def compiler_driver(name: str) -> str:
+    """The driver command a ``compilers.yaml`` block invokes (``g++``, ``clang++``, ...)."""
+    return _load_compilers()[name].get("cc", "")
 
 
 def compiler_names() -> Tuple[str, ...]:
@@ -389,19 +425,9 @@ def _stdpar_backend_is_tbb(cc: str) -> bool:
 _STDPAR_PROBE_TIMEOUT_S = 30
 
 
-def stdpar_link_flags(lang: str) -> Tuple[str, ...]:
-    """Extra LINK arguments a source using ``<execution>`` policies needs on this host.
-
-    ``()`` unless the block declares a ``stdpar_link_ref`` AND this toolchain's parallel-algorithm
-    backend really is the one it names. Only the ISO-algorithm emit (``numpyto --target
-    cpp_isopar``) links with these; a plain C++ build is unaffected, which is why they live in
-    their own key instead of the block's ``link:`` line.
-
-    Nothing is needed at compile time: ``<execution>`` and the policy overloads are always
-    available, and when the backend is absent the policies degrade to the serial implementation --
-    slower than promised, never wrong, and never a link error.
-    """
-    _cname, block = _compiler_for_lang(_load_compilers(), lang)
+def _stdpar_link_for_block(block: Dict[str, Any]) -> Tuple[str, ...]:
+    """The ``<execution>``-policy link arguments for one compiler block; ``()`` when the block
+    declares none or this toolchain's parallel backend is not the one it names."""
     ref = block.get("stdpar_link_ref")
     if not ref:
         return ()
@@ -411,6 +437,24 @@ def stdpar_link_flags(lang: str) -> Tuple[str, ...]:
     if not _stdpar_backend_is_tbb(block["cc"]):
         return ()
     return tuple(shlex.split(flag_vars[ref]))
+
+
+def stdpar_link_flags(lang: str) -> Tuple[str, ...]:
+    """Extra LINK arguments a source using ``<execution>`` policies needs on this host.
+
+    ``()`` unless the block declares a ``stdpar_link_ref`` AND this toolchain's parallel-algorithm
+    backend really is the one it names. :func:`build_shared_lib_commands` appends these to EVERY
+    C++ link (the task text promises agents that ``std::execution::par`` / ``par_unseq`` just work,
+    so the promise has to hold for an ordinary submission, not only for the ``numpyto --target
+    cpp_isopar`` emit). They live in their own key rather than the block's ``link:`` line because
+    the answer is a host property, asked per compiler.
+
+    Nothing is needed at compile time: ``<execution>`` and the policy overloads are always
+    available, and when the backend is absent the policies degrade to the serial implementation --
+    slower than promised, never wrong, and never a link error.
+    """
+    _cname, block = _compiler_for_lang(_load_compilers(), lang)
+    return _stdpar_link_for_block(block)
 
 
 def isopar_capability() -> flags.AutoparProbe:
@@ -859,6 +903,11 @@ def build_shared_lib_commands(
         # the link template carries no {baseline}, so propagate -fopenmp here.
         if "-fopenmp" in baseline and "-fopenmp" not in link_argv:
             link_argv.append("-fopenmp")
+        # The C++ <execution> policies (std::execution::par / par_unseq) dispatch into oneTBB in
+        # libstdc++, and an unresolved TBB symbol is a link failure the agent cannot fix from the
+        # source field. Appended for every C++ link so the task text can promise the policies work;
+        # () when this toolchain's backend is not TBB, and --as-needed drops it when unused.
+        link_argv.extend(f for f in _stdpar_link_for_block(block) if f not in link_argv)
         cmds.append(link_argv)
     if extra_link:
         cmds[-1].extend(extra_link)  # final argv produces the .so (sees -L/-l)

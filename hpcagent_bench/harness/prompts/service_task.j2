@@ -32,7 +32,11 @@ buffers are pre-allocated and written in place. The reserved scratch args
 `uint8_t *workspace` + `int64_t workspace_size`: to use scratch, set
 `workspace_bytes` in your submission (a byte count or expression over the size
 symbols); the judge allocates it 256-byte-aligned OUTSIDE the timed region (so it
-is free) and passes it in. Unrequested -> `workspace` is `NULL`, `workspace_size` 0. Outputs must match {{ oracle_phrase }} within rtol={{ rtol }},
+is free) and passes it in. Unrequested -> `workspace` is `NULL`, `workspace_size` 0.
+{% if language == "cpp" %}
+{% include "lang/cpp.j2" %}
+{% endif %}
+Outputs must match {{ oracle_phrase }} within rtol={{ rtol }},
 atol={{ atol }} on the visible AND on held-out inputs you never see.
 
 ## Performance sizes (what your speedup is timed on)
@@ -65,6 +69,11 @@ in your submission's `build` flags list ONLY the libraries as `-l<name>`, in lin
 
 {% if input_mode != "library" %}
 ## Delivering your code
+Optional submission metadata: `"compiler"` picks the toolchain family, and `"gcc"` when you
+omit it. The judge builds the BASELINE and your candidate with the one you name, so the
+speedup stays apples-to-apples whichever you pick.
+
+{% include "sections/build_flags.j2" %}
 Send the {{ language }} source EITHER inline in the `source` field, OR as a file you wrote into
 the shared folder `{{ shared_dir }}` whose path you put in `source_file`. One or the other --
 both at once is a 400. A `source_file` must be named exactly `{{ kernel }}.{{ ext }}` (the kernel

@@ -206,6 +206,12 @@ writes the signature in this order can never transpose same-typed arguments.
   non-`const`** when it is written (an output / in-out buffer). Output buffers
   are exactly the kernel's `output_args`.
 - Pointers are `restrict` (no aliasing) -- the kernels are vectorization targets.
+- **The qualifier is spelled per language.** `restrict` is C99 and C only: C++ never
+  adopted the keyword, so a C++ compiler (and nvcc/hipcc, which parse device sources
+  as C++) rejects `*restrict` outright. C spells it `restrict`; C++ / CUDA / HIP spell
+  it `__restrict__`; Fortran has no qualifier at all (distinct dummy arguments already
+  imply no aliasing). One source decides:
+  `support.bindings.contract.restrict_kw`.
 
 ## 6. Timing -- harness-owned, no kernel argument
 
@@ -228,7 +234,10 @@ Same logical contract, idiomatic surface per language. All emit a `bind(C)` /
 (CUDA/HIP are host-entry C-ABI functions -- Sec. 10). Every dtype<->type mapping
 comes from the single registry (`numpyto_common.dtypes`).
 
-- **C / C++ / CUDA / HIP**: `void f(const double *restrict A, double *restrict C, const int64_t N, uint8_t *restrict workspace, const int64_t workspace_size)`
+- **C**: `void f(const double *restrict A, double *restrict C, const int64_t N, uint8_t *restrict workspace, const int64_t workspace_size)`
+- **C++ / CUDA / HIP**: the same signature with `__restrict__` in place of `restrict`
+  (Sec. 5) and `extern "C"` linkage:
+  `extern "C" void f(const double *__restrict__ A, double *__restrict__ C, const int64_t N, uint8_t *__restrict__ workspace, const int64_t workspace_size)`
 - **Fortran**: `subroutine f(A, C, N, workspace, workspace_size) bind(C, name="...")` with
   `real(c_double), intent(in) :: A(*)`, `intent(inout) :: C(*)`,
   `integer(c_int64_t), value, intent(in) :: N`; the trailing `workspace` /
@@ -299,7 +308,8 @@ void gemm_c_auto(const double *restrict A,    // ptr, in
 An agent receives this signature + a `/* TODO: implement */` body (never the
 reference solution) and the binding JSON above; it drops in its implementation
 file and the harness compiles via the matrix (`flags.py`) and calls it through
-`wrap_kernel`.
+`wrap_kernel`. A C++ / CUDA / HIP agent receives the same stub with `extern "C"`
+and `__restrict__` (Sec. 5) -- the C99 keyword does not exist in C++.
 
 ---
 
@@ -390,6 +400,9 @@ void <base>_mpi(
    uint8_t  *restrict workspace, /* Sec. 11, per-rank, untimed */
    int64_t   workspace_size);
 ```
+
+A C++ submission gets this same signature with `__restrict__` and `extern "C"` (Sec. 5):
+the driver links `<base>_mpi` unmangled.
 
 - **Ownership only, agent owns communication.** The harness assigns a *disjoint*
   partition: it scatters each rank's owned interior and gathers the outputs (both

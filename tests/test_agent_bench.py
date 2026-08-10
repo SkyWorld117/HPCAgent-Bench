@@ -167,7 +167,9 @@ def test_gen_stub_cuda_hip_host_entry():
         stub = gen_call_stub(b, lang)
         assert header in stub  # GPU runtime header
         assert f'extern "C" void {sym}(' in stub  # canonical host symbol
-        assert "const double *restrict A" in stub  # HOST pointers, canonical order
+        # HOST pointers, canonical order. nvcc/hipcc parse as C++, so the C99 keyword is spelled
+        # __restrict__ (Sec. 5) -- bare `restrict` does not compile there.
+        assert "const double *__restrict__ A" in stub
         assert "time_ns" not in stub  # no timer arg -- the harness times externally
         assert "workspace" in stub  # trailing reserved scratch pair (Sec. 11)
         assert "TODO" in stub  # body is a stub, not a solution
