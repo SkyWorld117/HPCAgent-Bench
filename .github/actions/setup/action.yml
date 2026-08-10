@@ -1,7 +1,7 @@
 name: "HPCAgent-Bench CI setup"
 description: >
-  Native toolchain (make/gcc/g++/gfortran/clang/flang + OpenBLAS + FFTW) and the base Python
-  deps every CI runner shares. Job-specific extras (tvm, Pluto, gt4py, Apptainer) stay in
+  Native toolchain (make/gcc/g++/gfortran/clang/flang + OpenBLAS + FFTW + LAPACKE) and the base
+  Python deps every CI runner shares. Job-specific extras (tvm, Pluto, gt4py, Apptainer) stay in
   the job so only the runner that needs one pays for it.
 
 runs:
@@ -16,6 +16,9 @@ runs:
         # and cegterg port oracles link -lfftw3 and #include <fftw3.h>. Without it cegterg's
         # toolchain probe fails and 17 port-fidelity cases SKIP; verify_toolchain.py checks the
         # fftw3 pkg-config module so that provisioning gap is a red setup step, not a quiet skip.
+        # liblapacke-dev: DaCe's LAPACK library nodes (cholesky2, contour_integral,
+        # rayleigh_ritz_rotation) expand into generated C++ that #includes <lapacke.h>; the distro
+        # package's own liblapack-dev alternative dep is already satisfied by libopenblas-dev above.
         # ninja + ccache are BUILD-SPEED dependencies, and both fail SILENTLY when absent rather
         # than erroring, so they belong here rather than in whichever job noticed first:
         #   ninja  -- DaCe picks its CMake generator with `shutil.which('ninja')` and only replays
@@ -26,7 +29,7 @@ runs:
         #             a PATH shim, so the package has to exist before either can point at it.
         sudo apt-get update
         sudo apt-get install -y build-essential gfortran pkg-config libopenblas-dev libfftw3-dev \
-          ninja-build ccache
+          liblapacke-dev ninja-build ccache
 
     - name: LLVM toolchain (clang / clang++ / flang / libomp)
       shell: bash
