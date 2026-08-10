@@ -311,7 +311,7 @@ def test_the_oracle_transforms_with_the_columns_own_flags(tmp_path, monkeypatch)
     monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
     monkeypatch.setattr(pluto_transform, "run_bounded", capture)
 
-    status = oracle._run_pluto(tmp_path, "mm", "fp64", {}, {}, {}, {}, (), 0.0, 0.0, "ok")
+    status = oracle._run_pluto(tmp_path, "mm", "fp64", {}, {}, {}, {}, (), 0.0, 0.0, "ok", tmp_path, "mm")
 
     assert status.startswith("skip:unsupported:polycc")
     args = tuple(seen["cmd"][1:1 + len(pluto_transform.POLYCC_ARGS)])

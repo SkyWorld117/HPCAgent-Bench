@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -34,7 +35,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from hpcagent_bench import paths
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
-from hpcagent_bench.pluto_affine import scop_nonaffine_reason
+from hpcagent_bench.pluto_affine import has_scop, scop_nonaffine_reason
 
 #: The framework name this module transforms for -- used in every decline message.
 FRAMEWORK = "pluto"
@@ -77,6 +78,22 @@ PET_MATH_VECTOR_SHIM = ("/* Neutralised for pet scop extraction only -- see plut
                         "   from; the vector-math decls it adds on top are unused by scop extraction. */\n"
                         "#include <bits/libm-simd-decl-stubs.h>\n")
 
+#: The ``<omp.h>`` :func:`pet_parse_env` supplies, for the pet parse only. polycc processes a
+#: MULTI-scop translation unit one scop at a time, re-parsing its own OUTPUT for the next one -- and
+#: that output opens with the ``#include <omp.h>`` polycc prepends, which pet's flag-less libclang
+#: does not find on its default search path, so every scop after the first is lost with "No SCoPs
+#: extracted". Nothing polycc emits CALLS the runtime (measured: no ``omp_*`` reference in its
+#: output, only ``#pragma omp parallel for``), so the declarations below are all a re-parse needs.
+PET_OMP_SHIM = ("/* Parse-only <omp.h> for pet scop re-extraction -- see pluto_transform.pet_parse_env. */\n"
+                "typedef struct { int __pet_shim; } omp_lock_t;\n"
+                "typedef struct { int __pet_shim; } omp_nest_lock_t;\n"
+                "int omp_get_thread_num(void);\n"
+                "int omp_get_num_threads(void);\n"
+                "int omp_get_max_threads(void);\n"
+                "int omp_in_parallel(void);\n"
+                "void omp_set_num_threads(int);\n"
+                "double omp_get_wtime(void);\n")
+
 
 def pet_parse_env(scratch: pathlib.Path) -> Dict[str, str]:
     """The environment a ``polycc --pet`` subprocess needs to PARSE the emitted scop on aarch64.
@@ -93,25 +110,63 @@ def pet_parse_env(scratch: pathlib.Path) -> Dict[str, str]:
     built under this environment -- the timed clang compile of the transformed C still sees the real
     headers at ``-march=native``. The shim lives in the caller's throwaway ``scratch`` so it lasts
     exactly as long as the parse and leaves nothing behind for a later build to pick up.
+
+    A stub ``<omp.h>`` rides along on the same path for the same reasons -- see :data:`PET_OMP_SHIM`,
+    which is what makes a translation unit with SEVERAL scops transform rather than lose all but the
+    first.
     """
     shim = scratch / "pet-include"
     (shim / "bits").mkdir(parents=True, exist_ok=True)
     (shim / "bits" / "math-vector.h").write_text(PET_MATH_VECTOR_SHIM)
+    (shim / "omp.h").write_text(PET_OMP_SHIM)
     env = dict(os.environ)
     existing = env.get("C_INCLUDE_PATH", "")
     env["C_INCLUDE_PATH"] = f"{shim}{os.pathsep}{existing}" if existing else str(shim)
     return env
 
 
-def scop_inputs(cpp_backend: pathlib.Path, base: str) -> List[pathlib.Path]:
-    """The translator's ``<base>_fp*_pluto_input.c`` scops, sorted; ``[]`` when none were emitted."""
-    return sorted(cpp_backend.glob(f"{base}_fp*_pluto_input.c"))
+def override_source(bench_dir: pathlib.Path, base: str) -> Optional[pathlib.Path]:
+    """The tracked ORIGINAL-PolyBench scop for ``base`` under the kernel's source dir, if any.
+
+    A sibling of ``cpp_backend`` (which is gitignored and regenerated), so this is the one
+    place a hand override can live and survive a ``cpp_backend`` wipe."""
+    src = bench_dir / f"{base}_pluto_reference.c"
+    return src if src.is_file() else None
+
+
+def scop_inputs(cpp_backend: pathlib.Path, base: str, bench_dir: Optional[pathlib.Path] = None) -> List[pathlib.Path]:
+    """The scops ``base``'s Pluto column transforms, sorted; ``[]`` when none were emitted.
+
+    An :func:`override_source` under ``bench_dir`` (default ``cpp_backend``'s parent -- true for
+    every caller except the numerical oracle, whose scop lives in a scratch dir instead) REPLACES
+    the whole generated set and is returned AS-IS: no translator run, no copy, no freshness check
+    against it, since PolyBench/C ships one ``DATA_TYPE`` per kernel rather than a precision
+    family the generated ``fp*`` scops are keyed on. The override file itself is never written to
+    by this module.
+
+    A file that marks no region is not a scop input: polycc would hand it straight back and the
+    column would time untransformed C (see :func:`hpcagent_bench.pluto_affine.has_scop`)."""
+    override = override_source(bench_dir if bench_dir is not None else cpp_backend.parent, base)
+    if override is not None:
+        return [override]
+    return sorted(p for p in cpp_backend.glob(f"{base}_fp*_pluto_input.c") if has_scop(p.read_text()))
 
 
 def transformed_path(scop: pathlib.Path) -> pathlib.Path:
-    """Where ``scop``'s polycc output lands: ``<base>_fpNN_pluto.c``, the name
-    ``numpyto_c.bindings.emit_pluto_binding`` already declares as the Pluto source."""
-    return scop.with_name(f"{scop.name[:-len('_pluto_input.c')]}_pluto.c")
+    """Where ``scop``'s polycc output lands.
+
+    A generated scop (``<base>_fpNN_pluto_input.c``) transforms in place, next to the input --
+    the name ``numpyto_c.bindings.emit_pluto_binding`` already declares as the Pluto source. A
+    tracked :func:`override_source` (``<base>_pluto_reference.c``) is STATIC and lives in the kernel's
+    source dir, so its transform is redirected into that kernel's gitignored ``cpp_backend``
+    instead -- writing polycc's output beside the override would dirty a tracked directory on
+    every build."""
+    if scop.name.endswith("_pluto_input.c"):
+        return scop.with_name(f"{scop.name[:-len('_pluto_input.c')]}_pluto.c")
+    build_dir = scop.parent / "cpp_backend"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    base = scop.name.removesuffix("_pluto_reference.c")
+    return build_dir / f"{base}_fp64_pluto.c"
 
 
 def drop_core_dumps() -> None:  # pragma: no cover -- runs in the forked child
@@ -153,6 +208,42 @@ def run_bounded(cmd: Sequence[str],
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
+#: polycc's own scratch counters, the only bare-``int`` declaration lines in the output: the emitted
+#: scop declares every local as a sized type, so nothing of ours can match.
+SCRATCH_DECL_RE = re.compile(r"^(\s*)(register\s+)?int\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*;\s*$")
+
+
+def dedupe_scratch_declarations(transformed_c: str) -> str:
+    """Drop each re-declaration of a polycc scratch counter one of whose declarations is still in scope.
+
+    polycc emits its counters (``t1..tN``, ``lb/ub/lbp/ubp/lb2/ub2``, ``register lbv/ubv``) at the
+    scope of every scop it transforms, so a translation unit with several regions in one block does
+    not compile ('redeclaration of t1' -- POLYCC-012). They are pure scratch, assigned before every
+    use, so one live declaration serves all of them. Scope is tracked by brace, not by function: a
+    region nested in a loop body declares its own set, which the block after it cannot see.
+    Repairing the output here rather than at a call site keeps the timed build, the report and the
+    oracle compiling the same thing.
+    """
+    scopes: List[set] = [set()]
+    out: List[str] = []
+    for line in transformed_c.split("\n"):
+        m = SCRATCH_DECL_RE.match(line)
+        if m is not None:
+            live = set().union(*scopes)
+            fresh = [n for n in (n.strip() for n in m.group(3).split(",")) if n not in live]
+            scopes[-1].update(fresh)
+            if fresh:
+                out.append(f"{m.group(1)}{m.group(2) or ''}int {', '.join(fresh)};")
+            continue
+        out.append(line)
+        for ch in line:
+            if ch == "{":
+                scopes.append(set())
+            elif ch == "}" and len(scopes) > 1:
+                scopes.pop()
+    return "\n".join(out)
+
+
 def run_polycc(scop: pathlib.Path,
                out: pathlib.Path,
                args: Sequence[str] = POLYCC_ARGS,
@@ -192,6 +283,8 @@ def run_polycc(scop: pathlib.Path,
             raise
     if proc.returncode != 0:
         out.unlink(missing_ok=True)
+    elif out.is_file():
+        out.write_text(dedupe_scratch_declarations(out.read_text()))
     return cmd, proc
 
 
