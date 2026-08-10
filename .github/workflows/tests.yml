@@ -227,6 +227,9 @@ jobs:
     timeout-minutes: 90
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
+      # tests/test_dace_openblas_link.py builds a pinned OpenBLAS with USE_OPENMP=1 (~10 min at
+      # -j4) and skips the build when the install is already there -- cached below, not rebuilt.
+      OPTARENA_BLAS_CACHE: ${{ github.workspace }}/.openblas-cache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -256,6 +259,15 @@ jobs:
           restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       - name: Setup -- reset the ccache counters
         run: ccache --zero-stats
+
+      # Only the INSTALL tree (51 MB); the 332 MB source tree is not needed once it exists. Keyed
+      # by CPU_KEY as well as the tag: the build is not DYNAMIC_ARCH, so a cache restored onto a
+      # different runner uarch would SIGILL rather than fail honestly.
+      - name: Setup -- restore the from-source OpenBLAS (USE_OPENMP=1)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.openblas-cache/openblas-openmp/install
+          key: openblas-openmp-v0.3.29-${{ runner.os }}-${{ env.CPU_KEY }}
 
       - uses: ./.github/actions/setup
 
