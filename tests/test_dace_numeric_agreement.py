@@ -151,9 +151,10 @@ def gated_kernels() -> Tuple[str, ...]:
     Three different spellings meet here and only one of them belongs in a hand-written list:
 
     * ``KERNELS`` holds PATH-KEYS (``scientific_computing/.../trisolv/trisolv``);
-    * ``REFUSED`` holds kernel DIRECTORIES (``path.parent.name``), and one directory can carry
-      several keys -- ``bicg/`` carries both ``bicg_solvers`` and ``sp_bicg``, ``vexx/`` carries
-      ``vexx_k`` -- so a refusal excuses every kernel under that directory;
+    * ``REFUSED`` holds kernel DIRECTORY PATHS (``scientific_computing/.../bicg``), and one
+      directory can carry several keys -- ``bicg/`` carries both ``bicg_solvers`` and ``sp_bicg``,
+      ``vexx/`` carries ``vexx_k`` -- so a refusal excuses every kernel under that directory. The
+      path, not the bare name: two tracks each hold a ``bicg/`` and only one of them refuses;
     * the STEM is what this returns, because it is unique across the corpus
       (``test_kernel_stems_are_unique`` pins that), it is what ``BenchSpec.load`` and
       ``run_kernel`` resolve, and it is the only one of the three a reader can write down.
@@ -167,7 +168,7 @@ def gated_kernels() -> Tuple[str, ...]:
     out: List[str] = []
     for key in sorted(KERNELS):
         spec = BenchSpec.load(key)
-        directory = spec.relative_path.split("/")[-1]
+        directory = spec.relative_path
         if spec.track in GATED_TRACKS and directory in generated and directory not in REFUSED:
             out.append(key.split("/")[-1])
     return tuple(out)
