@@ -148,3 +148,18 @@ hierarchies, factories, or indirection layers that aren't needed (YAGNI). Apply:
 - `auto`, range-`for`, `enum class`, `[[nodiscard]]`, `noexcept` where it holds.
 
 After writing or modernizing, run all six gates in section A on the result.
+
+## C. Parallel algorithms (`<execution>`)
+
+The parallel execution policies (`std::execution::par`, `par_unseq`) passed to
+`std::transform`/`std::for_each`/`std::reduce` and friends are implemented over
+**oneTBB** -- `libtbb` (`-ltbb`) is their runtime dependency. On this benchmark's
+judge TBB is installed and linked automatically, so `par`/`par_unseq` just work;
+you do not need to declare `-ltbb` yourself.
+
+Know the failure mode anyway: libstdc++ picks the backend per translation unit from
+`__has_include(<tbb/tbb.h>)`, so where the TBB headers are absent every policy
+**silently degrades to the serial backend**. The code still compiles, still links,
+and still returns the right answers -- on one thread, with nothing in the flags or
+the exit code to say so. Never assume a policy parallelized anything; check
+(`nm -u` on the object should show `_ZN3tbb...` references) or measure it.

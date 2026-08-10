@@ -12,6 +12,18 @@ FROM ${BASE_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTHON_REQUIREMENTS=requirements/nvidia.txt
 
+# The graded toolchains, PINNED (supersedes the 2026-08-07 "latest available" decision: a campaign
+# whose compiler moved between arms is not comparable across them). Both are installed best-effort
+# and then HARD-VERIFIED in the final step -- a base whose archives cannot supply the pinned major
+# must fail the build, not quietly grade on whatever it did have.
+ARG GCC_MAJOR=16
+ARG LLVM_MAJOR=22
+# NVIDIA HPC SDK -- nvfortran/nvc++ for the OpenACC + `-stdpar` methods. ON for the NVIDIA leg,
+# where `-stdpar=gpu` / `-acc=gpu` are the point of having it; the layer measures ~10-25 GB
+# unpacked (the multi-arch CUDA payload dominates). Set 0 to build a smaller image without them.
+ARG INSTALL_NVHPC=1
+ARG NVHPC_APT_VERSION=25-7
+
 ENV LC_ALL=C \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,profiler \
@@ -57,14 +69,29 @@ RUN set -eux; \
     done; \
     rm -rf /var/lib/apt/lists/*
 
-# The NEWEST LLVM apt.llvm.org publishes for this codename, plus the newest distro gcc (operator
-# decision 2026-08-07: latest available, not a pin). The harness probes the BARE driver names, so
-# the unversioned symlinks in /usr/local/bin are load-bearing rather than cosmetic. The distro
-# clang and the distro-flang fallback installed above stay as the LAST resort, for a base whose
-# codename apt.llvm.org does not publish -- hence the block is best-effort and the drivers are
-# only relinked once a versioned one exists.
+# GCC ${GCC_MAJOR} and LLVM ${LLVM_MAJOR}, the two PINNED graded toolchains, each with a
+# newest-first fallback chain behind it. The harness probes the BARE driver names, so the
+# unversioned symlinks in /usr/local/bin are load-bearing rather than cosmetic. The distro clang
+# and the distro-flang fallback installed above stay as the LAST resort, for a base whose codename
+# apt.llvm.org does not publish -- hence this block is best-effort and the drivers are only
+# relinked once a versioned one exists. What makes "best-effort" safe is the FINAL step: it
+# refuses the image when the bare driver is not the pinned major, so a fallback can never be
+# graded silently.
+#
+# ubuntu-toolchain-r/test is added because the Ubuntu archive stops well short of gcc-16: without
+# it the loop below cannot see the pinned major at all. The PPA key is fetched by fingerprint
+# rather than trusting the whole keyserver.
+ARG GCC_MAJOR
+ARG LLVM_MAJOR
 RUN set -eux; \
     codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"; \
+    gpg --batch --keyserver keyserver.ubuntu.com \
+        --recv-keys 60C317803A41BA51845E371A1E9377A2BA9EF27F 2>/dev/null \
+      && gpg --batch --export 60C317803A41BA51845E371A1E9377A2BA9EF27F \
+           > /etc/apt/trusted.gpg.d/ubuntu-toolchain-r.gpg \
+      && echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu ${codename} main" \
+           > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \
+      || echo "ubuntu-toolchain-r/test unavailable; falling back to the distro gcc" >&2; \
     for attempt in 1 2 3; do \
       if wget -qO /tmp/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key; then break; fi; \
       echo "apt.llvm.org key fetch attempt ${attempt} failed; retrying in $((attempt * 5))s" >&2; \
@@ -73,7 +100,7 @@ RUN set -eux; \
     llvm_major=""; \
     if [ -n "${codename}" ] && [ -s /tmp/apt.llvm.org.asc ]; then \
       mv /tmp/apt.llvm.org.asc /etc/apt/trusted.gpg.d/apt.llvm.org.asc; \
-      for candidate in 23 22 21 20; do \
+      for candidate in ${LLVM_MAJOR} 23 22 21 20; do \
         echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${candidate} main" \
           > /etc/apt/sources.list.d/llvm.list; \
         if apt-get update >/dev/null 2>&1 \
@@ -98,7 +125,8 @@ RUN set -eux; \
       echo "${llvm_major}" > /usr/local/share/llvm-major; \
     fi; \
     newest_gcc=""; \
-    for candidate in 16 15 14 13; do \
+    apt-get update >/dev/null 2>&1 || true; \
+    for candidate in ${GCC_MAJOR} 16 15 14 13; do \
       if apt-cache show "gcc-${candidate}" >/dev/null 2>&1; then newest_gcc="${candidate}"; break; fi; \
     done; \
     if [ -n "${newest_gcc}" ]; then \
@@ -116,6 +144,18 @@ RUN set -eux; \
 
 COPY containers/build-hptt.sh /build-hptt.sh
 RUN sh /build-hptt.sh
+
+# Run in the final verification step below, not here: it must gate the toolchain the image SHIPS.
+COPY containers/stdpar-gate.sh /stdpar-gate.sh
+
+# Intel oneAPI (icx/icpx/ifx) and, when INSTALL_NVHPC=1, the NVIDIA HPC SDK (nvc/nvc++/nvfortran).
+# Its own layer because these are the two biggest and the two most optional things in the image --
+# see the script for the measured sizes and why apt rather than spack.
+ARG INSTALL_NVHPC
+ARG NVHPC_APT_VERSION
+COPY containers/install-extra-toolchains.sh /install-extra-toolchains.sh
+RUN INSTALL_NVHPC="${INSTALL_NVHPC}" NVHPC_APT_VERSION="${NVHPC_APT_VERSION}" \
+      sh /install-extra-toolchains.sh
 
 COPY requirements/ /requirements/
 RUN set -eux; \
@@ -146,6 +186,8 @@ RUN npm install -g @anthropic-ai/claude-code
 COPY containers/agent /opt/optarena-agent
 RUN chmod +x /opt/optarena-agent/start_agents.sh /opt/optarena-agent/start_run.sh
 
+ARG GCC_MAJOR
+ARG LLVM_MAJOR
 RUN set -eux; \
     command -v nvcc; \
     command -v nsys || true; \
@@ -168,6 +210,14 @@ RUN set -eux; \
       flang --version | head -1 | grep -q " ${llvm_major}" \
         || { echo "bare flang is not LLVM ${llvm_major}: $(command -v flang)" >&2; exit 1; }; \
     fi; \
+    # The PIN itself, not just internal consistency: the block above installs best-effort down a \
+    # fallback chain, so without this an archive that cannot supply the pinned major produces an \
+    # image that grades on a different compiler and says nothing. \
+    [ "${llvm_major}" = "${LLVM_MAJOR}" ] \
+      || { echo "pinned LLVM ${LLVM_MAJOR} unavailable; image has ${llvm_major:-none}" >&2; exit 1; }; \
+    gcc -dumpversion | cut -d. -f1 | grep -qx "${GCC_MAJOR}" \
+      || { echo "pinned GCC ${GCC_MAJOR} unavailable; bare gcc is $(gcc -dumpfullversion)" >&2; exit 1; }; \
+    sh /stdpar-gate.sh; \
     python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"; \
     # Both images must grade on the same interpreter line; the NGC base does not state its python. \
     python3 --version 2>&1 | grep -q "^Python 3\.12\." \
