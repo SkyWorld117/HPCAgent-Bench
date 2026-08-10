@@ -101,11 +101,12 @@ everything server-side, so python3 is for generating or checking your own code, 
 4. Iterate on step 3. Then `submit` once, with the same body, on your best version.
 
 Score early and often -- after every meaningful change, never sit on an untested rewrite.
-Do not stop early. The ceiling differs per kernel: some allow 10x, some barely 1.2x -- so
-never settle for your first working speedup. Keep trying genuinely different approaches
-until the budget is nearly spent; declare a plateau only after several distinct ideas
-scored no better. Then `submit` your best correct version -- an unsubmitted improvement
-scores zero.
+You have plenty of attempts (~1000 score calls is fine). Do not stop early. The ceiling
+differs per kernel: some allow 10x, some barely 1.2x -- so never settle for your first
+working speedup. Keep trying genuinely different approaches; declare a plateau only after
+several distinct ideas scored no better. Then `submit` your best correct version. If time
+or attempts run out before you submit, your last correct scored version counts as the
+submission -- so always keep the best version as the last one you scored.
 
 The same call without the tools:
 
