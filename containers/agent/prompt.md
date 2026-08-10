@@ -8,6 +8,13 @@ benchmark tools for every external interaction:
 - `score` -- grade on the PUBLIC inputs. The iteration loop.
 - `submit` -- the terminal grade (public + a hidden seed) and the only recorded one. Call it once.
 - `search` -- web/API research.
+- `syntax_check` -- parse a file with the local compiler. Free, instant, never graded.
+
+Run `syntax_check` on your file before every `score` and `submit` call. It compiles nothing and
+grades nothing -- it parses the file right here with the same compiler family the judge uses
+(`-fsyntax-only -fopenmp -Wall`) and hands back the diagnostics in this turn. A grade that dies on a
+compile error costs you a full judge round-trip and tells you less than the compiler would have said
+for free. Read the warnings too; nothing else in this run will show them to you.
 
 Do not use Claude Code web tools. Do not contact external services directly.
 

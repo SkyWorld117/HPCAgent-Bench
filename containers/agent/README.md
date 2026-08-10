@@ -10,8 +10,11 @@ only these benchmark-facing tools through MCP:
 - `profile`: run a profiler over the submission and return its report.
 - `submit`: the TERMINAL grade -- public plus a held-out hidden seed, and the only
   route that records a result. One per task.
+- `syntax_check`: parse a source file with the LOCAL compiler. No judge, no link, no
+  run. The agent has no shell; the MCP server runs in the same container as the
+  toolchain, so this costs a subprocess instead of a judge round-trip.
 
-These tools only make HTTP JSON calls to the judge configured through `.env`. They
+Every tool but `syntax_check` only makes HTTP JSON calls to the judge configured through `.env`. They
 send exactly what the judge's own client sends and never repair a request: the
 `rank` is attached from `$JUDGE_RANK` where the tool cannot forget it, the language
 comes from `$LANGUAGE` (never a tool argument, because an enforced track refuses a
@@ -36,6 +39,7 @@ agent/
     profile_tool.py
     submit.py
     search.py
+    syntax_check.py
 ```
 
 `profile_tool.py`, not `profile.py`: the tools directory is on `sys.path`, so a
@@ -146,6 +150,16 @@ attached from `$JUDGE_RANK` on every call.
 
 `profile` additionally takes `tool` (which profiler), `min_percent`, `threads`,
 `reps`, `residency`, and `counters` with `counter_group` as a pair.
+
+`syntax_check` fields:
+
+- `source_file` string, required: path to the file to parse, in this container.
+
+It answers `{"ok": <parsed>, "language", "command", "exit_code", "output"}`, where
+`output` is the compiler's stdout plus stderr verbatim. The compiler comes from the
+file extension (`.c`, `.cpp`, `.f90`, `.hip`, `.cu`), falling back to `$LANGUAGE`, and
+always runs `-fsyntax-only -fopenmp -Wall` -- parse only, never a link or a run. `ok`
+true means the file parses, not that it is correct or fast.
 
 A refusal comes back as `{"ok": false, "status": <code>, "error": "<judge's own
 message>", "body": <the judge's JSON>}`. The common ones: `400` for a language the

@@ -110,7 +110,7 @@ for idx in $(seq 0 "$((AGENT_COUNT - 1))"); do
       --strict-mcp-config \
       --tools "Read,Write,Edit,MultiEdit,Glob,Grep" \
       --allowedTools "mcp__optarena__search" "mcp__optarena__task" "mcp__optarena__score" \
-        "mcp__optarena__profile" "mcp__optarena__submit" \
+        "mcp__optarena__profile" "mcp__optarena__submit" "mcp__optarena__syntax_check" \
       --disallowedTools "Bash" "WebFetch" "WebSearch" "Task" "Agent" \
       "$(cat "${prompt_file}")"
   ) >"${log_file}" 2>&1 &
