@@ -100,6 +100,13 @@ everything server-side, so python3 is for generating or checking your own code, 
             "source_file": "/shared/agent-7/argmax_value.f90"} -> correct / speedup.
 4. Iterate on step 3. Then `submit` once, with the same body, on your best version.
 
+Score early and often -- after every meaningful change, never sit on an untested rewrite.
+Do not stop early. The ceiling differs per kernel: some allow 10x, some barely 1.2x -- so
+never settle for your first working speedup. Keep trying genuinely different approaches
+until the budget is nearly spent; declare a plateau only after several distinct ideas
+scored no better. Then `submit` your best correct version -- an unsubmitted improvement
+scores zero.
+
 The same call without the tools:
 
     curl -sX POST "$JUDGE_URL/submit" -H 'Content-Type: application/json' \
