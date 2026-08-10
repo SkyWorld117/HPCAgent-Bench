@@ -26,6 +26,7 @@ This module owns the second edit plus the runtime helpers:
 """
 import functools
 import glob
+import logging
 import os
 import pathlib
 import shlex
@@ -84,6 +85,32 @@ COMPILER_FAMILIES = {
     "oneapi": "intel-oneapi-compilers",
 }
 
+#: ``config.yaml`` key an arm pins a language's toolchain family with.
+FAMILY_PIN_KEY = "build.compiler.{lang}"
+
+
+def family_names() -> Tuple[str, ...]:
+    """Every requestable toolchain family, in task-text order."""
+    return tuple(COMPILER_FAMILIES)
+
+
+def default_family() -> str:
+    """The family used when neither an arm nor a submission names one."""
+    return family_names()[0]
+
+
+def resolve_family(lang: str, requested: Optional[str] = None) -> str:
+    """The toolchain family for ``lang``: arm pin (``build.compiler.<lang>``) beats submission's
+    ``requested``, which beats :func:`default_family`."""
+    pin = config.get(FAMILY_PIN_KEY.format(lang=lang)) or ""
+    for value, origin in ((pin, FAMILY_PIN_KEY.format(lang=lang)), (requested or "", "submission 'compiler'")):
+        if value and value not in COMPILER_FAMILIES:
+            raise KeyError(f"unknown compiler {value!r} from {origin}; expected one of {family_names()}")
+    if pin and requested and pin != requested:
+        logging.getLogger(__name__).info("compiler pin %s=%s overrides the submitted %r",
+                                         FAMILY_PIN_KEY.format(lang=lang), pin, requested)
+    return pin or requested or default_family()
+
 
 def compiler_for_family(lang: str, family: str) -> Optional[str]:
     """The ``compilers.yaml`` block name that builds ``lang`` with toolchain ``family``, or ``None``
@@ -96,7 +123,7 @@ def compiler_for_family(lang: str, family: str) -> Optional[str]:
     """
     spack = COMPILER_FAMILIES.get(family)
     if spack is None:
-        raise KeyError(f"unknown compiler family {family!r}; expected one of {tuple(COMPILER_FAMILIES)}")
+        raise KeyError(f"unknown compiler family {family!r}; expected one of {family_names()}")
     for name, block in _load_compilers().items():
         if block.get("lang") != lang or block.get("mpi"):
             continue
@@ -108,6 +135,61 @@ def compiler_for_family(lang: str, family: str) -> Optional[str]:
 def compiler_driver(name: str) -> str:
     """The driver command a ``compilers.yaml`` block invokes (``g++``, ``clang++``, ...)."""
     return _load_compilers()[name].get("cc", "")
+
+
+#: The directive-offload programming models :func:`offload_flags` selects between.
+OFFLOAD_MODELS: Tuple[str, ...] = ("openmp", "openacc")
+
+#: The GPU legs the images are built for.
+OFFLOAD_VENDORS: Tuple[str, ...] = ("nvidia", "amd")
+
+#: ``(family, vendor)`` -> ``{model: flags constant name}``; absent pair/model = no offload path (clang: no OpenACC, nvhpc: no AMD leg).
+OFFLOAD_REFS: Dict[Tuple[str, str], Dict[str, str]] = {
+    ("gcc", "nvidia"): {
+        "openmp": "OMP_TARGET_GCC_NVIDIA",
+        "openacc": "OPENACC_GCC_NVIDIA"
+    },
+    ("gcc", "amd"): {
+        "openmp": "OMP_TARGET_GCC_AMD",
+        "openacc": "OPENACC_GCC_AMD"
+    },
+    ("llvm", "nvidia"): {
+        "openmp": "OMP_TARGET_LLVM_NVIDIA"
+    },
+    ("llvm", "amd"): {
+        "openmp": "OMP_TARGET_LLVM_AMD"
+    },
+    ("nvhpc", "nvidia"): {
+        "openmp": "OMP_TARGET_NVHPC_NVIDIA",
+        "openacc": "OPENACC_NVHPC_NVIDIA"
+    },
+}
+
+#: Default ``{arch}`` per ``(family, vendor)``, in that driver's spelling.
+OFFLOAD_ARCH: Dict[Tuple[str, str], str] = {
+    ("gcc", "nvidia"): flags.OFFLOAD_ARCH_NVIDIA_GCC,
+    ("gcc", "amd"): flags.OFFLOAD_ARCH_AMD,
+    ("llvm", "nvidia"): flags.OFFLOAD_ARCH_NVIDIA,
+    ("llvm", "amd"): flags.OFFLOAD_ARCH_AMD,
+    ("nvhpc", "nvidia"): flags.OFFLOAD_ARCH_NVIDIA_NVHPC,
+}
+
+
+def offload_flags(family: str, vendor: str, model: str, *, arch: Optional[str] = None) -> str:
+    """The ``model`` offload flags for toolchain ``family`` on GPU leg ``vendor``; ``""`` when unsupported."""
+    if family not in COMPILER_FAMILIES:
+        raise KeyError(f"unknown compiler family {family!r}; expected one of {family_names()}")
+    if vendor not in OFFLOAD_VENDORS:
+        raise KeyError(f"unknown gpu vendor {vendor!r}; expected one of {OFFLOAD_VENDORS}")
+    if model not in OFFLOAD_MODELS:
+        raise KeyError(f"unknown offload model {model!r}; expected one of {OFFLOAD_MODELS}")
+    ref = OFFLOAD_REFS.get((family, vendor), {}).get(model)
+    if ref is None:
+        return ""
+    flag_vars = vars(flags)
+    if ref not in flag_vars:
+        raise KeyError(f"offload ref {ref!r} is not a constant in hpcagent_bench.flags")
+    return flag_vars[ref].format(arch=arch or OFFLOAD_ARCH[(family, vendor)])
 
 
 def compiler_names() -> Tuple[str, ...]:
@@ -183,9 +265,15 @@ def _resolve_baseline(block: dict, mode: Mode) -> str:
 
 
 def _compiler_for_lang(compilers: Dict[str, dict], lang: str, *, mpi: bool = False) -> Tuple[str, dict]:
-    """Pick the first compiler block matching ``lang``. ``mpi=False`` (default) picks a
-    single-node block; ``mpi=True`` picks the ``mpi: true`` wrapper block (``mpicc.mpich`` ...),
-    so the single-node and MPI lang lookups never cross."""
+    """Pick the compiler block for ``lang``: :func:`resolve_family`'s family, else the first matching
+    block; ``mpi=True`` picks the ``mpi: true`` wrapper block instead of the single-node one."""
+    if not mpi:
+        family = resolve_family(lang)
+        name = compiler_for_family(lang, family)
+        if name is not None:
+            return name, compilers[name]
+        if config.get(FAMILY_PIN_KEY.format(lang=lang)):
+            raise KeyError(f"compiler family {family!r} builds no {lang!r} in this image")
     for cname, block in compilers.items():
         if block.get("lang") == lang and bool(block.get("mpi")) == mpi:
             return cname, block
@@ -401,17 +489,12 @@ def std_flag(lang: str) -> str:
 
 @functools.lru_cache(maxsize=None, typed=True)
 def _stdpar_backend_is_tbb(cc: str) -> bool:
-    """Does ``cc``'s standard library implement the ``<execution>`` policies over TBB?
-
-    Asked, not assumed, and asked the way libstdc++ itself asks it -- ``__has_include(<tbb/tbb.h>)``
-    in ``<bits/c++config.h>`` -- because the answer is a HOST property that flips the link
-    requirement in both directions: with TBB present, omitting its library is an undefined-symbol
-    link failure; with TBB absent, adding it is a ``cannot find -ltbb`` link failure. A compiler we
-    cannot run at all answers False, the choice that links.
-    """
+    """Does ``cc``'s ``<execution>`` backend use TBB (asked via ``__has_include``, a host property)?"""
     probe = "#if __has_include(<tbb/tbb.h>)\n__NPB_STDPAR_TBB__\n#endif\n"
+    # Unresolved driver names spawn-fail into a False verdict, which silently drops -ltbb.
+    exe = resolve_compiler(cc) or cc
     try:
-        r = subprocess.run([cc, "-x", "c++", "-E", "-"],
+        r = subprocess.run([exe, "-x", "c++", "-E", "-"],
                            input=probe,
                            capture_output=True,
                            text=True,
@@ -734,6 +817,7 @@ wrap_kernel` dlopens. Flags resolve from :mod:`hpcagent_bench.flags` via
     link_subst = subst_map(link_block["cc"], objs=" ".join(objs), lib=out_so)
     link_argv = _render_argv(link_block["link"], link_subst)
     link_argv.extend(link_block.get("link_extra") or [])
+    link_argv.extend(f for f in _stdpar_link_for_block(link_block) if f not in link_argv)
     if extra_flags:  # Polly/Pluto need -fopenmp -lgomp at link too
         link_argv.extend(shlex.split(extra_flags))
     cmds.append(link_argv)

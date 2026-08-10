@@ -110,7 +110,7 @@ def log_grade(route: str, body: dict, graded: dict | None) -> None:
     ``graded`` is the upstream's parsed 200 body, or ``None`` when it refused: a request that
     ended without a verdict is a ``score_error`` call, still part of the trajectory.
     """
-    from hpcagent_bench import config
+    from hpcagent_bench import config, languages
     from hpcagent_bench.harness import recording
     from hpcagent_bench.harness.runner import RunStatus, status_of
     from hpcagent_bench.harness.scoring import Score
@@ -122,8 +122,7 @@ def log_grade(route: str, body: dict, graded: dict | None) -> None:
     kernel = body.get("kernel")
     if not isinstance(kernel, str) or not kernel:
         return  # a body that named no kernel is attributable to nothing
-    # Both mirror the upstream's own reading of the same body: a prebuilt library IS the 'any'
-    # source mode, and an unnamed language is graded as C.
+    # Mirrors upstream's own reading: prebuilt library = 'any' source mode, unnamed language = C.
     language = str(body.get("language", DEFAULT_LANGUAGE))
     source_mode = "any" if body.get("library") else "restricted"
     score = None
@@ -147,7 +146,10 @@ def log_grade(route: str, body: dict, graded: dict | None) -> None:
         # A served grade sees ONE language: the body's. It is both what the judge was asked to
         # grade and what the agent shipped, so it stands in both columns rather than one of them
         # guessing at the arm the judge was never told.
-        delivered_language=language)
+        delivered_language=language,
+        # Resolved WITHOUT the body's 'compiler': the upstream judge drops that field (see
+        # service._submission_from_body), so the pin/default is what really built this grade.
+        compiler=languages.resolve_family(language))
 
 
 async def record_grade(route: str, request: Request, upstream: httpx.Response) -> None:

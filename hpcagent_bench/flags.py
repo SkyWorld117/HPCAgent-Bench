@@ -116,8 +116,8 @@ CPU_BASELINE_GCC = (f"-O3 {_ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing 
 #: vectorize libm, and fails loudly on a host whose spec omits it.
 CPU_BASELINE_GFORTRAN = (f"-O3 {_ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC")
 
-#: Intel icpx (LLVM-based oneAPI) baseline: -O3 + xHost + OpenMP + ZMM hint (no fast-math).
-CPU_BASELINE_ICPX = (f"-O3 -xHost -fopenmp {_FP_RELAX} -fPIC -qopt-zmm-usage=high")
+#: icx defaults to fp-model=fast; precise must come first (last spelling wins over _FP_RELAX).
+CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -fopenmp {_FP_RELAX} -fPIC -qopt-zmm-usage=high")
 
 #: Appended to a PROFILED build (``Sandbox.build(debug=True)``, the /profile endpoint) so perf can
 #: name the symbols it samples. Only ``-g``: it emits DWARF beside the code without changing it, so
@@ -528,6 +528,24 @@ CUDA_BASELINE = (f"-O3 --use_fast_math -Xcompiler='-O3 -march=native -ffast-math
 #: (no ``-Xcompiler``); mirrors the SC26-Layout-AD hipcc set. ``--offload-arch=
 #: <gfx>`` is appended per-host by :func:`compose_hip` after :func:`detect_gfx`.
 HIP_BASELINE = (f"-O3 -march=native -ffast-math {_FP_RELAX} -fPIC")
+
+# Directive-offload flag sets, per toolchain family and GPU leg; {arch} filled by offload_flags().
+
+#: gcc nvptx offload compiler has no sm_90; sm_89 is its ceiling.
+OFFLOAD_ARCH_NVIDIA = "sm_90"
+OFFLOAD_ARCH_NVIDIA_GCC = "sm_89"
+OFFLOAD_ARCH_NVIDIA_NVHPC = "cc90"
+OFFLOAD_ARCH_AMD = "gfx942"
+
+OMP_TARGET_GCC_NVIDIA = "-fopenmp -foffload=nvptx-none -foffload-options=nvptx-none=-march={arch}"
+OMP_TARGET_GCC_AMD = "-fopenmp -foffload=amdgcn-amdhsa -foffload-options=amdgcn-amdhsa=-march={arch}"
+OMP_TARGET_LLVM_NVIDIA = "-fopenmp --offload-arch={arch}"
+OMP_TARGET_LLVM_AMD = "-fopenmp --offload-arch={arch}"
+OMP_TARGET_NVHPC_NVIDIA = "-mp=gpu -gpu={arch}"
+
+OPENACC_GCC_NVIDIA = "-fopenacc -foffload=nvptx-none -foffload-options=nvptx-none=-march={arch}"
+OPENACC_GCC_AMD = "-fopenacc -foffload=amdgcn-amdhsa -foffload-options=amdgcn-amdhsa=-march={arch}"
+OPENACC_NVHPC_NVIDIA = "-acc -gpu={arch}"
 
 # ---------------------------------------------------------------------------
 # Probes -- minimal, environment-overridable, fail-soft. Frameworks rely on

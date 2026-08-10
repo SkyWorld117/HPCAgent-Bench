@@ -26,7 +26,7 @@ import tempfile
 import time
 from typing import List, Optional, Sequence, Tuple
 
-from hpcagent_bench import config, paths
+from hpcagent_bench import config, languages, paths
 from hpcagent_bench.harness.scoring import Score, VerifyResult
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.frameworks.utilities import cpu_model
@@ -180,6 +180,11 @@ CREATE TABLE IF NOT EXISTS calls (
     -- speedup-over-time curve is only readable with the route beside it. NULL = the grade did
     -- not come from a route (record_trajectory's in-process runner).
     route       TEXT,
+    -- the toolchain family (languages.COMPILER_FAMILIES) this grade's baseline AND candidate
+    -- were both built with, after the arm pin / submission / default precedence. A campaign
+    -- that varies the toolchain is only readable with it beside the speedup. NULL = the writer
+    -- did not resolve one.
+    compiler    TEXT,
     baseline    TEXT,
     cpu         TEXT,
     commit_sha  TEXT,
@@ -441,12 +446,7 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the ONE current schema -- tables + indexes -- idempotently.
-
-    Every statement is ``CREATE ... IF NOT EXISTS``, so this is safe to call on every
-    :func:`connect` (the cost is negligible) and needs no version gate. The DB is not
-    versioned or migrated: the DDL constants above ARE the schema, and a schema change
-    means rebuilding the DB rather than an in-place ALTER."""
+    """Create the ONE current schema -- tables + indexes -- idempotently (``CREATE ... IF NOT EXISTS``)."""
     cur = conn.cursor()
     cur.execute(_BENCHMARKS_DDL)
     cur.execute(_PROMPTS_DDL)
@@ -479,6 +479,19 @@ def _shard_tables(conn: sqlite3.Connection) -> list:
     ordered = [t for t in _MERGE_FIRST if t in by_name]
     ordered += sorted(set(by_name) - set(_MERGE_FIRST))
     return [(name, by_name[name]) for name in ordered]
+
+
+def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Does ``table`` carry ``column`` in THIS database (schema is forward-only, never migrated)?"""
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def compiler_expr(conn: sqlite3.Connection, table: str = "calls") -> str:
+    """A SELECT expression giving ``table``'s effective toolchain family, safe on ANY vintage of the schema."""
+    default = languages.default_family()
+    if column_exists(conn, table, "compiler"):
+        return f"COALESCE({table}.compiler, '{default}')"
+    return f"'{default}'"
 
 
 def _columns(conn: sqlite3.Connection, table: str, skip_id: bool) -> list:
@@ -785,6 +798,7 @@ def record_call(score: Optional[Score],
                 preset: str = "S",
                 datatype: str = "float64",
                 delivered_language: str = "",
+                compiler: Optional[str] = None,
                 path: Optional[str] = None) -> int:
     """Persist ONE served grade as a ``calls`` row; return its ``round`` (0 = not logged).
 
@@ -816,11 +830,12 @@ def record_call(score: Optional[Score],
         conn.execute(
             """INSERT INTO calls(
                 run_id, ts, benchmark, preset, datatype, language, delivered_language, source_mode, optimizer,
-                round, tokens, speedup, correct, status, route, baseline, cpu, commit_sha, prompt_hash, execution)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                round, tokens, speedup, correct, status, route, compiler, baseline, cpu, commit_sha, prompt_hash,
+                execution)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, task.language, delivered_language, task.source_mode,
              optimizer, int(prior) + 1, 0, float(score.speedup if score is not None else 0.0),
-             int(bool(score.correct) if score is not None else 0), status, route,
+             int(bool(score.correct) if score is not None else 0), status, route, compiler,
              (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution))
         conn.commit()
         return int(prior) + 1
