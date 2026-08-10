@@ -54,6 +54,11 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: Seeded from a full sweep of the 331 gated kernels: 311 agreed, 19 did not, 1 has no case.
 #: Remeasured 2026-08-08: the four ``mismatch`` entries all agree now and are gone; ``stockham_fft``
 #: was measured failing and was never on the list.
+#: Remeasured 2026-08-10 after two HARNESS defects were fixed -- a case built with the wrong element
+#: type (``numerical_oracle._custom_initialize``) and a free symbol the manifest names that nothing
+#: consulted (``dace_numeric_probe``). Neither was DaCe's: ``floyd_warshall`` agrees and never needed
+#: an entry, three ``unbound_symbols`` entries are gone, and the fourth turned out to be a real
+#: ``mismatch`` the harness defect had been standing in front of.
 NUMERIC_BAD: Dict[str, str] = {
     # `Connector name 'out' is already used as a symbol, constant, or array name` -- a gemv/solve
     # library node's connector collides with the kernel's ARRAY named `out`. One upstream DaCe bug
@@ -84,18 +89,23 @@ NUMERIC_BAD: Dict[str, str] = {
     "crc16": "parse_fail",
     "dfa": "parse_fail",
     "subset_sum": "parse_fail",  # KeyError: ConditionalBlock (if_32)
-    # No `mismatch` entry survives. All four -- channel_flow (u: d=4.41e-02), cp2k_grid_integrate
-    # (hab: d=4.32e+00), s353_gather_reduction_unroll (b: d=5.41e+02) and unroll_reduction_11_accs
-    # (out: d=1.12e+03) -- were one of two dace frontend defects on SCALAR containers, and all four
-    # agree since the emitter routes around both (dace issues 05 and 06; see the desugars in
-    # numpyto_c.dace_emit). Remeasured 2026-08-08, one subprocess per kernel.
+    # The `unbound_symbols` class is EMPTY. Its four entries (cp2k_density_matrix_trs4,
+    # examinimd, gromacs_nbnxm, lavamd) were never a kernel defect: the symbols are manifest
+    # PARAMETERS, and the probe consulted the case's `syms` for input arguments only, so a symbol
+    # carried by no bare array dimension had nothing left to bind it. The probe binds free SDFG
+    # symbols from `syms` too since 2026-08-10; three of the four agree and are gone, and the
+    # fourth is the `mismatch` below that the missing binding had been hiding.
     #
-    # A free symbol neither an array shape nor a __hpcagent_bench_symbol_defs__ recipe binds. The
-    # emitter mints the name and then records no closed form for it, so nothing downstream can.
-    "cp2k_density_matrix_trs4": "unbound_symbols",  # n_block_rows
-    "examinimd": "unbound_symbols",  # cells_per_dim
-    "gromacs_nbnxm": "unbound_symbols",  # table_size
-    "lavamd": "unbound_symbols",  # particles_per_box
+    # It RAN and the answer is wrong -- a real disagreement, measured 2026-08-10, one subprocess
+    # per kernel. Both surfaced when the binding above stopped short-circuiting them.
+    "lavamd": "mismatch",  # fv: d=1.61e+02
+    "minife": "mismatch",  # x: d=3.82e-01
+    #
+    # The four mismatch entries this list was seeded with -- channel_flow (u: d=4.41e-02),
+    # cp2k_grid_integrate (hab: d=4.32e+00), s353_gather_reduction_unroll (b: d=5.41e+02) and
+    # unroll_reduction_11_accs (out: d=1.12e+03) -- were one of two dace frontend defects on SCALAR
+    # containers, and all four agree since the emitter routes around both (dace issues 05 and 06;
+    # see the desugars in numpyto_c.dace_emit). Remeasured 2026-08-08.
     # Missing program argument "KE" -- an output the SDFG wants that the case does not carry.
     "nbody": "run_fail",
 }

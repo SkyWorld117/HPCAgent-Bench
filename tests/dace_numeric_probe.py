@@ -102,6 +102,18 @@ def main() -> int:
             rec["verdict"], rec["detail"] = "run_fail", f"unresolved argument {name!r}"
             print(json.dumps(rec), flush=True)
             return 0
+    # Free SDFG symbols the MANIFEST already names, bound before the shape matching below so a
+    # ``__hpcagent_bench_symbol_defs__`` recipe can be evaluated over them as well.
+    #
+    # ``bind_free_symbols`` recovers a symbol by matching an array's symbolic shape against its
+    # concrete one, and only for a BARE dimension name -- a nonlinear shape defeats it. minife's
+    # arrays are ``((nx+1)*(ny+1)*(nz+1),)``, so nx/ny/nz occur in no bare dimension and the leg
+    # reported ``unbound_symbols`` for a kernel that runs. ``case["syms"]`` is the preset the oracle
+    # BUILT those inputs from (down-scaling included), so it is the same number by construction --
+    # this consults it for symbols too, where before only ``input_args`` did.
+    for name in sorted({str(s) for s in sdfg.free_symbols} - set(kwargs)):
+        if name in case["syms"]:
+            kwargs[name] = case["syms"][name]
     recipes = vars(module).get("__hpcagent_bench_symbol_defs__", ())
     try:
         kwargs.update(dace_framework.bind_free_symbols(sdfg, recipes, case["input_args"], call, kwargs))
