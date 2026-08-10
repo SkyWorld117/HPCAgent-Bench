@@ -159,6 +159,52 @@ def test_ensure_emits_once_reuses_then_reemits_on_source_change(tmp_path, monkey
         KERNELS.refresh()
 
 
+def test_ensure_removes_a_stale_canonical_whose_emit_failed(tmp_path, monkeypatch):
+    """A broken generator must not serve yesterday's file. The emit only runs because the
+    fingerprint says the bytes are wrong for the current source, so on a failure the stale
+    canonical is DELETED and its cache entry left un-refreshed -- the caller's import then raises
+    on a missing module, which is what a clean checkout (no file to keep) already does."""
+    from hpcagent_bench import autogen, paths
+    from hpcagent_bench.spec import KERNELS
+    from numpyto_common.emit_io import write_generated
+
+    benchmarks = tmp_path / "benchmarks"
+    kdir = _widget_kernel(benchmarks)
+    canonical = kdir / "widget_dace.py"
+
+    def fake_ok(spec, targets):
+        for t in targets:
+            write_generated(paths.BENCHMARKS / spec.relative_path / f"{spec.module_name}_{t}.py",
+                            "# body\n",
+                            source=f"{spec.module_name}_numpy.py")
+        return {t: "ok" for t in targets}
+
+    def fake_fail(spec, targets):
+        return {t: "fail: RuntimeError: the generator broke" for t in targets}
+
+    original_root = paths.BENCHMARKS
+    try:
+        paths.BENCHMARKS = benchmarks
+        KERNELS.refresh()
+        monkeypatch.setattr(autogen, "emit_targets", fake_ok)
+        autogen.ensure("widget", ["dace"])
+        assert canonical.exists()
+        cached = kdir / ".cache" / "widget_dace.py"
+        assert cached.exists(), "a successful emit is cached"
+
+        (kdir / "widget_numpy.py").write_text("def kernel(C, A):\n    C[:] = A * 3\n")
+        KERNELS.refresh()
+        monkeypatch.setattr(autogen, "emit_targets", fake_fail)
+        autogen.ensure("widget", ["dace"])
+        assert not canonical.exists(), "a failed emit must not leave the stale canonical behind"
+        monkeypatch.setattr(autogen, "emit_targets", fake_ok)
+        autogen.ensure("widget", ["dace"])
+        assert canonical.exists(), "the next run retries the emit -- the failure was never cached"
+    finally:
+        paths.BENCHMARKS = original_root
+        KERNELS.refresh()
+
+
 def test_ensure_never_touches_a_hand_override(tmp_path, monkeypatch):
     """A hand-written override (no autogen marker) is never emitted and never cached -- left byte-for-byte."""
     from hpcagent_bench import autogen, paths
