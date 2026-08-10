@@ -41,10 +41,11 @@ One sample per mode, kept minimal so the mode itself is what you read:
 
 The four samples below are the second mode with a specific comparison already wired up.
 
-## `scientific_computing_dace_main_vs_pluto.sbatch` — one node, two optimizers, reports on
+## `npbench_dace_main_vs_pluto.sbatch` — one node, two optimizers, reports on
 
 Mode 2 on a **single** node: `#SBATCH --nodes=1 --ntasks-per-node=4`, so four kernel shards each
-measuring on a quarter of the node, over every kernel in the `scientific_computing` track.
+measuring on a quarter of the node, over every kernel tagged `npbench` (`all@npbench` — a
+`scientific_computing` subset plus a few ML kernels).
 
 | column | what it is |
 |---|---|
@@ -60,7 +61,7 @@ separate compile-only run into a scratch directory, so the timed `.so` is untouc
 number is identical with the reports on or off — but each costs one extra compile per kernel ×
 column, which is why they are off by default.
 
-    DACE_MAIN=~/src/dace-main sbatch -A <account> samples/scientific_computing_dace_main_vs_pluto.sbatch
+    DACE_MAIN=~/src/dace-main sbatch -A <account> samples/npbench_dace_main_vs_pluto.sbatch
 
 The branch check is the same `ensure_branch` the flavors job uses, now shared from
 `scripts/dace_branch.sh` rather than copied — two copies is how the two would drift into disagreeing
@@ -183,7 +184,7 @@ frmwrks)` fails — no speedup table, after the whole sweep. Both native samples
 tree-independent columns (`numpy`, and `pluto` in the three-way job) in their own **unstamped**
 stage, so the baseline stays `numpy` and is still measured exactly once.
 
-> The two older DaCe samples above do **not** do this: `scientific_computing_dace_main_vs_pluto.sbatch` exports
+> The two older DaCe samples above do **not** do this: `npbench_dace_main_vs_pluto.sbatch` exports
 > `HPCAGENT_BENCH_RECORD_BUILD=main` for its whole run, and `npbench_dace_flavors.sbatch` puts
 > `numpy` in its `main` stage. Both stamp the baseline and their final `plot` step trips that
 > assert. Not fixed here — it is a change to files this section does not own.
@@ -237,7 +238,7 @@ steps cannot disagree.
 
     sbatch -A <account> samples/agentic_container.sbatch
     sbatch -A <account> samples/deterministic_kernels_to_ranks.sbatch
-    DACE_MAIN=... sbatch -A <account> samples/scientific_computing_dace_main_vs_pluto.sbatch
+    DACE_MAIN=... sbatch -A <account> samples/npbench_dace_main_vs_pluto.sbatch
     DACE_MAIN=... DACE_EXTENDED=... sbatch -A <account> -N 8 samples/npbench_dace_flavors.sbatch
     HPCAGENT_BENCH_ENV=... DACE_MAIN=... DACE_EXTENDED=... \
         sbatch -A <account> samples/cscs_alps_native_three_way.sbatch
