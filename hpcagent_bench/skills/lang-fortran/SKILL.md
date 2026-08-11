@@ -21,8 +21,17 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
 - ABI fixed: `bind(C)` subroutine, arrays FLAT assumed-size `real(c_double), intent(in) :: a(*)`,
   scalars `value, intent(in)`, plus `workspace(*)`/`workspace_size`
   (`_gen_fortran`, `hpcagent_bench/support/bindings/stubs.py`).
-- `syntax_check` before every `score`/`submit`; iterate with `score` (`preset: "S"` is cheap);
-  submit an already-scored version early -- unsubmitted improvement scores zero.
+- `syntax_check` before every `score`/`submit`; iterate with `score`, and leave `preset` UNSET:
+  it changes the problem size, the recorded grade uses the default preset, and a version tuned
+  at `S`/`M` can lose there. What gets recorded is your LAST graded version, not your best --
+  after an experiment that scores lower, restore the best text and re-score; never end on an
+  experiment. The graded file must be named exactly `<kernel>.<ext>` (`_v2` names are a 400).
+- `submit` re-checks a SECOND seed: near-tolerance reciprocal/reassociation tricks fail there.
+  An HTTP 500 `score failed ... 'fuzzed'` from `submit` is a judge fault, not your code -- retry
+  once, then stop with the good version in place. No compiled reference exists on disk; `search`
+  is not provisioned. Sub-microsecond kernels jitter 20-50% between identical calls: under
+  ~1.15x is not a result. Some kernels ship deliberately silly structure -- deleting it for the
+  plain loop beats every directive (the largest recorded wins, 24x, are that).
 
 ## 1. Writing good Fortran
 
