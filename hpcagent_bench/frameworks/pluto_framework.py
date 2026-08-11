@@ -16,6 +16,7 @@ for it, so it is the only one that asks the numerical oracle for a verdict befor
 
 import json
 import shlex
+import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from hpcagent_bench import pluto_transform
@@ -148,6 +149,11 @@ class PlutoFramework(NativeFramework):
         because :func:`pluto_transform.run_polycc` only ``os.replace``s ``out`` from a scratch
         copy on success -- a stale-but-complete transform from an earlier run, if any, is what the
         build would pick up instead.
+
+        Bounded by :func:`pluto_transform.polycc_report_timeout_s` -- the same 360s the numerical
+        oracle bounds its own ``run_polycc`` call with -- so a wedged polycc times out this ONE
+        scop's report chunk instead of hanging the perf column forever; a timeout degrades to a
+        skip chunk the same way a rejection does, never a crash.
         """
         if pluto_transform.polycc_exe() is None:
             return None
@@ -156,6 +162,7 @@ class PlutoFramework(NativeFramework):
         scops = pluto_transform.scop_inputs(cpp_backend, base)
         if not scops:
             return None
+        timeout = pluto_transform.polycc_report_timeout_s()
         chunks: List[str] = ["==== polycc transformation report ===="]
         for scop in scops:
             try:
@@ -164,7 +171,11 @@ class PlutoFramework(NativeFramework):
                 chunks.append(f"---- {scop.name} ----\nskipped: {exc}")
                 continue
             out = pluto_transform.transformed_path(scop)
-            cmd, proc = pluto_transform.run_polycc(scop, out, pluto_transform.POLYCC_REPORT_ARGS)
+            try:
+                cmd, proc = pluto_transform.run_polycc(scop, out, pluto_transform.POLYCC_REPORT_ARGS, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                chunks.append(f"---- {scop.name} ----\nskipped: polycc timed out after {timeout:.0f}s")
+                continue
             if proc.returncode != 0:
                 chunks.append(f"---- {scop.name} ----\nskipped: polycc rejected the scop\n{proc.stderr}")
                 continue
