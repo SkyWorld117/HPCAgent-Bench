@@ -240,6 +240,22 @@ POLLY_PAR = f"-mllvm -polly -mllvm -polly-parallel {_OPENMP_CLANG}"
 GCC_AUTOPAR = ("-ftree-parallelize-loops={n} -floop-parallelize-all "
                "-fgraphite-identity -floop-nest-optimize -fopenmp")
 
+#: Native-construct threading: honor Fortran ``do concurrent``'s independence promise with real
+#: threads. Appended to EVERY build of a block that declares ``doconcurrent_ref`` in
+#: compilers.yaml, unconditionally of build mode -- the run environment is always multi-core
+#: (``native_call.grading_cpus``), and the opt-in is the CONSTRUCT in the agent's source: the
+#: flag fires on ``do concurrent`` loops ONLY, code without one compiles byte-identically.
+#: Verified (spack flang 22.1.5, dc loop, nm + timed 1-vs-8-thread run): lowers to
+#: __kmpc_fork_call, honors OMP_NUM_THREADS, correct results ("experimental" compile warning is
+#: normal). Needs LLVM >= 20 -- an older image flang rejects the flag and every flang build
+#: breaks, so preflight the image before a campaign. Only flang carries this: gfortran's sole
+#: lever (``-ftree-parallelize-loops``) is parloops, which threads ANY provably-parallel loop
+#: (Fortran dummies cannot alias, so that is most plain loops too -- measured, GOMP_parallel in
+#: a plain-do object) -- whole-build autopar, not a do-concurrent switch, so the default family
+#: keeps ``do concurrent`` serial. ifx needs nothing: it threads it under the ``-fopenmp``
+#: already in its baseline.
+DO_CONCURRENT_FLANG = "-fdo-concurrent-to-openmp=host"
+
 #: Pluto pre-processes the source; only OpenMP is added at compile time.
 #:
 #: This is the ONE clang column that does NOT take :data:`_OPENMP_CLANG`, and it cannot:
