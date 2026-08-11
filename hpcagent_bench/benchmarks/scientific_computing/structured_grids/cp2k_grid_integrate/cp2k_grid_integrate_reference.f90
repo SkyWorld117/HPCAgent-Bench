@@ -230,18 +230,18 @@ contains
 
   ! Canonical HPCAgent-Bench C ABI entry for the vendored multi-core baseline: the argument
   ! order, kinds and mutability mirror the harness stub (support/bindings/stubs.py). The
-  ! standalone Fortran core uses thread-private scratch, so the manifest's scratch buffers
-  ! (alpha/cab/cxyz/pol) and the reserved Sec. 11 workspace are accepted to preserve the ABI
-  ! but are intentionally not referenced.
-  subroutine cp2k_grid_integrate_fp64(alpha, border_width, cab, cxyz, dh, dh_inv, grid, hab, &
+  ! standalone Fortran core dimensions its own thread-private pol/alpha/cxyz/cab scratch
+  ! internally (see cp2k_grid_integrate_ref), so those are not part of this ABI. The reserved
+  ! Sec. 11 workspace is accepted to preserve the ABI but is intentionally not referenced.
+  subroutine cp2k_grid_integrate_fp64(border_width, dh, dh_inv, grid, hab, &
                                       la_max, la_min, lb_max, lb_min, npts_global, npts_local, &
-                                      pol, ra, rab, radius, shift_local, zeta, zetb, npts, num_tasks, &
+                                      ra, rab, radius, shift_local, zeta, zetb, npts, num_tasks, &
                                       workspace, workspace_size) bind(C, name="cp2k_grid_integrate_fp64")
-    real(c_double), intent(in) :: alpha(*), cab(*), cxyz(*), dh(*), dh_inv(*), grid(*)
+    real(c_double), intent(in) :: dh(*), dh_inv(*), grid(*)
     real(c_double), intent(inout) :: hab(*)
     integer(c_int), intent(in) :: border_width(*), la_max(*), la_min(*), lb_max(*), lb_min(*)
     integer(c_int), intent(in) :: npts_global(*), npts_local(*), shift_local(*)
-    real(c_double), intent(in) :: pol(*), ra(*), rab(*), radius(*), zeta(*), zetb(*)
+    real(c_double), intent(in) :: ra(*), rab(*), radius(*), zeta(*), zetb(*)
     integer(c_int64_t), value, intent(in) :: npts, num_tasks, workspace_size
     ! Reserved scratch (ABI Sec. 11): assumed-size, intent(inout); the harness passes
     ! C_NULL_PTR when workspace_size == 0, so it must never be dereferenced here.

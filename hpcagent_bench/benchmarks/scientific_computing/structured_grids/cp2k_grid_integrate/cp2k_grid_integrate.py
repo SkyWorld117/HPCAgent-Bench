@@ -9,8 +9,6 @@ override used to construct valid CP2K-style Gaussian and grid data.
 
 import numpy as np
 
-MAX_L = 2
-MAX_LP = 2 * MAX_L
 MAX_COSET = 10
 MAX_CUBE_RADIUS = 2
 
@@ -100,19 +98,6 @@ def initialize(num_tasks, npts, seed, datatype=np.float64):
     shift_local = np.zeros(3, dtype=np.int32)
     border_width = np.zeros(3, dtype=np.int32)
 
-    pol = np.zeros(
-        (num_tasks, 3, MAX_LP + 1, 2 * MAX_CUBE_RADIUS + 1),
-        dtype=dtype,
-    )
-    alpha = np.zeros(
-        (num_tasks, 3, MAX_L + 1, MAX_L + 1, MAX_LP + 1),
-        dtype=dtype,
-    )
-    cxyz = np.zeros(
-        (num_tasks, MAX_LP + 1, MAX_LP + 1, MAX_LP + 1),
-        dtype=dtype,
-    )
-    cab = np.zeros((num_tasks, MAX_COSET, MAX_COSET), dtype=dtype)
     hab = np.zeros((num_tasks, MAX_COSET, MAX_COSET), dtype=dtype)
 
     return (
@@ -132,9 +117,5 @@ def initialize(num_tasks, npts, seed, datatype=np.float64):
         npts_local,
         shift_local,
         border_width,
-        pol,
-        alpha,
-        cxyz,
-        cab,
         hab,
     )
