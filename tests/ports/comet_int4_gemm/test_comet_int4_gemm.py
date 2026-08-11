@@ -1,6 +1,6 @@
 # Copyright 2026 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Validate comet_int4_gemm_reference.cpp against the NumPy reference.
+"""Validate comet_int4_gemm_reference.cpp against the NumPy reference, and pin int4 semantics.
 
 Compares the standalone C++/OpenMP extraction of CoMet's CUTLASS INT4
 tensor-core GEMM (comet_int4_gemm_reference.cpp) with the NumPy reference
@@ -11,6 +11,11 @@ threads -- so there is no reduction-order sensitivity to grade for; the
 thread-count check below is a cheap extra confirmation, not a required
 peak-relative grading (that's only needed for kernels with `omp atomic`
 accumulation into shared output, which this one has none of).
+
+test_initialize_enforces_int4_code_range_and_dtypes at the bottom is separate: it needs no
+C++ toolchain and pins initialize()'s int4 (0-3, int8-stored) code range plus the manifest's
+declared dtypes -- the only enforcement of that contract, since the repo dtype registry has no
+int4 kind.
 """
 
 import ctypes
@@ -29,12 +34,18 @@ import numpy as np
 import pytest
 from numpy.ctypeslib import ndpointer
 
+from comet_int4_gemm import CODE_MAX, CODE_MIN, initialize
 from comet_int4_gemm_numpy import comet_int4_gemm as numpy_kernel
+
+from hpcagent_bench.spec import load_spec
 
 CPP_SOURCE = BENCH_DIR / "comet_int4_gemm_reference.cpp"
 CPP_LIBRARY = HERE / "libcomet_int4_gemm_ref.so"
 
-pytestmark = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ missing")
+#: Only the C++-fidelity tests below need a toolchain; the int4-range enforcement test at the
+#: bottom of this file is pure Python and must always run, so this is applied per-test, not as a
+#: module-wide ``pytestmark``.
+needs_gxx = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ missing")
 
 
 def _build_so():
@@ -92,6 +103,7 @@ def _run_numpy(codes_left, codes_right):
     return out
 
 
+@needs_gxx
 def test_tiny_deterministic_case_matches_hand_derived_tallies():
     """Same 4-vector case CoMet's own Quick_Start.txt CCC example and this
     session's numpy/C++ ports were all cross-validated against."""
@@ -112,6 +124,7 @@ def test_tiny_deterministic_case_matches_hand_derived_tallies():
         assert got == want, f"pair ({i},{j}): got {got}, want {want}"
 
 
+@needs_gxx
 @pytest.mark.parametrize("num_vector,num_field,seed", [
     (1, 1, 0),
     (2, 1, 1),
@@ -132,6 +145,7 @@ def test_cpp_matches_numpy_reference(num_vector, num_field, seed):
     np.testing.assert_array_equal(cpp_out, numpy_out)
 
 
+@needs_gxx
 def test_asymmetric_left_right_blocks():
     """Left and right blocks need not be the same vectors (e.g. inter-block
     all2all comparisons in CoMet's decomposition) -- exercise that directly."""
@@ -160,6 +174,7 @@ def test_asymmetric_left_right_blocks():
     np.testing.assert_array_equal(out, expected)
 
 
+@needs_gxx
 def test_invalid_dimensions_rejected():
     lib = _load_lib()
     codes = np.zeros((1, 1), dtype=np.int8)
@@ -169,6 +184,7 @@ def test_invalid_dimensions_rejected():
     assert lib.comet_int4_gemm_ref(codes, codes, out, 1, 1, 0) != 0
 
 
+@needs_gxx
 def test_result_independent_of_thread_count(monkeypatch):
     """No scatter/shared-accumulation in this kernel (every output element is
     owned by exactly one (I,J) tile), so unlike a reduction-style kernel this
@@ -190,3 +206,28 @@ def test_result_independent_of_thread_count(monkeypatch):
 
     for r in results[1:]:
         np.testing.assert_array_equal(results[0], r)
+
+
+def test_initialize_enforces_int4_code_range_and_dtypes():
+    """comet_int4_gemm's operands are CoMet's 2-bit CCC codes packed as int4 upstream, but the
+    repo dtype registry has no int4 kind -- this is the only place that range gets enforced, at
+    the kernel's own initialize() plus the manifest's declared dtypes. A drift in either (e.g. a
+    stray ``rng.integers(0, 8, ...)``, or a manifest dtype edited out of sync) must break this
+    test, not silently change what "int4" means for this kernel."""
+    spec = load_spec("comet_int4_gemm")
+    num_vector = spec.parameters["S"]["num_vector"]
+    num_field = spec.parameters["S"]["num_field"]
+    codes_left, codes_right, out = initialize(num_vector, num_field, seed=0)
+
+    for codes in (codes_left, codes_right):
+        assert codes.dtype == np.int8
+        assert codes.min() >= CODE_MIN
+        assert codes.max() <= CODE_MAX
+    assert out.dtype == np.int32
+
+    assert spec.init.dtypes["codes_left"] == "int8"
+    assert spec.init.dtypes["codes_right"] == "int8"
+    assert spec.init.dtypes["out"] == "int32"
+    assert codes_left.dtype == np.dtype(spec.init.dtypes["codes_left"])
+    assert codes_right.dtype == np.dtype(spec.init.dtypes["codes_right"])
+    assert out.dtype == np.dtype(spec.init.dtypes["out"])
