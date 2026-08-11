@@ -5,7 +5,7 @@ description: "Fortran 2018 ground rules for this harness: the judge's build, the
 
 # lang-fortran
 
-One kernel, one thread. Score = speedup vs a SERIAL same-toolchain gfortran build.
+One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfortran build.
 
 ## Harness facts
 
@@ -13,7 +13,9 @@ One kernel, one thread. Score = speedup vs a SERIAL same-toolchain gfortran buil
   -fno-trapping-math -fno-signed-zeros -fstrict-aliasing -fPIC` (`CPU_BASELINE_GFORTRAN` in
   `hpcagent_bench/flags.py`, block `gfortran` in `hpcagent_bench/envs/compilers.yaml`).
 - `-ffast-math` NEVER on: the compiler will not reassociate FP for you.
-- `-fopenmp` always on, `OMP_NUM_THREADS=1` at grading -- threads pay nothing, `!$omp simd` works.
+- `-fopenmp` always on. Grading is MULTI-CORE: the timed run owns its slot's physical cores
+  (24 here, no SMT), `OMP_NUM_THREADS` preset to match -- `!$omp parallel do` pays on big
+  independent loops, `!$omp simd` stacks, tiny trip counts lose to spawn overhead.
 - `do concurrent` compiles clean and runs SERIAL (no parallelizing flag wired): a plain `do`.
 - libmvec is live without fast-math (glibc Fortran directives, pre-included by the driver spec).
 - ABI fixed: `bind(C)` subroutine, arrays FLAT assumed-size `real(c_double), intent(in) :: a(*)`,

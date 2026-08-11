@@ -5,16 +5,19 @@ description: "C++23 shapes that make the compiler vectorize this kernel, and the
 
 # lang-cpp
 
-One kernel. One thread. Score = speedup vs SERIAL same-toolchain build. Payoff comes from
-the COMPILER, not from threads.
+One kernel, a full slot of cores. Score = speedup vs SERIAL same-toolchain build. Payoff
+comes from the compiler AND from threads.
 
 ## Harness facts
 
 - Judge build fixed: `-std=c++23 -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math
   -fno-signed-zeros -fstrict-aliasing`. NO `-ffast-math`: compiler will not reassociate FP.
 - `build:` keeps only `-I -D -l -L`; every other token silently DROPPED.
-- `OMP_NUM_THREADS=1` pinned. OpenMP runs but wins nothing; `omp simd` still wins.
-- `<execution>` links `-ltbb` for you, nothing to declare; only its `unseq` half pays.
+- Grading is MULTI-CORE: the timed run owns its slot's physical cores (24 here, no SMT),
+  `OMP_NUM_THREADS` preset to match. `omp parallel for` pays on big independent loops;
+  `omp simd` stacks; tiny trip counts lose to spawn overhead.
+- `<execution>` links `-ltbb` for you, nothing to declare. `par` spreads across the slot's
+  cores (TBB sizes itself from the affinity mask), `unseq` vectorizes -- `par_unseq` takes both.
 - glibc `libmvec` on: `exp/log/sin` loops CAN vectorize without fast-math.
 - Signature fixed, already spells `__restrict__`. Keep every qualifier.
 - Only `workspace_bytes` scratch is aligned (256B); inputs are NOT -- lying with
