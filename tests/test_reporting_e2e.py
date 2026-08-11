@@ -26,7 +26,8 @@ import numpy as np
 import pytest
 
 from hpcagent_bench import stats
-from hpcagent_bench.plotting import cell_summary, load_results, plot_distribution_grid, plot_heatmap
+from hpcagent_bench.plotting import (cell_summary, load_results, machine_groups, machine_output, plot_distribution_grid,
+                                     plot_heatmap)
 
 #: Known-good simple stencil that builds + validates under native dace (verified on this box).
 _NATIVE_KERNEL_STEM = "heat_3d"  # directory stem; recorded under short_name "heat3d"
@@ -192,7 +193,7 @@ def test_reporting_pipeline_end_to_end(tmp_path, capsys) -> None:
 
     # Each call returns ONE path per machine in the DB, and the paths are what is asserted on --
     # the figures are named after the hardware, so a hardcoded `heatmap.pdf` would only pass by
-    # accident. This run records a single machine, so each family is one file.
+    # accident. How many machines that is (and what they are called) is derived below, not assumed.
     written = plot_heatmap(benchmark="all",
                            preset="S",
                            datatype="float64",
@@ -214,7 +215,16 @@ def test_reporting_pipeline_end_to_end(tmp_path, capsys) -> None:
                                       output=str(box),
                                       usetex=False)
 
-    assert len(written) == 3, f"one machine should give one figure per family, got {written}"
+    # Machine set straight from the reporting layer's own grouping key (plotting.machine_groups
+    # partitions on (cpu, gpu); no CPU name or machine count baked in here -- a DB with a real
+    # hostname, "test-cpu", or two machines must all pass the same way).
+    data = load_results(str(db), "all", "S", "float64")
+    machines = sorted({label for label, _ in machine_groups(data)})
+    assert machines, "no machine identity found in the results DB"
+
+    families = [str(heatmap), str(violin), str(box)]
+    expected = {machine_output(family, label) for family in families for label in machines}
+    assert {str(path) for path in written} == expected, f"got {sorted(written)}, expected {sorted(expected)}"
     for stem in (heatmap, violin, box):
         assert not stem.exists(), f"{stem} is the family name, never a written file"
     for path in written:
@@ -224,7 +234,6 @@ def test_reporting_pipeline_end_to_end(tmp_path, capsys) -> None:
         assert pdf.read_bytes()[:4] == b"%PDF"
 
     # --- the stats path: cleaned median + finite bootstrap CI --------------------------
-    data = load_results(str(db), "all", "S", "float64")
     assert not data.empty and "numpy" in set(data["framework"])
 
     summary = cell_summary(data)
