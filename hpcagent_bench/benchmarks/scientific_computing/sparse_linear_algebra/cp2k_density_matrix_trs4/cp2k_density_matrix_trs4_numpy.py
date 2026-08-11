@@ -31,7 +31,10 @@ DBCSR matrix products are represented by a deterministic local blocked-CSR
 operation with fixed-size dense blocks and explicit scalar multiplication
 loops. The fixed output pattern models CP2K's filtering/truncation by dropping
 product blocks outside the retained pattern and zeroing numerically small
-retained blocks.
+retained blocks. That model is only faithful while the density matrix decays
+inside the retained pattern, which is why the accompanying initializer builds a
+GAPPED system: TRS4 purification is an insulator method, and a gapless spectrum
+has a delocalized density matrix that no fixed sparse pattern can carry.
 
 This adaptation intentionally omits DBCSR, MPI/Cannon communication, OpenMP,
 BLAS and local GEMM dispatch, dynamic sparse allocation, Arnoldi spectral-bound
@@ -196,7 +199,6 @@ def cp2k_density_matrix_trs4(
         frob_id_sq = 0.0
         frob_x_sq = 0.0
         trace_fx = 0.0
-        trace_gx = 0.0
         for block_row in range(n_block_rows):
             for block_pos in range(int(row_ptr[block_row]), int(row_ptr[block_row + 1])):
                 block_col = int(col_idx[block_pos])
@@ -214,9 +216,15 @@ def cp2k_density_matrix_trs4(
                         poly_value = 4.0 * x_value - 3.0 * x2_value
                         g_blocks[block_pos, inner_row, inner_col] = g_value
                         poly_blocks[block_pos, inner_row, inner_col] = poly_value
-                        trace_gx += x2_value * g_value
                         trace_fx += x2_value * poly_value
 
+        # tr(X^2 G) = tr(X^2 (X - I)^2) = ||X^2 - X||_F^2 for symmetric X, and expanding the
+        # blocked sums shows the two differ by exactly tr(X^2) - ||X||_F^2, which is zero because
+        # the pattern holds the diagonal. Accumulating x2*g instead loses that: the truncated
+        # product is not symmetric, the deficit turns trace_gx negative, gamma flips sign and the
+        # iteration runs the wrong way. Taking the residual norm makes trace_gx >= 0 by
+        # construction -- and it is one accumulation less in this serial loop.
+        trace_gx = frob_id_sq
         frob_id = np.sqrt(frob_id_sq)
         frob_x = np.sqrt(frob_x_sq)
         delta_n = float(nelectron) - trace_fx
