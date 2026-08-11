@@ -1,5 +1,5 @@
-/* PolyBench/C 4.2.1 original kernel (polybench.sourceforge.net), adapted to the
- * harness's runtime-sized VLA signature -- see hpcagent_bench/pluto_transform.py. */
+/* Manual verbatim transcription of PolyBench/C 4.2.1 floyd-warshall, adapted
+ * only in signature to the harness's runtime-sized VLA ABI. */
 #include <stdint.h>
 #include <math.h>
 #define DATA_TYPE int
