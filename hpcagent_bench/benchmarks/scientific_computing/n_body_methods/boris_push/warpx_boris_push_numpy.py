@@ -31,8 +31,6 @@ the particle arrays.
 """
 import math
 
-import numpy as np
-
 # --- MomentumPushType (Source/Utils/WarpXAlgorithmSelection.H, AMREX_ENUM order)
 FULL = 0
 FIRST_HALF = 1
