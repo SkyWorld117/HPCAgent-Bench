@@ -221,15 +221,19 @@ def cp2k_density_matrix_trs4(
         frob_x = np.sqrt(frob_x_sq)
         delta_n = float(nelectron) - trace_fx
 
+        # threshold enters SQUARED quantities here, so it plays the role of eps^2 -- the same
+        # scalar is squared before use in the block filter of blocked_csr_multiply.
         if frob_id_sq < threshold * frob_x_sq and np.abs(delta_n) < 0.5:
             gamma = 3.0
         elif np.abs(delta_n) < 1.0e-14:
             gamma = 0.0
         else:
+            # Clamp the MAGNITUDE and keep the sign: a bare `denominator < floor` clamped every
+            # negative trace_gx up to +floor and flipped gamma's sign with it.
             denominator = trace_gx
             denominator_floor = np.abs(delta_n) / 100.0
-            if denominator < denominator_floor:
-                denominator = denominator_floor
+            if np.abs(denominator) < denominator_floor:
+                denominator = denominator_floor if denominator >= 0.0 else -denominator_floor
             gamma = delta_n / denominator
         gamma_values[iteration] = gamma
 

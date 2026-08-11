@@ -15,7 +15,8 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
-BENCH_DIR = (REPO_ROOT / "hpcagent_bench" / "benchmarks" / "hpc" / "sparse_linear_algebra" / "cp2k_density_matrix_trs4")
+BENCH_DIR = (REPO_ROOT / "hpcagent_bench" / "benchmarks" / "scientific_computing" / "sparse_linear_algebra" /
+             "cp2k_density_matrix_trs4")
 sys.path.insert(0, str(BENCH_DIR))
 
 from cp2k_density_matrix_trs4 import initialize  # noqa: E402
@@ -29,6 +30,18 @@ from hpcagent_bench.support.bindings.contract import binding_from_spec  # noqa: 
 
 SPEC = BenchSpec.load("cp2k_density_matrix_trs4")
 BINDING = binding_from_spec(SPEC)
+
+#: The graded presets, read from the manifest: n_iter is an iteration BUDGET tuned there
+#: (see the comment above ``parameters:``), so no size number is duplicated here.
+MANIFEST = yaml.safe_load((BENCH_DIR / "cp2k_density_matrix_trs4.yaml").read_text())
+PRESETS = MANIFEST.get("benchmark", MANIFEST)["parameters"]
+
+
+def preset_args(preset):
+    """``(n_block_rows, block_size, n_iter, nelectron)`` for a manifest preset."""
+    p = PRESETS[preset]
+    return p["n_block_rows"], p["block_size"], p["n_iter"], p["nelectron"]
+
 
 #: Thread counts the OpenMP block-row decomposition must agree on. Every parallel loop writes
 #: disjoint block positions and accumulates only within its owning block row, so the answer must
@@ -82,7 +95,7 @@ def fortran_library(tmp_path_factory):
 
     fortran_source = BENCH_DIR / "cp2k_density_matrix_trs4_reference.f90"
     build_dir = tmp_path_factory.mktemp("cp2k_density_matrix_trs4_fortran")
-    library = build_dir / "libcp2k_density_matrix_trs4_ref.dylib"
+    library = build_dir / "libcp2k_density_matrix_trs4_ref.so"
     subprocess.run(
         [
             compiler,
@@ -144,7 +157,7 @@ def abi_inputs(n_block_rows, block_size, n_iter, nelectron):
 
 
 def call_abi_entry(library, data):
-    """Invoke ``cp2k_density_matrix_trs4_fp64`` as the harness does; returns its address.
+    """Invoke ``cp2k_density_matrix_trs4_fp64`` as the harness does.
 
     Argument list and types are derived from the binding rather than hand-written, so this cannot
     drift from the ABI the harness actually calls.
@@ -167,7 +180,6 @@ def call_abi_entry(library, data):
     function.argtypes = argtypes
     function.restype = None
     function(*args)
-    return ctypes.cast(function, ctypes.c_void_p).value
 
 
 def run_fortran(
@@ -257,7 +269,7 @@ def test_manifest_init_scalars_reach_initializer():
     args = [symbols[name] for name in init["input_args"]]
     data = initialize(*args, datatype=np.float64)
 
-    assert args == [4, 2, 3, 5, -2.0, 2.0, 1.0e-8, 2.0, 19]
+    assert args == [*preset_args("S"), -2.0, 2.0, 1.0e-8, 2.0, 19]
     assert data[2].shape == (12, 2, 2)
 
 
@@ -466,6 +478,47 @@ def test_all_gamma_update_branches(nelectron, expected_branch):
         assert 0.0 <= inputs[10][0] <= 6.0
 
 
+@pytest.mark.parametrize("preset", ["S", "M"])
+def test_graded_presets_actually_converge(preset):
+    """The purification loop must reach its break, not merely run the budget out.
+
+    With too small a budget branch_history is a flat run of 3s and converged stays 0: the
+    kernel would then grade a truncated iteration instead of a converged density matrix.
+    """
+    n_block_rows, block_size, n_iter, nelectron = preset_args(preset)
+    inputs = list(initialize(n_block_rows, block_size, n_iter, nelectron, -2.0, 2.0, 1.0e-8, 2.0, 19))
+    run_numpy(inputs, n_iter, nelectron, -2.0, 2.0, 1.0e-8, 2.0)
+
+    state, branch_history = inputs[12], inputs[11]
+    iterations_done = int(state[6])
+    assert state[7] == 1.0
+    assert 0 < iterations_done < n_iter
+    assert np.all(branch_history[:iterations_done] > 0)
+    assert np.all(branch_history[iterations_done:] == 0)
+    assert state[9] < 1.0e-4
+
+
+def test_large_preset_stays_bounded_without_converging():
+    """L cannot converge and its budget must stop before the iteration runs away.
+
+    blocked_csr_multiply keeps only the fixed three-blocks-per-row pattern, so the truncated
+    trace_gx eventually goes negative -- impossible for the exact operator, where it is
+    tr(X^2 (X - I)^2) >= 0 -- and gamma flips sign. A budget past that point overflows to
+    inf/NaN, which would be graded as a result.
+    """
+    n_block_rows, block_size, n_iter, nelectron = preset_args("L")
+    inputs = list(initialize(n_block_rows, block_size, n_iter, nelectron, -2.0, 2.0, 1.0e-8, 2.0, 19))
+    run_numpy(inputs, n_iter, nelectron, -2.0, 2.0, 1.0e-8, 2.0)
+
+    state, branch_history = inputs[12], inputs[11]
+    assert state[7] == 0.0
+    assert int(state[6]) == n_iter
+    for array in inputs[4:]:
+        assert np.isfinite(array).all()
+    assert np.max(np.abs(inputs[9])) < 10.0
+    assert set(int(branch) for branch in branch_history) == {2, 3}
+
+
 def test_spin_scaling_and_chemical_potential_bounds():
     base = initialize(5, 2, 4, 6, -2.0, 2.0, 1.0e-8, 1.0, 59)
     one_spin = list(clone_inputs(base))
@@ -554,11 +607,11 @@ def test_abi_entry_point_matches_numpy_oracle(fortran_library):
     entry -- not only through the standalone core the cross-checks above call."""
     assert BINDING.symbol == "cp2k_density_matrix_trs4_fp64"
 
-    oracle = abi_inputs(12, 3, 4, 22)
-    run_numpy([oracle[n] for n in SPEC.init.output_args], 4, 22, -2.0, 2.0, 1.0e-8, 2.0)
+    oracle = abi_inputs(*preset_args("M"))
+    run_numpy([oracle[n] for n in SPEC.init.output_args], *preset_args("M")[2:], -2.0, 2.0, 1.0e-8, 2.0)
     expected = {n: np.array(oracle[n], copy=True) for n in SPEC.output_args}
 
-    actual = abi_inputs(12, 3, 4, 22)
+    actual = abi_inputs(*preset_args("M"))
     call_abi_entry(fortran_library, actual)
 
     assert np.count_nonzero(actual["p_blocks"]) > 0
@@ -579,23 +632,20 @@ def test_openmp_thread_counts_agree_with_oracle_on_one_entry_point(fortran_libra
     set_threads, get_max_threads = omp_controls(fortran_library)
     default_threads = get_max_threads()
 
-    oracle = abi_inputs(48, 4, 6, 115)
-    run_numpy([oracle[n] for n in SPEC.init.output_args], 6, 115, -2.0, 2.0, 1.0e-8, 2.0)
+    oracle = abi_inputs(*preset_args("L"))
+    run_numpy([oracle[n] for n in SPEC.init.output_args], *preset_args("L")[2:], -2.0, 2.0, 1.0e-8, 2.0)
     expected = {n: np.array(oracle[n], copy=True) for n in SPEC.output_args}
 
-    results, addresses = {}, set()
+    results = {}
     try:
         for threads in THREAD_COUNTS:
             set_threads(threads)
             assert get_max_threads() == threads
-            data = abi_inputs(48, 4, 6, 115)
-            addresses.add(call_abi_entry(fortran_library, data))
+            data = abi_inputs(*preset_args("L"))
+            call_abi_entry(fortran_library, data)
             results[threads] = {n: np.array(data[n], copy=True) for n in SPEC.output_args}
     finally:
         set_threads(default_threads)
-
-    # One resolved symbol drove every run: the threaded results describe the same kernel.
-    assert len(addresses) == 1
 
     for threads in THREAD_COUNTS:
         for name in SPEC.output_args:
