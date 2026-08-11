@@ -14,6 +14,7 @@ covers the emitted binding's order against the canonical one; here it is the bui
 marshalling that consumes that order, the polycc invocation, and -- with a real toolchain -- that
 the transformed library computes the right answer.
 """
+import concurrent.futures
 import ctypes
 import os
 import pathlib
@@ -143,20 +144,60 @@ def test_polycc_rejection_declines_and_surfaces_its_own_diagnostic(tmp_path, mon
     assert "data dependent conditions not supported" in str(excinfo.value)
 
 
-def test_a_failed_polycc_leaves_no_partial_output_to_be_compiled(tmp_path, monkeypatch) -> None:
-    """polycc writes as it goes. A truncated translation unit whose mtime is newer than the scop's is
-    exactly the "fresh enough, reuse it" condition the next build tests, so it would compile half a
-    kernel and time it."""
+def test_a_failed_polycc_never_writes_out_directly(tmp_path, monkeypatch) -> None:
+    """polycc is pointed at a private scratch name, never ``out``, so a failed (or killed mid-emit)
+    run cannot leave a truncated ``out`` behind -- there is nothing at ``out`` for it to truncate.
+    Pinned after a real race: ``out`` is a FIXED, shared path (a tracked override's ``cpp_backend``
+    sibling, not a caller's private temp dir), so two overlapping callers handing polycc the same
+    ``-o`` argument used to be able to truncate each other's output -- measured, six concurrent runs
+    of one scop through the old direct-write path came back with five different byte counts,
+    including a 0-byte file, from identical inputs and an otherwise-deterministic polycc (a serial
+    repeat of the same run is always byte-identical). A failed run must therefore leave a
+    PRE-EXISTING ``out`` -- e.g. a stale-but-complete transform from an earlier successful run --
+    untouched rather than deleted: with polycc never writing to ``out`` directly, there is no
+    truncated content there for the old "delete on failure" cleanup to be protecting against, and
+    deleting a good cached transform on a transient failure would only be waste."""
     scop = write_scop(tmp_path)
     out = pluto_transform.transformed_path(scop)
-    out.write_text("/* half a kernel */\n")
+    out.write_text("/* stale but complete, from an earlier good run */\n")
+    stale_mtime = out.stat().st_mtime
     monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
     monkeypatch.setattr(pluto_transform, "run_bounded", failing_polycc)
 
     _cmd, proc = pluto_transform.run_polycc(scop, out)
 
     assert proc.returncode == 1
-    assert not out.exists(), "a partial polycc output survived a failed run"
+    assert out.read_text() == "/* stale but complete, from an earlier good run */\n", \
+        "a failed run corrupted or deleted a pre-existing, unrelated out"
+    assert out.stat().st_mtime == stale_mtime, "a failed run touched out's mtime"
+    leftover = [p for p in out.parent.iterdir() if p not in (out, scop)]
+    assert not leftover, f"a failed run left scratch litter behind: {leftover}"
+
+
+@pytest.mark.skipif(pluto_transform.polycc_exe() is None, reason=NO_POLYCC)
+def test_concurrent_runs_on_the_same_out_do_not_corrupt_each_other(tmp_path) -> None:
+    """The flake this pins: ``out`` is a FIXED path (a tracked override's real ``cpp_backend``
+    sibling is exactly this shape), so the timed build, the numerical oracle and a second pytest
+    worker can all hand polycc the SAME ``-o`` argument for the SAME scop at once. Before the
+    scratch-name-then-``os.replace`` fix, that raced two polycc PROCESSES truncating one shared
+    file -- measured, six such concurrent runs came back with five different byte counts (one of
+    them 0 bytes) from identical inputs and an otherwise fully deterministic polycc. ``out`` at
+    rest after several concurrent runs must be BYTE-IDENTICAL to a plain serial run -- never a
+    torn write from a sibling that happened to still be writing."""
+    scop = write_scop(tmp_path)
+    out = pluto_transform.transformed_path(scop)
+
+    baseline_out = out.with_name("baseline_" + out.name)
+    _cmd, base_proc = pluto_transform.run_polycc(scop, baseline_out, timeout=120)
+    assert base_proc.returncode == 0, base_proc.stderr
+    baseline = baseline_out.read_text()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: pluto_transform.run_polycc(scop, out, timeout=120), range(6)))
+
+    for _cmd, proc in results:
+        assert proc.returncode == 0, proc.stderr
+    assert out.read_text() == baseline, "out diverged from a serial run's byte-identical output"
 
 
 def test_call_args_declines_when_the_binding_is_absent(tmp_path, monkeypatch) -> None:

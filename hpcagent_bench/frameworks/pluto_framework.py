@@ -144,8 +144,10 @@ class PlutoFramework(NativeFramework):
         (:data:`pluto_transform.POLYCC_REPORT_ARGS` extends :data:`pluto_transform.POLYCC_ARGS`), so
         the two are structurally incapable of describing different transforms -- the report adds
         ``--debug`` verbosity and nothing else. Writing to the SAME path the build compiles is what
-        makes the echoed command copy-pasteable; a run that fails leaves nothing behind for the
-        build to pick up, because :func:`pluto_transform.run_polycc` deletes its own partial output.
+        makes the echoed command copy-pasteable; a run that fails publishes nothing new there,
+        because :func:`pluto_transform.run_polycc` only ``os.replace``s ``out`` from a scratch
+        copy on success -- a stale-but-complete transform from an earlier run, if any, is what the
+        build would pick up instead.
         """
         if pluto_transform.polycc_exe() is None:
             return None

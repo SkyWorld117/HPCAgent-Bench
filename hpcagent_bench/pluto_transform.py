@@ -253,15 +253,26 @@ def run_polycc(scop: pathlib.Path,
     Runs in a throwaway cwd because polycc drops a ``<stem>.pluto.cloog`` intermediate beside
     the working directory; ``out`` is absolute, so only the litter is confined.
 
-    A FAILED run's partial ``out`` is deleted. polycc writes as it goes, so a run that dies
-    mid-emit leaves a truncated translation unit whose mtime is NEWER than the scop's -- which is
-    exactly the "fresh enough, reuse it" condition :func:`transformed_sources` tests, so the next
-    build would compile half a kernel and time it. Removing it here rather than in each caller is
-    what keeps that true for both of them.
+    polycc is told to write a UNIQUE ``-o`` path next to ``out`` (a name ``tempfile.mkstemp``
+    reserved), never ``out`` itself, and a success is published into ``out`` with one
+    ``os.replace`` at the end. ``out`` is a fixed, shared path -- for an :func:`override_source`
+    scop it is a tracked file's sibling in the real ``cpp_backend``, not a caller's private temp
+    dir -- so two overlapping callers (the timed build and the numerical oracle, or two test
+    workers) used to hand polycc the SAME ``-o`` argument and race truncating it: measured, six
+    concurrent runs of one scop through the OLD direct-write path came back with FIVE different
+    outputs, including a 0-byte file, from otherwise-identical inputs and otherwise-deterministic
+    polycc (a serial repeat of the same run is always byte-identical). ``os.replace`` on the same
+    filesystem is atomic, so a concurrent reader now only ever observes a complete ``out`` -- the
+    one before this call or the one after it, never a torn write from either.
+
+    A FAILED run leaves ``out`` untouched -- there is nothing partial to clean up there any more,
+    since polycc never wrote to it -- so a stale-but-complete previous transform survives a
+    transient failure instead of being thrown away.
 
     The argv is RETURNED rather than reconstructed by the caller: the transformation report echoes
     the command it ran, and a second copy built from a second ``shutil.which`` can print something
-    that was never executed.
+    that was never executed. It names ``out`` as the ``-o`` target (what the caller asked for and
+    what now sits there on success), not the internal scratch name polycc actually wrote to.
 
     Runs under :func:`pet_parse_env`, so the timed build and the report get the aarch64 pet-parse
     shim from the same place they get everything else about this invocation. Wiring it here rather
@@ -269,23 +280,29 @@ def run_polycc(scop: pathlib.Path,
     the scop differently from the build could describe a transform the build never managed to run.
 
     ``timeout`` (seconds, ``None`` = unbounded) bounds a WEDGED polycc through :func:`run_bounded`;
-    the expiry raises :class:`subprocess.TimeoutExpired` and deletes the partial output first.
+    the expiry raises :class:`subprocess.TimeoutExpired`, having deleted only the scratch output.
     """
     exe = polycc_exe()
     if exe is None:
         raise NotSupportedByFramework(FRAMEWORK, scop.stem, "polycc is not installed on this host")
+    argv = [exe, *args, str(scop), "-o", str(out)]
+    fd, tmp_name = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp_out = pathlib.Path(tmp_name)
+    tmp_out.unlink()  # only the unique NAME is wanted -- polycc must create the file itself
     with tempfile.TemporaryDirectory(prefix="pluto_transform_") as scratch:
-        cmd = [exe, *args, str(scop), "-o", str(out)]
+        cmd = [exe, *args, str(scop), "-o", str(tmp_out)]
         try:
             proc = run_bounded(cmd, cwd=scratch, timeout=timeout, env=pet_parse_env(pathlib.Path(scratch)))
         except subprocess.TimeoutExpired:
-            out.unlink(missing_ok=True)
+            tmp_out.unlink(missing_ok=True)
             raise
-    if proc.returncode != 0:
-        out.unlink(missing_ok=True)
-    elif out.is_file():
-        out.write_text(dedupe_scratch_declarations(out.read_text()))
-    return cmd, proc
+    if proc.returncode != 0 or not tmp_out.is_file():
+        tmp_out.unlink(missing_ok=True)
+    else:
+        tmp_out.write_text(dedupe_scratch_declarations(tmp_out.read_text()))
+        os.replace(tmp_out, out)
+    return argv, proc
 
 
 def assert_affine(scop: pathlib.Path, kernel: str) -> None:
