@@ -19,6 +19,8 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   trip counts lose to spawn overhead. Full recipe in the openmp page.
 - `do concurrent` THREADS on the `llvm` family (the build passes `-fdo-concurrent-to-openmp=host`)
   and on `oneapi`; on the DEFAULT `gcc` family it runs SERIAL. Details in the do-concurrent page.
+- Coarrays are NOT a lever: no `-fcoarray` flag is on any build, so coarray code does not even
+  compile (measured, gfortran default rejects `num_images()`).
 - libmvec is live without fast-math (glibc Fortran directives, pre-included by the driver spec).
 - **The entry point MUST be a bare `bind(C)` SUBROUTINE** -- not a function, not a module
   procedure, no name mangling. Drop `bind(C)` or wrap it in a module and the judge cannot find

@@ -47,9 +47,11 @@ Fortran. Everything below applies to all three; clause syntax is identical.
   `lastprivate` to break a false dependence you cannot rewrite away.
 - **Fortran spellings:** `!$omp parallel do` on the proven-independent loop; close it with
   `end do` alone -- a trailing `!$omp end parallel do` is legal ONLY as the very next line and
-  a frequent build-breaker anywhere else, so omitting it is always safe. `!$omp workshare`
-  covers array syntax, but an explicit loop under `parallel do` usually beats it. `!$omp simd`
-  cannot sit on a `do concurrent` loop -- pick one spelling (see the do-concurrent page).
+  a frequent build-breaker anywhere else, so omitting it is always safe. **`!$omp workshare`
+  does NOT thread on the default `gcc` family** (gfortran lowers it to `single` -- measured,
+  zero scaling on a compute-bound body; flang threads it only partially): rewrite array syntax
+  as an explicit loop under `parallel do`. `!$omp simd` cannot sit on a `do concurrent` loop --
+  pick one spelling (see the do-concurrent page).
 
 ## Offload (`target`)
 
