@@ -502,4 +502,11 @@ wait "${agent_step_pid}"
 agent_status="$?"
 set -e
 
+# Post-run utilization verdicts into the job log, so over/under-provisioned role splits are
+# visible without anyone remembering to run the report. Best-effort: the batch-host python may
+# be too old for the report (needs >= 3.10), and a report failure must never fail the run.
+echo "===== node utilization report (${RUN_DIR}/monitor) ====="
+python3 "${SCRIPT_DIR}/monitor_report.py" "${RUN_DIR}/monitor" 2>&1 \
+    || echo "monitor_report failed (python3 too old on this host?); run it manually on the login node"
+
 exit "${agent_status}"

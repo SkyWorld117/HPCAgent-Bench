@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import math
 import os
 import pathlib
 import sys
@@ -210,6 +211,18 @@ async def search(request: SearchRequest) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+def scrub_nonfinite(value: Any) -> Any:
+    """JSONResponse serializes with allow_nan=False; an upstream inf (speedup with a ~0 ns
+    measured run, seen live in 589436) must degrade to null, not 500 the whole submit."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: scrub_nonfinite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [scrub_nonfinite(item) for item in value]
+    return value
+
+
 @app.post("/submit")
 async def submit(request: Request) -> Response:
     """Terminal grade: public inputs plus the held-out second seed, and the only LEADERBOARD route."""
@@ -218,7 +231,7 @@ async def submit(request: Request) -> Response:
     if upstream.status_code != 200:
         return relay(upstream)  # an error body has no hidden slice to drop
     graded = upstream.json()
-    return JSONResponse({key: value for key, value in graded.items() if key not in HIDDEN_KEYS})
+    return JSONResponse(scrub_nonfinite({key: value for key, value in graded.items() if key not in HIDDEN_KEYS}))
 
 
 @app.post("/bench")
