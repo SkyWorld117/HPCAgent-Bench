@@ -157,7 +157,7 @@ def kernel(alpha, imgIn: torch.Tensor):
 
     import numpy as np
     k = ((1.0 - np.exp(-alpha_val)) * (1.0 - np.exp(-alpha_val)) /
-         (1.0 + alpha_val * np.exp(-alpha_val) - np.exp(2.0 * alpha_val)))
+         (1.0 + 2.0 * alpha_val * np.exp(-alpha_val) - np.exp(2.0 * alpha_val)))
 
     a1 = a5 = float(k)
     a2 = a6 = float(k * np.exp(-alpha_val) * (alpha_val - 1.0))

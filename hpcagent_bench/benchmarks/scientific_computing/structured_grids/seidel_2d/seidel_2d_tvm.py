@@ -33,7 +33,7 @@ def run_seidel(exe, n, TSTEPS, A, dev):
     host = A.numpy()  # .numpy() already returns a fresh copy
     row_tmp = empty((n, ), A.dtype, dev)
 
-    for _ in range(0, TSTEPS - 1):
+    for _ in range(TSTEPS):
         for i in range(1, n - 1):
             up = tvm.runtime.tensor(np.ascontiguousarray(host[i - 1]), device=dev)
             cur = tvm.runtime.tensor(np.ascontiguousarray(host[i]), device=dev)

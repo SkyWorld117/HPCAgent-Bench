@@ -30,7 +30,7 @@ def kernel_mpi(A, B, N, TSTEPS, *, comm, workspace):
     r0 = 2 if up == MPI.PROC_NULL else 1
     r1 = rows - 1 if down == MPI.PROC_NULL else rows
 
-    for _t in range(1, TSTEPS):
+    for _t in range(TSTEPS):
         _exchange(comm, Ap, rows, up, down)
         Bp[r0:r1 + 1, 1:-1] = 0.2 * (Ap[r0:r1 + 1, 1:-1] + Ap[r0:r1 + 1, 0:-2] + Ap[r0:r1 + 1, 2:] +
                                      Ap[r0 + 1:r1 + 2, 1:-1] + Ap[r0 - 1:r1, 1:-1])

@@ -68,7 +68,7 @@ def kernel(TSTEPS, A, B, alpha=0.125):
     exe1 = _K1.get(key)  # A -> B
     exe2 = _K2.get(key)  # B -> A
     alpha = float(alpha)
-    for _ in range(1, TSTEPS):
+    for _ in range(1, TSTEPS + 1):
         exe1(A, B, alpha, B)
         exe2(B, A, alpha, A)
     return A, B

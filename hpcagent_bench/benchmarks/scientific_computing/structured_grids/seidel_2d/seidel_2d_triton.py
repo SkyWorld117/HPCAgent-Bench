@@ -59,9 +59,11 @@ def _kernel_recursive_scan(
 
 
 def kernel(TMAX, N, A):
-    grid_stencil = lambda meta: (triton.cdiv(N - 2, meta['BLOCK_SIZE']), )
 
-    for t in range(TMAX - 1):
+    def grid_stencil(meta):
+        return (triton.cdiv(N - 2, meta['BLOCK_SIZE']), )
+
+    for t in range(TMAX):
         # Process rows sequentially (Gauss-Seidel dependency)
         for i in range(1, N - 1):
             # Apply stencil to row i in parallel across columns

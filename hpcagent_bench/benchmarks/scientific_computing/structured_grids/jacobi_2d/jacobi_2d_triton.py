@@ -21,7 +21,7 @@ def jacobi2d_step(src_ptr, dst_ptr, barrier, N: tl.int32, stride0: tl.int32, num
     tiles_per_dim = tl.cdiv(N - 2, BLOCK_SIZE)
     total_tiles = tiles_per_dim * tiles_per_dim
 
-    for _ in range(2 * (TSTEPS - 1)):
+    for _ in range(2 * TSTEPS):
         for tile_id in range(sm_index, total_tiles, num_sms):
             pid_x = tile_id // tiles_per_dim
             pid_y = tile_id % tiles_per_dim
@@ -38,12 +38,12 @@ def jacobi2d_step(src_ptr, dst_ptr, barrier, N: tl.int32, stride0: tl.int32, num
             base = i * stride0 + j
 
             c = tl.load(src_ptr + base, mask=in_bounds, other=0)
-            l = tl.load(src_ptr + i * stride0 + (j - 1), mask=in_bounds, other=0)
+            lf = tl.load(src_ptr + i * stride0 + (j - 1), mask=in_bounds, other=0)
             r = tl.load(src_ptr + i * stride0 + (j + 1), mask=in_bounds, other=0)
             u = tl.load(src_ptr + (i - 1) * stride0 + j, mask=in_bounds, other=0)
             d = tl.load(src_ptr + (i + 1) * stride0 + j, mask=in_bounds, other=0)
 
-            out = 0.2 * (c + l + r + u + d)
+            out = 0.2 * (c + lf + r + u + d)
             tl.store(dst_ptr + base, out, mask=in_bounds)
 
         dst_ptr, src_ptr = src_ptr, dst_ptr

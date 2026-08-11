@@ -5,7 +5,7 @@ def kernel(TSTEPS, A, B, alpha=0.125):
     # alpha is the diffusion coefficient shared by all three stencil axes (default 0.125 keeps the
     # numerics identical to the hardcoded constant it replaced); exposed as a runtime scalar so a
     # run can vary the thermal diffusivity.
-    for t in range(1, TSTEPS):
+    for t in range(1, TSTEPS + 1):
         B[1:-1, 1:-1,
           1:-1] = (alpha * (A[2:, 1:-1, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[:-2, 1:-1, 1:-1]) + alpha *
                    (A[1:-1, 2:, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, :-2, 1:-1]) + alpha *

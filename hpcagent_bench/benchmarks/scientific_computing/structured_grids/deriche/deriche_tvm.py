@@ -30,7 +30,7 @@ _K_gpu = TvmKernel("deriche_gpu", build_primfunc, gpu_target, lambda: tvm.cuda(0
 
 def _coeffs(alpha):
     e = np.exp
-    k = (1.0 - e(-alpha)) * (1.0 - e(-alpha)) / (1.0 + alpha * e(-alpha) - e(2.0 * alpha))
+    k = (1.0 - e(-alpha)) * (1.0 - e(-alpha)) / (1.0 + 2.0 * alpha * e(-alpha) - e(2.0 * alpha))
     a1 = a5 = k
     a2 = a6 = k * e(-alpha) * (alpha - 1.0)
     a3 = a7 = k * e(-alpha) * (alpha + 1.0)

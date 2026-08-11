@@ -57,7 +57,7 @@ void heat3d_mpi(
     int64_t p0 = (up == MPI_PROC_NULL) ? 2 : 1;
     int64_t p1 = (down == MPI_PROC_NULL) ? planes - 1 : planes;
 
-    for (int64_t t = 1; t < TSTEPS; t++) {
+    for (int64_t t = 1; t <= TSTEPS; t++) {
         /* Refresh A's ghost planes from the neighbours' boundary owned planes, then B = stencil(A). */
         MPI_Sendrecv(Ap + plane, (int)plane, MPI_DOUBLE, up, 0,
                      Ap + (planes + 1) * plane, (int)plane, MPI_DOUBLE, down, 0, cart, MPI_STATUS_IGNORE);

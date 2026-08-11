@@ -58,7 +58,7 @@ void jacobi2d_mpi(
     int64_t r0 = (up == MPI_PROC_NULL) ? 2 : 1;
     int64_t r1 = (down == MPI_PROC_NULL) ? rows - 1 : rows;
 
-    for (int64_t t = 1; t < TSTEPS; t++) {
+    for (int64_t t = 0; t < TSTEPS; t++) {
         /* Refresh A's ghost rows from the neighbours' boundary owned rows, then B = stencil(A). */
         MPI_Sendrecv(Ap + ncols, (int)ncols, MPI_DOUBLE, up, 0,
                      Ap + (rows + 1) * ncols, (int)ncols, MPI_DOUBLE, down, 0, cart, MPI_STATUS_IGNORE);

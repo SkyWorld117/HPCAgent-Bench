@@ -3,7 +3,7 @@
 # HPCAgent-Bench correctness reference.
 def kernel(TSTEPS, N, A):
 
-    for t in range(0, TSTEPS - 1):
+    for t in range(TSTEPS):
         for i in range(1, N - 1):
             A[i, 1:-1] += (A[i - 1, :-2] + A[i - 1, 1:-1] + A[i - 1, 2:] + A[i, 2:] + A[i + 1, :-2] + A[i + 1, 1:-1] +
                            A[i + 1, 2:])

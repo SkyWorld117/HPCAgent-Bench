@@ -29,7 +29,7 @@ def kernel_mpi(A, B, N, TSTEPS, alpha=0.125, *, comm, workspace):
     p0 = 2 if up == MPI.PROC_NULL else 1
     p1 = planes - 1 if down == MPI.PROC_NULL else planes
 
-    for _t in range(1, TSTEPS):
+    for _t in range(1, TSTEPS + 1):
         _exchange(comm, Ap, planes, up, down)
         Bp[p0:p1 + 1, 1:-1,
            1:-1] = (alpha *

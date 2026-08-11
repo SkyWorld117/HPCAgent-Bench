@@ -36,7 +36,7 @@ def kernel(TSTEPS, A, B):
     exe = _K.get((n, str(A.dtype)))
     # Ping-pong in place: B's interior <- stencil(A), then A's interior <-
     # stencil(B). Y_in == Y_out aliasing keeps the boundary fixed.
-    for _ in range(1, TSTEPS):
+    for _ in range(TSTEPS):
         exe(A, B, B)
         exe(B, A, A)
     return A
