@@ -1,6 +1,7 @@
 /* Manual verbatim transcription of the PolyBench/C 4.2.1 adi kernel
  * (polybench.sourceforge.net), adapted only in its signature to the harness's
- * runtime-sized VLA ABI; B1/B2 read the harness's b1/b2 scalars. */
+ * runtime-sized VLA ABI; B1/B2 are the PolyBench-verbatim literals, the
+ * yaml-plumbed b1/b2 params stay in the ABI but are intentionally unused. */
 #include <stdint.h>
 #include <math.h>
 #define SCALAR_VAL(x) x
@@ -24,13 +25,16 @@ void adi_fp64(int64_t N, int64_t TSTEPS, double u[restrict N][N], double b1, dou
   DATA_TYPE mul1, mul2;
   DATA_TYPE a, b, c, d, e, f;
 
+  (void)b1;
+  (void)b2;
+
 #pragma scop
 
   DX = SCALAR_VAL(1.0)/(DATA_TYPE)_PB_N;
   DY = SCALAR_VAL(1.0)/(DATA_TYPE)_PB_N;
   DT = SCALAR_VAL(1.0)/(DATA_TYPE)_PB_TSTEPS;
-  B1 = b1;
-  B2 = b2;
+  B1 = SCALAR_VAL(2.0);
+  B2 = SCALAR_VAL(1.0);
   mul1 = B1 * DT / (DX * DX);
   mul2 = B2 * DT / (DY * DY);
 
