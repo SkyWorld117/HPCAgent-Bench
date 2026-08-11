@@ -307,6 +307,18 @@ esac
 
 mkdir -p "${RUN_DIR}" "${SHARED_HOST_DIR}"
 
+# Lustre: a checkpoint downloaded into a stripe-1 directory loads at ONE OST's bandwidth
+# (measured: kimi's 554 GiB at 55 min). A PFL default on the HF hub dir makes every future
+# download stripe wide past 64 MiB while small files stay narrow. Set from the batch host
+# (the containers have no lfs); existing files keep their layout -- restripe those with
+# `lfs migrate -c 16 -S 4M` while nothing reads them. Best-effort: a non-Lustre HF_HOME
+# (or no lustre client) must not fail the run.
+if command -v lfs >/dev/null 2>&1; then
+    mkdir -p "${HF_HOME:-${SCRATCH}/hf}/hub"
+    lfs setstripe -E 64M -c 1 -E -1 -c 16 -S 4M "${HF_HOME:-${SCRATCH}/hf}/hub" 2>/dev/null \
+        || echo "note: lfs setstripe on ${HF_HOME:-${SCRATCH}/hf}/hub failed (non-Lustre?)"
+fi
+
 # Read-only per-kernel material + the prompt template, once per run, before any role starts.
 # run_campaign.sh writes the problems file next to this script, so a bare name from .env is relative
 # to SCRIPT_DIR, not to whatever directory the job was submitted from.
