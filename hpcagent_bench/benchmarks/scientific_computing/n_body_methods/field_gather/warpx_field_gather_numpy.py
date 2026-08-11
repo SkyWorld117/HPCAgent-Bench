@@ -12,7 +12,7 @@ Original project:
 Extracted kernel:
     doGatherShapeN<depos_order, galerkin_interpolation>   (+ Compute_shape_factor)
 
-Original source:
+Original source (WarpX tag 26.08, commit d72f49d70b6a8aa5c64895e6446f1013263c81fb):
     Source/Particles/Gather/FieldGather.H
     Source/Particles/ShapeFactors.H
 

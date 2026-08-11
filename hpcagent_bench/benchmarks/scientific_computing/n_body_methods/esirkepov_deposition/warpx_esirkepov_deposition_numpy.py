@@ -12,7 +12,7 @@ Extracted kernel:
     doEsirkepovDepositionShapeN
     (+ Compute_shape_factor, Compute_shifted_shape_factor)
 
-Original source:
+Original source (WarpX tag 26.08, commit d72f49d70b6a8aa5c64895e6446f1013263c81fb):
     Source/Particles/Deposition/CurrentDeposition.H
     Source/Particles/ShapeFactors.H
 

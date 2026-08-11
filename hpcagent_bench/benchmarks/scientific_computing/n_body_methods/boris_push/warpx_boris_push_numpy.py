@@ -11,7 +11,7 @@ Original project:
 Extracted kernel:
     UpdateMomentumBoris
 
-Original source:
+Original source (WarpX tag 26.08, commit d72f49d70b6a8aa5c64895e6446f1013263c81fb):
     Source/Particles/Pusher/UpdateMomentumBoris.H
 
 Original project license:
