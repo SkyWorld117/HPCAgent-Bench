@@ -29,7 +29,7 @@ CLANG = "clang"
 
 CXX_SUFFIXES = (".cpp", ".cc", ".cxx", ".c++", ".C")
 
-DEFAULT_CFLAGS = "-O3 -march=native"
+DEFAULT_CFLAGS = f"{flags.OPT_LEVEL} {flags.ARCH_NATIVE}"
 
 REPORT_SUFFIX = ".optreport.txt"
 

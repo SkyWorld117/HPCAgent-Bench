@@ -69,7 +69,7 @@ _FP_RELAX = "-fno-math-errno -fno-trapping-math -fno-signed-zeros"
 # (brew gcc's libgomp, or a libomp-equipped clang). (3) libmvec is glibc's vector libm --
 # Linux only (macOS libSystem has none), and reached by a DIFFERENT knob per compiler
 # family; see the libmvec block below.
-_ARCH_NATIVE = "-mcpu=native" if (osinfo.IS_MACOS and osinfo.is_arm()) else "-march=native"
+ARCH_NATIVE = "-mcpu=native" if (osinfo.IS_MACOS and osinfo.is_arm()) else "-march=native"
 _OPENMP_CLANG = "-fopenmp=libgomp" if osinfo.IS_LINUX else "-fopenmp"
 
 #: The libmvec decl header handed to GCC (see the file for the full rationale).
@@ -98,13 +98,13 @@ OPT_LEVEL = "-O3"
 #: OpenMP is pinned to GNU ``libgomp`` (like POLLY_PAR/PLUTO_PAR -- clang's default
 #: ``libomp`` is a separate, frequently-absent package) and glibc's ``libmvec`` is added;
 #: on macOS both are dropped (neither exists there -- see the OS-aware pieces above).
-CPU_BASELINE_CLANG = (f"-O3 {_ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_CLANG}")
+CPU_BASELINE_CLANG = (f"-O3 {ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_CLANG}")
 
 #: GCC baseline for C / C++: -O3 + native arch + OpenMP + vectorized libm (no fast-math).
 #: The libmvec half arrives as a decl header, not a flag -- gcc has no -fveclib. This line
 #: previously claimed "libmvec implicit on glibc"; it is not, and was not: glibc's decls
 #: need __FAST_MATH__, so gcc built every libm call scalar while clang vectorized it.
-CPU_BASELINE_GCC = (f"-O3 {_ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_GCC}")
+CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_GCC}")
 
 #: GCC baseline for Fortran -- CPU_BASELINE_GCC minus the C decl header. gfortran cannot
 #: consume one ("valid for C/C++/... but not for Fortran"): a warning on every compile, and
@@ -114,7 +114,7 @@ CPU_BASELINE_GCC = (f"-O3 {_ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing 
 #: pre-include is a distro spec, not upstream gcc, so it is a host property rather than
 #: something we can assert from here: tests/test_vecmath.py checks gfortran really does
 #: vectorize libm, and fails loudly on a host whose spec omits it.
-CPU_BASELINE_GFORTRAN = (f"-O3 {_ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC")
+CPU_BASELINE_GFORTRAN = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC")
 
 #: icx defaults to fp-model=fast; precise must come first (last spelling wins over _FP_RELAX).
 CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -fopenmp {_FP_RELAX} -fPIC -qopt-zmm-usage=high")
@@ -131,13 +131,13 @@ DEBUG_SYMBOLS: List[str] = ["-g"]
 #: NO ``-ffast-math`` (its reassociation/finite-math rewrites diverge from NumPy).
 #: Kept here in the matrix so no framework string-literals the optimization
 #: flags itself (the no-literal invariant this module documents).
-PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {_ARCH_NATIVE} {_FP_RELAX}"
+PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX}"
 
 #: LLVM Fortran (``flang`` / ``flang-new``) baseline -- LLVM's Fortran front end,
 #: the Fortran companion to the clang C/C++ baseline (``CPU_BASELINE_CLANG``).
 #: Mirrors the clang intent (O3 + native arch + OpenMP + PIC; no fast-math -- see the
 #: CPU baseline note); flang does not accept every gcc FP-relax spelling.
-FLANG_BASELINE = f"-O3 {_ARCH_NATIVE} -fopenmp -fPIC"
+FLANG_BASELINE = f"-O3 {ARCH_NATIVE} -fopenmp -fPIC"
 
 # ---------------------------------------------------------------------------
 # Warnings -- a diagnostic axis, not an optimization one, so it is a separate

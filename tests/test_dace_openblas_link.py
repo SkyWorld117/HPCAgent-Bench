@@ -78,7 +78,8 @@ def build_openblas_openmp() -> pathlib.Path:
         shutil.rmtree(source, ignore_errors=True)
         source.parent.mkdir(parents=True, exist_ok=True)
         run_step(["git", "clone", "--depth", "1", "--branch", OPENBLAS_TAG, OPENBLAS_REPO, str(source)], CLONE_TIMEOUT)
-    run_step(["make", "-C", str(source), "USE_OPENMP=1", f"-j{BUILD_JOBS}"], BUILD_TIMEOUT)
+    # Runners are uarch-heterogeneous; gcc-13 fails the autodetected AVX512 kernels. Pin AVX2.
+    run_step(["make", "-C", str(source), "USE_OPENMP=1", "TARGET=HASWELL", f"-j{BUILD_JOBS}"], BUILD_TIMEOUT)
     run_step(["make", "-C", str(source), f"PREFIX={openmp_prefix() / 'install'}", "install"], CLONE_TIMEOUT)
     assert library.exists(), f"OpenBLAS {OPENBLAS_TAG} reported an install but {library} is missing"
     return library

@@ -10,7 +10,7 @@ the COMPILER, not from threads.
 
 ## Harness facts
 
-- Judge build fixed: `-O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math
+- Judge build fixed: `-std=c++23 -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math
   -fno-signed-zeros -fstrict-aliasing`. NO `-ffast-math`: compiler will not reassociate FP.
 - `build:` keeps only `-I -D -l -L`; every other token silently DROPPED.
 - `OMP_NUM_THREADS=1` pinned. OpenMP runs but wins nothing; `omp simd` still wins.

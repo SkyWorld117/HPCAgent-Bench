@@ -285,7 +285,7 @@ use-after-free).
 
 **Fence.** The reference's ladder is `__x86_64__ && __GNUC__` -> `_mm_mfence()`, `_WIN64` ->
 `MemoryBarrier()`, else NOTHING. "Else nothing" includes aarch64, which is in our target set
-(`_ARCH_NATIVE` branches on Apple arm64; CSCS is Neoverse). Extended:
+(`ARCH_NATIVE` branches on Apple arm64; CSCS is Neoverse). Extended:
 
 ```c
 #if defined(__x86_64__) && defined(__GNUC__)
