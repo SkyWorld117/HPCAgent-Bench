@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=kimi-messages-probe
 #SBATCH --partition=mi300
-#SBATCH --nodes=3
+#SBATCH --nodes=5
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --time=03:00:00
@@ -12,7 +12,7 @@
 # an instant 200 with zero engine activity, and the claude client burned all 10 retries on
 # error=unknown/error_status=null. The anthropic adapter is byte-identical to the working
 # rocm723 image, so the suspects are the kimi_k2 tool parser and the Kimi chat template --
-# both only reachable with a live server. This job boots the campaign's exact 2-node pp
+# both only reachable with a live server. This job boots the campaign exact pp=4
 # serve once (eager mode: CUDA graphs are irrelevant to protocol bugs and cost up to 2 h),
 # then captures RAW response bodies for the request shapes claude-code sends.
 #
@@ -48,13 +48,15 @@ READY_TIMEOUT="${READY_TIMEOUT:-7200}"
 mkdir -p "${RUN_DIR}"
 
 mapfile -t NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
-if (( ${#NODES[@]} != 3 )); then
-    echo "FAIL: need exactly 3 nodes, allocation has ${#NODES[@]}" >&2
+if (( ${#NODES[@]} != 5 )); then
+    echo "FAIL: need exactly 5 nodes, allocation has ${#NODES[@]}" >&2
     exit 2
 fi
 export NODE0="${NODES[0]}"
 NODE1="${NODES[1]}"
 NODE2="${NODES[2]}"
+NODE3="${NODES[3]}"
+NODE4="${NODES[4]}"
 
 SERVE_SCRIPT="${RUN_DIR}/serve.sh"
 CLIENT_SCRIPT="${RUN_DIR}/client.sh"
@@ -64,8 +66,8 @@ stage() { printf '\n===== stage: %s =====\n' "$*"; }
 
 cat <<EOF
 job:       ${SLURM_JOB_ID}
-inference: ${NODE0} + ${NODE1} (${INFERENCE_EDF}, pp=2 tp=4) port ${API_PORT}
-client:    ${NODE2} (${AGENT_EDF})
+inference: ${NODE0}..${NODE3} (${INFERENCE_EDF}, pp=4 tp=4) port ${API_PORT}
+client:    ${NODE4} (${AGENT_EDF})
 model:     ${MODEL_REPO} served as ${SERVED_MODEL}
 run dir:   ${RUN_DIR}
 EOF
@@ -106,9 +108,9 @@ ARGS=(
     "${MODEL_PATH}"
     --served-model-name "${SERVED_MODEL}"
     --tensor-parallel-size 4
-    --pipeline-parallel-size 2
+    --pipeline-parallel-size 4
     --distributed-executor-backend mp
-    --nnodes 2
+    --nnodes 4
     --node-rank "${rank}"
     --master-addr "${NODE0}"
     --master-port "${MASTER_PORT}"
@@ -121,6 +123,7 @@ ARGS=(
     --max-model-len 65536
     --gpu-memory-utilization 0.85
     --enforce-eager
+    --reasoning-parser kimi_k2
 )
 if (( rank == 0 )); then
     ARGS+=(--host 0.0.0.0 --port "${API_PORT}")
@@ -276,9 +279,9 @@ CLIENT
 chmod +x "${SERVE_SCRIPT}" "${CLIENT_SCRIPT}"
 rm -f "${CLIENT_DONE}"
 
-stage "starting kimi pp=2 on ${NODE0},${NODE1}"
-srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --exclusive --export=ALL \
-    --nodelist="${NODE0},${NODE1}" --environment="${INFERENCE_EDF}" \
+stage "starting kimi pp=4 on ${NODE0}-${NODE3}"
+srun --nodes=4 --ntasks=4 --ntasks-per-node=1 --exclusive --export=ALL \
+    --nodelist="${NODE0},${NODE1},${NODE2},${NODE3}" --environment="${INFERENCE_EDF}" \
     bash "${SERVE_SCRIPT}" >"${RUN_DIR}/vllm-step.log" 2>&1 &
 SERVER_STEP_PID=$!
 
@@ -307,7 +310,7 @@ cat "${RUN_DIR}/models.json"
 
 stage "client probes on ${NODE2}"
 set +e
-srun --nodes=1 --ntasks=1 --exclusive --export=ALL --nodelist="${NODE2}" \
+srun --nodes=1 --ntasks=1 --exclusive --export=ALL --nodelist="${NODE4}" \
     --environment="${AGENT_EDF}" bash "${CLIENT_SCRIPT}"
 client_status=$?
 set -e
