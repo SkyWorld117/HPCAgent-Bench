@@ -18,8 +18,10 @@ import shlex
 import subprocess
 import tomllib
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "containers/cluster/example-script/run_cluster.sh"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "containers/cluster/example-script/run_cluster.sh"
 FUNCTION_RE = re.compile(r"^derived_edf\(\) \{$.*?^\}$", re.MULTILINE | re.DOTALL)
+AGENT_MOUNT = f"{REPO_ROOT}/containers/agent:/opt/optarena-agent"
 
 
 def function_text():
@@ -38,6 +40,7 @@ def run_derived_edf(tmp_path, name, edf_dir):
         f"SHARED_HOST_DIR={shlex.quote(str(shared_dir))}",
         "SHARED_MOUNT=/shared",
         f"EDF_PATH={shlex.quote(str(edf_dir))}",
+        f"HPCAGENT_BENCH_REPO={shlex.quote(str(REPO_ROOT))}",
         function_text(),
         f"derived_edf {shlex.quote(name)}",
         'printf %s "${EDF_FILE}"',
@@ -73,6 +76,7 @@ def test_the_shared_mount_lands_in_a_copy_that_is_still_valid_toml(tmp_path):
     assert derived == tmp_path / "run/edf/bench.toml"
     parsed = tomllib.loads(derived.read_text())
     assert f"{shared_dir}:/shared" in parsed["mounts"]
+    assert AGENT_MOUNT in parsed["mounts"]
     assert parsed["image"] == "docker://example/optarena:latest"
     assert parsed["env"] == {"FI_PROVIDER": "cxi"}
     assert (edf_dir / "bench.toml").read_text() == MULTILINE_EDF, "the registered EDF must not be rewritten"
@@ -106,4 +110,4 @@ def test_the_mounts_already_in_the_edf_survive(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     mounts = tomllib.loads(pathlib.Path(proc.stdout).read_text())["mounts"]
-    assert mounts == [f"{shared_dir}:/shared", "/scratch:/scratch", "/capstor:/capstor"]
+    assert mounts == [f"{shared_dir}:/shared", AGENT_MOUNT, "/scratch:/scratch", "/capstor:/capstor"]
