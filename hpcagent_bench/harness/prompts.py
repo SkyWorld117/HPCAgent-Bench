@@ -458,7 +458,8 @@ def language_skills_for(task) -> FrozenSet[str]:
 MODEL_SKILL_LANGUAGES: Dict[str, FrozenSet[str]] = {
     "openmp": frozenset({"c", "cpp", "fortran"}),
     "stdpar-cpp": frozenset({"cpp"}),
-    "openacc-fortran": frozenset({"fortran"}),
+    "doconcurrent-fortran": frozenset({"fortran"}),
+    "openacc": frozenset({"c", "cpp", "fortran"}),
 }
 
 

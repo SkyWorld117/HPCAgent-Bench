@@ -20,11 +20,15 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
 - Kernel ABI already spells restrict: `void k(const double *restrict a, double *restrict out,
   int64_t n)`. Symbols are `int64_t`.
 - Workflow: `syntax_check` before every `score`/`submit`. Iterate with `score`. What gets
-  recorded is your LAST graded version, not your best: after any experiment that scores lower,
-  restore the best text and re-score before anything else. Never end the session on an experiment.
-- `preset` changes the problem size. The recorded grade uses the task's DEFAULT preset; a speedup
-  measured at `S`/`M`/`XL` does not transfer and a version tuned there can lose at the default.
-  Leave `preset` unset.
+  recorded is your LAST graded version, not your best -- and MOST prior runs (60%) ended on a
+  worse experiment and lost real speedup. So the invariant is per-iteration, not end-of-session:
+  the moment a `score` comes back below your best, restore the best text and re-score it BEFORE
+  trying the next idea. You may run out of budget at any time; never let the last graded thing
+  be an experiment.
+- `preset` changes the problem size. A speedup measured at `S`/`M`/`XL` does not transfer and a
+  version tuned there can lose at the default. Leave `preset` unset -- and `submit` HONORS a
+  `preset` you pass, so the recorded grade measures the wrong size and the analysis discards it.
+  When copying a `score` payload into `submit`, DELETE the preset key.
 
 ## Judge realities
 

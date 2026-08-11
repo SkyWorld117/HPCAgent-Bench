@@ -27,8 +27,10 @@ comes from the compiler AND from threads.
 ## Workflow
 
 `syntax_check` (free, instant) on every file BEFORE `score`/`submit`. Iterate with `score`.
-What gets recorded is your LAST graded version, not your best: after an experiment that scores
-lower, restore the best text and re-score before anything else -- never end on an experiment.
+What gets recorded is your LAST graded version, not your best -- and MOST prior runs (60%)
+ended on a worse experiment and lost real speedup. The invariant is per-iteration: the moment
+a `score` comes back below your best, restore the best text and re-score it BEFORE trying the
+next idea; budget can end at any time, so the last graded thing must never be an experiment.
 The graded file must be named exactly `<kernel>.<ext>`; `_v2` names are a 400. `submit`
 re-checks a SECOND seed (near-tolerance reassociation tricks fail there), and an HTTP 500
 `score failed ... 'fuzzed'` from it is a judge fault, not your code: retry once, then stop with
@@ -71,6 +73,7 @@ No shell (`Bash` disallowed): clang-tidy, sanitizers and `-Rpass` are unreachabl
    same `fp_ops`. `counter_group="cache"` when ratios say memory, not compute.
 
 Wrong answer, no shell: bisect with `tool="none"` prints. Leave `preset` unset: it changes the
-problem size, the recorded grade uses the DEFAULT preset, and a version tuned at `S`/`M` can
-lose there. The `linuxperf` dump runs to hundreds of KB -- ask at most once; your context is
+problem size, and `submit` HONORS a `preset` you pass -- the recorded grade then measures the
+wrong size and the analysis discards it; when copying a `score` payload into `submit`, DELETE
+the preset key. A version tuned at `S`/`M` can lose at the default. The `linuxperf` dump runs to hundreds of KB -- ask at most once; your context is
 ~64k, so never re-`Read` the file after an edit that reported success.
