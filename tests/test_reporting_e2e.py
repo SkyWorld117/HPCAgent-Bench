@@ -109,6 +109,25 @@ def _attempt_native(work: pathlib.Path) -> bool:
     return _db_has_validated(db, ["numpy", "dace_cpu"])
 
 
+def _clean_native_leftovers(db: pathlib.Path) -> None:
+    """Remove any shard DB (+ -wal/-shm + prompt store) a partial :func:`_attempt_native` left
+    beside ``db``, plus ``db`` itself if that partial run already got aggregated into it.
+
+    ``_attempt_native`` can write real-hostname rows into a shard and even build ``db`` as their
+    aggregate before ``_db_has_validated`` decides the run does not count. Leaving the shard on
+    disk means the next ``ensure_aggregated`` call (``load_results`` / ``plot_*`` both make one)
+    re-merges those real rows into the synthetic DB we are about to write -- two machines instead
+    of one."""
+    from hpcagent_bench.harness import recording
+
+    for stale in recording.shard_paths(str(db)) + [str(db)]:
+        store = recording.prompt_store_dir(stale)
+        if store.is_dir():
+            shutil.rmtree(store)
+        for suffix in ("", "-wal", "-shm"):
+            pathlib.Path(str(stale) + suffix).unlink(missing_ok=True)
+
+
 def _build_synthetic(db: pathlib.Path) -> None:
     """Write a small SYNTHETIC results DB with the real schema: two structured-grid kernels x
     (numpy, dace_cpu, numba), a handful of jittered samples each plus a slow outlier on one cell
@@ -117,6 +136,7 @@ def _build_synthetic(db: pathlib.Path) -> None:
 
     from hpcagent_bench.frameworks.schema import Result, results_engine
 
+    _clean_native_leftovers(db)
     rng = np.random.default_rng(0)
     engine = results_engine(str(db))
     # (kernel short_name, domain) -- real short_names so the ordering resolves them to HPC.
