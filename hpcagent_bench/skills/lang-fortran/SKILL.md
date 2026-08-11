@@ -17,8 +17,8 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   (24 here, no SMT), `OMP_NUM_THREADS` preset to match. The default move is
   `!$omp parallel do simd` with `reduction(...)` on the outermost independent big loop; tiny
   trip counts lose to spawn overhead. Full recipe in the openmp page.
-- `do concurrent` THREADS on the `llvm` family (the build passes `-fdo-concurrent-to-openmp=host`)
-  and on `oneapi`; on the DEFAULT `gcc` family it runs SERIAL. Details in the do-concurrent page.
+- `do concurrent` THREADS on every family: gcc via `-ftree-parallelize-loops`, llvm via
+  `-fdo-concurrent-to-openmp=host`, oneapi under `-fopenmp`. Details in the do-concurrent page.
 - Coarrays are NOT a lever: no `-fcoarray` flag is on any build, so coarray code does not even
   compile (measured, gfortran default rejects `num_images()`).
 - libmvec is live without fast-math (glibc Fortran directives, pre-included by the driver spec).
