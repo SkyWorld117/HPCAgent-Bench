@@ -14,9 +14,10 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
   -fno-signed-zeros -fstrict-aliasing`. Source: `hpcagent_bench/flags.py`.
 - `-ffast-math` NEVER on. Compiler will not reassociate FP for you.
 - `-fopenmp` always on, you never add or remove it. Grading is MULTI-CORE: the timed run owns
-  its slot's physical cores (24 here, no SMT) with `OMP_NUM_THREADS` preset to match, so
-  `omp parallel for` on an independent, big-enough loop pays toward core count against the
-  serial baseline; `omp simd` stacks on top. Tiny trip counts lose to spawn overhead.
+  its slot's physical cores (24 here, no SMT) with `OMP_NUM_THREADS` preset to match. The
+  default move is `#pragma omp parallel for simd` with `reduction(...)` on the outermost
+  independent big-enough loop -- it pays toward core count against the serial baseline. Tiny
+  trip counts lose to spawn overhead; full recipe in the openmp page.
 - Kernel ABI already spells restrict: `void k(const double *restrict a, double *restrict out,
   int64_t n)`. Symbols are `int64_t`.
 - Workflow: `syntax_check` before every `score`/`submit`. Iterate with `score`. What gets

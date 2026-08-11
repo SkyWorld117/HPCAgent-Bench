@@ -26,16 +26,17 @@ Fortran. Everything below applies to all three; clause syntax is identical.
   silly reference structure and writing the plain loop -- no directive beats that. Then thread,
   then vectorize, and only then consider intrinsics (hand-written AVX after `omp simd` already
   vectorized usually regresses and burns budget).
-- **`parallel for` on the OUTERMOST independent loop.** Prove independence first: no iteration
-  writes what another reads. Every accumulator gets `reduction(+:acc)` -- never a shared
-  variable, and no hand-built per-thread partial-sum arrays; the clause is the whole pattern.
-  `schedule(static)` is the default and right for uniform iterations; `dynamic`/`guided` only
-  when per-iteration cost varies. A tiny trip count is better left to `simd` alone -- spawn
-  overhead is real.
-- **`simd` on the unit-stride inner loop**, with `reduction(+:acc)` to authorize the FP
+- **The default move is `parallel for simd` (Fortran: `!$omp parallel do simd`) on the
+  OUTERMOST independent loop**: threads across the slot's cores plus vector lanes within each,
+  one directive. Prove independence first: no iteration writes what another reads. Every
+  accumulator gets `reduction(+:acc)` -- never a shared variable, and no hand-built per-thread
+  partial-sum arrays; the clause is the whole pattern and it also authorizes the FP
   reassociation the compiler refuses on its own (no `-ffast-math`) -- keep it only while the
-  answer stays inside tolerance. The combined `parallel for simd` is usually the right answer
-  on one big independent loop: threads across cores plus lanes within each.
+  answer stays inside tolerance. `schedule(static)` is the default and right for uniform
+  iterations; `dynamic`/`guided` only when per-iteration cost varies.
+- **Split the two halves when the shape demands it**: `parallel for` on the outer loop with
+  `simd` on the unit-stride inner loop when they are different loops; `simd` alone on a tiny
+  trip count where spawn overhead beats the win.
 - **`aligned(...)` claims: only on memory YOU allocated.** ABI input pointers carry natural
   alignment ONLY -- an `aligned(p:32|64)` clause or `__builtin_assume_aligned` on one is UB and
   the #1 crash cause on record (SIGSEGV at vector width, a full judge round trip lost). This is

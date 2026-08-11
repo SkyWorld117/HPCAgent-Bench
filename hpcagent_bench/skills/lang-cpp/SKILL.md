@@ -14,8 +14,9 @@ comes from the compiler AND from threads.
   -fno-signed-zeros -fstrict-aliasing`. NO `-ffast-math`: compiler will not reassociate FP.
 - `build:` keeps only `-I -D -l -L`; every other token silently DROPPED.
 - Grading is MULTI-CORE: the timed run owns its slot's physical cores (24 here, no SMT),
-  `OMP_NUM_THREADS` preset to match. `omp parallel for` pays on big independent loops;
-  `omp simd` stacks; tiny trip counts lose to spawn overhead.
+  `OMP_NUM_THREADS` preset to match. The default move is `#pragma omp parallel for simd` with
+  `reduction(...)` on the outermost independent big loop (or `par_unseq`, below); tiny trip
+  counts lose to spawn overhead. Full recipe in the openmp page.
 - `<execution>` links `-ltbb` for you, nothing to declare. `par` spreads across the slot's
   cores (TBB sizes itself from the affinity mask), `unseq` vectorizes -- `par_unseq` takes both.
 - glibc `libmvec` on: `exp/log/sin` loops CAN vectorize without fast-math.
