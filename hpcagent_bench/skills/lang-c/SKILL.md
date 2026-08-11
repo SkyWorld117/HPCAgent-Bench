@@ -62,9 +62,12 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
 - **Math forms the judge's flags cover.** `-fno-math-errno` makes `sqrt`/`fabs`/`fmin`/`fmax`
   instructions, not libm calls with errno; `x * x`, not `pow(x, 2.0)`.
 - **The judge's input buffers carry only natural alignment; only the `workspace` scratch is
-  over-aligned (256B).** Claiming more -- `__builtin_assume_aligned` OR an OpenMP
-  `aligned(p:32|64)` clause -- is UB and SIGSEGVs at vector width; `aligned(p:8)` is true and
-  buys nothing. A crash costs a full judge round trip and reports as `correct: false`.
+  over-aligned (256B).** Claiming more on an ABI INPUT pointer -- `__builtin_assume_aligned`
+  OR an OpenMP `aligned(p:32|64)` clause -- is UB and SIGSEGVs at vector width; `aligned(p:8)`
+  is true and buys nothing. This is a fact about the data, not a risk to re-assess. On storage
+  you OWN -- the workspace, your own C11 `aligned_alloc` or aligned locals --
+  `__builtin_assume_aligned` is fine. A crash costs a full judge round trip and reports as
+  `correct: false`.
 
 ## 2. Debugging tools
 
