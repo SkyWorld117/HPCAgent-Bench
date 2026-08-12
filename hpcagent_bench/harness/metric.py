@@ -245,11 +245,25 @@ def _correctness_cells(params, configs, constraints, k, config_names):
         for kind, sample in fuzz.edge_shapes(params, cfg, constraints, config_names=config_names):
             cells.append({"label": f"cfg{ci}:edge:{kind}", "params": sample, "timed": False})
         for j in range(k):
+            # Draw 0 is the declared MAXIMUM, not a random sample. Nothing else in the set is
+            # guaranteed to reach it: edge shapes stay deliberately small, large_shapes samples the
+            # upper half of [L, XL], and a seeded draw lands on an endpoint only by accident -- so
+            # the one shape a production run actually uses could go ungraded. It replaces a draw
+            # rather than adding a cell, so the correctness set costs the same.
+            label = "max" if j == 0 else f"fuzz{j}"
             try:
-                sample = fuzz.fuzzed_shape(params, j, cfg, constraints, config_names=config_names)
+                if j == 0:
+                    sample = fuzz.max_shape(params, cfg, constraints, config_names=config_names)
+                else:
+                    sample = fuzz.fuzzed_shape(params, j, cfg, constraints, config_names=config_names)
             except ValueError:
-                continue  # no draw satisfies the constraints here
-            cells.append({"label": f"cfg{ci}:fuzz{j}", "params": sample, "timed": False})
+                if j != 0:
+                    continue  # no draw satisfies the constraints here
+                try:  # the maximum is not constraint-legal here, so spend the cell on an ordinary draw
+                    sample, label = fuzz.fuzzed_shape(params, 0, cfg, constraints, config_names=config_names), "fuzz0"
+                except ValueError:
+                    continue
+            cells.append({"label": f"cfg{ci}:{label}", "params": sample, "timed": False})
     return cells
 
 

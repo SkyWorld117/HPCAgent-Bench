@@ -496,6 +496,28 @@ def edge_shapes(parameters: Dict[str, Any],
     return out
 
 
+def max_shape(parameters: Dict[str, Any],
+              config: Dict[str, Any] = None,
+              constraints=None,
+              config_names: FrozenSet[str] = NO_CONFIG_NAMES) -> Dict[str, Any]:
+    """The exact top of the fuzz interval: every free size root pinned to its declared maximum.
+
+    :func:`resolve_ranges` brackets each size as ``[L, XL]``, so this is the ``XL`` preset with
+    derive/construct resolved and ``config`` merged -- the largest shape the manifest declares and
+    the one a production run actually uses. Nothing else in the draw guarantees it is ever seen:
+    :func:`edge_shapes` deliberately stays small (:func:`_edge_value` clamps to
+    :data:`EDGE_VALUES`), :func:`large_shapes` samples the upper HALF of the interval, and a
+    seeded fuzz draw hits an endpoint only by accident.
+
+    :raises ValueError: When the maximum shape is not constraint-legal for this config -- the
+        caller decides whether to fall back to an ordinary draw.
+    """
+    fixed = dict(config or {})
+    fuzzed = resolve_ranges(parameters, config_names=config_names)
+    spec = respec_ranges(parameters, fuzzed, lambda lo, hi: [hi, hi])
+    return _resolve_against(spec, fixed, 0, "uniform", constraints, config_names=config_names)
+
+
 def large_shapes(parameters: Dict[str, Any],
                  config: Dict[str, Any] = None,
                  *,
