@@ -434,12 +434,22 @@ case "${CONTAINER_RUNTIME}" in
 esac
 
 derived_edf() {
-    # derived_edf <registered EDF name> -- leaves in EDF_FILE a per-run COPY of that EDF which also
-    # mounts the shared folder. An EDF is a static registered file, so a run-specific mount can only
-    # enter through a rewritten one; srun --environment takes an absolute .toml path.
-    local name="$1" dir src=""
+    # derived_edf <registered EDF name> <role tag> -- leaves in EDF_FILE a per-run COPY of that EDF
+    # which also mounts the shared folder. An EDF is a static registered file, so a run-specific
+    # mount can only enter through a rewritten one; srun --environment takes an absolute .toml path.
+    #
+    # The path carries the ROLE, and the file is renamed into place rather than streamed into place.
+    # Both halves matter. The judge and the agent are launched with the same AMD_CE_ENV, so a
+    # name-only path had them rewriting one file -- and role_srun backgrounds the judge's srun before
+    # the agent's rewrite starts, so the truncate could land while the judge's srun was still reading
+    # its --environment. What that step got was an empty or half-written TOML, no container
+    # environment applied, and the payload running on the BARE HOST: the tell was `python3` resolving
+    # to the host's 3.6.15 (the image ships 3.12), which killed the judge in 589512 and 590356 and
+    # cost about one arm in fifteen. rename(2) is atomic, so a reader now sees old file or new, never
+    # a partial one.
+    local name="$1" role="${2:-role}" dir src="" tmp
     local -a edf_dirs
-    EDF_FILE="${RUN_DIR}/edf/${name}.toml"
+    EDF_FILE="${RUN_DIR}/edf/${name}.${role}.toml"
     IFS=: read -r -a edf_dirs <<<"${EDF_PATH:-${HOME}/.edf}"
     for dir in "${edf_dirs[@]}"; do
         if [[ -f "${dir}/${name}.toml" ]]; then
@@ -452,6 +462,7 @@ derived_edf() {
         exit 2
     fi
     mkdir -p "${RUN_DIR}/edf"
+    tmp="${EDF_FILE}.$$.tmp"
     # The agent tools are baked into the image at build time; mounting the checkout's copy on top
     # keeps them in lockstep with the repo the other roles already run from (585108: a .sqsh six
     # hours older than the identity fix recorded every row as 'adhoc').
@@ -460,12 +471,15 @@ derived_edf() {
         '!added && /^[[:space:]]*mounts[[:space:]]*=[[:space:]]*\[[[:space:]]*$/ {
              print; print entry; print agent_entry; added = 1; next
          }
-         { print }' "${src}" >"${EDF_FILE}"
+         { print }' "${src}" >"${tmp}"
     # Refuse to launch: without the mount the judge sees no submitted file and blames the agent.
-    if ! grep -qF "${SHARED_HOST_DIR}:${SHARED_MOUNT}" "${EDF_FILE}"; then
+    # Checked on the temp file, so a rejected rewrite never becomes the file an srun could pick up.
+    if ! grep -qF "${SHARED_HOST_DIR}:${SHARED_MOUNT}" "${tmp}"; then
+        rm -f "${tmp}"
         echo "EDF ${src} has no multi-line 'mounts = [' block to add ${SHARED_MOUNT} to" >&2
         exit 2
     fi
+    mv -f "${tmp}" "${EDF_FILE}"
 }
 
 role_srun() {
@@ -484,7 +498,8 @@ role_srun() {
     wrap=()
     case "${CONTAINER_RUNTIME}" in
         ce)
-            derived_edf "${ce_env}"
+            # role_flag is "--judge-node"/"--agent-node"/...; strip the dashes for a filename.
+            derived_edf "${ce_env}" "${role_flag#--}"
             srun_args+=(--environment="${EDF_FILE}")
             ;;
         apptainer)
