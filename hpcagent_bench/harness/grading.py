@@ -146,10 +146,16 @@ AUTO_BASELINE = "auto"
 BASELINE_OPTIONS = BASELINE_CHOICES + (AUTO_BASELINE, )
 
 #: Per-track default speedup baseline when the user does not override it.
+#: ``loop_level_reasoning`` is SINGLE-CORE C, not ``c-autopar``. The autopar default made the
+#: denominator itself parallel, so a correct parallelisation raced another parallelisation and
+#: scored about 1.0 -- the measured llr4 rows were 0.48, 0.49, 0.99. It also cost two extra
+#: builds and two extra timed sweeps per cell (clang AND gcc), where ``c`` reuses the oracle's
+#: own single-core build (see ReferencePlan.bl_is_seq_c). What the track asks is "parallelise
+#: this loop", so the time to beat is the serial loop.
 TRACK_DEFAULT_BASELINE: Dict[str, str] = {
-    "loop_level_reasoning": "c-autopar",
+    "loop_level_reasoning": "c",
     "machine_learning": "numpy",
-    "scientific_computing": "c-autopar",
+    "scientific_computing": "numpy",
 }
 
 #: Neutral fallback baseline for a track absent from TRACK_DEFAULT_BASELINE.

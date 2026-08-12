@@ -45,6 +45,13 @@ fuzz:
   # reference cannot finish inside timeouts.kernel_s, mislabelling it incorrect.
   # 0 = off (uncapped, legacy behaviour).
   correctness_size_cap: 1024
+  # Declared preset the HELD-OUT correctness cases are drawn at. They are never timed -- what they
+  # test is the data / distribution / config axes -- so drawing them at the XL-anchored timed shape
+  # spent most of a grade's wall clock running the numpy reference len(hidden.VARIANTS) more times
+  # on gigabyte inputs, re-checking a shape the PUBLIC case already checks at full size. A DECLARED
+  # preset, not a clamp: clamping a dimension can violate a kernel's constraints. Empty (or a preset
+  # a kernel does not declare) falls back to the timed preset, the pre-2026-08 behaviour.
+  hidden_correctness_preset: M
   size_distribution: log_uniform
   data_distribution: uniform
 
@@ -74,7 +81,7 @@ service:
 # so the two measurement paths cannot drift.
 measurement:
   baseline: auto           # speedup denominator (mirrors service.baseline). auto = the per-track
-                           #   default (loop_level_reasoning/scientific_computing -> c-autopar, machine_learning -> numpy); numpy | c |
+                           #   default (loop_level_reasoning -> c, scientific_computing -> numpy, machine_learning -> numpy); numpy | c |
                            #   c-autopar | cpp-autopar | fortran-autopar. A compiled baseline falls
                            #   back to numpy per-kernel when it cannot be emitted/built.
   repeat: 50               # timed reps kept per measurement (default 50; reduced with median +

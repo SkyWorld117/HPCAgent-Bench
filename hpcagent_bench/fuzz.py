@@ -92,6 +92,16 @@ def _sample_one(lo: float, hi: float, rng, distribution: str) -> int:
     return int(round(val))
 
 
+def _constant_across_presets(parameters: Dict[str, Any], name: str) -> bool:
+    """Whether ``name`` holds the SAME value in every preset that declares it.
+
+    The pre-XL resolution derived each range as ``[min over presets, max over presets]``, so such a
+    parameter collapsed to a degenerate ``[v, v]`` on its own. Anchoring on XL reads one preset and
+    would have scaled it, so the invariant is restored explicitly here."""
+    seen = [preset[name] for preset in parameters.values() if isinstance(preset, dict) and name in preset]
+    return len(seen) > 1 and all(v == seen[0] for v in seen)
+
+
 def resolve_ranges(parameters: Dict[str, Any],
                    size_cap: int = None,
                    config_names: FrozenSet[str] = NO_CONFIG_NAMES) -> Dict[str, Any]:
@@ -135,6 +145,14 @@ def resolve_ranges(parameters: Dict[str, Any],
     for name, value in base.items():
         if name in config_names:
             out[name] = value  # declared config knob: fixed, never scaled by a size preset
+        elif _constant_across_presets(parameters, name):
+            # A parameter the manifest declares IDENTICALLY in every preset is not a size: the
+            # preset ladder is what distinguishes a dimension, and a value that does not move along
+            # it is a knob (an iteration cap, a seed, a tile width) whose kernel has simply not
+            # migrated to the dimensions:/config: split yet. Scaling it by +-15% would perturb an
+            # ALGORITHM during a timed run. Kept degenerate rather than scalar so the shape of this
+            # branch's output matches what every caller has always seen for such a parameter.
+            out[name] = [value, value] if isinstance(value, int) else value
         elif isinstance(value, int) and value > 1:
             lo = max(1, int(value * lo_m))
             out[name] = [lo, max(lo, int(value * hi_m))]

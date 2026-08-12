@@ -295,9 +295,22 @@ def _call_native_impl(
     params.append(WORKSPACE_PTYPE)
     params.append("int64_t")
 
-    ffi.cdef(f"void {sym}({', '.join(params)});")
+    signature = f"void {sym}({', '.join(params)});"
+    ffi.cdef(signature)
     lib = ffi.dlopen(str(lib_path))
-    fn = ffi.addressof(lib, sym)  # fetch the symbol by name via cffi's own API
+    try:
+        fn = ffi.addressof(lib, sym)  # fetch the symbol by name via cffi's own API
+    except AttributeError as exc:
+        # cffi's own message is "function/symbol not found in library <tmp path>", which tells the
+        # author nothing about WHAT to name their function. This is the single most common way a
+        # submission fails -- a C++ entry point left out of `extern "C"` (mangled), or simply
+        # renamed -- and it was surfacing as an opaque score_error, so the agent kept resubmitting
+        # the same wrong name until its wall clock ran out. Name the contract in the error instead.
+        raise RuntimeError(f"the built library exports no symbol {sym!r}. The entry point must be exactly "
+                           f"this, with C linkage:\n    {signature}\n"
+                           f"In C++ that means wrapping the definition in extern \"C\" (otherwise the "
+                           f"name is mangled and cannot be found). Renaming the function, changing the "
+                           f"argument list, or dropping the trailing workspace pair all break it.") from exc
 
     # Sec. 11 scratch pair (trailing args): NULL/0 unless requested, aligned by the shared
     # helper. Sized from the scalars only, so one buffer serves every rep; ``ws`` stays

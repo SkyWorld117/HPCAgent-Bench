@@ -275,7 +275,8 @@ def test_config_names_keep_the_declared_value_across_fuzz_iterations():
         p = fuzz.sample_params(CONFIG_AND_DIM_PARAMS, iteration=it, config_names=CONFIG_NAMES)
         assert p["seed"] == 7
         assert p["multrec_limit"] == 512
-        assert 8 <= p["N"] <= 100000
+        # Anchored on XL (100000 here), not spanning S..XL: every draw is within +-15% of it.
+        assert 85000 <= p["N"] <= 115000
 
 
 def test_edge_shapes_never_perturbs_a_declared_config_knob():

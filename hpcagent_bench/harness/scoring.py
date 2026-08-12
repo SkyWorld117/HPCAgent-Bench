@@ -45,6 +45,16 @@ from hpcagent_bench.support.bindings import binding_from_spec
 from hpcagent_bench.flags import Mode
 from hpcagent_bench.spec import BenchSpec
 
+#: Per-process memo of measured BASELINE times, keyed by everything that determines one (kernel,
+#: shapes, datatype, seed, denominator, rep budget). Timings only -- never reference outputs, which
+#: are gigabytes at the XL-anchored shapes. See the lookup in :func:`score` for why this exists.
+#: Threads may race to fill an entry; the loser simply measures twice, which is correct.
+BASELINE_TIMING_CACHE: Dict[Tuple, Tuple[Dict[str, int], Dict[str, List[int]]]] = {}
+
+#: Entry ceiling. On overflow the whole map is dropped rather than evicted one by one: a rebuild
+#: costs a single round, and no ordering bookkeeping can then go wrong under concurrency.
+BASELINE_TIMING_CACHE_MAX = 256
+
 
 def _resolve_tolerances(rtol: Optional[float], atol: Optional[float], datatype: str) -> Tuple[float, float]:
     """Fill an unset (``None``) ``rtol`` / ``atol`` from the datatype's precision band.
@@ -523,8 +533,20 @@ def score(submission: Submission,
                         public_seed,
                         fuzz_iteration=fuzz_iteration,
                         params_override=params_override)
+    # Held-out cases are correctness-only -- never timed -- so they are drawn at a DECLARED small
+    # preset instead of the timed one. At the XL-anchored fuzz shapes each case cost a full numpy
+    # reference pass (tens of seconds on a gigabyte input) and there are len(hidden.VARIANTS) of
+    # them, which is most of a grade's wall clock spent re-checking a shape the PUBLIC case already
+    # checks at full size. What the held-out sweep actually tests is the data / distribution /
+    # config axes, and none of those need the big shape. A declared preset, not a clamp of the
+    # drawn one: clamping a dimension can violate the kernel's own constraints, where every
+    # declared preset is valid by construction. Empty knob (or a preset the kernel does not
+    # declare) keeps the historic behaviour of drawing them at the timed preset.
+    hidden_preset = str(config.get("fuzz.hidden_correctness_preset", "") or "")
+    if hidden_preset not in spec.parameters:
+        hidden_preset = preset
     cases = [] if not hidden else (
-        hidden_cases if hidden_cases is not None else hidden_tests.hidden_cases(spec, preset))
+        hidden_cases if hidden_cases is not None else hidden_tests.hidden_cases(spec, hidden_preset))
     # A case that names config knobs runs at THIS preset's sizes with those knobs substituted:
     # params_override replaces the parameter block verbatim, so the sizes have to come along or the
     # held-out case would silently run at whatever the override alone spelled.
@@ -569,7 +591,22 @@ def score(submission: Submission,
     baseline_samples: Dict[str, List[int]] = {}  # ref name -> per-repeat ns (for the timing backend)
     if _wants(oracle, "numpy"):
         expected_public["numpy"] = _numpy_reference(spec, data)
-    if baseline_uses_numpy(baseline):
+    # Compiled references: the single-core C oracle (correctness) and/or the compiled baseline
+    # (timing). ``c`` share the single-core C build; a ``*-autopar`` baseline is a
+    # SEPARATE multi-core build. ``compiled`` is (label, language, compiler, mode) or None.
+    plan: ReferencePlan = reference_plan(oracle, baseline, spec)
+    # A baseline time is a property of (kernel, shapes, datatype, seed, denominator, rep budget) and
+    # the machine -- NEVER of the submission. Agents iterate: 2-3 /score rounds on the same kernel is
+    # normal, and every round re-emitted, re-built and re-timed the identical reference. Reusing it
+    # is free below 1024-element shapes and worth minutes per round at the XL-anchored ones. Only the
+    # TIMINGS are cached: reference OUTPUTS are gigabytes at these shapes and are recomputed.
+    bl_key = (task.kernel, preset, datatype, public_seed, fuzz_iteration, baseline, repeat, timing.warmup_count(),
+              repr(sorted(drawn_params(spec, data).items())))
+    cached = BASELINE_TIMING_CACHE.get(bl_key)
+    if cached is not None:
+        baselines.update(cached[0])
+        baseline_samples.update(cached[1])
+    if baseline_uses_numpy(baseline) and "numpy" not in baselines:
         baseline_samples["numpy"] = _time_numpy_samples(spec, data, repeat, warmup=timing.warmup_count())
         baselines["numpy"] = min(baseline_samples["numpy"])
     # One case in flight at a time: the numpy EXPECTED outputs are kept, the inputs they were
@@ -588,11 +625,9 @@ def score(submission: Submission,
             baseline_samples["numpy"] = _time_numpy_samples(spec, data, repeat, warmup=timing.warmup_count())
             baselines["numpy"] = min(baseline_samples["numpy"])
 
-    # Compiled references: the single-core C oracle (correctness) and/or the compiled baseline
-    # (timing). ``c`` share the single-core C build; a ``*-autopar`` baseline is a
-    # SEPARATE multi-core build. ``compiled`` is (label, language, compiler, mode) or None.
-    plan: ReferencePlan = reference_plan(oracle, baseline, spec)
-    if plan.oracle_wants_c or plan.bl_is_seq_c:
+    # The C run is still needed when the ORACLE wants its outputs; a cached time alone only lets the
+    # baseline-only case skip it.
+    if plan.oracle_wants_c or (plan.bl_is_seq_c and "c" not in baselines):
         try:
             c_public, c_ns, c_hidden, c_samples = _run_c_reference(spec,
                                                                    task,
@@ -624,7 +659,7 @@ def score(submission: Submission,
     # the kernel's vendored native source -- timing only. Strongest baseline: time every AVAILABLE
     # candidate compiler and keep the fastest sample set as the denominator. A missing compiler / a
     # kernel that won't build under it is skipped; if none build, fall back to numpy.
-    if plan.bl_own_build:
+    if plan.bl_own_build and plan.bl_label not in baselines:
         label, lang, compilers, bl_mode = plan.compiled
         best_samples = None
         for compiler in compilers:
@@ -650,6 +685,11 @@ def score(submission: Submission,
             baseline_samples[label] = best_samples
         else:
             _numpy_baseline_fallback()
+
+    if baselines and cached is None:
+        if len(BASELINE_TIMING_CACHE) >= BASELINE_TIMING_CACHE_MAX:
+            BASELINE_TIMING_CACHE.clear()  # bounded, and a rebuild costs one round -- no LRU bookkeeping
+        BASELINE_TIMING_CACHE[bl_key] = (dict(baselines), {k: list(v) for k, v in baseline_samples.items()})
 
     # Primary baseline for the scalar speedup row: numpy if timed, else C.
     primary = _primary_baseline(baselines)

@@ -58,13 +58,13 @@ def test_autopar_baselines_map_language_and_candidate_compilers():
 
 def test_track_default_map_values():
     assert grading.TRACK_DEFAULT_BASELINE == {
-        "loop_level_reasoning": "c-autopar",
+        "loop_level_reasoning": "c",
         "machine_learning": "numpy",
-        "scientific_computing": "c-autopar"
+        "scientific_computing": "numpy"
     }
-    assert grading.default_baseline_for_track("loop_level_reasoning") == "c-autopar"
+    assert grading.default_baseline_for_track("loop_level_reasoning") == "c"
     assert grading.default_baseline_for_track("machine_learning") == "numpy"
-    assert grading.default_baseline_for_track("scientific_computing") == "c-autopar"
+    assert grading.default_baseline_for_track("scientific_computing") == "numpy"
     # An unknown / unset track falls back to the neutral historic default.
     assert grading.default_baseline_for_track("something-else") == grading.DEFAULT_BASELINE == "c"
     assert grading.default_baseline_for_track(None) == "c"
@@ -76,18 +76,18 @@ def test_resolve_from_track_when_not_overridden():
     machine_learning = BenchSpec.load(_ML)
     scientific_computing = BenchSpec.load(_HPC)
     assert loop_level_reasoning.track == "loop_level_reasoning" and grading.resolve_baseline(
-        "auto", loop_level_reasoning) == "c-autopar"
-    assert grading.resolve_baseline(None, loop_level_reasoning) == "c-autopar"
+        "auto", loop_level_reasoning) == "c"
+    assert grading.resolve_baseline(None, loop_level_reasoning) == "c"
     assert machine_learning.track == "machine_learning" and grading.resolve_baseline("auto",
                                                                                      machine_learning) == "numpy"
     assert scientific_computing.track == "scientific_computing" and grading.resolve_baseline(
-        "auto", scientific_computing) == "c-autopar"
+        "auto", scientific_computing) == "numpy"
 
 
 def test_explicit_override_beats_track_default():
     """An explicit concrete kind wins over the track default (both directions)."""
-    loop_level_reasoning = BenchSpec.load(_FOUNDATION)  # track default = c-autopar
-    scientific_computing = BenchSpec.load(_HPC)  # track default = c-autopar
+    loop_level_reasoning = BenchSpec.load(_FOUNDATION)  # track default = c (single-core)
+    scientific_computing = BenchSpec.load(_HPC)  # track default = numpy
     machine_learning = BenchSpec.load(_ML)  # track default = numpy
     # Override an autopar-default kernel to numpy / plain c, and a numpy-default kernel to autopar.
     assert grading.resolve_baseline("numpy", loop_level_reasoning) == "numpy"
@@ -151,13 +151,24 @@ def test_cpp_autopar_candidates_are_multicore_autopar():
 
 
 def test_fortran_autopar_candidates_are_multicore_autopar():
-    """fortran-autopar compiles gfortran + GCC auto-parallelization, MULTI_CORE only."""
+    """fortran-autopar compiles gfortran + GCC auto-parallelization, MULTI_CORE only.
+
+    gfortran cannot use the plain `_AUTOPAR_FLAG` check the C/C++ cases use. Its block also
+    declares `doconcurrent_ref: DO_CONCURRENT_GFORTRAN`, which is `-ftree-parallelize-loops={n}`
+    -- the SAME spelling as the autopar flag -- and that one is appended in EVERY mode by design
+    (user decision 2026-08-11: native constructs parallelize on every family, and the timed child
+    always gets real cores). So the mode gate is asserted on the Graphite flags only GCC_AUTOPAR
+    contributes, and the do-concurrent flag is pinned separately instead of left as a silent
+    string coincidence that makes the mode gate look broken.
+    """
     lang, compilers = grading.AUTOPAR_BASELINES["fortran-autopar"]
     assert compilers == ("gfortran", )
-    for compiler in compilers:
-        flag = _AUTOPAR_FLAG[compiler]
-        assert flag in _flag_string(lang, compiler, Mode.MULTI_CORE)
-        assert flag not in _flag_string(lang, compiler, Mode.SINGLE_CORE)
+    multi = _flag_string(lang, "gfortran", Mode.MULTI_CORE)
+    single = _flag_string(lang, "gfortran", Mode.SINGLE_CORE)
+    for graphite in ("-floop-parallelize-all", "-fgraphite-identity", "-floop-nest-optimize"):
+        assert graphite in multi, graphite
+        assert graphite not in single, graphite
+    assert _AUTOPAR_FLAG["gfortran"] in multi and _AUTOPAR_FLAG["gfortran"] in single
 
 
 # --- API + service surfaces -------------------------------------------------------
@@ -202,24 +213,27 @@ def test_c_autopar_reference_builds_and_times():
         pytest.skip("NumpyToC emitter or a C autopar compiler (clang/gcc) absent")
     from hpcagent_bench.harness.scoring import measure_baselines
     task = Task(_FOUNDATION, "restricted", "c")
-    # Explicit c-autopar AND the auto (per-track) default must both land on the c-autopar reference.
-    for baseline in ("c-autopar", "auto"):
+    # Explicit c-autopar reaches the multi-core reference; the per-track ``auto`` default no longer
+    # does -- loop_level_reasoning resolves to single-core ``c``, so it must NOT time an autopar
+    # build. Each spelling is asserted against the reference it actually selects.
+    for baseline, expected in (("c-autopar", "c-autopar"), ("auto", "c")):
         out = measure_baselines(task, preset="S", repeat=2, baseline=baseline)
-        # Either the autopar reference timed or it fell back to numpy; whichever ran must be positive.
+        # Either the selected reference timed or it fell back to numpy; whichever ran must be positive.
         assert out, f"{baseline}: no baseline timed"
-        label = "c-autopar" if "c-autopar" in out else "numpy"
+        label = expected if expected in out else "numpy"
         assert out[label] > 0
+        assert "c-autopar" not in out or expected == "c-autopar", (
+            f"{baseline}: resolved to {expected!r} but timed the autopar reference")
 
 
-def test_hpc_resolves_to_c_autopar_and_times():
-    """An scientific_computing kernel resolves to the c-autopar baseline and times the strongest available candidate."""
-    if not _emitter_and_any(["clang", "gcc"]):
-        pytest.skip("NumpyToC emitter or a C autopar compiler (clang/gcc) absent")
+def test_hpc_resolves_to_numpy_and_times():
+    """An scientific_computing kernel resolves to the numpy baseline -- its numpy/BLAS reference IS
+    the fast, authoritative spec, so nothing compiled is timed for it under ``auto``."""
     from hpcagent_bench.harness.scoring import measure_baselines
     out = measure_baselines(Task(_HPC, "restricted", "c"), preset="S", repeat=2, baseline="auto")
     assert out, "no baseline timed"
-    label = "c-autopar" if "c-autopar" in out else "numpy"
-    assert out[label] > 0
+    assert out.get("numpy", 0) > 0
+    assert "c-autopar" not in out, "auto must not reach the autopar reference on scientific_computing"
 
 
 def test_numpy_baseline_times_when_explicitly_selected():
