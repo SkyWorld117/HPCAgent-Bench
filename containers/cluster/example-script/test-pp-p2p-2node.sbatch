@@ -151,6 +151,23 @@ variant_env() {
         # LL/LL128 signal data-readiness with in-band flags in a shared buffer; a missed flag is read
         # as valid stale data rather than an error. Simple uses explicit sync and cannot do that.
         v12-proto-simple) echo "export NCCL_PROTO=Simple" ;;
+        # The documented one. NVIDIA/nccl#2001: silent cross-node allreduce corruption present in
+        # 2.27.3+ and 2.29.2, absent in 2.26.6, on HPE Cray EX + Slingshot 11 through aws-ofi-nccl,
+        # about 30% of 1 MiB messages. LL128 has been the default since 2.27 and neither EDF sets
+        # NCCL_PROTO, so every run so far had it live. Our RCCL is 2.27.7 (campaign image) and
+        # 2.30.4 (this one) -- both inside the affected band. CSCS and Sigma2 both publish
+        # NCCL_PROTO=^LL128 as the workaround; it keeps Simple and LL, so it costs less bandwidth
+        # than v12. Run v0-current beside it: the claim is a RATE difference, not a verdict.
+        v14-noll128)     echo "export NCCL_PROTO=^LL128" ;;
+        # GPU Direct RDMA off, staged through host memory. 590739's own RCCL logs show the EDF's
+        # "we never asked for GDR" assumption is false: omitting NCCL_NET_GDR_LEVEL lets RCCL
+        # auto-negotiate it, and it chose GDRDMA for 709 of 717 channels on a 6.4 kernel. The
+        # comm reached "Init COMPLETE" and only then stopped -- bootstrap goes over host memory,
+        # payload goes over GDRDMA -- which is why a 2-element broadcast hangs as readily as a
+        # 3584-element recv. Path-dependent, not size-dependent: no NCCL_PROTO value explains that.
+        v15-nogdr)       echo "export NCCL_NET_GDR_LEVEL=0" ;;
+        # The full combination the kimi arms now run, so the probe measures what is deployed.
+        v16-simple-nogdr) echo "export NCCL_PROTO=Simple; export NCCL_NET_GDR_LEVEL=0" ;;
         # MI300A is an APU: host and device share physical memory and XNACK lets the GPU fault pages
         # in and out. A page that migrates while its region is registered for RDMA corrupts silently.
         v13-noxnack)     echo "export HSA_XNACK=0" ;;

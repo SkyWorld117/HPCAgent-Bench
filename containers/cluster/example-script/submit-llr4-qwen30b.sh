@@ -16,7 +16,7 @@ done
 for lang in c cpp fortran; do
     for suffix in "" "-skills"; do
         arm="llr4-qwen30b-${lang}${suffix}"
-        sbatch --nodes=4 --time=12:00:00 -A "${ACCOUNT}" "$@" \
+        sbatch --nodes=6 --time=12:00:00 -A "${ACCOUNT}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
         echo "submitted ${arm}"
     done
