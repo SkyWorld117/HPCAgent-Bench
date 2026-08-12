@@ -22,7 +22,7 @@ dtypes declares the C signature, then ``ffi.dlopen`` + a direct call invoke the 
 """
 import math
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -437,6 +437,24 @@ def resolve_token_budget(spec: BenchSpec) -> Optional[int]:
     return None if flat is None else int(flat)
 
 
+def drawn_params(spec: BenchSpec, data: Mapping[str, object]) -> Optional[Dict[str, object]]:
+    """The concrete size values a built dataset was actually materialised at, or None.
+
+    ``Benchmark.get_data`` copies every resolved parameter into the data dict alongside the arrays,
+    so a fuzz draw's chosen sizes are readable here -- and this is the only place that knows them,
+    since the judge calls ``score`` with ``preset="fuzzed"`` and no override, and the draw itself
+    happens inside ``get_data``. Recovering them beats re-deriving them: a second call to the
+    sampler would have to reproduce the seeding exactly, and would silently diverge the day either
+    side changed.
+
+    Only symbols some declared preset names are taken, so the arrays and ``datatype`` that share
+    the dict are left out -- what comes back is a parameter mapping, not a dataset.
+    """
+    names = {name for values in spec.parameters.values() for name in values}
+    drawn = {name: data[name] for name in names if name in data}
+    return drawn or None
+
+
 def score(submission: Submission,
           task: Task,
           *,
@@ -523,7 +541,15 @@ def score(submission: Submission,
     device = task.residency == "device"
     timeout = float(config.get("timeouts.kernel_s", 300))
     # Hidden cases ride along as followups of THIS call at THIS preset, so one cap covers them too.
-    memory_gb = sizing.kernel_memory_gb(spec, preset, datatype, submission.workspace_bytes, params_override)
+    # The sizes come from the data that was JUST built, not from the preset name: the judge calls
+    # score() with preset="fuzzed" and no params_override, and kernel_memory_gb has nothing to
+    # derive from for a preset the manifest never declares, so it fell back to the
+    # limits.kernel_memory_gb FLOOR -- a cap unrelated to the shapes this very call materialised.
+    # heat3d_tiled_sym drew 711^3, needed ~10.7 GiB, got the 10 GB floor, and died mid-grade as an
+    # _ArrayMemoryError (589510). Reading the draw back off `data` cannot drift from what ran; a
+    # re-derivation here would have to repeat the seeding and could.
+    memory_gb = sizing.kernel_memory_gb(spec, preset, datatype, submission.workspace_bytes, params_override
+                                        or drawn_params(spec, data))
 
     # --- references (oracle) + baselines -------------------------------------
     # numpy is cheap; the C reference is built/run once when oracle or baseline
