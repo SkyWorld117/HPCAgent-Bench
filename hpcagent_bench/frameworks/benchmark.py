@@ -74,7 +74,6 @@ class Benchmark(object):
                                             fuzz_iteration or 0,
                                             configs=self.spec.config_space,
                                             constraints=tuple(fz.get("constraints") or ()) + self.spec.constraints,
-                                            size_cap=fuzz.correctness_size_cap() or None,
                                             config_names=self.spec.config_names)
         else:
             if preset not in self.info["parameters"].keys():

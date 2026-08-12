@@ -97,12 +97,11 @@ def resolve_ranges(parameters: Dict[str, Any],
                    config_names: FrozenSet[str] = NO_CONFIG_NAMES) -> Dict[str, Any]:
     """Per-param fuzz spec: each value is a ``[lo, hi]`` range or a fixed scalar.
 
-    Prefers an explicit ``fuzzed`` preset; otherwise the default range brackets
-    the ``L`` (publication) size and the ``XL`` (GPU) size: ``[L, XL]`` per
-    integer size param (hi always >= L; XL is an absolute size, not an additive
-    width). Falls back to ``L * fuzz.size_hi_mult`` for the high bound when there
-    is no ``XL`` preset, and to the largest preset when there is no ``L``.
-    Non-integer / size-1 params are kept fixed.
+    Prefers an explicit ``fuzzed`` preset; otherwise the default range is ANCHORED
+    ON ``XL`` -- ``[XL * fuzz.xl_lo_mult, XL * fuzz.xl_hi_mult]``, 0.85 and 1.15 by
+    default -- per integer size param. Falls back to ``L``, then to the first
+    declared preset, when a manifest has no ``XL``. Non-integer / size-1 params are
+    kept fixed.
 
     ``config_names`` names the kernel's DECLARED config knobs (a manifest's
     ``config:`` block -- :class:`hpcagent_bench.spec.ConfigKnob` -- surfaced by
@@ -124,20 +123,21 @@ def resolve_ranges(parameters: Dict[str, Any],
     """
     if FUZZED_PRESET in parameters:
         return _apply_size_cap(dict(parameters[FUZZED_PRESET]), size_cap, config_names)
-    base = (parameters.get("L") or next(iter(parameters.values())))
-    step = parameters.get("XL") or {}  # absolute XL (GPU) size == fuzz upper bound
-    hi_m = float(config.get("fuzz.size_hi_mult", 4.0))
+    # Anchored on XL, not spanning [L, XL]. A range that wide is drawn log-uniform, so most draws
+    # land far below XL and the timed problem is too small for the thing being measured to show:
+    # at preset S this corpus times 512-element kernels, where an OpenMP fork/join costs more than
+    # the kernel and a correct parallelisation scores ~1.0. XL is the size the manifests declare as
+    # the production shape, so every timed draw sits within +-15% of it and stays a real workload.
+    base = (parameters.get("XL") or parameters.get("L") or next(iter(parameters.values())))
+    lo_m = float(config.get("fuzz.xl_lo_mult", 0.85))
+    hi_m = float(config.get("fuzz.xl_hi_mult", 1.15))
     out: Dict[str, Any] = {}
     for name, value in base.items():
         if name in config_names:
             out[name] = value  # declared config knob: fixed, never scaled by a size preset
         elif isinstance(value, int) and value > 1:
-            # XL is an ABSOLUTE size (as everywhere else), not an additive width:
-            # the fuzz interval is [L, XL] so we never time a shape larger than the
-            # largest declared/validated preset (guards OOM / unvalidated regimes).
-            xl = step.get(name)
-            hi = int(xl) if isinstance(xl, int) else int(value * hi_m)
-            out[name] = [value, max(hi, value)]
+            lo = max(1, int(value * lo_m))
+            out[name] = [lo, max(lo, int(value * hi_m))]
         else:
             out[name] = value
     return _apply_size_cap(out, size_cap, config_names)
