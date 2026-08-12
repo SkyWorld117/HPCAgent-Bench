@@ -71,13 +71,19 @@ def check_db_shards(run_dir: pathlib.Path) -> CheckResult:
         bad.append(f"{len(rank_dirs)} rank dirs but only {len(shards)} produced a .db shard")
 
     merged_total = None
+    coverage = None
     if not bad:
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp) / "results-merged.db"
             try:
                 merge_results.merge(run_dir, out)
                 conn = sqlite3.connect(out)
+                # Rows, for the conservation check below -- submissions is append-only and an agent
+                # resubmits freely, so this counts attempts and NOT how much of the track was done.
                 merged_total = conn.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
+                # Distinct kernels, which is the number that says whether an arm is usable: llr4
+                # arms reported hundreds of rows while having actually graded 12 to 81 of 242.
+                coverage = conn.execute("SELECT COUNT(DISTINCT benchmark) FROM submissions").fetchone()[0]
                 conn.close()
             except (SystemExit, sqlite3.Error) as exc:
                 bad.append(f"merge failed: {exc}")
@@ -86,7 +92,7 @@ def check_db_shards(run_dir: pathlib.Path) -> CheckResult:
             bad.append(f"merged submissions={merged_total} != sum of per-shard submissions={expected}")
 
     summary = f"{len(shards)}/{len(rank_dirs)} shards, per-shard submissions={list(counts.values())}, " \
-              f"merged={merged_total}"
+              f"merged={merged_total}, kernels covered={coverage}"
     if bad:
         summary += "; " + "; ".join(bad)
     return CheckResult("db_shards", not bad, summary)

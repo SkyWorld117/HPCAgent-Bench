@@ -392,10 +392,15 @@ def main(argv: list[str] | None = None) -> int:
                         required=True,
                         help=f"output prefix: writes PREFIX{PER_PROBLEM_SUFFIX} "
                         f"and PREFIX{PAIRS_SUFFIX}")
+    # `last`, not `best`: agents resubmit freely (up to 6 rows for one kernel on llr4), and taking
+    # the MAX over those rows scores a run by its luckiest attempt rather than by what the agent
+    # actually converged on -- a cherry-pick that flatters whichever arm submitted most often.
+    # The last verified submission is the agent's own final answer. Raw rows are kept either way;
+    # this only chooses how they collapse at read time.
     parser.add_argument("--dedup",
                         choices=("best", "last"),
-                        default="best",
-                        help="which verified submission represents a kernel (default best)")
+                        default="last",
+                        help="which verified submission represents a kernel (default last)")
     args = parser.parse_args(argv)
 
     if not args.arm:

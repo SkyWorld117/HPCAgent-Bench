@@ -191,6 +191,19 @@ def test_dedup_last_takes_the_final_submission_in_time(ablation_stats, tmp_path)
     assert float(rows[0]["a_speedup"]) == 2.0
 
 
+def test_dedup_defaults_to_last(ablation_stats, tmp_path):
+    """The DEFAULT, not just the modes: every other test passes --dedup explicitly, so a flipped
+    default would move every reported number without failing anything. `last` is the agent's own
+    final answer; `best` takes the MAX over resubmissions, which scores an arm by its luckiest
+    attempt and flatters whichever arm submitted most often (llr4 reached 6 rows for one kernel)."""
+    db = tmp_path / "a.db"
+    seed_db(db, [("gemm", 1, 3.0), ("gemm", 2, 2.0)])
+    prefix = tmp_path / "abl"
+    assert ablation_stats.main([f"--arm=a={db}", "--problems=1", f"--out={prefix}"]) == 0
+    rows = read_csv(tmp_path / ("abl" + ablation_stats.PER_PROBLEM_SUFFIX))
+    assert float(rows[0]["a_speedup"]) == 2.0
+
+
 def test_suspect_rows_are_excluded_from_dedup_best(ablation_stats, tmp_path, capsys):
     """A suspect row is a broken measurement, not a result: left in, its 1e6 would BE the arm's
     best for that kernel and would move the median of every comparison it entered."""
