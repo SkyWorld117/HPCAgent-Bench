@@ -4,6 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${CLUSTER_ENV_FILE:-${SCRIPT_DIR}/.env}"
 
+# No core dumps. Beverin's core_pattern is the machine-global `core_%h_%p` and a dump lands in the
+# crashing process's CWD, which for every role here is SCRIPT_DIR -- so a crashed worker litters the
+# repo with a core_nid<node>_<pid> stub. They are 0 bytes and worth nothing: the size limit truncates
+# the dump after the kernel has already created the file. Slurm propagates this limit to job steps.
+ulimit -c 0
+
 if [[ -f "${ENV_FILE}" ]]; then
     set -a
     # shellcheck disable=SC1090
