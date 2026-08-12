@@ -10,6 +10,18 @@ ENV_FILE="${CLUSTER_ENV_FILE:-${SCRIPT_DIR}/.env}"
 # the dump after the kernel has already created the file. Slurm propagates this limit to job steps.
 ulimit -c 0
 
+# Every role below re-enters this script INSIDE its container, where python3 is the image's 3.12
+# or 3.14. When a step silently runs on the batch host instead, python3 is SLES 3.6 and the only
+# symptom is a ModuleNotFoundError for a stdlib module, minutes later, in a per-rank log nobody
+# reads -- that is how 589512's judge died. Fail at the door instead, naming the cause.
+require_modern_python() {
+    if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+        return 0
+    fi
+    echo "FATAL: role $1 has python3 $(python3 -V 2>&1), need >= 3.10 -- is this step running OUTSIDE its container?" >&2
+    exit 2
+}
+
 if [[ -f "${ENV_FILE}" ]]; then
     set -a
     # shellcheck disable=SC1090
@@ -52,6 +64,7 @@ export HPCAGENT_BENCH_REPO RUN_DIR SCRIPT_DIR SHARED_HOST_DIR SHARED_MOUNT
 export HPCAGENT_BENCH_SHARED_DIR="${SHARED_MOUNT}"
 
 run_vllm_node() {
+    require_modern_python vllm
     local node_rank="${SLURM_PROCID:-0}"
     local log_dir="${RUN_DIR}/vllm"
     local -a command extra
@@ -130,6 +143,12 @@ PY
     fi
     export VLLM_DISABLE_PYNCCL="${VLLM_DISABLE_PYNCCL:-1}"
     export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+    # Per-step deadline for one execute_model RPC. vLLM's own default is 300 s and
+    # --distributed-timeout-seconds does NOT cover it, so a slow first decode kills the engine
+    # outright: that is what gutted oss 589514/515 down to 12 and 27 graded benchmarks and what
+    # ended the kimi pp=4 probe. Generous rather than infinite -- a genuinely wedged collective
+    # should still surface as a dead engine rather than a job that hangs to its wall clock.
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
     export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
     export NCCL_DEBUG_FILE="${log_dir}/nccl.%h.%p.log"
 
@@ -144,6 +163,7 @@ PY
 }
 
 run_judge_node() {
+    require_modern_python judge
     local judge_rank="${SLURM_PROCID:-0}"
     local log_dir="${RUN_DIR}/judge"
     local rank_dir="${RUN_DIR}/judge/rank-${judge_rank}"
@@ -227,6 +247,7 @@ run_judge_node() {
 }
 
 run_agent_node() {
+    require_modern_python agent
     local agent_rank="${SLURM_PROCID:-0}"
     local node_dir="${RUN_DIR}/agents/node-${agent_rank}"
     local config="${node_dir}/litellm.yaml"
@@ -524,7 +545,10 @@ set -e
 # visible without anyone remembering to run the report. Best-effort: the batch-host python may
 # be too old for the report (needs >= 3.10), and a report failure must never fail the run.
 echo "===== node utilization report (${RUN_DIR}/monitor) ====="
-python3 "${SCRIPT_DIR}/monitor_report.py" "${RUN_DIR}/monitor" 2>&1 \
-    || echo "monitor_report failed (python3 too old on this host?); run it manually on the login node"
+# This line alone runs on the BATCH HOST, not in a container, where python3 is SLES 3.6 -- so the
+# report failed on every job ever run. /usr/bin/python3.11 is present on Beverin's hosts; python3
+# stays as the fallback so a host without it still completes the run.
+"$(command -v python3.11 || command -v python3)" "${SCRIPT_DIR}/monitor_report.py" "${RUN_DIR}/monitor" 2>&1 \
+    || echo "monitor_report failed; run it manually on the login node with python3.11"
 
 exit "${agent_status}"
