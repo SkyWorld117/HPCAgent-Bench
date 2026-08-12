@@ -55,11 +55,23 @@ INFERENCE_EDF="${INFERENCE_EDF:-rocm714-vllm-0.23.0-cdna}"
 
 MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-4}"
-STAGE_TIMEOUT="${STAGE_TIMEOUT:-240}"
+# Room for the sustained stage (SUSTAIN_SECONDS) on top of init, group creation and the one-shot
+# stages. Too tight a wall clock reports a FAIL that is only the probe being cut off mid-run.
+STAGE_TIMEOUT="${STAGE_TIMEOUT:-600}"
+# Drive mixed TP/PP traffic for this long. Kimi served for about 2.5 minutes before it stopped, so
+# a shorter window than that cannot claim the fabric survives the load.
+SUSTAIN_SECONDS="${SUSTAIN_SECONDS:-180}"
+# Repetitions per (variant, fill) cell. The failure is INTERMITTENT -- see the CELL_PASS comment
+# below -- so a single run per cell is not a measurement. Keep this >= 3 for any claim about a fix.
+REPEATS="${REPEATS:-5}"
 # Fraction of free GPU memory the probe holds before building any communicator. 0 = empty-GPU
 # control. The interesting run is a high value: vLLM creates its pipeline communicator with weights
 # and KV cache already resident, and registration is what failed there (cxil_map), not transport.
-FILL_FRACTION="${FILL_FRACTION:-0}"
+# Two levels, and the pair is the whole experiment. 0.70 is what kimi now serves at; 0 is the same
+# traffic with the memory pressure removed. Both FAIL -> the cause is the concurrent traffic itself
+# and no utilization number fixes it. Only 0.70 FAILs -> it is memory pressure and the lever is
+# --gpu-memory-utilization. Both PASS -> the fabric is not the cause and the next suspect is vLLM.
+FILL_FRACTION="${FILL_FRACTION:-0 0.70}"
 
 mkdir -p "${RUN_DIR}"
 [[ -f "${PROBE_PY}" ]] || { echo "FAIL: missing ${PROBE_PY}" >&2; exit 2; }
@@ -95,7 +107,11 @@ EOF
 #   v4-minimal   drop all CXI/MR tuning, keep only what SELECTS the fabric
 #   v5-min-hybrid  minimal plus the one match-mode setting that is a correctness fix, not a tuning knob
 # VARIANTS overrides the sweep, e.g. VARIANTS=v0-current to run the committed env alone.
-read -r -a VARIANT_NAMES <<<"${VARIANTS:-v0-current v1-nochan v2-nocrossnic v3-nordzv v4-minimal v5-min-hybrid}"
+# Default is the committed env alone. The env bisect is DONE -- job 590369 cleared every knob at
+# fill <= 0.70 -- so re-running six variants only dilutes the question now on the table, which is
+# whether sustained mixed traffic survives at all. Set VARIANTS to bisect the env again if a
+# sustained failure turns out to be env-sensitive.
+read -r -a VARIANT_NAMES <<<"${VARIANTS:-v0-current}"
 
 TUNING_VARS="FI_CXI_DEFAULT_CQ_SIZE FI_CXI_DEFAULT_TX_SIZE FI_CXI_DISABLE_HOST_REGISTER \
 FI_CXI_RX_MATCH_MODE FI_CXI_SAFE_DEVMEM_COPY_THRESHOLD FI_CXI_RDZV_PROTO FI_CXI_RDZV_EAGER_SIZE \
@@ -110,14 +126,43 @@ variant_env() {
         v3-nordzv)     echo "unset FI_CXI_RDZV_PROTO FI_CXI_RDZV_EAGER_SIZE FI_CXI_RDZV_GET_MIN FI_CXI_RDZV_THRESHOLD" ;;
         v4-minimal)    echo "unset ${TUNING_VARS}" ;;
         v5-min-hybrid) echo "unset ${TUNING_VARS}; export FI_CXI_RX_MATCH_MODE=hybrid" ;;
+        # The committed env plus the one variable RCCL itself asks for. At fill 0.70 job 590674
+        # failed the very first collective with "RCCL_USE_AMD_SMI_LIB not set, but HIP_FABRIC_API is
+        # defined ... Rerun with RCCL_USE_AMD_SMI_LIB=1 to enable AMD SMI and UALoE fabric support",
+        # and the identical line is in every dead kimi arm. A big allocation pushes RCCL onto the
+        # fabric-backed path, which it can only drive through AMD SMI -- hence empty GPU fine,
+        # loaded GPU dead, with no fabric error at all in between.
+        v6-amdsmi)     echo "export RCCL_USE_AMD_SMI_LIB=1" ;;
+        # Both variables the AMD guidance pairs: AMD SMI for topology/telemetry, and the scratch
+        # reclaim opt-out for firmware that fails to return RCCL scratch under tight VRAM.
+        v7-amdsmi-noscratch) echo "export RCCL_USE_AMD_SMI_LIB=1 HSA_NO_SCRATCH_RECLAIM=1" ;;
+        v8-noscratch)  echo "export HSA_NO_SCRATCH_RECLAIM=1" ;;
+        # --- memory-registration cache, the best fit for a SILENT wrong answer ---
+        # The EDF caches registrations essentially without bound (MAX_COUNT=524288, MAX_SIZE=-1) and
+        # invalidates them with FI_MR_CACHE_MONITOR=userfaultfd. The cache is keyed by VIRTUAL
+        # address, so if the monitor ever misses an unmap, a later allocation that reuses the address
+        # inherits a registration pointing at the wrong physical pages: the RDMA still "succeeds" and
+        # the data is wrong. That predicts everything the fill threshold predicted -- a big ballast
+        # allocation churns the address space, making reuse likely -- and additionally predicts the
+        # INTERMITTENCY, which a occupancy threshold does not.
+        v9-mrcache-off)  echo "export FI_MR_CACHE_MAX_COUNT=0" ;;
+        v10-mr-memhooks) echo "export FI_MR_CACHE_MONITOR=memhooks" ;;
+        v11-mr-disabled) echo "export FI_MR_CACHE_MONITOR=disabled" ;;
+        # LL/LL128 signal data-readiness with in-band flags in a shared buffer; a missed flag is read
+        # as valid stale data rather than an error. Simple uses explicit sync and cannot do that.
+        v12-proto-simple) echo "export NCCL_PROTO=Simple" ;;
+        # MI300A is an APU: host and device share physical memory and XNACK lets the GPU fault pages
+        # in and out. A page that migrates while its region is registered for RDMA corrupts silently.
+        v13-noxnack)     echo "export HSA_XNACK=0" ;;
         *)             echo "echo 'FAIL: unknown variant $1' >&2; exit 2" ;;
     esac
 }
 
 run_variant() {
-    local name="$1" fill="$2" label="${1}@fill${2}" log="${RUN_DIR}/${1}-fill${2}.log"
+    local name="$1" fill="$2" rep="$3"
+    local label="${1}@fill${2}#${3}" log="${RUN_DIR}/${1}-fill${2}-r${3}.log"
 
-    printf '\n===== variant %s (fill %s) =====\n' "${name}" "${fill}"
+    printf '\n===== variant %s (fill %s) rep %s =====\n' "${name}" "${fill}" "${rep}"
     srun --nodes=2 --ntasks=2 --ntasks-per-node=1 \
         --gpus-per-node=4 --cpus-per-task=32 \
         --environment="${INFERENCE_EDF}" \
@@ -127,16 +172,17 @@ run_variant() {
             torchrun --nnodes=2 --nproc-per-node=${RANKS_PER_NODE} \
                 --node-rank=\${SLURM_NODEID} \
                 --master-addr='${MASTER_ADDR}' --master-port='${MASTER_PORT}' \
-                '${PROBE_PY}' --timeout-seconds 90 --fill-fraction ${fill}
+                '${PROBE_PY}' --timeout-seconds 90 --fill-fraction ${fill} \
+                --sustain-seconds ${SUSTAIN_SECONDS}
         " 2>&1 | tee "${log}" || true
 
-    verdict "${label}" "${log}"
+    verdict "${label}" "${log}" "${name}@fill${fill}"
 }
 
 # Report the two stages separately. A single pass/fail line would hide the one distinction that
 # matters here: allreduce PASS + p2p FAIL means the fabric is fine and only the 2-rank path is broken.
 verdict() {
-    local name="$1" log="$2"
+    local name="$1" log="$2" cell="$3"
     local allreduce p2p pair provider
 
     # PASS needs rank 0's PASS *and* no rank reporting FAIL: a remote rank can get a silently wrong
@@ -148,38 +194,66 @@ verdict() {
     allreduce=$(stage_verdict allreduce)
     pair=$(stage_verdict p2p_size2)
     p2p=$(stage_verdict p2p_size4)
+    sustained=$(stage_verdict sustained)
+    # `|| true` for the same reason as the failure dump below: under `set -o pipefail` this fails
+    # when grep matches NOTHING, which is exactly what an earlier stage failing produces -- so the
+    # run died at the first failing variant, taking every later variant with it (jobs 590674, 590679).
+    rounds=$(grep -oE '^sustained_rounds_total=[0-9]+' "${log}" | tail -1 | cut -d= -f2 || true)
     grep -q 'Using network Socket'  "${log}" && provider=SOCKET || provider=cxi
     grep -q 'Selected provider is cxi' "${log}" || provider=UNKNOWN
 
-    printf -- '-- %s: allreduce=%s p2p_size2=%s p2p_size4=%s net=%s\n' \
-        "${name}" "${allreduce}" "${pair}" "${p2p}" "${provider}"
+    printf -- '-- %s: allreduce=%s p2p_size2=%s p2p_size4=%s sustained=%s rounds=%s net=%s\n' \
+        "${name}" "${allreduce}" "${pair}" "${p2p}" "${sustained}" "${rounds:-0}" "${provider}"
     # `|| true`: under `set -o pipefail` this pipeline fails when the grep matches NOTHING, which is
     # precisely the passing case -- it ended the first corrected run after one variant.
     grep -E '^(failed_stage|failure)=' "${log}" | sed 's/^/   | /' | head -4 || true
 
-    SUMMARY+=("${name}: allreduce=${allreduce} p2p_size2=${pair} p2p_size4=${p2p} net=${provider}")
-    if [[ "${p2p}" == PASS && "${provider}" == cxi ]]; then
+    SUMMARY+=("${name}: allreduce=${allreduce} p2p_size2=${pair} p2p_size4=${p2p} \
+sustained=${sustained} rounds=${rounds:-0} net=${provider}")
+    # The sustained stage is what decides now. The one-shot stages already pass at fill 0.70 (job
+    # 590369) and kimi still died -- after serving, not at init -- so "communicator builds" is no
+    # longer evidence of anything.
+    CELL_TOTAL["${cell}"]=$(( ${CELL_TOTAL["${cell}"]:-0} + 1 ))
+    if [[ "${sustained}" == PASS && "${provider}" == cxi ]]; then
+        CELL_PASS["${cell}"]=$(( ${CELL_PASS["${cell}"]:-0} + 1 ))
         PASSING+=("${name}")
     fi
 }
 
 SUMMARY=()
 PASSING=()
+# Pass RATE per (variant, fill) cell, not a single verdict. The same cell -- v0-current at fill 0.70
+# -- came back FAIL (hard ncclInternalError, job 590674), FAIL (silent wrong answer 10.0, job 590679)
+# and PASS (154852 sustained rounds, job 590681). One sample per cell measures nothing when the
+# failure is intermittent, and it is exactly how a variant gets crowned as "the fix" by luck.
+declare -A CELL_PASS CELL_TOTAL
 read -r -a FILL_LEVELS <<<"${FILL_FRACTION}"
 for fill in "${FILL_LEVELS[@]}"; do
     for name in "${VARIANT_NAMES[@]}"; do
-        run_variant "${name}" "${fill}"
+        for rep in $(seq 1 "${REPEATS}"); do
+            run_variant "${name}" "${fill}" "${rep}"
+        done
     done
 done
 
 printf '\n===== summary =====\n'
 printf '%s\n' "${SUMMARY[@]}"
 
-if (( ${#PASSING[@]} == 0 )); then
-    echo "PP_P2P_GATE: FAIL -- no variant carried 2-rank P2P over CXI. The env is not the cause."
+printf '\n===== pass rate per cell (%s reps each) =====\n' "${REPEATS}"
+clean_cells=()
+for cell in $(printf '%s\n' "${!CELL_TOTAL[@]}" | sort); do
+    pass="${CELL_PASS[${cell}]:-0}" total="${CELL_TOTAL[${cell}]}"
+    printf -- '-- %-34s %s/%s\n' "${cell}" "${pass}" "${total}"
+    # A fix has to survive EVERY repetition. Anything less is the intermittency this sweep exists
+    # to measure, and calling it a fix is how a lucky sample becomes a deployment decision.
+    (( pass == total )) && clean_cells+=("${cell}")
+done
+
+if (( ${#clean_cells[@]} == 0 )); then
+    echo "PP_P2P_GATE: FAIL -- no cell passed every repetition."
     echo "Logs: ${RUN_DIR}"
     exit 1
 fi
-echo "PP_P2P_GATE: PASS -- first working variant: ${PASSING[0]} (all: ${PASSING[*]})"
+echo "PP_P2P_GATE: PASS -- clean across all reps: ${clean_cells[*]}"
 echo "Logs: ${RUN_DIR}"
 exit 0

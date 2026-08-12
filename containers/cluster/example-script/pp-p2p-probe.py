@@ -21,6 +21,7 @@ import argparse
 import datetime
 import os
 import sys
+import time
 import traceback
 
 import torch
@@ -110,6 +111,87 @@ def run_p2p_chain(group, ranks: list[int], device: torch.device, rank: int, elem
         torch.cuda.synchronize()
 
 
+def tp_group_ranks(rank: int, local_world_size: int) -> list[int]:
+    """The ranks sharing this rank's node: kimi runs tensor parallelism inside a node, pipeline across."""
+    node = rank // local_world_size
+    return list(range(node * local_world_size, (node + 1) * local_world_size))
+
+
+def run_sustained(wide_group, gloo_group, tp_group, ranks: list[int], tp_ranks: list[int], device: torch.device,
+                  rank: int, elements: int, allgather_elements: int, seconds: float) -> int:
+    """Drive TP allgather, gloo metadata handoff and NCCL pipeline P2P together, for a while.
+
+    The one-shot stages above only prove a communicator can be BUILT. Kimi got past that: every arm
+    reported its KV cache, served 80 requests, and only then stopped -- job 590379 with its pipeline
+    peer vanishing mid ``recv_object`` (gloo), jobs 590380/590381 with a ``_ALLGATHER_BASE`` wedged
+    past the 600 s watchdog. So the interesting question is not whether the fabric comes up but
+    whether it keeps making progress under the traffic a real decode loop generates.
+
+    All three shapes run in one round because that is how they run in vLLM, and it is their overlap
+    that is untested: a lazy 2-rank P2P communicator in flight while a separate group runs a
+    collective. ``allgather_elements`` defaults to the width observed in the failure so the message
+    sizes are the ones that actually wedged.
+
+    Returns the number of completed rounds, so a hang that the timeout cuts short still reports how
+    far it got. Correctness is checked every round: the failure mode this machine has already shown
+    once is a silently WRONG answer, not an exception.
+
+    EVERY rank runs this, not just the pipeline members: the TP allgather is collective over all four
+    node-local ranks, so a loop entered by only the two that happen to sit in the pipeline group would
+    hang on the first round. For the same reason the stop decision is rank 0's and is broadcast --
+    letting each rank test its own clock independently desynchronises them at the deadline, and the
+    rank that leaves first strands the rest inside a collective.
+    """
+    position = ranks.index(rank) if rank in ranks else -1
+    tp_position = tp_ranks.index(rank)
+    # bfloat16: the dtype the model actually moves, so the byte counts match the wedged collective.
+    contribution = torch.full((allgather_elements, ), float(tp_position + 1), dtype=torch.bfloat16, device=device)
+    gathered = torch.empty((allgather_elements * len(tp_ranks), ), dtype=torch.bfloat16, device=device)
+    payload = torch.full((elements, ), float(rank), device=device)
+    inbox = torch.empty((elements, ), device=device)
+    meta = torch.empty((1, ), dtype=torch.int64)
+    keep_going = torch.ones((1, ), dtype=torch.int64, device=device)
+
+    deadline = time.monotonic() + seconds
+    rounds = 0
+    while True:
+        if rank == 0:
+            keep_going.fill_(1 if time.monotonic() < deadline else 0)
+        dist.broadcast(keep_going, src=0)
+        if keep_going.item() == 0:
+            break
+
+        dist.all_gather_into_tensor(gathered, contribution, group=tp_group)
+        torch.cuda.synchronize()
+        # Check the LAST contributor's slice: a partial-fabric failure leaves the local rank's own
+        # slice right and a remote one zeroed, so reading slot 0 would call a broken gather clean.
+        last = gathered[allgather_elements * (len(tp_ranks) - 1)].item()
+        if last != float(len(tp_ranks)):
+            raise ValueError(f"allgather wrong at round {rounds}: expected {float(len(tp_ranks))}, got {last}")
+
+        # The gloo hop first, then the NCCL one: vLLM sends the tensor metadata over the CPU group
+        # before the hidden states, and it was the gloo recv that raised "Connection closed by peer".
+        # A rank outside the pipeline group (position -1) does the TP half of the round only.
+        if position > 0:
+            dist.recv(meta, src=ranks[position - 1], group=gloo_group)
+            if meta.item() != rounds:
+                raise ValueError(f"metadata wrong at round {rounds}: got {meta.item()}")
+            dist.irecv(inbox, src=ranks[position - 1], group=wide_group).wait()
+            torch.cuda.synchronize()
+            if inbox[0].item() != float(ranks[position - 1]):
+                raise ValueError(f"payload wrong at round {rounds}: got {inbox[0].item()}")
+        if 0 <= position < len(ranks) - 1:
+            dist.send(torch.tensor([rounds], dtype=torch.int64), dst=ranks[position + 1], group=gloo_group)
+            dist.isend(payload, dst=ranks[position + 1], group=wide_group).wait()
+            torch.cuda.synchronize()
+
+        rounds += 1
+        # Progress on stdout is what distinguishes "wedged at round 3" from "wedged at round 40000".
+        if rank == 0 and rounds % 200 == 0:
+            report("sustained_rounds", rounds)
+    return rounds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--elements", type=int, default=1 << 20, help="payload floats per P2P hop")
@@ -119,6 +201,16 @@ def main() -> int:
                         default=0.0,
                         help="occupy this fraction of free GPU memory BEFORE building groups, so the "
                         "communicator is created under the memory pressure a loaded model imposes")
+    parser.add_argument("--sustain-seconds",
+                        type=float,
+                        default=180.0,
+                        help="how long to drive mixed TP/PP traffic; 0 skips the sustained stage. The "
+                        "default covers the ~2.5 min kimi survived after its first request")
+    parser.add_argument("--allgather-elements",
+                        type=int,
+                        default=14680064,
+                        help="per-rank TP allgather width; the default is the NumelIn of the "
+                        "_ALLGATHER_BASE that wedged in jobs 590380 and 590381")
     args = parser.parse_args()
 
     rank = env_int("RANK", 0)
@@ -160,6 +252,15 @@ def main() -> int:
         # and both groups must be built before either is used so the two stages cannot interleave.
         wide_group = dist.new_group(ranks=wide, timeout=timeout)
         pair_group = dist.new_group(ranks=pair, timeout=timeout)
+        # Built here with the others: new_group is collective over the world group, so every group
+        # the run will ever need has to be created before any of them is used.
+        gloo_group = dist.new_group(ranks=wide, backend="gloo", timeout=timeout)
+        tp_ranks = tp_group_ranks(rank, local_world_size)
+        tp_groups = [
+            dist.new_group(ranks=list(range(n * local_world_size, (n + 1) * local_world_size)), timeout=timeout)
+            for n in range(world_size // local_world_size)
+        ]
+        tp_group = tp_groups[rank // local_world_size]
         if rank == 0:
             report("stage_group_create", "PASS")
 
@@ -184,6 +285,17 @@ def main() -> int:
         dist.barrier()
         if rank == 0:
             report("stage_p2p_size4", "PASS")
+
+        # Last, because it is the long one and because everything above is a precondition for it.
+        stage = "sustained"
+        if args.sustain_seconds > 0.0:
+            rounds = run_sustained(wide_group, gloo_group, tp_group, wide, tp_ranks, device, rank, args.elements,
+                                   args.allgather_elements, args.sustain_seconds)
+            dist.barrier()
+            if rank == 0:
+                report("sustained_rounds_total", rounds)
+                report("stage_sustained", "PASS")
+        if rank == 0:
             report("verdict", "PASS")
     except Exception as exc:  # noqa: BLE001 -- the failure IS the measurement; report it, do not raise
         # EVERY rank reports its own failure, not just rank 0. Under memory pressure the cross-node
