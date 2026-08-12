@@ -551,10 +551,24 @@ role_srun "${AGENT_NODES}" "${AGENT_NODELIST}" "${AMD_CE_ENV}" "${BENCH_IMAGE}" 
 agent_step_pid="${ROLE_PID}"
 step_pids+=("${agent_step_pid}")
 
+# Supervise ALL THREE steps, not just the agent one. Waiting on the agent alone means a dead
+# service step goes unnoticed: the agents cannot make progress, but they retry the dead endpoint
+# until their OWN wall-clock budget expires, so the job holds every node for hours producing
+# nothing. Job 590380 sat on 6 nodes for 90 minutes after its vLLM ranks were gone.
+# `wait -n` returns on the FIRST background step to exit, whichever one that is; bash 4.4 has no
+# `-p` to name it, so ask who is still alive instead.
 set +e
-wait "${agent_step_pid}"
-agent_status="$?"
+wait -n
+first_status="$?"
 set -e
+
+if kill -0 "${agent_step_pid}" 2>/dev/null; then
+    echo "FATAL: a service step exited (status ${first_status}) while the agents were still running." >&2
+    echo "       Ending the run now -- the agents cannot make progress without it." >&2
+    # The EXIT trap (cleanup_steps) kills the remaining steps and releases the allocation.
+    exit 1
+fi
+agent_status="${first_status}"
 
 # Post-run utilization verdicts into the job log, so over/under-provisioned role splits are
 # visible without anyone remembering to run the report. Best-effort: the batch-host python may
