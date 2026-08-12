@@ -31,6 +31,11 @@
 
 set -euo pipefail
 
+# Beverin's core_pattern is the machine-global `core_%h_%p` and a dump lands in the crashing
+# process's CWD, littering the repo with 0-byte core_nid<node>_<pid> stubs (the size limit
+# truncates the dump after the kernel has created the file). Slurm propagates CORE to steps.
+ulimit -c 0
+
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/claude-roundtrip/logs/${SLURM_JOB_ID}"
 export HF_HOME="${SCRATCH}/hf"
