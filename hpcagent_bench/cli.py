@@ -862,11 +862,14 @@ def cmd_aggregate_db(args) -> int:
     ``run-framework --summarize`` rollup aggregates as part of closing the run. This exists for the
     case where the merge should happen NOW (archiving a run, or copying one DB off the cluster)."""
     from hpcagent_bench.harness import recording
-    shards = recording.shard_paths(args.db)
+    # A cluster run does not leave its shards beside anything: each judge rank writes into its own
+    # <run>/judge/rank-N/ directory, so the default sibling scan finds nothing and the run looks
+    # empty. --source names them explicitly, which is what recording.aggregate already accepts.
+    shards = list(args.source) if args.source else recording.shard_paths(args.db)
     if not shards:
         print(f"no shard DBs beside {args.db or recording.base_db_path()}; nothing to aggregate")
         return 0
-    rows = recording.aggregate(args.db)
+    rows = recording.aggregate(args.db, sources=shards if args.source else None)
     print(f"aggregated {rows} rows from {len(shards)} shards into {args.db or recording.base_db_path()}")
     return 0
 
@@ -1335,6 +1338,11 @@ def build_parser() -> argparse.ArgumentParser:
                     default=None,
                     help="aggregate destination; shards are the hpcagent_bench<N>.db files beside it "
                     "(default: the configured record.db_path)")
+    ag.add_argument("--source",
+                    action="append",
+                    default=None,
+                    help="explicit shard DB to merge; repeatable. Needed for a cluster run, whose "
+                    "shards sit in per-rank subdirectories rather than beside the destination")
     ag.set_defaults(func=cmd_aggregate_db)
 
     pl = sub.add_parser("plot", help="read the results DB and emit the speedup heatmap PDF")
