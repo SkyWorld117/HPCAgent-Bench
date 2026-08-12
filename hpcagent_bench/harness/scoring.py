@@ -20,6 +20,7 @@ A build or run failure is a scored zero (``correct=False``), never a dropped row
 The ``.so`` is loaded with cffi in ABI mode: a per-call ``cdef`` built from the runtime
 dtypes declares the C signature, then ``ffi.dlopen`` + a direct call invoke the kernel.
 """
+import functools
 import math
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -527,16 +528,23 @@ def score(submission: Submission,
     # A case that names config knobs runs at THIS preset's sizes with those knobs substituted:
     # params_override replaces the parameter block verbatim, so the sizes have to come along or the
     # held-out case would silently run at whatever the override alone spelled.
+    #
+    # BUILDERS, not data. Every held-out case is the size of the public run (hidden.VARIANTS at the
+    # public preset), so materialising the list put 6 full input sets in memory at once and the
+    # timed child's address space peaked at 7x the declared arrays -- against an RLIMIT_AS derived
+    # as MEMORY_COPIES (2) x arrays. Deferring the draw to the moment of use costs one extra
+    # get_data per case and keeps the peak at the public set plus the case in flight.
     hidden_data = [(case.label,
-                    _data_seeded(task.kernel,
-                                 case.preset,
-                                 datatype,
-                                 case.seed,
-                                 params_override=({
-                                     **spec.parameters[case.preset],
-                                     **dict(case.config)
-                                 } if case.config else params_override),
-                                 hidden_variant=case.variant)) for case in cases]
+                    functools.partial(_data_seeded,
+                                      task.kernel,
+                                      case.preset,
+                                      datatype,
+                                      case.seed,
+                                      params_override=({
+                                          **spec.parameters[case.preset],
+                                          **dict(case.config)
+                                      } if case.config else params_override),
+                                      hidden_variant=case.variant)) for case in cases]
 
     device = task.residency == "device"
     timeout = float(config.get("timeouts.kernel_s", 300))
@@ -564,9 +572,15 @@ def score(submission: Submission,
     if baseline_uses_numpy(baseline):
         baseline_samples["numpy"] = _time_numpy_samples(spec, data, repeat, warmup=timing.warmup_count())
         baselines["numpy"] = min(baseline_samples["numpy"])
-    for label, hdata in hidden_data:
+    # One case in flight at a time: the numpy EXPECTED outputs are kept, the inputs they were
+    # derived from are not. Only the outputs are needed again, at grading.
+    for label, make_hidden in hidden_data:
         if _wants(oracle, "numpy"):
-            expected_hidden.setdefault(label, {})["numpy"] = _numpy_reference(spec, hdata)
+            hdata = make_hidden()
+            try:
+                expected_hidden.setdefault(label, {})["numpy"] = _numpy_reference(spec, hdata)
+            finally:
+                del hdata
 
     def _numpy_baseline_fallback():
         """Time the numpy baseline when a requested compiled reference is unavailable."""
@@ -676,7 +690,7 @@ def score(submission: Submission,
                                                                          workspace_bytes=submission.workspace_bytes,
                                                                          reps=repeat,
                                                                          warmup=timing.warmup_count(),
-                                                                         followups=[h for _, h in hidden_data])
+                                                                         followups=[make for _, make in hidden_data])
             native_ns = min(native_samples) if native_samples else 0
             public_correct, max_err, detail = _grade_against(spec, expected_public, actual, rtol, atol)
 

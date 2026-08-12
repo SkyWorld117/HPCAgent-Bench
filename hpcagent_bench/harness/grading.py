@@ -6,7 +6,7 @@ import importlib
 import pathlib
 import time
 from dataclasses import dataclass, replace
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -344,7 +344,7 @@ def run_compiled_reference(spec: BenchSpec,
                            task: Task,
                            binding: Binding,
                            public_data: Dict,
-                           hidden_data: List[Tuple[str, Dict]],
+                           hidden_data: List[Tuple[str, Callable[[], Dict]]],
                            repeat: int,
                            timeout: float,
                            memory_gb: float,
@@ -388,14 +388,21 @@ def run_compiled_reference(spec: BenchSpec,
                                                         warmup=warmup)
         best = min(samples) if samples else 0
         hidden_out: Dict[str, Dict] = {}
-        for label, hdata in hidden_data:
-            houts, _samples, _mem, _extra = _call_isolated(lib,
-                                                           binding,
-                                                           hdata,
-                                                           language,
-                                                           device=False,
-                                                           timeout=timeout,
-                                                           memory_gb=memory_gb)
+        # Built here and dropped after its call: every held-out case is the size of the public run
+        # (hidden.VARIANTS at the public preset), so holding all of them plus public_data is what
+        # pushed the reference's own footprint to 6x the declared arrays.
+        for label, make_hidden in hidden_data:
+            hdata = make_hidden()
+            try:
+                houts, _samples, _mem, _extra = _call_isolated(lib,
+                                                               binding,
+                                                               hdata,
+                                                               language,
+                                                               device=False,
+                                                               timeout=timeout,
+                                                               memory_gb=memory_gb)
+            finally:
+                del hdata
             hidden_out[label] = houts
     return outputs, int(best or 0), hidden_out, [int(s) for s in samples]
 
@@ -404,7 +411,7 @@ def _run_c_reference(spec: BenchSpec,
                      task: Task,
                      binding: Binding,
                      public_data: Dict,
-                     hidden_data: List[Tuple[str, Dict]],
+                     hidden_data: List[Tuple[str, Callable[[], Dict]]],
                      repeat: int,
                      timeout: float,
                      memory_gb: float,

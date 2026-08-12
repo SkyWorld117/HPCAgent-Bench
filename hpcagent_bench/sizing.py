@@ -369,6 +369,12 @@ def shape_namespace(spec: BenchSpec, values: Mapping[str, object]) -> Dict[str, 
 #: Copies of the kernel's arrays a single-node run must have room for. The harness itself rebuilds
 #: every input buffer once per repetition (``native_call._call_native_impl``), so the second copy is
 #: memory the run genuinely needs -- headroom for one full snapshot of the data, not a fudge factor.
+#:
+#: This is a claim about the whole child, so it only holds because the held-out cases are built one
+#: at a time (``native_call.run_followup``). They used to be materialised up front -- six input sets
+#: at the public size, plus the per-rep copy -- which put the real peak at 7x while this said 2x,
+#: and heat3d_tiled_sym hit RLIMIT_AS mid-grade. Anything that makes a second input set outlive the
+#: call it belongs to breaks this constant, not just the comment.
 MEMORY_COPIES: int = 2
 
 #: Bytes in the gibibyte the memory cap is quoted in (``_call_isolated(memory_gb=...)``).

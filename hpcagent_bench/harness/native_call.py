@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from cffi import FFI
@@ -201,6 +201,25 @@ def _rep_guard(run_once, seconds: float, after_first_rep=None):
     return guarded
 
 
+def run_followup(make_src, call_with, rep_timeout: float) -> Dict[str, np.ndarray]:
+    """Materialise ONE held-out input set, call the kernel on it, and drop it again.
+
+    Followups arrive as builders rather than as data because every one of them is the size of the
+    public run: hidden.VARIANTS is 5, so handing them over as dicts kept 6 full input sets resident
+    at once and the child's address space peaked at 7x the declared arrays -- against an RLIMIT_AS
+    the harness derives as MEMORY_COPIES (2) x arrays. heat3d_tiled_sym died exactly there. Built
+    here, one at a time, the peak is the public set plus the one case in flight.
+
+    Deleting ``src`` before returning is the whole point of the function: keeping it alive until
+    the list comprehension's next iteration is what put every case in memory simultaneously.
+    """
+    src = make_src()
+    try:
+        return _rep_guard(functools.partial(call_with, src), rep_timeout, None)(False)[0]
+    finally:
+        del src
+
+
 def _call_native_impl(
     lib_path,
     binding: Binding,
@@ -215,7 +234,7 @@ def _call_native_impl(
     warmup: int,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Dict] = ()
+    followups: Sequence[Callable[[], Dict]] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Shared FFI body for the host and device native calls: marshal ``data`` to the
     canonical symbol of ``lib_path`` and time ``reps`` calls (plus ``warmup`` discarded ones).
@@ -239,9 +258,11 @@ def _call_native_impl(
     allocation, and the symbol lookup happen outside it, so none of them count toward a
     sample; the D2H copy is the ``to_host`` in the output map, after it.
 
-    ``followups`` are extra input sets called after the timed reps through this same loaded image,
-    so a submission's own cached state is HOT when they run (see :func:`_call_isolated`). Returns
-    ``(outputs_by_name, [ns samples], [followup output maps])`` for the LAST rep's outputs.
+    ``followups`` are BUILDERS of extra input sets, called after the timed reps through this same
+    loaded image, so a submission's own cached state is HOT when they run (see
+    :func:`_call_isolated`). Builders rather than data so only one held-out set is resident at a
+    time -- see :func:`run_followup`. Returns ``(outputs_by_name, [ns samples], [followup output
+    maps])`` for the LAST rep's outputs.
     """
     ffi = FFI()
     sym = binding.symbols[lang]
@@ -326,7 +347,7 @@ def _call_native_impl(
     # has not seen. A submission that cached rep 1's answer in its own file-scope storage replays it
     # here and grades WRONG -- which a fresh child per hidden case can never detect, since each fresh
     # image starts with an empty cache. Untimed, so no sample moves.
-    extras = [_rep_guard(functools.partial(call_with, src), rep_timeout, None)(False)[0] for src in followups]
+    extras = [run_followup(make_src, call_with, rep_timeout) for make_src in followups]
     return outputs, samples, extras
 
 
@@ -340,7 +361,7 @@ def _call_native(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Dict] = ()
+    followups: Sequence[Callable[[], Dict]] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """dlopen ``lib_path`` and time ``reps`` calls of the canonical symbol with ``data`` on the HOST.
 
@@ -387,7 +408,7 @@ def _call_native_device(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Dict] = ()
+    followups: Sequence[Callable[[], Dict]] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Device-resident call: array buffers live on the GPU.
 
@@ -465,7 +486,7 @@ def _call_python(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Dict] = ()
+    followups: Sequence[Callable[[], Dict]] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Load an agent's Python submission from ``py_path`` and time ``reps`` calls of its kernel.
 
@@ -515,7 +536,7 @@ def _call_python(
                                            reps, warmup)
     # Same one-module replay hole as the native path: the submission is exec'd once, so a
     # module-level cache survives every rep. Followups exercise it on unseen inputs, untimed.
-    extras = [_rep_guard(functools.partial(call_with, src), rep_timeout, None)(False)[0] for src in followups]
+    extras = [run_followup(make_src, call_with, rep_timeout) for make_src in followups]
     return outputs, samples, extras
 
 
@@ -708,16 +729,20 @@ def _call_isolated(
     device_id: Optional[int] = None,
     reps: int = 1,
     warmup: int = 0,
-    followups: Sequence[Dict] = ()
+    followups: Sequence[Callable[[], Dict]] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], MemoryUsage, List[Dict[str, np.ndarray]]]:
     """Run a whole measurement in ONE CHILD PROCESS so an agent kernel that segfaults,
     hangs, or over-allocates is a SCORED failure, not a death of the whole runner.
 
-    ``followups`` are extra input sets called AFTER every timed sample, in this same child and
-    through the same loaded image. That ordering is the point: a submission whose own file-scope
-    storage caches rep 1's answer is hot by then, so it replays that answer on inputs it never saw
-    and grades wrong. Running each hidden case in its own fresh child cannot see this at all --
-    every fresh image starts with an empty cache. Untimed, so no sample moves.
+    ``followups`` are BUILDERS of extra input sets, called AFTER every timed sample, in this same
+    child and through the same loaded image. That ordering is the point: a submission whose own
+    file-scope storage caches rep 1's answer is hot by then, so it replays that answer on inputs it
+    never saw and grades wrong. Running each hidden case in its own fresh child cannot see this at
+    all -- every fresh image starts with an empty cache. Untimed, so no sample moves.
+
+    Each builder is invoked and its result dropped inside :func:`run_followup`, so the child holds
+    ONE held-out set at a time rather than all of them. A builder must be picklable (the device
+    path spawns), which a ``functools.partial`` over a module-level function is.
 
     Returns ``(outputs, samples, memory, followup_outputs)`` -- the LAST rep's outputs, the kept ns
     samples, the child's peak resident memory (see :class:`MemoryUsage`, captured outside the
