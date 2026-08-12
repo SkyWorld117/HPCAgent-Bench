@@ -1,0 +1,59 @@
+# Replace the three placeholders as described in README.md before registering this EDF.
+# AMD's official CDNA vllm image (rocm/vllm rocm7.14.0_cdna_..._vllm_0.23.0), pulled 589091.
+# Purpose: MLA prefill support (flash_attn 2.8.3 + aiter) that the CSCS image lacks -- Kimi/DeepSeek.
+# Layout differs from the CSCS image: ROCm ships as wheels in site-packages and there is NO /opt/rocm.
+# The image ships no aws-ofi-nccl plugin either, so RCCL used to fall back to TCP over the hsn NICs;
+# the env block below points it at the plugin extracted from the rocm723-ofi image instead.
+image = "@IMAGE@"
+
+mounts = [
+  "/capstor:/capstor",
+  "/iopsstor:/iopsstor"
+]
+
+workdir = "@WORKDIR@"
+
+[annotations]
+com.hooks.cxi.enabled = "true"
+com.hooks.netstack.source = "host"
+
+[env]
+HSA_ENABLE_IPC_MODE_LEGACY = "1"
+SAFETENSORS_FAST_GPU = "1"
+HIP_FORCE_DEV_KERNARG = "1"
+TOKENIZERS_PARALLELISM = "false"
+
+NCCL_SOCKET_IFNAME = "hsn0,hsn1,hsn2,hsn3"
+GLOO_SOCKET_IFNAME = "hsn0"
+
+# aws-ofi-nccl, the net plugin that puts RCCL on libfabric/CXI instead of TCP. Without it RCCL
+# dlopens librccl-net.so, misses, finds no verbs device either (CXI is not verbs) and SILENTLY
+# picks Socket over hsn0-3 -- no error, just the slow path. @PLUGIN@ is the directory
+# extract-aws-ofi-plugin.sh writes: the plugin built for the rocm723-ofi image (aws-ofi-nccl
+# v1.20.0), which exports ncclNetPlugin_v6-v12 (this image's RCCL 2.30.4 wants v6-v12) and carries
+# no RPATH, so it is relocatable. Verified against this image: glibc 2.39 >= the 2.38 it needs,
+# GLIBCXX_3.4.33 >= 3.4.32, libhwloc.so.15 present, libamdhip64.so.7 already loaded by RCCL itself.
+# The CSCS site hook com.hooks.aws_ofi_nccl is NOT usable here: its rocm6 plugin exports only
+# ncclNetPlugin_v5 and links libamdhip64.so.6. Gated by example-script/test-rccl-ofi-2node.sbatch
+# (job 590212: cxi, 4 nics, nNodes 2, no Socket, 85 GB/s bus at 2 nodes x 4 ranks).
+# The unified ofi+MLA image will ship this at /opt/aws-ofi-nccl instead.
+NCCL_NET_PLUGIN = "ofi"
+NCCL_NET = "AWS Libfabric"
+FI_PROVIDER = "cxi"
+# @PLUGIN@ is PREPENDED to the image's OWN baked LD_LIBRARY_PATH, which is spelled out here in
+# full: the rocm wheels are reachable only through it, and replacing it with just the plugin dir
+# breaks the whole stack. Absolute rather than an expansion for the same reason PATH is below --
+# $VAR would take the host's value, not the image's.
+LD_LIBRARY_PATH = "@PLUGIN@/lib:/opt/python/lib/python3.14/site-packages/_rocm_sdk_devel/lib:/opt/python/lib/python3.14/site-packages/_rocm_sdk_devel/lib/rocm_sysdeps/lib:/opt/python/lib/python3.14/site-packages/_rocm_sdk_core/lib:/opt/python/lib/python3.14/site-packages/_rocm_sdk_core/lib/rocm_sysdeps/lib"
+
+# Beverin's current kernel lacks the DMA-BUF options needed by this stack. Both switches are
+# required: the first is RCCL's, the second the plugin's own, and the plugin ignores the first.
+NCCL_DMABUF_ENABLE = "0"
+OFI_NCCL_DISABLE_DMABUF = "1"
+
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,NET"
+
+# The image's own PATH, absolute (host SLES binaries must not leak in). rocm tools live in the
+# _rocm_sdk_* wheels; python and vllm in /opt/python/bin.
+PATH = "/opt/python/lib/python3.14/site-packages/_rocm_sdk_devel/bin:/opt/python/lib/python3.14/site-packages/_rocm_sdk_devel/lib/llvm/bin:/opt/python/lib/python3.14/site-packages/_rocm_sdk_core/bin:/opt/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

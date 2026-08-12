@@ -187,6 +187,48 @@ plugin, disables DMA-BUF for the current Beverin kernel, and puts
 `/opt/pytorch211/bin` first on `PATH`. Use the environment name
 `rocm723-vllm-0.23.0-pytorch211-ofi` with the site's CE command.
 
+## 6. Register the cdna image, with the OFI plugin borrowed from this one
+
+The cdna image (`rocm714-vllm-0.23.0-cdna`) is AMD's official build, used because it has the MLA
+prefill support (flash_attn + aiter) that Kimi and DeepSeek need and this image lacks. It ships no
+aws-ofi-nccl plugin, so RCCL there falls back to **TCP sockets, silently** -- no error, just the
+slow path, which is what made a kimi pp=4 decode hop take 7m08s and blow the executor deadline.
+
+Borrow the plugin from the image built above. It is relocatable because it was compiled against a
+captured host libfabric SDK with its rpath stripped, and both images ship the same libfabric
+anchor for the CXI hook to override:
+
+This image is pulled, not built here, so it has no `$ROOT` build tree; give its `.sqsh` path
+directly. `PLUGIN` is the directory `extract-aws-ofi-plugin.sh` prints.
+
+```bash
+PLUGIN=$(./extract-aws-ofi-plugin.sh | awk '/^plugin:/ {print $2}')
+IMAGE="$SCRATCH/ce-images/rocm714-vllm-0.23.0-cdna.sqsh"
+
+mkdir -p "$HOME/.edf"
+cp rocm714-vllm-0.23.0-cdna.toml "$HOME/.edf/rocm714-vllm-0.23.0-cdna.toml"
+
+sed -i \
+  -e "s|@IMAGE@|$IMAGE|g" \
+  -e "s|@WORKDIR@|$SCRATCH|g" \
+  -e "s|@PLUGIN@|$PLUGIN|g" \
+  "$HOME/.edf/rocm714-vllm-0.23.0-cdna.toml"
+```
+
+`@PLUGIN@` goes on `LD_LIBRARY_PATH` **first, keeping the image's own entries** -- the cdna image
+bakes an `LD_LIBRARY_PATH` that is the only route to its ROCm wheels, and replacing it with just
+the plugin directory breaks the whole stack.
+
+Then gate it before trusting a campaign to it:
+
+```bash
+sbatch --account=<account> ../../example-script/test-rccl-ofi-2node.sbatch
+```
+
+A pass requires `Selected provider is cxi`, `Using network AWS Libfabric`, no `Using network
+Socket`, and `correct=True`. A run that is correct **over Socket** is the failure this gate
+exists to catch, so read the three network lines, not just the numeric result.
+
 ## File selection summary
 
 Use only this build chain:
