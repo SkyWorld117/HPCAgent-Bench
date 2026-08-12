@@ -20,19 +20,22 @@ genuine compile error rather than reporting the reference as merely unavailable.
 import ctypes
 import functools
 import pathlib
-import shutil
 import subprocess
 import tempfile
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
+from tests.port_toolchain import gxx
+
 HERE = pathlib.Path(__file__).resolve().parent
 KERNEL = HERE.parents[2] / "hpcagent_bench" / "benchmarks" / "scientific_computing" / "spectral_methods" / "cegterg"
 CPP = KERNEL / "cegterg_reference.cpp"
 SO = HERE / "libcegterg_reference.so"
 
-BUILD_CMD: Tuple[str, ...] = ("g++", "-O3", "-std=c++20", "-Wall", "-Wextra", "-fPIC", "-shared")
+#: Flags only -- the driver is resolved per call, since which g++ can build this is a
+#: PATH question answered at run time, not a constant.
+BUILD_CMD: Tuple[str, ...] = ("-O3", "-std=c++20", "-Wall", "-Wextra", "-fPIC", "-shared")
 LINK_LIBS: Tuple[str, ...] = ("-lfftw3", "-llapack", "-lblas")
 
 _VP = ctypes.c_void_p
@@ -47,12 +50,12 @@ _PROBE = ('#include <fftw3.h>\nextern "C" void zgemm_();\nextern "C" void zhegvd
 @functools.lru_cache(maxsize=1, typed=True)
 def toolchain_available() -> bool:
     """True when g++ plus the FFTW3 / LAPACK / BLAS headers and libraries are all usable."""
-    if shutil.which("g++") is None:
+    if gxx() is None:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         src = pathlib.Path(tmp) / "probe.cpp"
         src.write_text(_PROBE)
-        cmd = ["g++", "-O3", "-std=c++20", str(src), "-o", str(pathlib.Path(tmp) / "probe"), *LINK_LIBS]
+        cmd = [gxx(), "-O3", "-std=c++20", str(src), "-o", str(pathlib.Path(tmp) / "probe"), *LINK_LIBS]
         return subprocess.run(cmd, capture_output=True, text=True).returncode == 0
 
 
@@ -63,7 +66,7 @@ def build_so(force: bool = False) -> pathlib.Path:
     call :func:`toolchain_available` first if a missing toolchain should be a skip instead."""
     if SO.exists() and not force and SO.stat().st_mtime >= CPP.stat().st_mtime:
         return SO
-    done = subprocess.run([*BUILD_CMD, str(CPP), "-o", str(SO), *LINK_LIBS], capture_output=True, text=True)
+    done = subprocess.run([gxx(), *BUILD_CMD, str(CPP), "-o", str(SO), *LINK_LIBS], capture_output=True, text=True)
     if done.returncode != 0:
         raise RuntimeError("cegterg_reference build failed:\n" + done.stderr[-3000:])
     if done.stderr.strip():  # zero-warning policy: -Wall -Wextra output is a failure

@@ -10,7 +10,6 @@ where applicable.
 """
 
 import ctypes
-import shutil
 import subprocess
 from pathlib import Path
 import sys
@@ -26,6 +25,7 @@ from numpy.ctypeslib import ndpointer
 
 import srad_numpy as srad
 from srad_numpy import SRAD_EPS, generate_random_srad_inputs, validate_srad_inputs
+from tests.port_toolchain import gxx
 
 RTOL = 1.0e-12
 ATOL = 1.0e-12
@@ -33,14 +33,14 @@ OK = 0
 CPP_SOURCE = HERE / "srad_ref.cpp"
 CPP_LIBRARY = HERE / "libsrad_ref.so"
 
-pytestmark = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ missing")
+pytestmark = pytest.mark.skipif(gxx() is None, reason="no g++ that builds -std=c++20")
 
 
 def build_cpp_reference():
     if (not CPP_LIBRARY.exists() or CPP_LIBRARY.stat().st_mtime < CPP_SOURCE.stat().st_mtime):
         subprocess.run(
             [
-                "g++",
+                gxx(),
                 "-O3",
                 "-std=c++20",
                 "-shared",

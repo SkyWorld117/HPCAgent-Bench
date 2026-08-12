@@ -346,18 +346,63 @@ COMPILER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "flang-new": ("flang", ),
 }
 
+#: Lowest driver major that can build what this driver's ``compilers.yaml`` block asks of it.
+#:
+#: An unversioned driver below its floor is NOT "a compiler we can use": it is on PATH, it
+#: accepts the invocation shape, and it then rejects the very ``-std=`` the block pins. Without
+#: a floor it SHADOWS a good versioned sibling, so a host whose default ``gcc`` is ancient fails
+#: every C build while ``gcc-14`` sits unused next to it. Measured on this login node (SUSE,
+#: default gcc 7.5.0 with gcc-12/13/14 alongside)::
+#:
+#:     gcc-7   -std=c17    -> unrecognized command line option, did you mean '-std=c11'?
+#:     g++-7   -std=c++23  -> unrecognized command line option, did you mean '-std=c++03'?
+#:     gcc-12  -std=c17    -> ok          g++-12/13/14 -std=c++23 -> ok
+#:
+#: One number per DRIVER, not per family, each traceable to the flag its own block pins:
+#: ``-std=c17`` and ``-std=f2018`` arrived in GCC 8; ``-std=c++23`` is spelled ``c++2b`` before
+#: GCC 12. Drivers absent here carry NO floor -- clang and flang pin nothing version-gated at
+#: this layer (flang's LLVM >= 20 requirement for ``-fdo-concurrent-to-openmp`` is a preflight
+#: check, not a resolution one), and inventing a floor for them would only reject working hosts.
+COMPILER_MIN_MAJOR: Dict[str, int] = {
+    "gcc": 8,
+    "g++": 12,
+    "gfortran": 8,
+}
+
+
+@functools.lru_cache(maxsize=None, typed=True)
+def driver_major(exe: str) -> int:
+    """Major version ``exe`` reports via ``-dumpversion``, or ``-1`` when it does not answer.
+
+    ``-1`` means "unknown", never "old": callers must treat a silent driver as usable, because
+    a probe that cannot speak is not evidence against the compiler.
+    """
+    try:
+        probe = subprocess.run([exe, "-dumpversion"], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    head = probe.stdout.strip().split(".")[0]
+    return int(head) if head.isdigit() else -1
+
 
 @functools.lru_cache(maxsize=None, typed=True)
 def resolve_compiler(name: str) -> Optional[str]:
     """Path to driver ``name``, else its highest ``<name>-<major>`` on PATH, else ``None``.
 
     Distros ship LLVM/GCC as ``<name>-<major>`` and only sometimes add the unversioned symlink.
-    Versions compare NUMERICALLY -- a string sort ranks ``flang-9`` above ``flang-21``."""
+    Versions compare NUMERICALLY -- a string sort ranks ``flang-9`` above ``flang-21``.
+
+    A candidate is skipped when it reports a major below :data:`COMPILER_MIN_MAJOR`, so a too-old
+    default driver falls through to a versioned sibling that can actually compile."""
     candidates = (name, ) + COMPILER_ALIASES.get(name, ())
+    floor = COMPILER_MIN_MAJOR.get(name, -1)
     for cand in candidates:
         exe = shutil.which(cand)
+        # Reject only on a CONFIDENT too-old answer; an unknown version stays usable.
         if exe is not None:
-            return exe
+            major = driver_major(exe) if floor > 0 else -1
+            if major < 0 or major >= floor:
+                return exe
 
     best_version = -1
     best_path: Optional[str] = None
@@ -379,6 +424,8 @@ def resolve_compiler(name: str) -> Optional[str]:
                 if not os.access(path, os.X_OK):
                     continue
                 version = int(suffix)
+                if version < floor:  # the suffix IS the major -- no probe needed
+                    continue
                 if version > best_version:
                     best_version = version
                     best_path = path

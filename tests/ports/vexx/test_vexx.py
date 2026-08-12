@@ -174,8 +174,8 @@ def test_coulomb_vcut_ws_without_table_raises():
 
 
 def _oracle():
-    import shutil
-    if shutil.which("g++") is None:
+    from tests.port_toolchain import gxx
+    if gxx() is None:
         return None
     sys.path.insert(0, str(_BASE))
     try:

@@ -10,7 +10,6 @@ where applicable.
 """
 
 import ctypes
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +23,8 @@ sys.path.insert(0, str(BENCH_DIR))
 
 import numpy as np
 from numpy.ctypeslib import ndpointer
+
+from tests.port_toolchain import gxx
 
 from examinimd_numpy import (
     DEFAULT_CUTOFF,
@@ -66,7 +67,7 @@ def build_cpp_reference():
     if not LIB_PATH.exists() or LIB_PATH.stat().st_mtime < CPP_SOURCE.stat().st_mtime:
         subprocess.run(
             [
-                "g++",
+                gxx(),
                 "-O3",
                 "-std=c++20",
                 "-shared",
@@ -274,8 +275,8 @@ class ExaMiniMDCppReference:
 
 @pytest.fixture(scope="module")
 def cpp():
-    if shutil.which("g++") is None:
-        pytest.skip("g++ not available")
+    if gxx() is None:
+        pytest.skip("no g++ that builds -std=c++20")
     return ExaMiniMDCppReference()
 
 

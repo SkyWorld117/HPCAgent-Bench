@@ -47,11 +47,12 @@ class VexxCtx(ctypes.Structure):
 def build_so(force=False):
     if SO.exists() and not force and SO.stat().st_mtime >= CPP.stat().st_mtime:
         return SO
-    import shutil
-    if shutil.which("g++") is None:
+    from tests.port_toolchain import gxx
+    cxx = gxx()
+    if cxx is None:
         return None
     r = subprocess.run(
-        ["g++", "-O3", "-std=c++20", "-fPIC", "-shared",
+        [cxx, "-O3", "-std=c++20", "-fPIC", "-shared",
          str(CPP), "-o", str(SO), "-lfftw3"],
         capture_output=True,
         text=True)
