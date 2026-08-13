@@ -261,3 +261,27 @@ def test_a_host_without_the_library_links_it_on_neither_side(monkeypatch, tmp_pa
     submission = languages.build_shared_lib_commands("cpp", src, tmp_path / "libs.so")[-1]
     assert flags.LINK_MIMALLOC not in baseline
     assert flags.LINK_MIMALLOC not in submission
+
+
+def test_no_fortran_compiler_declares_the_allocator(_mimalloc_links):
+    """Fortran is deliberately out of the allocator decision (user, 2026-08-13): allocatables are
+    the gfortran runtime's, not the agent's malloc calls, so -lmimalloc buys a Fortran submission
+    nothing. Pinned as ABSENCE across every fortran block, because absence is how it is currently
+    enforced -- one ref copied off a C block would silently put it back on the link line and put a
+    paragraph about an unusable knob into every Fortran prompt.
+    """
+    blocks = languages._load_compilers()
+    fortran = {name: b for name, b in blocks.items() if b.get("lang") == "fortran"}
+    assert fortran, "fixture guard: no fortran blocks found, the assertion below would be vacuous"
+    assert [n for n, b in fortran.items() if b.get("mimalloc_link_ref")] == []
+    assert languages.mimalloc_link_flags("fortran") == ()
+
+
+def test_the_fortran_prompt_says_nothing_about_the_allocator(_mimalloc_links):
+    """The build section's allocator paragraph is probe-gated, and the Fortran probe returns () --
+    so a host that CAN resolve -lmimalloc still must not promise it to a Fortran agent."""
+    from hpcagent_bench.harness.prompts import build_prompt
+    from hpcagent_bench.harness.task import Task
+
+    assert "mimalloc" not in build_prompt(Task("gemm", "restricted", "fortran"))
+    assert "mimalloc" in build_prompt(Task("gemm", "restricted", "c"))

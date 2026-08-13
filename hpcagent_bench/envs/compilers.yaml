@@ -61,6 +61,12 @@ gpp:
 # header via -include, which gfortran rejects as "valid for C/C++/... but not for Fortran".
 # gfortran gets libmvec from glibc's Fortran directives instead (the driver spec
 # pre-includes math-vector-fortran.h), so it needs no flag of ours here.
+# No mimalloc_link_ref on ANY fortran block -- gfortran, flang, ifx, mpifort (user decision
+# 2026-08-13). Fortran does not go through the allocator the way C/C++ does: allocatables are the
+# gfortran runtime's, not the agent's malloc calls, so linking -lmimalloc buys a Fortran submission
+# nothing while adding a library to every fortran link line and a paragraph to every fortran prompt
+# about a knob its author cannot use. tests/test_compiler_family.py pins the absence, so the ref
+# cannot drift back in by being copied off a C block.
 gfortran:
   lang: fortran
   install: {apt: gfortran, spack: gcc}
