@@ -29,6 +29,23 @@ def test_the_explicit_override_wins(monkeypatch):
     assert flags.ncores() == 3
 
 
+def test_a_confined_process_is_not_widened_by_the_node_wide_override(monkeypatch):
+    """run_cluster.sh exports the NODE's physical cores, so a rank pinned to one slot's share must
+    still read that share -- otherwise the override re-creates the oversubscription it was added to
+    fix, and silently, since the var is honoured before affinity is ever consulted."""
+    full = os.sched_getaffinity(0)
+    if len(full) < 2:
+        pytest.fail("need >= 2 cpus in the affinity mask")
+    subset = set(sorted(full)[:1])
+    monkeypatch.setenv("HPCAGENT_BENCH_NCORES", "512")
+    try:
+        os.sched_setaffinity(0, subset)
+        confined = flags.ncores()
+    finally:
+        os.sched_setaffinity(0, full)
+    assert confined == 1, f"a rank pinned to one cpu read the node-wide override instead: {confined}"
+
+
 @pytest.mark.parametrize("bogus", ["0", "-4", "", "many"])
 def test_a_bogus_override_is_ignored_rather_than_obeyed(monkeypatch, bogus):
     """HPCAGENT_BENCH_NCORES=0 must not size a thread pool to zero."""

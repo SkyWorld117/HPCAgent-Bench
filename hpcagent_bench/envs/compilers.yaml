@@ -28,6 +28,9 @@ gcc:
   # Strict ISO C17 (no gnu extensions). The reference C kernels self-time with
   # POSIX clock_gettime/struct timespec, so request POSIX the standard-compliant
   # way -- the _POSIX_C_SOURCE feature-test macro -- instead of the gnu dialect.
+  # Allocator for every graded C/C++ link, appended only when this toolchain can resolve it --
+  # languages.mimalloc_link_flags asks by linking. Host property, so not in the link line below.
+  mimalloc_link_ref: LINK_MIMALLOC
   compile: ["{cc}", "{baseline}", "-std=c17", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
@@ -50,6 +53,7 @@ gpp:
   # decides that by asking the compiler. Kept out of the link line below because the answer is a
   # host property, not a constant of the block.
   stdpar_link_ref: STDPAR_LINK_TBB
+  mimalloc_link_ref: LINK_MIMALLOC
   compile: ["{cc}", "{baseline}", "-std=c++23", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
@@ -82,6 +86,7 @@ clang:
   autopar_ref: POLLY_PAR
   report_ref: CLANG_OPT_REPORT
   warnings_ref: WARNINGS_BASIC
+  mimalloc_link_ref: LINK_MIMALLOC
   compile: ["{cc}", "{baseline}", "-std=c17", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 
@@ -98,6 +103,7 @@ clangpp:
   # See the gpp block: clang++ against libstdc++ resolves the same __has_include, and against
   # libc++ resolves it to false and links nothing extra.
   stdpar_link_ref: STDPAR_LINK_TBB
+  mimalloc_link_ref: LINK_MIMALLOC
   compile: ["{cc}", "{baseline}", "-std=c++23", "-D_POSIX_C_SOURCE=199309L", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}", "-lm"]
 

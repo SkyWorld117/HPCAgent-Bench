@@ -172,6 +172,12 @@ WARNINGS_BASIC = "-Wall -Wextra"
 #: than assuming either way).
 STDPAR_LINK_TBB = "-ltbb"
 
+#: The allocator every graded C/C++ submission links (user decision 2026-08-13). Appended only when
+#: the toolchain can really resolve it: `-lmimalloc` on a host without it is a hard
+#: `cannot find -lmimalloc`, the same trap as STDPAR_LINK_TBB above, and it would fail EVERY build
+#: rather than only the ones that allocate. :func:`languages.mimalloc_link_flags` asks by linking.
+LINK_MIMALLOC = "-lmimalloc"
+
 # ---------------------------------------------------------------------------
 # Multi-core autopar deltas. Each is appended on top of the CPU baseline.
 # ``GCC_AUTOPAR`` and similar carry a ``{n}`` placeholder that
@@ -639,16 +645,21 @@ def ncores() -> int:
     parent's ``OMP_NUM_THREADS=1`` bake ``-ftree-parallelize-loops=1`` into a cached .so that
     every later multi-core run would then reuse. Never raises.
     """
-    env = os.environ.get("HPCAGENT_BENCH_NCORES")
-    if env and env.isdigit():
-        n = int(env)
-        if n > 0:  # HPCAGENT_BENCH_NCORES=0 must NOT set OMP/autopar thread counts to 0
-            return n
     total = os.cpu_count() or 1
     try:
         allowed = os.sched_getaffinity(0)
     except AttributeError:  # macOS / Windows expose no affinity API
         allowed = set(range(total))
+    env = os.environ.get("HPCAGENT_BENCH_NCORES")
+    if env and env.isdigit():
+        n = int(env)
+        if n > 0:  # HPCAGENT_BENCH_NCORES=0 must NOT set OMP/autopar thread counts to 0
+            # The submit script exports the NODE's SMT-free topology, which is what an unbound
+            # process wants. A CONFINED one must still see only its share, or the override
+            # re-creates the very oversubscription affinity exists to prevent.
+            if len(allowed) < total:
+                return max(1, min(n, physical_cores(allowed)))
+            return n
     n = physical_cores(allowed)
     # Unbound: affinity tells us nothing about our share, so fall back to what SLURM says it
     # gave us (converted to cores at the machine's SMT width).
@@ -730,15 +741,15 @@ def cpu_env(mode: Mode, threads: Optional[int] = None) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def compose_autopar(baseline: str, autopar: Optional[str], mode: Mode) -> str:
+def compose_autopar(baseline: str, autopar: Optional[str], mode: Mode, cores: Optional[int] = None) -> str:
     """Append ``autopar`` to ``baseline`` when ``mode`` is :attr:`Mode.MULTI_CORE`.
 
-    Substitutes the ``{n}`` placeholder with :func:`ncores` so callers
-    can reference :data:`GCC_AUTOPAR` directly.
+    ``{n}`` becomes ``cores``, defaulting to :func:`ncores` for host probes. Grading callers pass
+    :func:`languages.grading_ncores`: the compile is unpinned, the timed child is not.
     """
     if mode is not Mode.MULTI_CORE or autopar is None:
         return baseline
-    return f"{baseline} {autopar.format(n=ncores())}"
+    return f"{baseline} {autopar.format(n=cores or ncores())}"
 
 
 def compose_cuda(arch: Optional[str] = None) -> str:

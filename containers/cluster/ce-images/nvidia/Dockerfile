@@ -42,7 +42,7 @@ RUN set -eux; \
       python3 python3-pip python3-venv python3-dev \
       build-essential gcc g++ gfortran clang lld \
       gdb valgrind util-linux hwloc msr-tools numactl \
-      libgoogle-perftools-dev heaptrack likwid papi-tools libpapi-dev strace ltrace binutils \
+      libgoogle-perftools-dev libmimalloc-dev heaptrack likwid papi-tools libpapi-dev strace ltrace binutils \
       ca-certificates git curl wget openssh-client gnupg ripgrep fd-find jq less tree htop \
       unzip vim nano file \
       automake autoconf libtool bison flex \
@@ -67,6 +67,13 @@ RUN set -eux; \
     for tool_bin in /usr/lib/linux-tools*/*/cpupower /usr/lib/linux-tools*/cpupower; do \
       if [ -x "${tool_bin}" ]; then ln -sf "${tool_bin}" /usr/local/bin/cpupower; fi; \
     done; \
+    # Stable, arch-independent path: the real libmimalloc.so lives under a multiarch dir that \
+    # differs between x86_64 and aarch64 (this image is GH200/aarch64) and moves with the distro \
+    # soname, so pin one symlink to it. \
+    mimalloc_so="$(find /usr/lib -maxdepth 2 -name 'libmimalloc.so*' 2>/dev/null | sort | head -1)"; \
+    [ -n "${mimalloc_so}" ] || { echo "libmimalloc.so not found after libmimalloc-dev install" >&2; exit 1; }; \
+    mkdir -p /usr/local/lib; \
+    ln -sf "${mimalloc_so}" /usr/local/lib/libmimalloc.so; \
     rm -rf /var/lib/apt/lists/*
 
 # GCC ${GCC_MAJOR} and LLVM ${LLVM_MAJOR}, the two PINNED graded toolchains, each with a
@@ -221,6 +228,14 @@ RUN set -eux; \
     python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"; \
     # Both images must grade on the same interpreter line; the NGC base does not state its python. \
     python3 --version 2>&1 | grep -q "^Python 3\.12\." \
-      || { echo "expected python 3.12, got $(python3 --version 2>&1)" >&2; exit 1; }
+      || { echo "expected python 3.12, got $(python3 --version 2>&1)" >&2; exit 1; }; \
+    LD_PRELOAD=/usr/local/lib/libmimalloc.so /bin/true \
+      || { echo "LD_PRELOAD=libmimalloc.so failed to run /bin/true" >&2; exit 1; }; \
+    LD_PRELOAD=/usr/local/lib/libmimalloc.so cat /proc/self/maps | grep -q libmimalloc \
+      || { echo "libmimalloc.so did not appear in the preloaded process's maps" >&2; exit 1; }
 
 WORKDIR /work
+
+# LD_PRELOAD last, after every RUN: set earlier it would preload mimalloc into apt/pip/compiler
+# steps during the build itself and can break them.
+ENV LD_PRELOAD=/usr/local/lib/libmimalloc.so
