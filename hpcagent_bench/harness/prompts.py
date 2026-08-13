@@ -703,6 +703,15 @@ def _baseline_flags(language: str) -> str:
         return ""
 
 
+def _mimalloc_linked(language: str) -> bool:
+    """Does the graded link line for ``language`` really carry ``-lmimalloc`` on this host?
+    Asked so the prompt never claims an allocator the probe declined to link."""
+    try:
+        return bool(languages.mimalloc_link_flags(language))
+    except KeyError:  # unknown language / no compiler block -- not fatal to the prompt
+        return False
+
+
 def _translation(task) -> str:
     """Best-effort NumpyToX translation of the reference into the task's native language
     (c/cpp/fortran) -- an optional starting point embedded when ``prompt.include_translation``
@@ -991,6 +1000,9 @@ def build_context(task: Task,
         # FP-relaxation set), publicly exposed so a self-compiled ("any") submission can
         # match them and so the FP semantics are auditable.
         "compile_flags": _baseline_flags(task.language),
+        # Whether the graded link line really carries -lmimalloc here, so the build section can
+        # say so. Probe-gated: a host without the library links nothing and the sentence is gone.
+        "mimalloc_linked": _mimalloc_linked(task.language),
         # any delivery: the machine-readable C-ABI, INLINED. The on-disk
         # <base>_binding.json is a generated, gitignored artifact that nothing on the agent
         # path emits, so pointing at its path handed the agent a file that was not there.

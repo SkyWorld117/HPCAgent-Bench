@@ -222,3 +222,20 @@ def test_build_flags_are_shown_per_compiler_family_from_the_matrix():
     assert "nvfortran" in nvhpc_line and "OpenACC" in nvhpc_line
     assert fortran.count("nvfortran") == 1 and fortran.count("OpenACC") == 1
     assert tbb not in fortran
+
+
+@pytest.mark.parametrize("language", ["c", "cpp"])
+def test_the_allocator_sentence_follows_the_link_probe(language, monkeypatch):
+    """mimalloc is named in the prompt only when the graded link line really carries it. The
+    probe is a real link, so a host without the library must produce NO sentence -- a prompt that
+    promises an allocator the judge did not link is a lie the agent optimizes against."""
+    from hpcagent_bench.harness.service import service_prompt
+
+    monkeypatch.setattr(languages, "mimalloc_link_flags", lambda lang: ("-lmimalloc", ))
+    linked = build_prompt(Task("gemm", "restricted", language))
+    assert "mimalloc" in linked, language
+    assert "mimalloc" in service_prompt("gemm", language, "http://judge:8000"), language
+
+    monkeypatch.setattr(languages, "mimalloc_link_flags", lambda lang: ())
+    assert "mimalloc" not in build_prompt(Task("gemm", "restricted", language)), language
+    assert "mimalloc" not in service_prompt("gemm", language, "http://judge:8000"), language
