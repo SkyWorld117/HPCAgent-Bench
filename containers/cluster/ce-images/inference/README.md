@@ -187,39 +187,21 @@ plugin, disables DMA-BUF for the current Beverin kernel, and puts
 `/opt/pytorch211/bin` first on `PATH`. Use the environment name
 `rocm723-vllm-0.23.0-pytorch211-ofi` with the site's CE command.
 
-## 6. Register the cdna image, with the OFI plugin borrowed from this one
+## 6. Add flash-attn, then gate the fabric
 
-The cdna image (`rocm714-vllm-0.23.0-cdna`) is AMD's official build, used because it has the MLA
-prefill support (flash_attn + aiter) that Kimi and DeepSeek need and this image lacks. It ships no
-aws-ofi-nccl plugin, so RCCL there falls back to **TCP sockets, silently** -- no error, just the
-slow path, which is what made a kimi pp=4 decode hop take 7m08s and blow the executor deadline.
-
-Borrow the plugin from the image built above. It is relocatable because it was compiled against a
-captured host libfabric SDK with its rpath stripped, and both images ship the same libfabric
-anchor for the CXI hook to override:
-
-This image is pulled, not built here, so it has no `$ROOT` build tree; give its `.sqsh` path
-directly. `PLUGIN` is the directory `extract-aws-ofi-plugin.sh` prints.
+vLLM's ROCm path needs upstream flash-attn for the MLA **prefill** backend that Kimi and DeepSeek
+use; without it engine init dies with `No valid MLA prefill backend found ... {FLASH_ATTN:
+[required dependencies not available]}` (589001). MLA decode already works here via TRITON_MLA.
 
 ```bash
-PLUGIN=$(./extract-aws-ofi-plugin.sh | awk '/^plugin:/ {print $2}')
-IMAGE="$SCRATCH/ce-images/rocm714-vllm-0.23.0-cdna.sqsh"
-
-mkdir -p "$HOME/.edf"
-cp rocm714-vllm-0.23.0-cdna.toml "$HOME/.edf/rocm714-vllm-0.23.0-cdna.toml"
-
-sed -i \
-  -e "s|@IMAGE@|$IMAGE|g" \
-  -e "s|@WORKDIR@|$SCRATCH|g" \
-  -e "s|@PLUGIN@|$PLUGIN|g" \
-  "$HOME/.edf/rocm714-vllm-0.23.0-cdna.toml"
+sbatch --account=<account> build/add-flash-attn-pt211.sbatch
 ```
 
-`@PLUGIN@` goes on `LD_LIBRARY_PATH` **first, keeping the image's own entries** -- the cdna image
-bakes an `LD_LIBRARY_PATH` that is the only route to its ROCm wheels, and replacing it with just
-the plugin directory breaks the whole stack.
+That patches the image in place, keeping `.before-flash-attn.sqsh`, and installs via the Triton
+backend so no composable-kernel compile is needed. `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE` is in
+the EDF because `flash_attn_interface.py` reads it at **import** time, not only at build time.
 
-Then gate it before trusting a campaign to it:
+Then gate the fabric before trusting a campaign to it:
 
 ```bash
 sbatch --account=<account> ../../example-script/test-rccl-ofi-2node.sbatch
@@ -249,8 +231,18 @@ build/build-vllm023-pt211.sbatch
 build/build-vllm023-pt211-inner.sh
     -> containers/rocm723-vllm-0.23.0-pytorch211-ofi.sqsh
 
+build/add-flash-attn-pt211.sbatch
+    -> patches the final image in place
+
 rocm723-vllm-0.23.0-pytorch211-ofi.toml
     -> final CE runtime environment
+```
+
+`build/build-chain.sh` submits all of the above as one `afterok` dependency chain, so a full
+rebuild is a single command:
+
+```bash
+VLLM_BUILD_ROOT=$SCRATCH/vllm-mi300-rebuild build/build-chain.sh --account=<account>
 ```
 
 Files whose names contain `.before-` or `.failed-` are retained history, not

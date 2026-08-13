@@ -35,3 +35,10 @@ NCCL_DEBUG_SUBSYS = "INIT,NET"
 
 VIRTUAL_ENV = "/opt/pytorch211"
 PATH = "/opt/pytorch211/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Needed at RUNTIME, not only when flash-attn was installed. flash_attn_interface.py:11 reads it
+# at IMPORT: TRUE picks .flash_attn_triton_amd, FALSE imports flash_attn_2_cuda, the compiled CK
+# extension a triton-only install does not have. vLLM wraps that import in try/except ImportError
+# and just reports the backend unavailable -- the exact 589001 "No valid MLA prefill backend"
+# failure, but with the package installed and looking fine.
+FLASH_ATTENTION_TRITON_AMD_ENABLE = "TRUE"

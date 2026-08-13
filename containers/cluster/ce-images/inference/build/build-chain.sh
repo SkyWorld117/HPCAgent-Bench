@@ -6,6 +6,7 @@
 #   J2 build-pytorch211-phase1.sbatch phase1.sqsh -> pytorch211-candidate.sqsh
 #   J2b add-numpy-pytorch211.sbatch   candidate + numpy (in place, keeps a backup)
 #   J3 build-vllm023-pt211.sbatch     candidate -> rocm723-vllm-0.23.0-pytorch211-ofi.sqsh
+#   J4 add-flash-attn-pt211.sbatch    + flash-attn (in place) -- the MLA PREFILL backend Kimi needs
 #
 # Each step starts only afterok its predecessor, so one submission rebuilds everything or stops
 # at the first failure. Everything lands under VLLM_BUILD_ROOT -- keep that DISTINCT from the
@@ -56,6 +57,7 @@ j1="$(submit "${j0}" "$@" --job-name=phase1-gate --partition=mi300 --nodes=1 --t
 j2="$(submit "${j1}" "$@" "${ROOT}/build/build-pytorch211-phase1.sbatch")"
 j2b="$(submit "${j2}" "$@" "${ROOT}/build/add-numpy-pytorch211.sbatch")"
 j3="$(submit "${j2b}" "$@" "${ROOT}/build/build-vllm023-pt211.sbatch")"
+j4="$(submit "${j3}" "$@" "${ROOT}/build/add-flash-attn-pt211.sbatch")"
 
 cat <<EOF
 submitted chain:
@@ -64,6 +66,7 @@ submitted chain:
   J2  pytorch 2.11   ${j2}
   J2b add numpy      ${j2b}
   J3  vLLM 0.23.0    ${j3}
+  J4  flash-attn     ${j4}
 watch:  squeue --me --format='%.10i %.16j %.8T %.10M %R'
 result: ${ROOT}/containers/rocm723-vllm-0.23.0-pytorch211-ofi.sqsh
 EOF
