@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Submit the 6 llr4 arms for Kimi-K2.7-Code: {c,cpp,fortran} x {off,skills}.
-# GATED on the kimi smoke (589327) passing: pp2 on the rocm714-cdna image + kimi_k2 parser.
+# Runs on the pt211 image (flash-attn added for MLA prefill) with graph capture and PyNCCL on.
 # Extra args go to sbatch verbatim (e.g. --partition). Account defaults to a-g200.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"

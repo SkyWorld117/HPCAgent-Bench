@@ -8,7 +8,7 @@
 #SBATCH --output=/capstor/scratch/cscs/ybudanaz/x86_64/rccl-ofi/logs/rccl-ofi-%j.out
 #SBATCH --error=/capstor/scratch/cscs/ybudanaz/x86_64/rccl-ofi/logs/rccl-ofi-%j.err
 #
-# Gate for the aws-ofi-nccl plugin now wired into the cdna EDF. Until it was, RCCL dlopened
+# Gate for the aws-ofi-nccl plugin the pt211 image ships at /opt/aws-ofi-nccl. Until it was, RCCL dlopened
 # librccl-net.so, missed, found no verbs device either (CXI is not verbs) and fell back to TCP
 # sockets over hsn0-3 -- silently, no error, just the slow path. That fallback is what made the
 # kimi pp=4 probe cross PP2->PP3 in 7m08s and blow the 300 s executor deadline.
@@ -38,7 +38,7 @@ SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 RUN_DIR="${SCRATCH}/rccl-ofi/logs/${SLURM_JOB_ID}"
 PLUGIN_DIR="${PLUGIN_DIR:-${SCRATCH}/ce-plugins/aws-ofi-nccl-rocm723/opt/aws-ofi-nccl}"
 ALLREDUCE_PY="${ALLREDUCE_PY:-${SCRATCH}/vllm-mi300-rebuild/phase1-context/torch-dist-allreduce-mi300.py}"
-INFERENCE_EDF="${INFERENCE_EDF:-rocm714-vllm-0.23.0-cdna}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 
 MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 SIZE_MB="${SIZE_MB:-256}"
@@ -162,7 +162,7 @@ run_allreduce 4 "stage3-2n4r"
 
 stage "summary"
 if (( ${#VERDICT_FAILURES[@]} == 0 )); then
-    echo "RCCL_OFI_GATE: PASS -- cdna is on CXI, no TCP fallback. Logs: ${RUN_DIR}"
+    echo "RCCL_OFI_GATE: PASS -- pt211 is on CXI, no TCP fallback. Logs: ${RUN_DIR}"
     exit 0
 fi
 echo "RCCL_OFI_GATE: FAIL -- ${VERDICT_FAILURES[*]}. Logs: ${RUN_DIR}"

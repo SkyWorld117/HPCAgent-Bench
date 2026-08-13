@@ -40,7 +40,7 @@ SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/claude-roundtrip/logs/${SLURM_JOB_ID}"
 export HF_HOME="${SCRATCH}/hf"
 
-INFERENCE_EDF="${INFERENCE_EDF:-rocm714-vllm-0.23.0-cdna}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AGENT_EDF="${AGENT_EDF:-optarena-amd-mi300}"
 
 # Flag-for-flag the llr4 kimi campaign serve (see .env.llr4-kimi27code-*), plus --enforce-eager.
