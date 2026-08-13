@@ -933,6 +933,12 @@ wrap_kernel` dlopens. Flags resolve from :mod:`hpcagent_bench.flags` via
     link_argv = _render_argv(link_block["link"], link_subst)
     link_argv.extend(link_block.get("link_extra") or [])
     link_argv.extend(f for f in _stdpar_link_for_block(link_block) if f not in link_argv)
+    # The allocator, on the BASELINE link line for the same reason it is on the submission's
+    # (build_shared_lib_commands): these framework columns are what a submission's speedup is
+    # divided by, so an allocator the candidate links and the baseline does not is a ratio the
+    # allocator moves. The container preloads mimalloc process-wide, which hides the asymmetry as
+    # long as LD_PRELOAD survives -- link it here too so the comparison does not depend on that.
+    link_argv.extend(f for f in _mimalloc_link_for_block(link_block) if f not in link_argv)
     if extra_flags:  # Polly/Pluto need -fopenmp -lgomp at link too
         link_argv.extend(shlex.split(extra_flags))
     cmds.append(link_argv)

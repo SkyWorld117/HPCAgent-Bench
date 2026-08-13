@@ -222,3 +222,42 @@ def test_every_cpu_baseline_lets_libm_calls_vectorize():
     for baseline in (flags.CPU_BASELINE_GCC, flags.CPU_BASELINE_CLANG, flags.CPU_BASELINE_GFORTRAN,
                      flags.CPU_BASELINE_ICPX):
         assert "-fno-math-errno" in baseline
+
+
+@pytest.fixture(name="_mimalloc_links")
+def mimalloc_links_fixture(monkeypatch):
+    """Pretend this host resolves ``-lmimalloc``, so the assertion is about the BUILD PATH rather
+    than about what happens to be installed on the runner."""
+    monkeypatch.setattr(languages, "_mimalloc_links", lambda cc: True)
+
+
+def test_the_baseline_link_carries_the_allocator_the_submission_links(_mimalloc_links, tmp_path):
+    """A submission's speedup is divided by these framework columns, so an allocator on one link
+    line and not the other is a ratio the allocator moves. The container preloads mimalloc
+    process-wide, which HIDES this for as long as LD_PRELOAD survives the launcher -- that is what
+    makes it worth pinning rather than leaving to the environment."""
+    src = tmp_path / "k.cpp"
+    src.write_text("int main() { return 0; }")
+    baseline = languages.build_kernel_lib_commands([("cpp", src)], tmp_path / "libk.so")[-1]
+    submission = languages.build_shared_lib_commands("cpp", src, tmp_path / "libs.so")[-1]
+    assert flags.LINK_MIMALLOC in baseline
+    assert flags.LINK_MIMALLOC in submission
+
+
+def test_the_allocator_is_never_linked_twice_on_the_baseline(_mimalloc_links, tmp_path):
+    src = tmp_path / "k.cpp"
+    src.write_text("int main() { return 0; }")
+    link = languages.build_kernel_lib_commands([("cpp", src)], tmp_path / "libk.so")[-1]
+    assert link.count(flags.LINK_MIMALLOC) == 1
+
+
+def test_a_host_without_the_library_links_it_on_neither_side(monkeypatch, tmp_path):
+    """Probe-gated both sides: an unresolvable -lmimalloc fails EVERY build, so a host without the
+    library must produce a clean link line on the baseline exactly as it does on the submission."""
+    monkeypatch.setattr(languages, "_mimalloc_links", lambda cc: False)
+    src = tmp_path / "k.cpp"
+    src.write_text("int main() { return 0; }")
+    baseline = languages.build_kernel_lib_commands([("cpp", src)], tmp_path / "libk.so")[-1]
+    submission = languages.build_shared_lib_commands("cpp", src, tmp_path / "libs.so")[-1]
+    assert flags.LINK_MIMALLOC not in baseline
+    assert flags.LINK_MIMALLOC not in submission
