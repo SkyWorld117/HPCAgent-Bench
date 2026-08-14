@@ -15,7 +15,7 @@ containers/
       amd/
         Dockerfile
         build_sqsh.sh
-        optarena-amd-mi300.toml
+        optarena-amd-mi300-v3.toml
       inference/
         README.md
         build/
@@ -50,7 +50,7 @@ export EDF_PATH="${HOME}/.edf"
 When an EDF is in the search path, launch it by name, without `.toml`:
 
 ```bash
-srun --environment=optarena-amd-mi300 hostname
+srun --environment=optarena-amd-mi300-v3 hostname
 ```
 
 ## Step 1: Optional Podman Storage Config
@@ -100,7 +100,7 @@ containers/cluster/ce-images/amd/build_sqsh.sh
 This writes:
 
 ```text
-${SCRATCH}/ce-images/optarena-ce-amd-mi300.sqsh
+${SCRATCH}/ce-images/optarena-ce-amd-mi300-v3.sqsh
 ```
 
 NVIDIA GH200:
@@ -134,14 +134,14 @@ containers/cluster/ce-images/nvidia/build_sqsh.sh
 Copy the EDF into `${HOME}/.edf`.
 
 ```bash
-cp containers/cluster/ce-images/amd/optarena-amd-mi300.toml "${HOME}/.edf/"
+cp containers/cluster/ce-images/amd/optarena-amd-mi300-v3.toml "${HOME}/.edf/"
 cp containers/cluster/ce-images/nvidia/optarena-nvidia-gh200.toml "${HOME}/.edf/"
 ```
 
 If you changed `OUTPUT_SQSH`, edit the EDF `image` line to match.
 
 ```toml
-image = "${SCRATCH}/ce-images/optarena-ce-amd-mi300.sqsh"
+image = "${SCRATCH}/ce-images/optarena-ce-amd-mi300-v3.sqsh"
 ```
 
 The default EDFs mount scratch and CSCS storage paths, set the working directory to
@@ -154,7 +154,7 @@ Use the EDF name, not the path, when the EDF is under `${HOME}/.edf`.
 AMD MI300A:
 
 ```bash
-srun --environment=optarena-amd-mi300 \
+srun --environment=optarena-amd-mi300-v3 \
   python3 -c 'import torch; print(torch.__version__); print(torch.cuda.is_available())'
 ```
 
@@ -168,7 +168,7 @@ srun --environment=optarena-nvidia-gh200 \
 Interactive shell:
 
 ```bash
-srun --environment=optarena-amd-mi300 --pty bash
+srun --environment=optarena-amd-mi300-v3 --pty bash
 srun --environment=optarena-nvidia-gh200 --pty bash
 ```
 
@@ -186,7 +186,7 @@ Minimal AMD example:
 #SBATCH --account=<account>
 #SBATCH --partition=<amd-partition>
 
-srun --environment=optarena-amd-mi300 \
+srun --environment=optarena-amd-mi300-v3 \
   python3 -m hpcagent_bench --help
 ```
 
@@ -236,7 +236,7 @@ TASK_FILE=/path/to/task.txt
 Launch the agents inside the CE environment:
 
 ```bash
-srun --environment=optarena-amd-mi300 /opt/optarena-agent/start_run.sh
+srun --environment=optarena-amd-mi300-v3 /opt/optarena-agent/start_run.sh
 srun --environment=optarena-nvidia-gh200 /opt/optarena-agent/start_run.sh
 ```
 
@@ -270,6 +270,6 @@ leaves benchmark grading routes as explicit stubs.
 
 - The NVIDIA Dockerfile defaults to the CSCS Alps Extended NGC PyTorch image.
 - The AMD Dockerfile defaults to AMD's ROCm PyTorch image and `gfx942` for MI300A.
-- CSCS EDF files are TOML files. The file is named `optarena-amd-mi300.toml`, but
-  `srun --environment=optarena-amd-mi300` is the normal launch form when it is in
+- CSCS EDF files are TOML files. The file is named `optarena-amd-mi300-v3.toml`, but
+  `srun --environment=optarena-amd-mi300-v3` is the normal launch form when it is in
   `${HOME}/.edf` or another `EDF_PATH` directory.
