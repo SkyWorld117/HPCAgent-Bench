@@ -51,7 +51,9 @@ fuzz:
   # on gigabyte inputs, re-checking a shape the PUBLIC case already checks at full size. A DECLARED
   # preset, not a clamp: clamping a dimension can violate a kernel's constraints. Empty (or a preset
   # a kernel does not declare) falls back to the timed preset, the pre-2026-08 behaviour.
-  hidden_correctness_preset: M
+  # The ladder floor, because this is applied UNCONDITIONALLY: at M every score() drew held-out
+  # cases at LEN_1D 47,000,000, 109 s of scalar numpy reference each. Public keeps the timed shape.
+  hidden_correctness_preset: S
   size_distribution: log_uniform
   data_distribution: uniform
 
