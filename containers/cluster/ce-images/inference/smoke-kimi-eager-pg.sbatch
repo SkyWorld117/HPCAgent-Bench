@@ -196,7 +196,9 @@ cleanup_steps() {
 }
 trap cleanup_steps EXIT INT TERM
 
-metric() { curl -fsS --max-time 10 "http://${NODE0}:${API_PORT}/metrics" 2>/dev/null |
+# The || true matters twice under set -eo pipefail: a dead server must read as an empty
+# metric the gates can act on, not a silent script abort inside a command substitution.
+metric() { { curl -fsS --max-time 10 "http://${NODE0}:${API_PORT}/metrics" 2>/dev/null || true; } |
     awk -v k="vllm:$1" '$0 ~ "^"k {print $2; exit}'; }
 
 stage "waiting for the API (up to ${READY_TIMEOUT}s)"
@@ -216,7 +218,9 @@ else
 fi
 
 stage "gate 2: unbatched-P2P warnings (594541 had 24; expect 0)"
-p2p=$(grep -ch "unbatched P2P op" "${RUN_DIR}"/vllm-rank*.log 2>/dev/null | awk '{s+=$1} END{print s+0}')
+# wc -l, not grep -c: grep exits 1 on zero matches, and zero matches is the PASS here --
+# under set -e that killed 594708 at the exact moment it succeeded.
+p2p=$(grep -h "unbatched P2P op" "${RUN_DIR}"/vllm-rank*.log 2>/dev/null | wc -l)
 echo "unbatched P2P warnings: ${p2p}"
 
 stage "gate 3: DOES IT DECODE -- the gate every previous smoke skipped"
