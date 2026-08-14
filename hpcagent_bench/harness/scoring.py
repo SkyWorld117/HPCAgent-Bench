@@ -36,7 +36,7 @@ from hpcagent_bench.harness.grading import BASELINE_CHOICES  # noqa: F401 -- re-
 from hpcagent_bench.harness.grading import (ORACLE_CHOICES, ReferencePlan, _data_seeded, _grade, _grade_against,
                                             _numpy_reference, _run_c_reference, _time_numpy, _time_numpy_samples,
                                             _wants, baseline_compiled, baseline_uses_numpy, build_reference_lib,
-                                            reference_plan, reference_submission, resolve_baseline,
+                                            reference_compiler, reference_plan, reference_submission, resolve_baseline,
                                             run_compiled_reference)
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.sandbox import Sandbox
@@ -595,13 +595,17 @@ def score(submission: Submission,
     # (timing). ``c`` share the single-core C build; a ``*-autopar`` baseline is a
     # SEPARATE multi-core build. ``compiled`` is (label, language, compiler, mode) or None.
     plan: ReferencePlan = reference_plan(oracle, baseline, spec)
-    # A baseline time is a property of (kernel, shapes, datatype, seed, denominator, rep budget) and
-    # the machine -- NEVER of the submission. Agents iterate: 2-3 /score rounds on the same kernel is
-    # normal, and every round re-emitted, re-built and re-timed the identical reference. Reusing it
-    # is free below 1024-element shapes and worth minutes per round at the XL-anchored ones. Only the
-    # TIMINGS are cached: reference OUTPUTS are gigabytes at these shapes and are recomputed.
+    # The reference follows the CANDIDATE's family, so a speedup measures the optimisation not the compiler.
+    ref_compiler = reference_compiler(submission, "c")
+    # A baseline time is a property of (kernel, shapes, datatype, seed, denominator, rep budget, that
+    # family) and the machine -- of nothing else in the submission. Agents iterate: 2-3 /score rounds
+    # on the same kernel is normal, and every round re-emitted, re-built and re-timed the identical
+    # reference. Reusing it is free below 1024-element shapes and worth minutes per round at the
+    # XL-anchored ones. ``ref_compiler`` is in the key or the first submission's family would poison
+    # every later one in the arm. Only the TIMINGS are cached: reference OUTPUTS are gigabytes at
+    # these shapes and are recomputed.
     bl_key = (task.kernel, preset, datatype, public_seed, fuzz_iteration, baseline, repeat, timing.warmup_count(),
-              repr(sorted(drawn_params(spec, data).items())))
+              ref_compiler, repr(sorted(drawn_params(spec, data).items())))
     cached = BASELINE_TIMING_CACHE.get(bl_key)
     if cached is not None:
         baselines.update(cached[0])
@@ -637,6 +641,7 @@ def score(submission: Submission,
                                                                    repeat,
                                                                    timeout,
                                                                    memory_gb,
+                                                                   compiler=ref_compiler,
                                                                    warmup=timing.warmup_count())
         except RuntimeError as exc:
             # The C reference could not be emitted/built for this kernel.
@@ -1298,7 +1303,8 @@ def score_cells(submission: Submission,
                 ctask = replace(task, language="c", source_mode="restricted", residency="host")
                 c_ctx = Sandbox(binding)
                 csb = c_ctx.__enter__()
-                cbuilt = csb.build(reference_submission(ctask, "c"), mode=Mode.SINGLE_CORE)
+                # Same family as the candidate, for the same reason score() does it.
+                cbuilt = csb.build(reference_submission(ctask, "c", submission.compiler), mode=Mode.SINGLE_CORE)
                 c_lib = cbuilt.lib if cbuilt.ok else None
                 if c_lib is None:
                     c_unavailable = f"C reference build failed: {str(cbuilt.log)[-400:]}"

@@ -271,10 +271,28 @@ def reference_task(task: Task, language: str = "c") -> Task:
     return replace(task, language=language, source_mode="restricted", residency="host")
 
 
-def reference_submission(task: Task, language: str = "c") -> Submission:
-    """The NumpyToX compiled reference for this kernel in language, as a restricted submission."""
+def reference_submission(task: Task, language: str = "c", compiler: Optional[str] = None) -> Submission:
+    """The NumpyToX compiled reference for this kernel in language, as a restricted submission.
+
+    ``compiler`` is the candidate's requested toolchain FAMILY, carried so ``Sandbox.build`` builds
+    this reference with it -- see :func:`reference_compiler`."""
     from hpcagent_bench.harness.agent import reference_source
-    return Submission(language=language, source=reference_source(reference_task(task, language)))
+    return Submission(language=language, source=reference_source(reference_task(task, language)), compiler=compiler)
+
+
+def reference_compiler(submission: Submission, language: str) -> Optional[str]:
+    """The ``compilers.yaml`` BLOCK that builds the reference in ``language`` with the toolchain
+    family the CANDIDATE is built with; ``None`` is the language's default block.
+
+    Speedup is candidate/baseline, so a denominator built by another family credits the compiler
+    instead of the optimisation -- the reason the allocator is on the baseline link line too (see
+    :func:`languages.build_kernel_lib_commands`). An unknown family also gives ``None``, since the
+    candidate's own build is what refuses it."""
+    try:
+        family = languages.resolve_family(submission.language, submission.compiler)
+    except KeyError:
+        return None
+    return languages.compiler_for_family(language, family)
 
 
 def c_reference_available(task: Task) -> bool:
@@ -421,8 +439,11 @@ def _run_c_reference(spec: BenchSpec,
                      repeat: int,
                      timeout: float,
                      memory_gb: float,
+                     compiler: Optional[str] = None,
                      warmup: int = 0) -> Tuple[Dict, int, Dict[str, Dict], List[int]]:
-    """The sequential-C reference: back-compat wrapper for run_compiled_reference(language='c', single-core)."""
+    """The sequential-C reference: back-compat wrapper for run_compiled_reference(language='c', single-core).
+
+    ``compiler`` is a ``compilers.yaml`` block name (:func:`reference_compiler`); ``None`` is the default."""
     return run_compiled_reference(spec,
                                   task,
                                   binding,
@@ -433,5 +454,5 @@ def _run_c_reference(spec: BenchSpec,
                                   memory_gb,
                                   language="c",
                                   mode=Mode.SINGLE_CORE,
-                                  compiler=None,
+                                  compiler=compiler,
                                   warmup=warmup)
