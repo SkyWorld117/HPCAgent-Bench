@@ -67,7 +67,7 @@ static const double ONE_THIRD = 1.0 / 3.0;
 static const double ONE_SIXTH = 1.0 / 6.0;
 
 // Compute_shape_factor<order>: fill sx[0..order], return the leftmost grid index.
-static inline int compute_shape_factor(double *sx, int order, double xmid) {
+static inline int compute_shape_factor(double *__restrict__ sx, int order, double xmid) {
   if (order == 0) {
     int j = (int)(xmid + 0.5);
     sx[0] = 1.0;
@@ -111,7 +111,8 @@ static inline int compute_shape_factor(double *sx, int order, double xmid) {
 // Compute_shifted_shape_factor<order>: write the shifted factors into sx at offset
 // base+1+i_shift+k and return the leftmost grid index. Orders 0/1 floor; 2/3/4
 // truncate -- exactly the original static_cast<int> casts.
-static inline int compute_shifted_shape_factor(double *sx, int base, int order, double x_old, int i_new) {
+static inline int compute_shifted_shape_factor(double *__restrict__ sx, int base, int order, double x_old,
+                                               int i_new) {
   if (order == 0) {
     int i = (int)std::floor(x_old + 0.5);
     int i_shift = i - i_new;
@@ -157,7 +158,7 @@ static inline int compute_shifted_shape_factor(double *sx, int base, int order, 
   return i - 2;
 }
 
-static inline void zero(double *a, int n) {
+static inline void zero(double *__restrict__ a, int n) {
   for (int i = 0; i < n; ++i)
     a[i] = 0.0;
 }

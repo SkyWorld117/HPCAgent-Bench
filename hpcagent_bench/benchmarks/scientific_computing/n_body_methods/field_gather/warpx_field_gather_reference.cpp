@@ -57,7 +57,7 @@ static const int GEOM_RSPHERE = 5;
 // Compute_shape_factor<order>: fill sx[0..order] and return the leftmost grid
 // index the particle touches. static_cast<int> truncates toward zero, matched by
 // the C cast (particle grid coordinates are non-negative).
-static inline int compute_shape_factor(double *sx, int order, double xmid) {
+static inline int compute_shape_factor(double *__restrict__ sx, int order, double xmid) {
   if (order == 0) {
     int j = (int)(xmid + 0.5);
     sx[0] = 1.0;
@@ -113,12 +113,15 @@ static inline int zdir_of(int geom) {
 // Single-particle field gather -- a faithful transcription of doGatherShapeN,
 // accumulating onto (Exp, Eyp, Ezp, Bxp, Byp, Bzp) in place.
 static void gather_shape_n(double xp, double yp, double zp, double &Exp, double &Eyp, double &Ezp, double &Bxp,
-                           double &Byp, double &Bzp, const double *ex_arr, const double *ey_arr, const double *ez_arr,
-                           const double *bx_arr, const double *by_arr, const double *bz_arr, const int *ex_type,
-                           const int *ey_type, const int *ez_type, const int *bx_type, const int *by_type,
-                           const int *bz_type, const double *dinv, const double *xyzmin, const int *lo,
-                           int n_rz_azimuthal_modes, int depos_order, int galerkin_interpolation, int geom, long n1,
-                           long n2, long ncomp) {
+                           double &Byp, double &Bzp, const double *__restrict__ ex_arr,
+                           const double *__restrict__ ey_arr, const double *__restrict__ ez_arr,
+                           const double *__restrict__ bx_arr, const double *__restrict__ by_arr,
+                           const double *__restrict__ bz_arr, const int *__restrict__ ex_type,
+                           const int *__restrict__ ey_type, const int *__restrict__ ez_type,
+                           const int *__restrict__ bx_type, const int *__restrict__ by_type,
+                           const int *__restrict__ bz_type, const double *__restrict__ dinv,
+                           const double *__restrict__ xyzmin, const int *__restrict__ lo, int n_rz_azimuthal_modes,
+                           int depos_order, int galerkin_interpolation, int geom, long n1, long n2, long ncomp) {
   const int o = depos_order;
   const int og = depos_order - galerkin_interpolation;
   const int zdir = zdir_of(geom);
