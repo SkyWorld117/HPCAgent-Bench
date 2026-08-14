@@ -5,11 +5,9 @@ level: 1
 parameters:
   S:
     LEN_2D: 64
-  # Work and footprint are both O(LEN_2D^2) here, so a ladder authored at the memory ceiling spans
-  # 1.2x in time from M to XL -- less than the 1.6x swing between a bb that gets transparent huge
-  # pages and one that does not, which is how XL measured FASTER than L. Anchored on time instead
-  # (5.4 ns per inner iteration, measured): ~100 / ~300 / ~1000 ms, a decade the page-table luck
-  # cannot invert.
+  # Work and footprint are both O(LEN_2D^2), so a ceiling-authored ladder spans only 1.2x in time
+  # and huge-page luck (1.6x) inverted it -- XL measured faster than L. Anchored on time instead:
+  # ~100 / ~300 / ~1000 ms.
   M:
     LEN_2D: 6063
   L:

@@ -5,13 +5,9 @@ level: 1
 parameters:
   S:
     LEN_2D: 64
-  # DELIBERATELY SHORT, and it will keep showing up as a degenerate top rung -- do not "fix" it by
-  # growing LEN_2D. The loop walks one diagonal, so work is O(LEN_2D) while three square matrices
-  # cost O(3*LEN_2D^2): a diagonal of length W at stride S needs W*S elements no matter how it is
-  # written, and the stride IS the puzzle. Even spending the track's whole 8 GiB ceiling buys
-  # LEN_2D 18918, which is 1.03 ms at the measured 54.6 ns per element -- 0.1% of a 1000 ms target.
-  # Since it cannot be a timed benchmark either way, it takes the small footprint instead of the
-  # 2.51 GB the old XL spent to buy 0.58 ms. s2102 covers diagonal-stride access at a timeable size.
+  # DELIBERATELY SHORT -- do not "fix" it by growing LEN_2D. Work is O(LEN_2D) along one diagonal
+  # over O(3*LEN_2D^2) of matrix, so even the whole 8 GiB ceiling buys 1.03 ms of a 1000 ms target.
+  # It cannot be timed either way, so it takes the small footprint. s2102 covers this at size.
   M:
     LEN_2D: 2049
   L:

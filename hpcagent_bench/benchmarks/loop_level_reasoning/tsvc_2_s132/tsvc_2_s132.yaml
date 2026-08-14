@@ -13,10 +13,9 @@ parameters:
     LEN_2D: 268435456
 init:
   arrays:
-    # Two rows, not LEN_2D of them: the loop writes row 0 and reads row 1 and never touches the
-    # rest, so a square aa spends the whole memory ceiling on rows nothing addresses and pins
-    # LEN_2D -- and with it the trip count -- at 16k, which is 0.20 ms against a 1000 ms target.
-    # The alias question the kernel exists to ask is unchanged, and adjacent rows make it sharper.
+    # Two rows, not LEN_2D of them: the loop touches only rows 0 and 1, so a square aa spent the
+    # ceiling on rows nothing addresses and pinned the trip count at 16k (0.20 ms). The alias
+    # question is unchanged, and adjacent rows sharpen it.
     aa: (2,LEN_2D)
     b: (LEN_2D,)
     c: (LEN_2D,)
