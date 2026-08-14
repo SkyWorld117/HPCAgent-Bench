@@ -78,6 +78,12 @@ export NODE0="${NODES[0]}"
 export NNODES="${#NODES[@]}"
 export TP_SIZE="${TP_SIZE:-4}"
 export PP_SIZE="${PP_SIZE:-${NNODES}}"
+# Parsers are MODEL-specific (594631: gpt-oss has no kimi think tokens, the API server died on
+# them). Defaults fit kimi; the control passes its own, e.g. TOOL_PARSER=openai
+# REASONING_PARSER=openai_gptoss EXTRA_SERVE_ARGS="--dtype bfloat16".
+export TOOL_PARSER="${TOOL_PARSER:-kimi_k2}"
+export REASONING_PARSER="${REASONING_PARSER:-kimi_k2}"
+export EXTRA_SERVE_ARGS="${EXTRA_SERVE_ARGS:-}"
 NODELIST="$(IFS=,; echo "${NODES[*]}")"
 
 SERVE_SCRIPT="${RUN_DIR}/serve.sh"
@@ -138,8 +144,8 @@ ARGS=(
     --safetensors-load-strategy prefetch
     --generation-config vllm
     --enable-auto-tool-choice
-    --tool-call-parser kimi_k2
-    --reasoning-parser kimi_k2
+    --tool-call-parser "${TOOL_PARSER}"
+    --reasoning-parser "${REASONING_PARSER}"
     --trust-remote-code
     --max-model-len 65536
     # 0.70 not 0.85: the fraction multiplies TOTAL board memory but only 96 of the MI300A's
@@ -147,6 +153,10 @@ ARGS=(
     --gpu-memory-utilization 0.70
     --max-num-seqs 128
 )
+if [[ -n "${EXTRA_SERVE_ARGS}" ]]; then
+    # shellcheck disable=SC2206 -- word-splitting is the contract, same as VLLM_EXTRA_ARGS
+    ARGS+=(${EXTRA_SERVE_ARGS})
+fi
 if (( rank == 0 )); then
     ARGS+=(--host 0.0.0.0 --port "${API_PORT}")
 else
