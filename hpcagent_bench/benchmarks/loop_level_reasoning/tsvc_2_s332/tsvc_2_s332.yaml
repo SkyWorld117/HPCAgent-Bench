@@ -12,8 +12,10 @@ parameters:
   XL:
     LEN_1D: 1041529568
 init:
-  output_args:
+  input_args:
+  - LEN_1D
   - threshold
+  output_args:
   - a
   - result
   scalars:
@@ -21,6 +23,7 @@ init:
   arrays:
     a: (LEN_1D,)
     result: (1,)
+  func_name: initialize
 output_args:
 - result
 taxonomy:

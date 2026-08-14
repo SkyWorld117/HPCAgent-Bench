@@ -6,18 +6,12 @@ parameters:
   S:
     LEN_1D: 512
   M:
-    LEN_1D: 100000000
+    LEN_1D: 130000001
   L:
-    LEN_1D: 228202713
+    LEN_1D: 260000001
   XL:
-    LEN_1D: 520764784
+    LEN_1D: 520000001
 init:
-  output_args:
-  - M
-  - a
-  - b
-  scalars:
-    M: 1
   arrays:
     a: (LEN_1D,)
     b: (LEN_1D,)
