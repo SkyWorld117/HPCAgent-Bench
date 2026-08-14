@@ -9,7 +9,6 @@ off Linux and uses `-mcpu=native` on Apple Silicon; `ru_maxrss` is scaled to byt
 platform (KB on Linux, bytes on macOS); and a missing compiler is a scored build
 failure, not a crashed runner.
 """
-import pytest
 
 from hpcagent_bench import config, flags, osinfo
 from hpcagent_bench.harness import native_call

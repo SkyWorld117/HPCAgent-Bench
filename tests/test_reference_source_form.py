@@ -17,7 +17,6 @@ dependence; handing it a non-aliasing promise answers the question for it.
 
 So: the C files are exempt by construction, and the gate is on parameters rather than on the file.
 """
-import pathlib
 import re
 
 from hpcagent_bench import paths

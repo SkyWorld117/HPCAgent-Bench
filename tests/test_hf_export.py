@@ -6,7 +6,6 @@ than letting the dataset silently fall behind. The rest pins the flat schema, pe
 and parquet/jsonl round-trips."""
 import json
 
-import pytest
 
 from hpcagent_bench import hf_export
 from hpcagent_bench.hf_export import ExportRow

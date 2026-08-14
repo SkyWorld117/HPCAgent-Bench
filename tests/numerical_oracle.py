@@ -144,7 +144,6 @@ from hpcagent_bench.precision import Precision  # noqa: E402
 # The emitter's own fp-tag helper, so this file's globs match what it names emitted files.
 from numpyto_common.naming import fptype_tag  # noqa: E402
 # Shared with the nest-forge Pluto lane; kept under its historical private name for callers here.
-from hpcagent_bench.pluto_affine import has_scop as _has_scop  # noqa: E402
 from hpcagent_bench.pluto_affine import scop_nonaffine_reason as _scop_nonaffine_reason  # noqa: E402,F401
 # The polycc invocation the TIMED pluto column builds from -- flags, pet-parse env and process-group
 # bound. Imported rather than restated so this gate cannot validate a different binary. See _run_pluto.
