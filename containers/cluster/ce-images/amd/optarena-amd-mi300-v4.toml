@@ -1,6 +1,6 @@
 # CSCS Container Engine EDF for the generic AMD MI300A image.
 # Keep this image path in sync with build_sqsh.sh OUTPUT_SQSH.
-image = "${SCRATCH}/ce-images/optarena-ce-amd-mi300-v3.sqsh"
+image = "${SCRATCH}/ce-images/optarena-ce-amd-mi300-v4.sqsh"
 mounts = [
     "/capstor/:/capstor/",
     "/iopsstor/:/iopsstor/",

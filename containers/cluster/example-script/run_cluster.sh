@@ -67,7 +67,7 @@ JUDGE_UPSTREAM_PORT="${JUDGE_UPSTREAM_PORT:-$((JUDGE_PORT + 1))}"
 JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS="${JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS:-300}"
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 INFERENCE_CE_ENV="${INFERENCE_CE_ENV:-rocm723-vllm-0.23.0-pytorch211-ofi}"
-AMD_CE_ENV="${AMD_CE_ENV:-optarena-amd-mi300-v3}"
+AMD_CE_ENV="${AMD_CE_ENV:-optarena-amd-mi300-v4}"
 # Weights and compile cache. iopsstor reads 9.45 GB/s at 16 readers vs capstor 0.83 (job 593523),
 # but purges at 14 days against capstor's 30 -- so capstor keeps the durable copy.
 FAST_SCRATCH="${FAST_SCRATCH:-}"
