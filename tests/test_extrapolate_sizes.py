@@ -115,17 +115,38 @@ def test_fit_exponent_needs_two_usable_points():
 # --------------------------------------------------------------------------------------------
 
 
+class FakeInit:
+    """The slice of ``init`` that :func:`hpcagent_bench.sizing.working_bytes` reads."""
+
+    def __init__(self, shapes: Dict[str, str]):
+        self.shapes = shapes
+        self.dtypes: Dict[str, str] = {}
+        self.scalars: Dict[str, object] = {}
+
+
 class FakeSpec:
 
     def __init__(self,
                  parameters: Dict[str, Dict[str, object]],
                  config_names: frozenset = frozenset(),
-                 track: str = "scientific_computing"):
+                 track: str = "scientific_computing",
+                 shapes: Optional[Dict[str, str]] = None):
         self.parameters = parameters
         self.config_names = config_names
         # The projection caps on the TRACK's own XL ceiling, so a spec without a track is not a
         # spec this code can be handed.
         self.track = track
+        # The projection is SOLVED in the working-set metric now, so a fake spec has to declare a
+        # shape the way a real one does. One ``(N,)`` fp64 array: 8 bytes an element, so the
+        # working set is exactly 8*N and every expectation below stays plain arithmetic.
+        self.init = FakeInit(shapes if shapes is not None else {"a": "(N,)"})
+        self.config_space: list = []
+        self.relative_path = "fake/kernel"
+        self.module_name = "fake_kernel"
+
+
+#: What ``FakeSpec``'s default one-array shape weighs per element (fp64).
+FAKE_ELEM_BYTES = 8
 
 
 def test_extrapolate_is_time_bound_when_the_projection_fits_memory():
@@ -136,7 +157,9 @@ def test_extrapolate_is_time_bound_when_the_projection_fits_memory():
     assert out.ok
     assert out.exponent == pytest.approx(1.0, rel=1e-9)
     assert out.bound_by == "time"
-    assert out.xl_bytes == pytest.approx(n_hi * 10, rel=1e-9)  # 100ms -> 1000ms at k=1 is 10x
+    # In the WORKING-SET metric (8 bytes x N), not the materialised footprint the fit was
+    # taken on: it is the metric derive_ladder validates the result against.
+    assert out.xl_bytes == pytest.approx(FAKE_ELEM_BYTES * 1000 * 10, rel=1e-9)  # 100ms -> 1000ms at k=1 is 10x
     assert out.xl_ms == pytest.approx(1000.0, rel=1e-6)
     assert out.XL["N"] == pytest.approx(1000 * 10, rel=1e-9)
     assert out.S == {"N": 1000}  # the anchor's OWN values, unchanged -- apply_sizes' "S" partner
@@ -150,7 +173,7 @@ def test_extrapolate_is_memory_bound_when_the_ceiling_binds_first():
     out = ex.extrapolate(spec, "fake/kernel", points, target_ms=1e12)
     assert out.ok
     assert out.bound_by == "memory"
-    assert out.xl_bytes == min(XL_BYTE_CEILING, n_hi * ex.MAX_EXTRAPOLATION)
+    assert out.xl_bytes == min(XL_BYTE_CEILING, FAKE_ELEM_BYTES * 1000 * ex.MAX_EXTRAPOLATION)
 
 
 def test_extrapolate_excludes_config_knobs_from_xl_and_from_the_scale():
@@ -266,3 +289,80 @@ def test_materialised_bytes_resolves_hand_initialized_kernel_by_path_key():
     spec = dataclasses.replace(real, init=dataclasses.replace(real.init, shapes={}))
     nbytes = ex.materialised_bytes(spec, key, "S")
     assert nbytes is not None and nbytes > 0
+
+
+def test_fit_exponent_drops_a_sub_floor_rung_and_fits_the_rest():
+    """Measuring EVERY rung must still fit. S is a 512-element smoke rung no kernel can time
+    honestly, so it is dropped -- the fit comes from the rungs that clear the floor."""
+    n_s, n_m, n_xl = 2**16, 2**20, 2**30
+    points = [
+        measured("S", ex.MIN_MEASURED_MS / 100, n_s),
+        measured("M", 2.0, n_m),
+        measured("XL", 2.0 * (n_xl / n_m)**2.0, n_xl),
+    ]
+    fitted, why = ex.fit_exponent(points)
+    assert why == ""
+    assert fitted == pytest.approx(2.0, rel=1e-9)  # S did not drag the slope toward 0
+
+
+def test_fit_exponent_names_the_rung_it_dropped():
+    """Dropping the only other point still refuses -- and says which rung went under the floor."""
+    fitted, why = ex.fit_exponent([measured("S", ex.MIN_MEASURED_MS / 2, 2**20), measured("M", 50.0, 2**30)])
+    assert fitted is None
+    assert "floor" in why and "S=" in why
+
+
+def test_an_xl_over_target_is_shrunk_not_left_alone():
+    """A kernel measured far OVER the target must come back smaller. Flooring the proposal at the
+    anchor's own size (right only while the anchor is M) silently returned the current XL while the
+    report claimed the target had been hit."""
+    key = next(k for k in KERNELS.specs() if k.endswith("tsvc_2_s4113"))
+    spec = KERNELS.specs()[key]
+    elem = 8 * 3  # fp64 x the three streamed arrays; only the RATIO of the two footprints matters
+    points = [
+        ex.Measured("M", 417.9, spec.parameters["M"]["LEN_1D"] * elem),
+        ex.Measured("XL", 7448.3, spec.parameters["XL"]["LEN_1D"] * elem),
+    ]
+    out = ex.extrapolate(spec, key, points, 1000.0)
+    assert out.problem == "" and out.bound_by == "time"
+    assert out.XL["LEN_1D"] < spec.parameters["XL"]["LEN_1D"], "an XL 7x over target must shrink"
+    assert out.XL["LEN_1D"] >= out.S["LEN_1D"], "XL may never fall under the M rung it is applied beside"
+
+
+def test_a_whole_ladder_over_target_slides_down_instead_of_collapsing():
+    """When M itself already costs more than the target, XL solves BELOW it and the per-symbol
+    floor clamps it back up -- M == XL, one benchmark measured three times. Five of 242 kernels
+    proposed exactly that, and apply_sizes took all five before derive_ladder learned to refuse a
+    flat ladder. The fix slides both ends down rather than flooring one of them."""
+    points = [measured("S", 275.0, 1_000_000), measured("M", 1100.0, 4_000_000)]  # k=1, M over target
+    spec = FakeSpec(parameters={"M": {"N": 1_000_000}})
+    out = ex.extrapolate(spec, "fake/too_big", points, target_ms=1000.0)
+    assert out.ok
+    assert out.S["N"] < out.XL["N"], "a ladder whose M is over target must move M, not only XL"
+    assert out.XL["N"] < spec.parameters["M"]["N"], "and the whole ladder must end up below today's M"
+
+
+def test_extrapolate_respects_the_ceiling_when_arrays_outrank_the_symbol_count():
+    """heat3d: ONE symbol, (N,N,N) arrays. The closed form this replaced raised N by the whole
+    byte ratio, so an 8 GB proposal materialised at 46.6 GB and derive_ladder refused it."""
+    n_lo, n_hi = 1_000_000, 10_000_000
+    points = [measured("S", 10.0, n_lo), measured("M", 100.0, n_hi)]
+    spec = FakeSpec(parameters={"M": {"N": 400}}, shapes={"a": "(N,N,N)", "b": "(N,N,N)"})
+    out = ex.extrapolate(spec, "fake/heat3d", points, target_ms=1e12)  # force the ceiling to bind
+    assert out.ok
+    assert out.bound_by == "memory"
+    got = FAKE_ELEM_BYTES * 2 * out.XL["N"]**3
+    assert got <= out.xl_bytes  # the constraint derive_ladder checks -- never exceeded
+    assert got > out.xl_bytes * 0.9  # and not left an order of magnitude short of it either
+
+
+def test_extrapolate_leaves_a_symbol_the_footprint_ignores_alone():
+    """A loop count (TSTEPS) is not a size: growing it changes the program, which derive_ladder
+    refuses as "moves structural knobs"."""
+    n_lo, n_hi = 1_000_000, 10_000_000
+    points = [measured("S", 10.0, n_lo), measured("M", 100.0, n_hi)]
+    spec = FakeSpec(parameters={"M": {"N": 1000, "TSTEPS": 20}}, shapes={"a": "(N,)"})
+    out = ex.extrapolate(spec, "fake/kernel", points, target_ms=1000.0)
+    assert out.ok
+    assert out.XL["TSTEPS"] == 20  # carried, never scaled
+    assert out.XL["N"] == pytest.approx(1000 * 10, rel=1e-9)  # the whole growth lands on N

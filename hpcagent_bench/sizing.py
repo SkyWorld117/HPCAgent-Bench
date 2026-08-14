@@ -192,7 +192,9 @@ def ladder_violations(ladder: Mapping[str, Mapping[str, object]]) -> List[str]:
     """Every way ``ladder`` is not monotone, as human-readable strings (empty when it is).
 
     A rung that shrinks where its neighbours grow is the failure this catches: it makes ``M``
-    slower than ``L``, or puts the fuzzer's ``[L, XL]`` interval the wrong way round.
+    slower than ``L``, or puts the fuzzer's ``[L, XL]`` interval the wrong way round. A pair of
+    rungs where no symbol grows is caught too: three presets at one size are one benchmark
+    measured three times, not a ladder.
     """
     out: List[str] = []
     for name in sorted(ladder.get("S", {})):
@@ -202,6 +204,17 @@ def ladder_violations(ladder: Mapping[str, Mapping[str, object]]) -> List[str]:
         for (lo_name, lo), (hi_name, hi) in zip(numeric, numeric[1:]):
             if hi < lo:
                 out.append(f"{name}: {lo_name}={lo} > {hi_name}={hi}")
+    # Timed rungs only: the kept S is a smoke rung the test suite runs at, and a proposal whose M
+    # lands on the size S already declares is not thereby a broken ladder.
+    for lo_name, hi_name in zip(PRESETS[1:], PRESETS[2:]):
+        if lo_name not in ladder or hi_name not in ladder:
+            continue
+        lo_vals, hi_vals = ladder[lo_name], ladder[hi_name]
+        grown = any(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and isinstance(hi_vals.get(k), (int, float))
+            and not isinstance(hi_vals.get(k), bool) and hi_vals[k] > v for k, v in lo_vals.items())
+        if not grown:
+            out.append(f"{lo_name}->{hi_name}: no symbol strictly increases, not a ladder")
     return out
 
 
@@ -604,6 +617,14 @@ def derive_ladder(spec: BenchSpec, small: Mapping[str, object],
     for (lo_name, lo), (hi_name, hi) in zip(zip(PRESETS, sizes), zip(PRESETS[1:], sizes[1:])):
         if hi < lo:
             problems.append(f"the problem shrinks from {lo_name} to {hi_name} ({lo:.3g} -> {hi:.3g})")
+        elif hi == lo and lo_name != KEPT:
+            # A fit whose anchor rung already costs more than the target proposes an XL below M, and
+            # the per-symbol floor then clamps it back UP to M -- so the ladder collapses to one size
+            # and every rung measures the same run. Caught here and not by the shrink test, which
+            # reads == as monotone. Only among the TIMED rungs: the kept S is a smoke rung the tests
+            # run at, and seissol_batched_gemm's S already sits at the batch the proposal names as M.
+            problems.append(f"the problem does not grow from {lo_name} to {hi_name} ({lo:.3g}), so the "
+                            f"two rungs are one benchmark measured twice")
     for preset in PRESETS:
         problems.extend(constraint_violations(spec, preset, ladder[preset]))
     # The single-core ceiling belongs on the TIMED one-core rung, not on the kept tests rung:

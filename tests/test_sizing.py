@@ -112,7 +112,28 @@ def test_a_ladder_that_shrinks_mid_way_is_reported():
     """A hand-edited middle rung that goes backwards makes M slower than L and inverts the
     fuzzer's ``[L, XL]`` interval, so it must not pass silently."""
     broken = {"S": {"N": 10}, "M": {"N": 900}, "L": {"N": 100}, "XL": {"N": 1000}}
-    assert ladder_violations(broken) == ["N: M=900 > L=100"]
+    assert ladder_violations(broken) == ["N: M=900 > L=100", "M->L: no symbol strictly increases, not a ladder"]
+
+
+def test_a_flat_ladder_is_rejected():
+    """Three presets at one size are one benchmark measured three times, not a ladder."""
+    flat = {"S": {"N": 1942}, "M": {"N": 1942}, "L": {"N": 1942}, "XL": {"N": 1942}}
+    assert ladder_violations(flat) == [
+        "M->L: no symbol strictly increases, not a ladder",
+        "L->XL: no symbol strictly increases, not a ladder",
+    ]
+
+
+def test_an_m_that_lands_on_the_kept_s_is_not_a_violation():
+    """seissol_batched_gemm's manifest S already sits at the batch the proposal names as M. S is
+    the smoke rung the test suite runs at, not a timed one, so that pair is not a broken ladder."""
+    assert ladder_violations({"S": {"N": 1024}, "M": {"N": 1024}, "L": {"N": 16384}, "XL": {"N": 524288}}) == []
+
+
+def test_a_ladder_growing_in_one_symbol_while_another_stays_fixed_is_accepted():
+    """TSTEPS is a fixed knob at every rung; N alone growing is enough to make a rung a rung."""
+    ladder = build_ladder({"N": 10, "TSTEPS": 20}, {"N": 100, "TSTEPS": 20}, {"N": 100000, "TSTEPS": 20})
+    assert ladder_violations(ladder) == []
 
 
 def test_rewriting_keeps_every_comment_and_touches_only_the_scalars():
@@ -242,6 +263,15 @@ def test_a_manifest_constraint_must_hold_at_every_rung():
     assert spec.constraints  # the manifest states the tie; if it stops doing so this test is moot
     _ladder, problems = derive_ladder(spec, {"batch": 1024}, {"batch": 524288})
     assert problems == []
+
+
+def test_an_xl_equal_to_m_is_refused_by_derive_ladder():
+    """The live apply path checks the problem SIZE, not the per-symbol series, and read == as
+    monotone. A fit anchored on a rung already slower than the target proposes an XL below M and
+    the per-symbol floor clamps it back to M, so every rung became one run measured four times."""
+    spec = spec_for("argmax_value")
+    _ladder, problems = derive_ladder(spec, {"LEN_1D": 1 << 20}, {"LEN_1D": 1 << 20})
+    assert any("does not grow" in p for p in problems)
 
 
 def test_an_xl_that_cannot_fit_an_accelerator_is_refused():
