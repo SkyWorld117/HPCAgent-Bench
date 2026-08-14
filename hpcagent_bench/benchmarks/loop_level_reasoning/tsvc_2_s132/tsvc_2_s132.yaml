@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_2D: 60000001
   L:
-    LEN_2D: 120000001
+    LEN_2D: 126909919
   XL:
-    LEN_2D: 240000001
+    LEN_2D: 268435456
 init:
   arrays:
     # Two rows, not LEN_2D of them: the loop writes row 0 and reads row 1 and never touches the

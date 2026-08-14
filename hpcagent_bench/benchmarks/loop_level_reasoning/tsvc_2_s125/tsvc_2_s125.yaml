@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_2D: 8705
   L:
-    LEN_2D: 11388
+    LEN_2D: 11942
   XL:
-    LEN_2D: 14899
+    LEN_2D: 16384
 init:
   arrays:
     flat_2d_array: (LEN_2D * LEN_2D,)

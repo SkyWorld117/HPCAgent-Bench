@@ -10,10 +10,10 @@ parameters:
     LEN_1D: 120000000
     SSYM: 2
   L:
-    LEN_1D: 204110712
+    LEN_1D: 143610098
     SSYM: 2
   XL:
-    LEN_1D: 347176523
+    LEN_1D: 171865503
     SSYM: 2
 init:
   arrays:

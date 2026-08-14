@@ -10,10 +10,10 @@ parameters:
     N: 1942
     TSTEPS: 20
   L:
-    N: 4585
+    N: 3175
     TSTEPS: 20
   XL:
-    N: 12499
+    N: 5191
     TSTEPS: 20
 init:
   arrays:

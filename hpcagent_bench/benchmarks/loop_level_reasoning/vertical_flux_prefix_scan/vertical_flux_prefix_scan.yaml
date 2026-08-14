@@ -10,11 +10,11 @@ parameters:
     N: 1310721
     K: 90
   L:
-    N: 3812260
-    K: 64
+    N: 2796204
+    K: 90
   XL:
-    N: 11088050
-    K: 46
+    N: 5965232
+    K: 90
 init:
   arrays:
     fall: (N,K)

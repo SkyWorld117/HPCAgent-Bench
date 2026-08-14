@@ -13,9 +13,9 @@ parameters:
   M:
     LEN_2D: 6063
   L:
-    LEN_2D: 10781
+    LEN_2D: 10695
   XL:
-    LEN_2D: 19173
+    LEN_2D: 18867
 init:
   arrays:
     a: (LEN_2D,)

@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_2D: 7476
   L:
-    LEN_2D: 7707
+    LEN_2D: 11067
   XL:
-    LEN_2D: 7946
+    LEN_2D: 16383
 init:
   arrays:
     out: (LEN_2D,LEN_2D)

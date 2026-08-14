@@ -8,9 +8,9 @@ parameters:
   M:
     N: 50000000
   L:
-    N: 131752898
+    N: 68147609
   XL:
-    N: 347176523
+    N: 92881933
 init:
   output_args:
   - alpha

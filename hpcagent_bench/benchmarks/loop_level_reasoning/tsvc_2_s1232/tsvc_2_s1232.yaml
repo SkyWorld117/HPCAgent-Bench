@@ -10,10 +10,10 @@ parameters:
     LEN_2D: 12289
     VLEN: 8
   L:
-    LEN_2D: 15131
+    LEN_2D: 15247
     VLEN: 8
   XL:
-    LEN_2D: 18632
+    LEN_2D: 18918
     VLEN: 8
 init:
   arrays:

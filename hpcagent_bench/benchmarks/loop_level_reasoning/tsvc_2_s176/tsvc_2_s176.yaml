@@ -11,9 +11,9 @@ parameters:
   # the per-cell budget -- the rung that is actually graded was never measured. These are the
   # numbers the fit already proposed off M and L (k = 2.19), landing XL on the 1000 ms target.
   L:
-    LEN_1D: 120872
+    LEN_1D: 118145
   XL:
-    LEN_1D: 158806
+    LEN_1D: 151719
 init:
   arrays:
     a: (LEN_1D,)

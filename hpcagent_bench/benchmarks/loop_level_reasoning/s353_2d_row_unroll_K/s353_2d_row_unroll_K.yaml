@@ -8,9 +8,9 @@ parameters:
   M:
     N: 10241
   L:
-    N: 14262
+    N: 14530
   XL:
-    N: 19865
+    N: 20615
 init:
   arrays:
     ip:
