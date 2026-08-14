@@ -62,16 +62,17 @@ def call(kernel: str, data: Dict, followups: List[Dict], reps: int = 3, warmup: 
     # The call path takes BUILDERS so only one held-out set is ever resident; these tests are about
     # the replay hole, not about sizing, so they still spell their cases as literals and get wrapped
     # here. deepcopy, not the dict itself: a real builder hands back arrays nothing else holds.
-    return native_call._call_isolated(kernel,
-                                      BINDING,
-                                      data,
-                                      "python",
-                                      device=False,
-                                      timeout=30,
-                                      py_meta=PY_META,
-                                      reps=reps,
-                                      warmup=warmup,
-                                      followups=[functools.partial(copy.deepcopy, f) for f in followups])
+    return native_call._call_isolated(
+        kernel,
+        BINDING,
+        data,
+        "python",
+        device=False,
+        timeout=30,
+        py_meta=PY_META,
+        reps=reps,
+        warmup=warmup,
+        followups=[native_call.Followup(build=functools.partial(copy.deepcopy, f)) for f in followups])
 
 
 PUBLIC = {"x": np.full(4, 1.0)}
@@ -194,14 +195,15 @@ def test_only_one_held_out_input_set_is_resident_at_a_time():
         return build
 
     kernel = write_kernel(HONEST_SRC)
-    _outputs, _samples, _mem, extras = native_call._call_isolated(kernel,
-                                                                  BINDING,
-                                                                  PUBLIC,
-                                                                  "python",
-                                                                  device=False,
-                                                                  timeout=30,
-                                                                  py_meta=PY_META,
-                                                                  reps=1,
-                                                                  warmup=0,
-                                                                  followups=[make(v) for v in (2.0, 3.0, 5.0)])
+    _outputs, _samples, _mem, extras = native_call._call_isolated(
+        kernel,
+        BINDING,
+        PUBLIC,
+        "python",
+        device=False,
+        timeout=30,
+        py_meta=PY_META,
+        reps=1,
+        warmup=0,
+        followups=[native_call.Followup(build=make(v)) for v in (2.0, 3.0, 5.0)])
     assert [float(e["y"][0]) for e in extras] == [3.0, 4.0, 6.0], "every case still ran, in order"

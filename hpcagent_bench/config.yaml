@@ -54,7 +54,15 @@ fuzz:
   # XL: the held-out cases check correctness at the PRODUCTION shape, where a large-size-only bug
   # (an indexing overflow, a blocked tail) actually appears. It was capped at S only to bound the
   # numpy reference cost, which the per-track oracle (service.oracle) has since removed.
-  hidden_correctness_preset: XL
+  # Per-case ladder, positional against hidden.VARIANTS. The variants are data distribution x
+  # magnitude and the config knobs rotate beside them, so shape was the one axis all five cases
+  # shared -- five runs of ONE shape. Rotating it costs 1.84 XL-equivalents instead of 5 and turns
+  # shape into a 4-point axis. A preset a kernel does not DECLARE falls back per case to the TIMED
+  # preset; empty list = every case at the timed preset (the pre-2026-08-14 behaviour).
+  # Order follows what each variant stresses: neutral-uniform isolates large-shape indexing at XL,
+  # the scale-3 variant needs size for accumulation error, the pure-distribution ones do not, and
+  # the scale-0.1 underflow probe is size-independent.
+  hidden_correctness_presets: [XL, M, M, L, S]
   size_distribution: log_uniform
   data_distribution: uniform
 
@@ -91,8 +99,8 @@ measurement:
                            #   c-autopar | cpp-autopar | fortran-autopar. A compiled baseline falls
                            #   back to numpy per-kernel when it cannot be emitted/built -- EXCEPT on
                            #   a C-oracle track, where that degradation fails the score instead.
-  repeat: 50               # timed reps kept per measurement (default 50; reduced with median +
-                           # non-parametric bootstrap CI, not a mean; >= 20 keeps the CI meaningful).
+  repeat: 20               # timed reps kept per measurement (>= 20 keeps the CI meaningful; 20 is
+                           # that floor, and halves the timed work per grade against the old 50).
   warmup: 1                # untimed warmup reps run + discarded before the timed reps, on the
                            # submission AND every baseline (fair), so cold caches / first-touch
                            # faults don't pollute the samples. 0 = off. Timed cells only.
@@ -103,7 +111,7 @@ measurement:
                            # timing section -- lets many agents solve in parallel while
                            # only ONE performance measurement runs at a time. Empty = off
                            # (rely on n_concurrent_trials). See docs/runtime.md.
-  timing_backend: min_of_k # reduce repeated runs to one r(i,j): min_of_k (best-of-repeat
+  timing_backend: mannwhitney_delta # reduce repeated runs to one r(i,j): min_of_k (best-of-repeat
                            # minimum, default) | mannwhitney_delta (Mann-Whitney U test +
                            # pessimistic minimum-gain delta; noise cannot pass as a speedup)
   mannwhitney:             # only used when timing_backend = mannwhitney_delta
@@ -283,6 +291,15 @@ timeouts:
   # Global override (null = unset). When set it wins over EVERY other layer -- the
   # one knob to cap/extend the whole sweep (e.g. $HPCAGENT_BENCH_TIMEOUTS_KERNEL_S_OVERRIDE=60).
   kernel_s_override: null
+  # Guillotine on the CANDIDATE's timed section, as a multiple of its own measured baseline.
+  # kernel_s is enforced per rep, so a submission that is merely very slow clears every rep alarm
+  # and still costs kernel_s x repeat -- 105 minutes for one grade at the L2 budget. A candidate
+  # this far past its baseline cannot win on speedup, so the remaining repeats buy nothing.
+  # 0 disables. The floor covers sub-millisecond baselines, where the factor alone would cap
+  # under the one-time page-fault / lazy-bind cost the warmup rep is there to absorb.
+  # Held-out cases are exempt: they run at their own preset, not the timed one.
+  guillotine_factor: 10
+  guillotine_floor_s: 5
 
 limits:
   oracle_cache_gb: 12      # per-process ceiling on the reference-OUTPUT cache (scoring.py), bounded

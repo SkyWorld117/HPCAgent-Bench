@@ -10,6 +10,7 @@ from the grading + orchestration logic. The scorer uses only :func:`_call_isolat
 everything else here is internal to this module.
 """
 import copy
+import dataclasses
 import functools
 import importlib.util
 import math
@@ -19,7 +20,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from cffi import FFI
@@ -201,8 +202,23 @@ def _rep_guard(run_once, seconds: float, after_first_rep=None):
     return guarded
 
 
-def run_followup(make_src, call_with, rep_timeout: float) -> Dict[str, np.ndarray]:
-    """Materialise ONE held-out input set, call the kernel on it, and drop it again.
+@dataclasses.dataclass(frozen=True)
+class Followup:
+    """One held-out case: a builder for its inputs, and the reduction applied to the kernel's
+    outputs INSIDE the child.
+
+    ``reduce`` exists because the outputs are the size of the public run and there are
+    ``hidden.VARIANTS`` of them. Returned raw, every case's arrays landed in ONE pickled queue
+    payload -- 7.4 GB on tsvc_2_s212 -- which the feeder thread never flushed, so the child exited
+    0 having delivered nothing and the grade read as a bare native-call failure. Reduced here, only
+    the verdict crosses the pipe. ``None`` keeps the raw outputs, for callers that want them.
+    """
+    build: Callable[[], Dict]
+    reduce: Optional[Callable[[Dict], Any]] = None
+
+
+def run_followup(followup, call_with, rep_timeout: float):
+    """Materialise ONE held-out input set, call the kernel on it, reduce, and drop it again.
 
     Followups arrive as builders rather than as data because every one of them is the size of the
     public run: hidden.VARIANTS is 5, so handing them over as dicts kept 6 full input sets resident
@@ -211,13 +227,20 @@ def run_followup(make_src, call_with, rep_timeout: float) -> Dict[str, np.ndarra
     here, one at a time, the peak is the public set plus the one case in flight.
 
     Deleting ``src`` before returning is the whole point of the function: keeping it alive until
-    the list comprehension's next iteration is what put every case in memory simultaneously.
+    the list comprehension's next iteration is what put every case in memory simultaneously. The
+    outputs go the same way once reduced -- see :class:`Followup`.
     """
-    src = make_src()
+    src = followup.build()
     try:
-        return _rep_guard(functools.partial(call_with, src), rep_timeout, None)(False)[0]
+        out = _rep_guard(functools.partial(call_with, src), rep_timeout, None)(False)[0]
     finally:
         del src
+    if followup.reduce is None:
+        return out
+    try:
+        return followup.reduce(out)
+    finally:
+        del out
 
 
 def _call_native_impl(
@@ -234,7 +257,7 @@ def _call_native_impl(
     warmup: int,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Callable[[], Dict]] = ()
+    followups: Sequence["Followup"] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Shared FFI body for the host and device native calls: marshal ``data`` to the
     canonical symbol of ``lib_path`` and time ``reps`` calls (plus ``warmup`` discarded ones).
@@ -374,7 +397,7 @@ def _call_native(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Callable[[], Dict]] = ()
+    followups: Sequence["Followup"] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """dlopen ``lib_path`` and time ``reps`` calls of the canonical symbol with ``data`` on the HOST.
 
@@ -421,7 +444,7 @@ def _call_native_device(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Callable[[], Dict]] = ()
+    followups: Sequence["Followup"] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Device-resident call: array buffers live on the GPU.
 
@@ -499,7 +522,7 @@ def _call_python(
     warmup: int = 0,
     rep_timeout: float = 0.0,
     after_first_rep=None,
-    followups: Sequence[Callable[[], Dict]] = ()
+    followups: Sequence["Followup"] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], List[Dict[str, np.ndarray]]]:
     """Load an agent's Python submission from ``py_path`` and time ``reps`` calls of its kernel.
 
@@ -742,7 +765,8 @@ def _call_isolated(
     device_id: Optional[int] = None,
     reps: int = 1,
     warmup: int = 0,
-    followups: Sequence[Callable[[], Dict]] = ()
+    guillotine_s: float = 0.0,
+    followups: Sequence["Followup"] = ()
 ) -> Tuple[Dict[str, np.ndarray], List[int], MemoryUsage, List[Dict[str, np.ndarray]]]:
     """Run a whole measurement in ONE CHILD PROCESS so an agent kernel that segfaults,
     hangs, or over-allocates is a SCORED failure, not a death of the whole runner.
@@ -772,6 +796,12 @@ def _call_isolated(
 
     ``timeout`` is PER REP, enforced in-child by :func:`_rep_guard`; the batch's
     ``timeout x reps`` is only an outer backstop for a child that wedges outside a rep.
+
+    ``guillotine_s`` (0 = off) replaces ``timeout`` in the TIMED section of that outer budget.
+    Per-rep alone leaves the batch unbounded in practice: a submission that is merely very slow
+    stays under every rep alarm and still burns ``timeout x reps`` -- 300s x 21 is 105 minutes for
+    one grade. Followups keep the full ``timeout``, because a held-out case runs at its own preset
+    and is legitimately slower than a timed rep at the public one.
     """
     # A python delivery always runs on the HOST (it is a plain callable, no device
     # transfer), so it never takes the spawn/device path even for a device task.
@@ -790,6 +820,8 @@ def _call_isolated(
     # since fork() from a multi-threaded process can deadlock). The device path forces
     # "spawn": a CUDA context does not survive fork.
     mp_context = "spawn" if use_device else None
+    timed_reps = warmup + max(1, reps)
+    batch_timeout = (guillotine_s or timeout) * timed_reps + timeout * len(followups)
     # run_forked owns the fork + wall-clock timeout + SIGTERM/SIGKILL escalation + reap;
     # the worker RETURNS its payload (or raises), which run_forked carries in .result.
     run = run_forked(_native_call_worker,
@@ -806,12 +838,13 @@ def _call_isolated(
                      warmup=warmup,
                      rep_timeout=timeout,
                      followups=tuple(followups),
-                     timeout=timeout * (warmup + max(1, reps) + len(followups)),
+                     timeout=batch_timeout,
                      mp_context=mp_context)
-    total_reps = warmup + max(1, reps) + len(followups)
     if not run.ok:
         if run.signal == "TIMEOUT":
-            raise RuntimeError(f"native call exceeded {timeout:g}s x {total_reps} reps and was killed")
+            per_rep = f"{guillotine_s:g}s/timed rep (guillotine)" if guillotine_s else f"{timeout:g}s/rep"
+            raise RuntimeError(f"native call exceeded its {batch_timeout:g}s batch budget "
+                               f"({per_rep} x {timed_reps} + {len(followups)} followups) and was killed")
         if run.signal == signal.SIGALRM.name:  # _rep_guard's alarm: a timeout, not a crash
             raise RuntimeError(f"native call exceeded {timeout:g}s on a single rep and was killed")
         if run.signal or (run.exit_code or 0) != 0:  # fatal signal / non-zero exit -> crash
