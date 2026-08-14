@@ -42,7 +42,17 @@ SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/kimi-smoke/${SLURM_JOB_ID}"
 export HF_HOME="${SCRATCH}/hf"
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-export PG_PATCH_DIR="${PG_PATCH_DIR:-${SUBMIT_DIR}/external-eager-pg-patch}"
+# Slurm spools this script to /var/spool/slurmd, so BASH_SOURCE cannot locate the patch and
+# SLURM_SUBMIT_DIR is all there is. Resolving against ONE assumed submit directory is a trap --
+# 594563 died on it in 1 s because the job was submitted from the repo root, not from here -- so
+# try both the sibling-directory and repo-root spellings before giving up.
+PG_PATCH_REL="containers/cluster/ce-images/inference/external-eager-pg-patch"
+for cand in "${PG_PATCH_DIR:-}" "${SUBMIT_DIR}/external-eager-pg-patch" "${SUBMIT_DIR}/${PG_PATCH_REL}"; do
+    if [[ -n "${cand}" && -f "${cand}/sitecustomize.py" ]]; then
+        export PG_PATCH_DIR="${cand}"
+        break
+    fi
+done
 
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 export MODEL_REPO="${MODEL_REPO:-moonshotai/Kimi-K2.7-Code}"
@@ -53,15 +63,22 @@ READY_TIMEOUT="${READY_TIMEOUT:-5400}"
 PROBE_STREAMS="${PROBE_STREAMS:-64}"
 PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-512}"
 
-test -f "${PG_PATCH_DIR}/sitecustomize.py" || {
-    echo "FAIL: no sitecustomize.py under ${PG_PATCH_DIR}" >&2
+test -f "${PG_PATCH_DIR:-}/sitecustomize.py" 2>/dev/null || {
+    echo "FAIL: no sitecustomize.py found from SLURM_SUBMIT_DIR=${SUBMIT_DIR}" >&2
+    echo "      set PG_PATCH_DIR=<dir holding sitecustomize.py> and resubmit" >&2
     exit 2
 }
 mkdir -p "${RUN_DIR}"
 
 mapfile -t NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
-(( ${#NODES[@]} == 4 )) || { echo "FAIL: need 4 nodes, have ${#NODES[@]}" >&2; exit 2; }
 export NODE0="${NODES[0]}"
+# Topology follows the ALLOCATION, so the same script measures the kimi config (4 nodes, pp=4)
+# and a pp=1 control on one node: `sbatch --nodes=1 --export=ALL,MODEL_REPO=openai/gpt-oss-120b`.
+# The control is what tells us whether a low tok/s number is the stack or just the offered load.
+export NNODES="${#NODES[@]}"
+export TP_SIZE="${TP_SIZE:-4}"
+export PP_SIZE="${PP_SIZE:-${NNODES}}"
+NODELIST="$(IFS=,; echo "${NODES[*]}")"
 
 SERVE_SCRIPT="${RUN_DIR}/serve.sh"
 SMOKE_DONE="${RUN_DIR}/smoke.done"
@@ -69,7 +86,7 @@ stage() { printf '\n===== stage: %s =====\n' "$*"; }
 
 cat <<EOF
 job:    ${SLURM_JOB_ID}
-model:  ${MODEL_REPO} tp=4 pp=4 on ${NODE0}..${NODES[3]}
+model:  ${MODEL_REPO} tp=${TP_SIZE} pp=${PP_SIZE} on ${NNODES} node(s): ${NODELIST}
 patch:  ${PG_PATCH_DIR}
 logs:   ${RUN_DIR}
 EOF
@@ -109,10 +126,10 @@ echo "rank ${rank} host $(hostname) model ${MODEL_PATH} PYTHONPATH=${PYTHONPATH}
 ARGS=(
     "${MODEL_PATH}"
     --served-model-name "${SERVED_MODEL}"
-    --tensor-parallel-size 4
-    --pipeline-parallel-size 4
+    --tensor-parallel-size "${TP_SIZE}"
+    --pipeline-parallel-size "${PP_SIZE}"
     --distributed-executor-backend mp
-    --nnodes 4
+    --nnodes "${NNODES}"
     --node-rank "${rank}"
     --master-addr "${NODE0}"
     --master-port "${MASTER_PORT}"
@@ -157,9 +174,9 @@ SERVE
 chmod +x "${SERVE_SCRIPT}"
 rm -f "${SMOKE_DONE}"
 
-stage "serving kimi tp=4 pp=4 with the eager-PG patch"
-srun --nodes=4 --ntasks=4 --ntasks-per-node=1 --exclusive --export=ALL \
-    --nodelist="${NODE0},${NODES[1]},${NODES[2]},${NODES[3]}" --environment="${INFERENCE_EDF}" \
+stage "serving ${MODEL_REPO} tp=${TP_SIZE} pp=${PP_SIZE} on ${NNODES} node(s) with the eager-PG patch"
+srun --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 --exclusive --export=ALL \
+    --nodelist="${NODELIST}" --environment="${INFERENCE_EDF}" \
     bash "${SERVE_SCRIPT}" >"${RUN_DIR}/vllm-step.log" 2>&1 &
 SERVER_STEP_PID=$!
 cleanup_steps() {
@@ -206,20 +223,29 @@ awk -v a="${before:-0}" -v b="${after:-0}" 'BEGIN{ if (b-a <= 0) exit 1 }' || {
 }
 
 stage "gate 4: saturation probe, ${PROBE_STREAMS} concurrent x ${PROBE_MAX_TOKENS} tokens"
-g0=$(metric generation_tokens_total); t0=$SECONDS
+# max_tokens is a floor on how long each stream lives, and ignore_eos keeps it from finishing
+# early -- otherwise short answers drain the batch and the "saturated" number is measured
+# against a half-empty engine, which is the same mistake as reading 92 tok/s off idle arms.
 for i in $(seq 1 "${PROBE_STREAMS}"); do
-    curl -fsS --max-time 600 "http://${NODE0}:${API_PORT}/v1/completions" \
+    curl -fsS --max-time 900 "http://${NODE0}:${API_PORT}/v1/completions" \
         -H 'Content-Type: application/json' \
-        -d "{\"model\":\"${SERVED_MODEL}\",\"prompt\":\"Explain loop tiling, variation ${i}.\",\"max_tokens\":${PROBE_MAX_TOKENS}}" \
+        -d "{\"model\":\"${SERVED_MODEL}\",\"prompt\":\"Explain loop tiling, variation ${i}.\",\"max_tokens\":${PROBE_MAX_TOKENS},\"ignore_eos\":true}" \
         -o "${RUN_DIR}/probe-${i}.json" &
 done
+# Let the batch fill before timing: the first seconds are prefill and ramp, not steady-state
+# decode, and including them understates the ceiling.
+sleep 25
+g0=$(metric generation_tokens_total); r0=$(metric num_requests_running); t0=$SECONDS
 sleep 60
-g1=$(metric generation_tokens_total); run=$(metric num_requests_running); t1=$SECONDS
+g1=$(metric generation_tokens_total); r1=$(metric num_requests_running); t1=$SECONDS
+awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v r0="${r0:-0}" -v r1="${r1:-0}" 'BEGIN{
+    conc = (r0 + r1) / 2
+    rate = (b - a) / dt
+    printf "SATURATED DECODE: %.1f tok/s aggregate over %ds at ~%.0f concurrent\n", rate, dt, conc
+    if (conc > 0) printf "                  %.1f tok/s per request\n", rate / conc
+    if (rate <= 0) { print "FAIL: no decode progress under load"; exit 1 }
+}' || exit 1
 wait
-awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v r="${run:-0}" 'BEGIN{
-    printf "SATURATED DECODE: %.1f tok/s aggregate over %ds at %s concurrent\n", (b-a)/dt, dt, r
-    if (r > 0) printf "                  %.1f tok/s per request\n", (b-a)/dt/r
-}'
 
 touch "${SMOKE_DONE}"
 printf '\n===== KIMI EAGER-PG SMOKE PASSED =====\nlogs: %s\n' "${RUN_DIR}"
