@@ -208,6 +208,15 @@ RUN set -eux; \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# Docs for the libraries an agent may link. The ROCm base is a MINIMIZED Ubuntu: dpkg excludes strip
+# /usr/share/man and /usr/share/doc, so `man gsl_sf_bessel` fails on an image that ships libgsl.
+# After the library layer, so unminimize's reinstall restores their pages too.
+RUN set -eux; \
+    apt-get update; \
+    yes | unminimize || true; \
+    apt-get install -y --no-install-recommends man-db manpages manpages-dev; \
+    rm -rf /var/lib/apt/lists/*
+
 COPY containers/agent /opt/optarena-agent
 COPY containers/judge /opt/optarena-judge
 RUN chmod +x /opt/optarena-agent/start_agents.sh /opt/optarena-agent/start_run.sh
@@ -243,6 +252,8 @@ RUN set -eux; \
       || { echo "pinned LLVM ${LLVM_MAJOR} unavailable; image has ${llvm_major:-none}" >&2; exit 1; }; \
     gcc -dumpversion | cut -d. -f1 | grep -qx "${GCC_MAJOR}" \
       || { echo "pinned GCC ${GCC_MAJOR} unavailable; bare gcc is $(gcc -dumpfullversion)" >&2; exit 1; }; \
+    man -w gcc >/dev/null \
+      || { echo "manpages missing: unminimize did not take" >&2; exit 1; }; \
     sh /stdpar-gate.sh; \
     python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"; \
     LD_PRELOAD=/usr/local/lib/libmimalloc.so /bin/true \

@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
 
-IMAGE_TAG="${IMAGE_TAG:-optarena-ce:amd-mi300-v3}"
-OUTPUT_SQSH="${OUTPUT_SQSH:-${SCRATCH:?SCRATCH must be set on CSCS}/ce-images/optarena-ce-amd-mi300-v3.sqsh}"
+IMAGE_TAG="${IMAGE_TAG:-optarena-ce:amd-mi300-v4}"
+OUTPUT_SQSH="${OUTPUT_SQSH:-${SCRATCH:?SCRATCH must be set on CSCS}/ce-images/optarena-ce-amd-mi300-v4.sqsh}"
 BASE_IMAGE="${BASE_IMAGE:-docker.io/rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.9.1}"
 ROCM_ARCH="${ROCM_ARCH:-gfx942}"
 
