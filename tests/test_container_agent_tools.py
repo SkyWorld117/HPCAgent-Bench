@@ -93,6 +93,10 @@ def free_choice_judge(make_judge, monkeypatch):
         "library": "/shared/libk.so",
         "workspace_bytes": "8*NI*NJ"
     }),
+    (dict(language="c", source="void k(void) {}", compiler="llvm"), {
+        "source": "void k(void) {}",
+        "compiler": "llvm"
+    }),
 ])
 def test_the_body_is_field_for_field_what_the_reference_client_sends(agent_tools, monkeypatch, submission, payload):
     """The drift guard: same field NAMES, same values, no invented ones.

@@ -1,9 +1,15 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Toolchain family resolution (Task F) and offload flag selection (Task G)."""
+import pathlib
+
 import pytest
 
 from hpcagent_bench import config, flags, languages
+from hpcagent_bench.harness import sandbox
+from hpcagent_bench.harness.envelope import Submission
+from hpcagent_bench.spec import BenchSpec
+from hpcagent_bench.support.bindings import binding_from_spec
 
 #: Every language the ``build.compiler.*`` pin is declared for in ``config.yaml``.
 PINNED_LANGS = ("c", "cpp", "fortran")
@@ -74,6 +80,73 @@ def test_an_unknown_pin_names_the_allowed_set_and_its_key(_reset_pin):
 def test_family_names_is_the_one_vocabulary():
     assert languages.family_names() == tuple(languages.COMPILER_FAMILIES)
     assert languages.family_names()[0] == languages.default_family()
+
+
+# --- Task F: a submission's 'compiler' field reaches the build argv --------
+
+CPP_SOURCE = 'extern "C" void gemm() {}\n'
+
+
+def sandbox_build(monkeypatch, submission: Submission) -> tuple[sandbox.BuildResult, list[list[str]]]:
+    """Run ``Sandbox.build`` with the compile/link RUN stubbed out.
+
+    Returns ``(BuildResult, cmds)``, where ``cmds`` is the argv the build would have spawned
+    (``[]`` when the build was refused before any command existed)."""
+    spawned: list[list[list[str]]] = []
+
+    def capture(cmds: list[list[str]], cwd, artifact, *, as_exe: bool) -> sandbox.BuildResult:
+        spawned.append(cmds)
+        return sandbox.BuildResult(True, artifact, "")
+
+    monkeypatch.setattr(sandbox, "finalize_build", capture)
+    with sandbox.Sandbox(binding_from_spec(BenchSpec.load("gemm"))) as sb:
+        result = sb.build(submission)
+    return result, (spawned[0] if spawned else [])
+
+
+def drivers_in(argv: list[str]) -> set[str]:
+    """The driver basenames an argv names, with any resolved path and version suffix stripped."""
+    return {pathlib.Path(tok).name.split("-")[0] for tok in argv}
+
+
+@pytest.mark.parametrize("family", ["gcc", "llvm"])
+def test_a_submitted_compiler_field_builds_with_that_family(monkeypatch, family):
+    """The wire the prompt promises: `"compiler": "llvm"` must put llvm's driver on the argv."""
+    submission = Submission(language="cpp", source=CPP_SOURCE, compiler=family)
+    _result, cmds = sandbox_build(monkeypatch, submission)
+    driver = languages.compiler_driver(languages.compiler_for_family("cpp", family))
+    assert driver in drivers_in(cmds[0])
+
+
+def test_a_submitted_compiler_field_moves_the_argv_off_the_default(monkeypatch):
+    """Not merely present: the requested family must produce a DIFFERENT build than the default,
+    which is what a silently ignored field could never do."""
+    _default_result, default = sandbox_build(monkeypatch, Submission(language="cpp", source=CPP_SOURCE))
+    _asked_result, requested = sandbox_build(monkeypatch, Submission(language="cpp", source=CPP_SOURCE,
+                                                                     compiler="llvm"))
+    assert drivers_in(requested[0]) != drivers_in(default[0])
+
+
+def test_an_arm_pin_still_beats_the_submitted_compiler_in_the_build(monkeypatch, _reset_pin):
+    config.set_override("build.compiler.cpp", "gcc")
+    _result, cmds = sandbox_build(monkeypatch, Submission(language="cpp", source=CPP_SOURCE, compiler="llvm"))
+    assert languages.compiler_driver(languages.compiler_for_family("cpp", "gcc")) in drivers_in(cmds[0])
+
+
+def test_an_unknown_submitted_compiler_fails_the_build_naming_the_allowed_set(monkeypatch):
+    result, cmds = sandbox_build(monkeypatch, Submission(language="cpp", source=CPP_SOURCE, compiler="clang"))
+    assert not result.ok and cmds == []
+    for family in languages.family_names():
+        assert family in result.log
+
+
+def test_the_compiler_field_survives_the_json_round_trip():
+    """``JudgeClient`` posts ``Submission.to_json()`` and the judge parses it back, so a field that
+    does not round-trip is dropped between the agent and the build."""
+    sub = Submission(language="c", source="void gemm() {}", compiler="oneapi")
+    assert sub.to_json()["compiler"] == "oneapi"
+    assert Submission.from_obj(sub.to_json()).compiler == "oneapi"
+    assert "compiler" not in Submission(language="c", source="x").to_json()
 
 
 # --- Task F: the pin reaches the block lookup both builds share ------------

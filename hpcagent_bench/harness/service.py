@@ -344,7 +344,8 @@ def _submission_from_body(body: dict, kernel: str, language: str, cfg: RunConfig
                       source=source,
                       library=str(sandbox.resolve_shared(library)) if library else None,
                       build=list(body.get("build", [])),
-                      workspace_bytes=body.get("workspace_bytes"))
+                      workspace_bytes=body.get("workspace_bytes"),
+                      compiler=body.get("compiler"))
 
 
 class JudgeHandler(BaseHTTPRequestHandler):

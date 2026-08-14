@@ -290,10 +290,15 @@ class Sandbox:
         extra_compile = [f"-I{shared}/include"] + (flags.DEBUG_SYMBOLS if debug else []) + agent_compile
         extra_link = [f"-L{shared}/lib"] + agent_link
         try:
+            # compiler= takes a compilers.yaml BLOCK name, so the requested FAMILY is translated
+            # first; None (family absent from this image) falls back to the default block.
+            family = languages.resolve_family(submission.language, submission.compiler)
+            block = languages.compiler_for_family(submission.language, family)
             cmds = languages.build_shared_lib_commands(submission.language,
                                                        src,
                                                        lib,
                                                        mode=mode,
+                                                       compiler=block,
                                                        extra_compile=extra_compile,
                                                        extra_link=extra_link)
         except (KeyError, FileNotFoundError) as e:

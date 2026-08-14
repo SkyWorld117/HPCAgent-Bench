@@ -122,6 +122,9 @@ class Submission:
     tokens: Optional[int] = None
     #: Optional MPI distribution request (grid + per-array layout); None runs the single-node path unchanged.
     distribution: Optional[Dict[str, Any]] = None
+    #: Requested toolchain FAMILY (``languages.COMPILER_FAMILIES``), not a ``compilers.yaml`` block
+    #: name; None asks for nothing and builds with the arm's pin or the default family.
+    compiler: Optional[str] = None
 
     def __post_init__(self):
         if self.language not in DELIVERY_LANGS:
@@ -165,6 +168,8 @@ class Submission:
             out["tokens"] = self.tokens
         if self.distribution is not None:
             out["distribution"] = self.distribution
+        if self.compiler is not None:
+            out["compiler"] = self.compiler
         return out
 
     @classmethod
@@ -182,7 +187,8 @@ class Submission:
                    build=list(obj.get("build", [])),
                    workspace_bytes=obj.get("workspace_bytes"),
                    tokens=obj.get("tokens"),
-                   distribution=obj.get("distribution"))
+                   distribution=obj.get("distribution"),
+                   compiler=obj.get("compiler"))
 
     @classmethod
     def from_response(cls, text: str, default_language: Optional[str] = None) -> "Submission":
