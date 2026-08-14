@@ -661,3 +661,44 @@ def test_a_language_page_names_the_standard_the_harness_actually_builds_with() -
         wrong = [f for f in found if f != want]
         assert not wrong, (f"{page} names {wrong} but the harness builds {lang} with {want} "
                            f"(hpcagent_bench/languages.py::std_flag)")
+
+
+#: Fortran 2023 spellings the graded `-std=f2018` line hard-errors on, and what F2018 offers
+#: instead. `reduce` is the one that actually shipped: the do-concurrent page taught it for
+#: accumulators until 2026-08-13, so every Fortran agent that followed the page got a build error
+#: rather than a slow result -- a solve-rate loss no speedup number shows.
+F2023_IN_FORTRAN = (
+    (r"\breduce\s*\(", "do concurrent reduce(+:s) is F2023; use !$omp parallel do reduction(+:s)"),
+    (r"\btypeof\b|\bclassof\b", "typeof/classof are F2023"),
+    (r"\benumeration\s+type\b", "enumeration type is F2023"),
+    (r"\bselected_logical_kind\b", "selected_logical_kind is F2023"),
+    (r"\btokenize\s*\(", "tokenize is an F2023 intrinsic"),
+    (r"\bc_f_strpointer\b|\bf_c_string\b", "c_f_strpointer/f_c_string are F2023"),
+)
+
+#: Pages whose Fortran the graded build actually compiles.
+FORTRAN_PAGES = ("lang-fortran", "doconcurrent-fortran")
+
+
+def test_no_fortran_page_teaches_a_2023_spelling() -> None:
+    """A page is an instruction, so a construct it spells out is a promise about the build line.
+
+    The -std= check beside this one pins the FLAG; it cannot see a 2023 feature written into the
+    prose under a correct flag, which is exactly the shape the reduce(+:s) regression had.
+    """
+    from hpcagent_bench import paths
+
+    # Per BULLET, not per line: a page may NAME a 2023 spelling in order to forbid it, and the
+    # forbidding usually sits on a different wrapped line than the name does. Naming one without
+    # forbidding it in the same breath is what this catches.
+    forbids = re.compile(r"F2023|2023|build error|rejected|not?t? newer|instead", re.I)
+    for page in FORTRAN_PAGES:
+        path = paths.ROOT / "hpcagent_bench" / "skills" / page / "SKILL.md"
+        if not path.exists():
+            continue
+        bullets = re.split(r"\n(?=[-*] |#)", path.read_text())
+        for bullet in bullets:
+            for pattern, why in F2023_IN_FORTRAN:
+                if re.search(pattern, bullet, re.I) and not forbids.search(bullet):
+                    raise AssertionError(f"{page} teaches a Fortran 2023 spelling ({why}) without "
+                                         f"marking it rejected: {' '.join(bullet.split())[:160]}")
