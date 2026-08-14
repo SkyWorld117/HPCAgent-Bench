@@ -436,5 +436,54 @@ def test_gaussian_matches_reference():
     np.testing.assert_allclose(b, bref, rtol=1e-9, atol=1e-9)
 
 
+# --------------------------------------------------------------------------- #
+# Automata processing: homogeneous-NFA frontier (VASim Automata::simulate)     #
+# --------------------------------------------------------------------------- #
+def _nfa_frontier_reference(row_ptr, col_idx, symbol_cols, is_report, start_idx, start_sod, symbols):
+    """Independent semantics: the frontier as a Python set, successors as a dict.
+
+    No worklist, no dedup flags, no CSR walk in the inner loop -- the port's three
+    data structures are exactly what this reference does without.
+    """
+    NS = row_ptr.shape[0] - 1
+    succ = {i: [int(c) for c in col_idx[row_ptr[i]:row_ptr[i + 1]]] for i in range(NS)}
+    starts_any = {int(start_idx[k]) for k in range(start_idx.shape[0]) if not start_sod[k]}
+    starts_eod = {int(start_idx[k]) for k in range(start_idx.shape[0]) if start_sod[k]}
+
+    counts = np.zeros(NS, dtype=np.int64)
+    reports = 0
+    enabled = starts_any | starts_eod
+    T = symbols.shape[0]
+    for t in range(T):
+        sym = int(symbols[t])
+        matched = {s for s in enabled if symbol_cols[s, sym]}
+        for s in matched:
+            counts[s] += 1
+            if is_report[s]:
+                reports += 1
+        enabled = set()
+        for s in matched:
+            enabled.update(succ[s])
+        enabled |= starts_any
+        if t == T - 1 or sym == 10:
+            enabled |= starts_eod
+    return counts, reports
+
+
+def test_nfa_frontier_matches_reference():
+    initialize, nfa_frontier = _load("finite_state_machine", "nfa_frontier")
+    NS, NE, NSTART, T = 33 * 11, 55 * 11, 11, 1201
+    args = initialize(NS, NE, NSTART, T)
+    counts, report_count = args[-2], args[-1]
+    want_counts, want_reports = _nfa_frontier_reference(*args[:7])
+
+    nfa_frontier(*args, NS, T)  # writes counts and report_count in place
+    np.testing.assert_array_equal(counts, want_counts)
+    assert int(report_count[0]) == want_reports
+    # A frontier collapsed onto the start states would agree with a broken reference too;
+    # ANMLZoo's automata activate 0.6-5.3% of their states per symbol.
+    assert 0.002 < counts.sum() / (T * NS) < 0.10
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
