@@ -68,6 +68,17 @@ JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS="${JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS:-30
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 INFERENCE_CE_ENV="${INFERENCE_CE_ENV:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AMD_CE_ENV="${AMD_CE_ENV:-optarena-amd-mi300-v3}"
+# Weights and compile cache. iopsstor reads 9.45 GB/s at 16 readers vs capstor 0.83 (job 593523),
+# but purges at 14 days against capstor's 30 -- so capstor keeps the durable copy.
+FAST_SCRATCH="${FAST_SCRATCH:-}"
+if [[ -z "${FAST_SCRATCH}" ]]; then
+    if [[ -d "/iopsstor/scratch/cscs/${USER}" ]]; then
+        FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+    else
+        FAST_SCRATCH="${SCRATCH}"
+    fi
+fi
+export FAST_SCRATCH
 HPCAGENT_BENCH_REPO="${HPCAGENT_BENCH_REPO:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
 RUN_ROOT="${RUN_ROOT:-${HPCAGENT_BENCH_REPO}/results/cluster}"
 RUN_DIR="${RUN_ROOT}/${SLURM_JOB_ID:-local}"
@@ -98,8 +109,12 @@ run_vllm_node() {
     # HF_HOME MUST be exported before the snapshot resolution below: inside the CE container
     # ~/.cache is the RAM-backed overlay, and resolving there made the fallback download 60 GB
     # of weights into the job cgroup - the OOM that killed 585035.
-    export HF_HOME="${HF_HOME:-${SCRATCH}/hf}"
+    export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
     export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+    # Unset, this defaults under ~/.cache, which is unmounted here -- the cache died with the job
+    # and 592283 re-ran 3 h 13 m of Inductor codegen. Graph capture stays uncached regardless.
+    export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
 
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
@@ -368,9 +383,9 @@ mkdir -p "${RUN_DIR}" "${SHARED_HOST_DIR}"
 # `lfs migrate -c 16 -S 4M` while nothing reads them. Best-effort: a non-Lustre HF_HOME
 # (or no lustre client) must not fail the run.
 if command -v lfs >/dev/null 2>&1; then
-    mkdir -p "${HF_HOME:-${SCRATCH}/hf}/hub"
-    lfs setstripe -E 64M -c 1 -E -1 -c 16 -S 4M "${HF_HOME:-${SCRATCH}/hf}/hub" 2>/dev/null \
-        || echo "note: lfs setstripe on ${HF_HOME:-${SCRATCH}/hf}/hub failed (non-Lustre?)"
+    mkdir -p "${HF_HOME:-${FAST_SCRATCH}/hf}/hub"
+    lfs setstripe -E 64M -c 1 -E -1 -c 16 -S 4M "${HF_HOME:-${FAST_SCRATCH}/hf}/hub" 2>/dev/null \
+        || echo "note: lfs setstripe on ${HF_HOME:-${FAST_SCRATCH}/hf}/hub failed (non-Lustre?)"
 fi
 
 # Read-only per-kernel material + the prompt template, once per run, before any role starts.
