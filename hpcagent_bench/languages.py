@@ -32,6 +32,7 @@ import pathlib
 import shlex
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -269,6 +270,15 @@ def _resolve_baseline(block: dict, mode: Mode) -> str:
     if ref not in flag_vars:
         raise KeyError(f"baseline_ref {ref!r} is not a constant in hpcagent_bench.flags")
     baseline = flag_vars[ref]
+    # Vector libm, for a block whose baseline cannot carry it as a constant. gcc/clang get it
+    # inside their baseline and gfortran from the driver spec; flang has neither, and a column
+    # building libm scalar while its neighbours vectorize measures the library, not the compiler.
+    veclib_ref = block.get("veclib_ref")
+    if veclib_ref is not None:
+        if veclib_ref not in flag_vars:
+            raise KeyError(f"veclib_ref {veclib_ref!r} is not a constant in hpcagent_bench.flags")
+        if _veclib_accepted(block["cc"], flag_vars[veclib_ref], block.get("lang", "c")):
+            baseline = f"{baseline} {flag_vars[veclib_ref]}"
     autopar_ref = block.get("autopar_ref")
     if autopar_ref is not None and autopar_ref not in flag_vars:
         raise KeyError(f"autopar_ref {autopar_ref!r} is not a constant in hpcagent_bench.flags")
@@ -593,6 +603,42 @@ def _stdpar_link_for_block(block: Dict[str, Any]) -> Tuple[str, ...]:
     if not _stdpar_backend_is_tbb(block["cc"]):
         return ()
     return tuple(shlex.split(flag_vars[ref]))
+
+
+#: Probe sources per compiler-block language: the smallest translation unit each front end accepts.
+_VECLIB_PROBE: Dict[str, Tuple[str, str]] = {
+    "fortran": (".f90", "end\n"),
+    "c": (".c", "int main(void){return 0;}\n"),
+    "cpp": (".cpp", "int main(){return 0;}\n"),
+}
+
+
+@functools.lru_cache(maxsize=None, typed=True)
+def _veclib_accepted(cc: str, flag: str, lang: str) -> bool:
+    """Does ``cc`` accept ``flag``? Asked by COMPILING, because a driver that does not know a
+    ``-fveclib=`` spelling rejects it at the command line rather than at link time.
+
+    A temp file rather than stdin: the Fortran front ends infer free vs fixed form from the
+    suffix, and ``-x`` is spelled differently (or absent) across them.
+    """
+    probe = _VECLIB_PROBE.get(lang)
+    if not flag or probe is None:
+        return False
+    suffix, source = probe
+    exe = resolve_compiler(cc) or cc
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, f"veclib_probe{suffix}")
+        with open(src, "w", encoding="ascii") as handle:
+            handle.write(source)
+        try:
+            r = subprocess.run(
+                [exe, flag, "-c", src, "-o", os.path.join(tmp, "veclib_probe.o")],
+                capture_output=True,
+                text=True,
+                timeout=_STDPAR_PROBE_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0
 
 
 @functools.lru_cache(maxsize=None, typed=True)

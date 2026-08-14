@@ -131,13 +131,23 @@ DEBUG_SYMBOLS: List[str] = ["-g"]
 #: NO ``-ffast-math`` (its reassociation/finite-math rewrites diverge from NumPy).
 #: Kept here in the matrix so no framework string-literals the optimization
 #: flags itself (the no-literal invariant this module documents).
-PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX}"
+#: ``_VECLIB_GCC`` rather than ``_VECLIB_CLANG``: pythran forwards these to whichever backend it
+#: was configured with, and the decl header is accepted by gcc AND clang while ``-fveclib`` is
+#: clang-only. Without it pythran was the one CPU column building libm scalar.
+PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX}{_VECLIB_GCC}"
 
 #: LLVM Fortran (``flang`` / ``flang-new``) baseline -- LLVM's Fortran front end,
 #: the Fortran companion to the clang C/C++ baseline (``CPU_BASELINE_CLANG``).
 #: Mirrors the clang intent (O3 + native arch + OpenMP + PIC; no fast-math -- see the
 #: CPU baseline note); flang does not accept every gcc FP-relax spelling.
 FLANG_BASELINE = f"-O3 {ARCH_NATIVE} -fopenmp -fPIC"
+
+#: flang's route to glibc's vector libm. Unlike gfortran -- which gets libmvec from the distro
+#: driver spec pre-including glibc's Fortran directives -- flang has no such spec, so the flag is
+#: the only way in. PROBE-GATED at use (languages._veclib_accepted): support landed across flang
+#: releases, and an unconditional flag would fail every Fortran build on a host whose flang
+#: predates it. Empty off Linux, where there is no libmvec to reach.
+VECLIB_FLANG = "-fveclib=libmvec" if osinfo.IS_LINUX else ""
 
 # ---------------------------------------------------------------------------
 # Warnings -- a diagnostic axis, not an optimization one, so it is a separate

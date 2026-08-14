@@ -153,6 +153,9 @@ flang:
   install: {apt: flang, spack: llvm}
   cc: flang
   baseline_ref: FLANG_BASELINE
+  # flang gets no libmvec from a driver spec the way gfortran does, so the flag is its only route.
+  # Probe-gated in languages._resolve_baseline: dropped on a flang that rejects the spelling.
+  veclib_ref: VECLIB_FLANG
   autopar_ref: null
   doconcurrent_ref: DO_CONCURRENT_FLANG
   compile: ["{cc}", "{baseline}", "-fPIC", "-c", "{src}", "-o", "{obj}"]
