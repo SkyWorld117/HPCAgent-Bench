@@ -98,6 +98,7 @@ run_vllm_node() {
     require_modern_python vllm
     local node_rank="${SLURM_PROCID:-0}"
     local log_dir="${RUN_DIR}/vllm"
+    local eager_pg_dir
     local -a command extra
     mkdir -p "${log_dir}"
 
@@ -111,6 +112,16 @@ run_vllm_node() {
     # of weights into the job cgroup - the OOM that killed 585035.
     export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
     export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+    # pp=4 lazy PG init mints a per-pair NCCL communicator over CXI (594541-543, 0 tokens decoded).
+    if [[ "${VLLM_EAGER_PG_PATCH:-0}" == "1" ]]; then
+        eager_pg_dir="${SCRIPT_DIR}/../ce-images/inference/external-eager-pg-patch"
+        if [[ ! -f "${eager_pg_dir}/sitecustomize.py" ]]; then
+            echo "FATAL: VLLM_EAGER_PG_PATCH=1 but ${eager_pg_dir}/sitecustomize.py is missing" >&2
+            exit 2
+        fi
+        export PYTHONPATH="${eager_pg_dir}:${PYTHONPATH:-}"
+    fi
 
     # Unset, this defaults under ~/.cache, which is unmounted here -- the cache died with the job
     # and 592283 re-ran 3 h 13 m of Inductor codegen. Graph capture stays uncached regardless.
