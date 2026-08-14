@@ -37,8 +37,11 @@ def test_grade_real_output_unaffected():
 
 
 def test_resolve_ranges_hi_is_absolute_xl():
-    # XL is an ABSOLUTE size; the default range must be [L, XL], not [L, L+XL].
-    # size_cap=0 disables the clamp so the assertion is independent of any global
-    # HPCAGENT_BENCH_FUZZ_SIZE_CAP a test env may set.
+    # XL is an ABSOLUTE size: hi comes from XL itself, never L + XL. That is the bug this pins.
+    # The band ANCHORS on XL rather than spanning [L, XL] -- a range that wide is drawn
+    # log-uniform, so most draws land far below XL and the timed problem is too small for what is
+    # being measured to show (fuzz.resolve_ranges). size_cap=0 disables the clamp so the assertion
+    # is independent of any global HPCAGENT_BENCH_FUZZ_SIZE_CAP a test env may set.
     ranges = resolve_ranges({"L": {"N": 1000}, "XL": {"N": 4000}}, size_cap=0)
-    assert ranges["N"] == [1000, 4000]
+    assert ranges["N"] == [3400, 4600]  # [0.85 * XL, 1.15 * XL]
+    assert ranges["N"][1] < 1000 + 4000, "hi is derived from XL alone, never L + XL"
