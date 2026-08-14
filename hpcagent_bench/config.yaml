@@ -51,9 +51,10 @@ fuzz:
   # on gigabyte inputs, re-checking a shape the PUBLIC case already checks at full size. A DECLARED
   # preset, not a clamp: clamping a dimension can violate a kernel's constraints. Empty (or a preset
   # a kernel does not declare) falls back to the timed preset, the pre-2026-08 behaviour.
-  # The ladder floor, because this is applied UNCONDITIONALLY: at M every score() drew held-out
-  # cases at LEN_1D 47,000,000, 109 s of scalar numpy reference each. Public keeps the timed shape.
-  hidden_correctness_preset: S
+  # XL: the held-out cases check correctness at the PRODUCTION shape, where a large-size-only bug
+  # (an indexing overflow, a blocked tail) actually appears. It was capped at S only to bound the
+  # numpy reference cost, which the per-track oracle (service.oracle) has since removed.
+  hidden_correctness_preset: XL
   size_distribution: log_uniform
   data_distribution: uniform
 
@@ -65,7 +66,10 @@ fuzz:
 # POST /submit accepts: source (agent submits code, the service compiles it =
 # "llvm as a port") | library (a prebuilt .so) | either.
 service:
-  oracle: numpy            # correctness reference: numpy | c | both
+  oracle: auto             # correctness reference: auto | numpy | c | both. auto = the per-track
+                           #   default (loop_level_reasoning -> c, everything else -> numpy). That
+                           #   track's references are interpreted scalar loops, ~118 s per case at
+                           #   its XL; numpy never runs there, an explicit request is overridden.
   # NOTE: the speedup denominator (baseline) is NOT here -- it is the SHARED `measurement.baseline`
   # key below (one source of truth read by both the judge and the Harbor grader, so the two
   # measurement paths cannot drift).
@@ -85,7 +89,8 @@ measurement:
   baseline: auto           # speedup denominator (mirrors service.baseline). auto = the per-track
                            #   default (loop_level_reasoning -> c, scientific_computing -> numpy, machine_learning -> numpy); numpy | c |
                            #   c-autopar | cpp-autopar | fortran-autopar. A compiled baseline falls
-                           #   back to numpy per-kernel when it cannot be emitted/built.
+                           #   back to numpy per-kernel when it cannot be emitted/built -- EXCEPT on
+                           #   a C-oracle track, where that degradation fails the score instead.
   repeat: 50               # timed reps kept per measurement (default 50; reduced with median +
                            # non-parametric bootstrap CI, not a mean; >= 20 keeps the CI meaningful).
   warmup: 1                # untimed warmup reps run + discarded before the timed reps, on the
@@ -280,6 +285,10 @@ timeouts:
   kernel_s_override: null
 
 limits:
+  oracle_cache_gb: 12      # per-process ceiling on the reference-OUTPUT cache (scoring.py), bounded
+                           # by BYTES: one entry is gigabytes at the XL-anchored shapes. Safe by
+                           # construction, not by pressure -- 4 judge slots x 12 = 48 of the node's
+                           # 128 GB, and the graded children are capped separately.
   kernel_memory_gb: 20     # FLOOR under (and fallback for) the per-kernel budget a single-node run
                            # derives from its own sizes -- sizing.kernel_memory_gb: workspace +
                            # 2x the input/output array bytes (RLIMIT_AS = harness baseline + that;

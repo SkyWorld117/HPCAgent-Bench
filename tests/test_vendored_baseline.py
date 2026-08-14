@@ -143,8 +143,10 @@ def test_explicit_choice_beats_the_kernel_declaration(tmp_path):
     with widget_kernel(tmp_path, baseline_block()):
         spec = BenchSpec.load(KERNEL)
         assert grading.resolve_baseline("c-autopar", spec) == "c-autopar"
-        assert grading.resolve_baseline("numpy", spec) == "numpy"
         assert grading.resolve_baseline("c", spec) == "c"
+        # ... every kind except numpy: widget's track (the default, loop_level_reasoning) grades
+        # against C, so an explicit numpy is overridden rather than run (tests/test_track_oracle.py).
+        assert grading.resolve_baseline("numpy", spec) == "c"
 
 
 def test_vendored_kind_re_resolves_idempotently(tmp_path):

@@ -8,7 +8,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 from hpcagent_bench import config, fuzz
 from hpcagent_bench.harness import timing
-from hpcagent_bench.harness.grading import (DEFAULT_BASELINE, VENDORED_BASELINE, baseline_compiled,
+from hpcagent_bench.harness.grading import (AUTO_ORACLE, DEFAULT_BASELINE, VENDORED_BASELINE, baseline_compiled,
                                             c_reference_available, resolve_baseline)
 from hpcagent_bench.harness.scoring import (Score, implausible_speedup, independent_verify, score_cells,
                                             score_distributed, score_scaling, suspect_threshold)
@@ -382,7 +382,7 @@ def score_task_fuzzed(submission: Submission,
                       verify: bool = True,
                       datatype: str = "float64",
                       repeat: int = 5,
-                      oracle: str = "numpy",
+                      oracle: str = AUTO_ORACLE,
                       baseline: str = DEFAULT_BASELINE,
                       perf_mode: Optional[str] = None,
                       rtol: Optional[float] = None,

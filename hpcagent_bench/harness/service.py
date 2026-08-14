@@ -186,7 +186,7 @@ def from_config() -> RunConfig:
     coerced to the config's enums at construction; overridable per-process by the CLI.
     """
     return RunConfig(
-        oracle=str(config.get("service.oracle", "numpy")),
+        oracle=str(config.get("service.oracle", "auto")),
         baseline=measurement_baseline(),
         input_mode=str(config.get("service.input_mode", "source")),
         preset=str(config.get("service.preset", "fuzzed")),

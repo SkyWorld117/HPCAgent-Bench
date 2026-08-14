@@ -22,8 +22,9 @@ dtypes declares the C signature, then ``ffi.dlopen`` + a direct call invoke the 
 """
 import functools
 import math
+from collections import OrderedDict
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -33,15 +34,17 @@ from hpcagent_bench.harness import mpi_call, mpi_sizing, timing
 from hpcagent_bench.harness.mpi_descriptor import Descriptor
 from hpcagent_bench.harness.native_call import _call_isolated
 from hpcagent_bench.harness.grading import BASELINE_CHOICES  # noqa: F401 -- re-exported for harbor_grade
-from hpcagent_bench.harness.grading import (ORACLE_CHOICES, ReferencePlan, _data_seeded, _grade, _grade_against,
+from hpcagent_bench.harness.grading import (AUTO_ORACLE, ReferencePlan, _data_seeded, _grade, _grade_against,
                                             _numpy_reference, _run_c_reference, _time_numpy, _time_numpy_samples,
                                             _wants, baseline_compiled, baseline_uses_numpy, build_reference_lib,
-                                            reference_compiler, reference_plan, reference_submission, resolve_baseline,
+                                            numpy_reference_allowed, reference_compiler, reference_plan,
+                                            reference_submission, resolve_baseline, resolve_oracle,
                                             run_compiled_reference)
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.sandbox import Sandbox
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.support.bindings import binding_from_spec
+from hpcagent_bench.support.bindings.contract import Binding
 from hpcagent_bench.flags import Mode
 from hpcagent_bench.spec import BenchSpec
 
@@ -51,9 +54,60 @@ from hpcagent_bench.spec import BenchSpec
 #: Threads may race to fill an entry; the loser simply measures twice, which is correct.
 BASELINE_TIMING_CACHE: Dict[Tuple, Tuple[Dict[str, int], Dict[str, List[int]]]] = {}
 
-#: Entry ceiling. On overflow the whole map is dropped rather than evicted one by one: a rebuild
-#: costs a single round, and no ordering bookkeeping can then go wrong under concurrency.
-BASELINE_TIMING_CACHE_MAX = 256
+#: Entry ceiling. A campaign is 242 kernels x fuzz.iterations x compiler family, so at 256 the map
+#: overflowed continuously and retained nothing -- and each dropped entry costs its kernel a full
+#: re-emit + rebuild + re-time. Entries are small dicts of ints (a campaign is a few MB), so the
+#: overflow stays a wholesale drop -- no ordering to get wrong under concurrency, now unreachable.
+BASELINE_TIMING_CACHE_MAX = 8192
+
+#: Per-process LRU of reference OUTPUTS, keyed by everything that determines them -- the axes of
+#: BASELINE_TIMING_CACHE's key that survive dropping the timing ones, plus the reference name. An
+#: agent iterating on one kernel re-scores the same inputs 2-3 times; these recompute per call.
+ORACLE_OUTPUT_CACHE: "OrderedDict[Tuple, Tuple[int, Dict[str, np.ndarray]]]" = OrderedDict()
+
+
+def oracle_cache_bytes_max() -> int:
+    """Byte ceiling for ORACLE_OUTPUT_CACHE. One entry is gigabytes at the XL-anchored shapes and
+    the judge slots share one memory pool, so this is bounded by SIZE, never by entry count."""
+    return int(float(config.get("limits.oracle_cache_gb", 4)) * 1024**3)
+
+
+def outputs_nbytes(outputs: Mapping[str, np.ndarray]) -> int:
+    """Bytes an expected-output set occupies."""
+    return sum(int(np.asarray(v).nbytes) for v in outputs.values())
+
+
+def oracle_cache_get(key: Tuple) -> Optional[Dict[str, np.ndarray]]:
+    """The cached outputs for key, refreshed as most-recently-used; None on a miss."""
+    entry = ORACLE_OUTPUT_CACHE.get(key)
+    if entry is None:
+        return None
+    ORACLE_OUTPUT_CACHE.move_to_end(key)
+    return entry[1]
+
+
+def oracle_cache_put(key: Tuple, outputs: Dict[str, np.ndarray]) -> None:
+    """Cache outputs under key, evicting least-recently-used until it fits; a single entry over
+    the whole cap is not cached at all. A miss costs one recompute, so refusing is always safe."""
+    cap = oracle_cache_bytes_max()
+    size = outputs_nbytes(outputs)
+    if size > cap:
+        return
+    ORACLE_OUTPUT_CACHE.pop(key, None)
+    # Summed, not carried in a counter: a counter that loses a race stays wrong for the whole process.
+    while ORACLE_OUTPUT_CACHE and sum(e[0] for e in ORACLE_OUTPUT_CACHE.values()) + size > cap:
+        ORACLE_OUTPUT_CACHE.popitem(last=False)
+    ORACLE_OUTPUT_CACHE[key] = (size, outputs)
+
+
+def cached_reference(key: Tuple, compute: Callable[[], Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+    """The cached outputs for key, computing + caching them on a miss."""
+    hit = oracle_cache_get(key)
+    if hit is not None:
+        return hit
+    outputs = compute()
+    oracle_cache_put(key, outputs)
+    return outputs
 
 
 def _resolve_tolerances(rtol: Optional[float], atol: Optional[float], datatype: str) -> Tuple[float, float]:
@@ -198,6 +252,23 @@ def _verify_triad(spec, o1, o2, np_public, re_out, np_re, c_public, rtol, atol, 
     return determinism_ok, reverify_ok, True, False
 
 
+#: Label the compiled verify pair carries its fresh-seed outputs under (never an agent-visible case).
+REVERIFY_LABEL = "reverify"
+
+
+def verify_references(spec: BenchSpec, task: Task, binding: Binding, data: Dict, redata: Dict, timeout: float,
+                      memory_gb: float) -> Tuple[Dict, Dict]:
+    """Expected outputs for the verify pair (public + fresh-seed).
+
+    numpy where the track allows it; on a C-only track ONE build of the compiled reference produces
+    both, so the hardening gate keeps its full strength without an interpreted reference run."""
+    if numpy_reference_allowed(spec):
+        return _numpy_reference(spec, data), _numpy_reference(spec, redata)
+    public, _ns, others, _samples = _run_c_reference(spec, task, binding, data, [(REVERIFY_LABEL, lambda: redata)], 1,
+                                                     timeout, memory_gb)
+    return public, others[REVERIFY_LABEL]
+
+
 def suspect_threshold(override: Optional[float] = None) -> float:
     """``override``, else the configured ``record.speedup_suspect_above``.
 
@@ -274,8 +345,10 @@ def independent_verify(submission: Submission,
                           int(reverify_seed),
                           fuzz_iteration=fuzz_iteration,
                           params_override=params_override)
-    np_public = _numpy_reference(spec, data)
-    np_re = _numpy_reference(spec, redata)
+    try:
+        np_public, np_re = verify_references(spec, task, binding, data, redata, timeout, memory_gb)
+    except RuntimeError as exc:  # C-only track: no reference, so nothing to verify against
+        return VerifyResult(False, False, False, False, False, suspect, f"harden: {spec.short_name}: {exc}")
 
     determinism_ok = reverify_ok = dual_oracle_ok = False
     dual_oracle_applied = False
@@ -384,7 +457,7 @@ def measure_baselines(task: Task,
             best_ns = c_ns if best_ns is None else min(best_ns, c_ns)
         if best_ns is not None:
             out[label] = best_ns
-        elif "numpy" not in out:
+        elif "numpy" not in out and numpy_reference_allowed(spec):
             out["numpy"] = _time_numpy(spec, data, repeat, warmup=warmup)
     return out
 
@@ -477,7 +550,7 @@ def score(submission: Submission,
           hidden: bool = True,
           hidden_cases: Optional[List] = None,
           mode: Mode = Mode.SINGLE_CORE,
-          oracle: str = "numpy",
+          oracle: str = AUTO_ORACLE,
           baseline: str = "numpy",
           fuzz_iteration: Optional[int] = None,
           params_override: Optional[Dict] = None) -> Score:
@@ -517,10 +590,8 @@ def score(submission: Submission,
                                  atol=atol,
                                  repeat=repeat)
 
-    if oracle not in ORACLE_CHOICES:
-        raise ValueError(f"oracle must be one of {ORACLE_CHOICES}; got {oracle!r}")
-
     spec = BenchSpec.load(task.kernel)
+    oracle = resolve_oracle(oracle, spec)  # track sentinel / None -> concrete reference (+ validation)
     baseline = resolve_baseline(baseline, spec)  # track sentinel / None -> concrete kind (+ validation)
     binding = binding_from_spec(spec)
     public_seed = int(config.get("seeds.public_tests", 42))
@@ -578,8 +649,8 @@ def score(submission: Submission,
     # heat3d_tiled_sym drew 711^3, needed ~10.7 GiB, got the 10 GB floor, and died mid-grade as an
     # _ArrayMemoryError (589510). Reading the draw back off `data` cannot drift from what ran; a
     # re-derivation here would have to repeat the seeding and could.
-    memory_gb = sizing.kernel_memory_gb(spec, preset, datatype, submission.workspace_bytes, params_override
-                                        or drawn_params(spec, data))
+    drawn = drawn_params(spec, data)
+    memory_gb = sizing.kernel_memory_gb(spec, preset, datatype, submission.workspace_bytes, params_override or drawn)
 
     # --- references (oracle) + baselines -------------------------------------
     # numpy is cheap; the C reference is built/run once when oracle or baseline
@@ -589,23 +660,30 @@ def score(submission: Submission,
     expected_hidden: Dict[str, Dict[str, Dict]] = {}  # label -> {ref_name: outputs}
     baselines: Dict[str, int] = {}
     baseline_samples: Dict[str, List[int]] = {}  # ref name -> per-repeat ns (for the timing backend)
+    # The override rides along: ``drawn`` reports declared SIZE symbols only, so a config knob that
+    # moves the outputs without moving a size would otherwise share another cell's entry.
+    drawn_repr = repr(sorted((drawn or {}).items()) + sorted((params_override or {}).items()))
+    oracle_key = (task.kernel, preset, datatype, public_seed, fuzz_iteration, drawn_repr)
     if _wants(oracle, "numpy"):
-        expected_public["numpy"] = _numpy_reference(spec, data)
+        expected_public["numpy"] = cached_reference(oracle_key + ("numpy", ), lambda: _numpy_reference(spec, data))
     # Compiled references: the single-core C oracle (correctness) and/or the compiled baseline
     # (timing). ``c`` share the single-core C build; a ``*-autopar`` baseline is a
     # SEPARATE multi-core build. ``compiled`` is (label, language, compiler, mode) or None.
     plan: ReferencePlan = reference_plan(oracle, baseline, spec)
     # The reference follows the CANDIDATE's family, so a speedup measures the optimisation not the compiler.
     ref_compiler = reference_compiler(submission, "c")
+    # The family is in the OUTPUT key too: gcc and clang may contract an FMA differently, and while
+    # allclose absorbs that, a shared entry would make which family filled it first observable.
+    c_oracle_key = oracle_key + ("c", ref_compiler)
     # A baseline time is a property of (kernel, shapes, datatype, seed, denominator, rep budget, that
     # family) and the machine -- of nothing else in the submission. Agents iterate: 2-3 /score rounds
     # on the same kernel is normal, and every round re-emitted, re-built and re-timed the identical
     # reference. Reusing it is free below 1024-element shapes and worth minutes per round at the
     # XL-anchored ones. ``ref_compiler`` is in the key or the first submission's family would poison
-    # every later one in the arm. Only the TIMINGS are cached: reference OUTPUTS are gigabytes at
-    # these shapes and are recomputed.
+    # every later one in the arm. Reference OUTPUTS are cached separately (ORACLE_OUTPUT_CACHE):
+    # they are gigabytes at these shapes, so they are bounded by bytes rather than by entries.
     bl_key = (task.kernel, preset, datatype, public_seed, fuzz_iteration, baseline, repeat, timing.warmup_count(),
-              ref_compiler, repr(sorted(drawn_params(spec, data).items())))
+              ref_compiler, drawn_repr)
     cached = BASELINE_TIMING_CACHE.get(bl_key)
     if cached is not None:
         baselines.update(cached[0])
@@ -623,15 +701,23 @@ def score(submission: Submission,
             finally:
                 del hdata
 
-    def _numpy_baseline_fallback():
-        """Time the numpy baseline when a requested compiled reference is unavailable."""
+    def numpy_baseline_fallback() -> bool:
+        """Time the numpy baseline when a requested compiled reference is unavailable; False when
+        this kernel's track forbids the degradation, and the caller must score the failure."""
+        if not numpy_reference_allowed(spec):
+            return False
         if "numpy" not in baselines:
             baseline_samples["numpy"] = _time_numpy_samples(spec, data, repeat, warmup=timing.warmup_count())
             baselines["numpy"] = min(baseline_samples["numpy"])
+        return True
 
+    # Cached OUTPUTS stand in for the whole C run only when no held-out case needs one too.
+    c_cached = oracle_cache_get(c_oracle_key) if plan.oracle_wants_c else None
+    if c_cached is not None:
+        expected_public["c"] = c_cached
     # The C run is still needed when the ORACLE wants its outputs; a cached time alone only lets the
     # baseline-only case skip it.
-    if plan.oracle_wants_c or (plan.bl_is_seq_c and "c" not in baselines):
+    if (plan.oracle_wants_c and (c_cached is None or hidden_data)) or (plan.bl_is_seq_c and "c" not in baselines):
         try:
             c_public, c_ns, c_hidden, c_samples = _run_c_reference(spec,
                                                                    task,
@@ -646,14 +732,21 @@ def score(submission: Submission,
         except RuntimeError as exc:
             # The C reference could not be emitted/built for this kernel.
             if plan.oracle_wants_c:
-                return Score(False, float("inf"), 0, False, str(exc), oracle=oracle)  # required as a correctness oracle
+                return Score(False, float("inf"), 0, False, f"{spec.short_name}: {exc}", oracle=oracle)
             # Baseline-only C request: fall back to the numpy baseline (recorded
             # honestly via the ``baseline`` label) rather than erroring the score --
             # so "speedup over C" degrades gracefully on kernels that don't emit C.
-            _numpy_baseline_fallback()
+            if not numpy_baseline_fallback():
+                return Score(False,
+                             float("inf"),
+                             0,
+                             False,
+                             f"{spec.short_name}: no denominator -- {exc}",
+                             oracle=oracle)
         else:
             if plan.oracle_wants_c:
                 expected_public["c"] = c_public
+                oracle_cache_put(c_oracle_key, c_public)
                 for label, _ in hidden_data:
                     expected_hidden.setdefault(label, {})["c"] = c_hidden[label]
             if plan.bl_is_seq_c:
@@ -688,12 +781,17 @@ def score(submission: Submission,
         if best_samples is not None:
             baselines[label] = min(best_samples)
             baseline_samples[label] = best_samples
-        else:
-            _numpy_baseline_fallback()
+        elif not numpy_baseline_fallback():
+            return Score(False,
+                         float("inf"),
+                         0,
+                         False,
+                         f"{spec.short_name}: no {label} denominator built",
+                         oracle=oracle)
 
     if baselines and cached is None:
         if len(BASELINE_TIMING_CACHE) >= BASELINE_TIMING_CACHE_MAX:
-            BASELINE_TIMING_CACHE.clear()  # bounded, and a rebuild costs one round -- no LRU bookkeeping
+            BASELINE_TIMING_CACHE.clear()  # no ordering bookkeeping to go wrong under concurrency
         BASELINE_TIMING_CACHE[bl_key] = (dict(baselines), {k: list(v) for k, v in baseline_samples.items()})
 
     # Primary baseline for the scalar speedup row: numpy if timed, else C.
@@ -1228,7 +1326,7 @@ def score_cells(submission: Submission,
                 *,
                 datatype: str = "float64",
                 repeat: int = 5,
-                oracle: str = "numpy",
+                oracle: str = AUTO_ORACLE,
                 baseline: str = "numpy",
                 mode: Mode = Mode.SINGLE_CORE,
                 verify: bool = True,
@@ -1252,6 +1350,7 @@ def score_cells(submission: Submission,
     the configured timing backend. Returns one :class:`CellScore` per input cell."""
     rtol, atol = _resolve_tolerances(rtol, atol, datatype)
     spec = BenchSpec.load(task.kernel)
+    oracle = resolve_oracle(oracle, spec)  # track sentinel / None -> concrete reference (+ validation)
     baseline = resolve_baseline(baseline, spec)  # track sentinel / None -> concrete kind (+ validation)
     binding = binding_from_spec(spec)
     device = task.residency == "device"
@@ -1411,7 +1510,7 @@ def score_cells(submission: Submission,
                 # like the submission + the other baselines: when it is the ONLY timed baseline an
                 # unwarmed cold rep would bias the ratio (esp. the distributional backend).
                 if (plan.compiled is not None and plan.bl_label not in baseline_samples
-                        and "numpy" not in baseline_samples):
+                        and "numpy" not in baseline_samples and numpy_reference_allowed(spec)):
                     baseline_samples["numpy"] = _time_numpy_samples(spec, data, reps, warmup=warmup)
 
                 # No reference to grade against (oracle="c" but the C build failed at
@@ -1460,7 +1559,11 @@ def score_cells(submission: Submission,
                                           int(reverify_seed),
                                           params_override=params)
                     re_actual, _, _ = _run(built.lib, submission.language, redata, 1, memory_gb)
-                    reverify_ok, _, _ = _grade(spec, _numpy_reference(spec, redata), re_actual, rtol, atol)
+                    # The C reference stands in wherever numpy is not this cell's oracle: c_lib is
+                    # built here (``expected`` is non-empty and holds only "c"), so it costs one run.
+                    re_expected = (_numpy_reference(spec, redata) if "numpy" in expected else _run(
+                        c_lib, "c", redata, 1, memory_gb)[0])
+                    reverify_ok, _, _ = _grade(spec, re_expected, re_actual, rtol, atol)
                     dual_ok = True if c_outputs is None else _grade(spec, c_outputs, actual, rtol, atol)[0]
                     verified = bool(determinism_ok) and reverify_ok and dual_ok
 

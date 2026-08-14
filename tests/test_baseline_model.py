@@ -89,9 +89,14 @@ def test_explicit_override_beats_track_default():
     loop_level_reasoning = BenchSpec.load(_FOUNDATION)  # track default = c (single-core)
     scientific_computing = BenchSpec.load(_HPC)  # track default = numpy
     machine_learning = BenchSpec.load(_ML)  # track default = numpy
-    # Override an autopar-default kernel to numpy / plain c, and a numpy-default kernel to autopar.
-    assert grading.resolve_baseline("numpy", loop_level_reasoning) == "numpy"
+    # Override an autopar-default kernel to plain c, and a numpy-default kernel to autopar.
     assert grading.resolve_baseline("c", loop_level_reasoning) == "c"
+    assert grading.resolve_baseline("c-autopar", loop_level_reasoning) == "c-autopar"
+    # numpy is the ONE kind an explicit choice cannot reach here: this track's numpy reference is an
+    # interpreted scalar loop (~118 s per case at its XL), so it is overridden -- see
+    # tests/test_track_oracle.py, which pins that numpy is unreachable for the track, not merely
+    # unpreferred.
+    assert grading.resolve_baseline("numpy", loop_level_reasoning) == "c"
     assert grading.resolve_baseline("numpy", scientific_computing) == "numpy"
     assert grading.resolve_baseline("cpp-autopar", machine_learning) == "cpp-autopar"
     assert grading.resolve_baseline("fortran-autopar", machine_learning) == "fortran-autopar"

@@ -37,11 +37,15 @@ def _cap_fuzz_sizes(request, monkeypatch):
     The real sweep draws up to ~10^8-element (GPU-scale) shapes; grading a Python-loop
     numpy reference at that size takes minutes, so an uncapped grade()/score_task_fuzzed
     test silently becomes a multi-minute hang. Pinning ``fuzz.size_cap`` small keeps the
-    exact same code path but sub-second. Tests that assert on the real large/distinct
-    draws (the fuzz machinery's own tests) opt out with ``@pytest.mark.real_fuzz``."""
+    exact same code path but sub-second. The held-out cases are drawn at a DECLARED preset
+    rather than a drawn size, so the cap cannot reach them -- the sweep grades them at XL
+    (multi-GB per case), and they are pinned to the smallest rung here for the same reason.
+    Tests that assert on the real large/distinct draws (the fuzz machinery's own tests) opt
+    out with ``@pytest.mark.real_fuzz``."""
     if request.node.get_closest_marker("real_fuzz"):
         return
     monkeypatch.setenv("HPCAGENT_BENCH_FUZZ_SIZE_CAP", "4096")
+    monkeypatch.setenv("HPCAGENT_BENCH_FUZZ_HIDDEN_CORRECTNESS_PRESET", "S")
 
 
 @pytest.fixture(autouse=True)

@@ -991,14 +991,14 @@ def build_parser() -> argparse.ArgumentParser:
                    default=5,
                    help="timed reps per task; best (min) kept for the speedup (default 5)")
     from hpcagent_bench.harness.baselines import BASELINES
-    from hpcagent_bench.harness.grading import BASELINE_OPTIONS
-    from hpcagent_bench.harness.scoring import ORACLE_CHOICES
+    from hpcagent_bench.harness.grading import BASELINE_OPTIONS, ORACLE_OPTIONS
     from hpcagent_bench.harness.service import INPUT_MODES
     from hpcagent_bench.harness.tools import DEFAULT_RANK
     a.add_argument("--oracle",
-                   default="numpy",
-                   choices=list(ORACLE_CHOICES),
-                   help="correctness reference (default numpy; c = compiled C reference; both)")
+                   default="auto",
+                   choices=list(ORACLE_OPTIONS),
+                   help="correctness reference (default auto = the per-track default: "
+                   "loop_level_reasoning->c, everything else->numpy; c = compiled C reference; both)")
     a.add_argument("--baseline",
                    default="auto",
                    choices=list(BASELINE_OPTIONS),
@@ -1117,9 +1117,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="delivery: restricted (default; source the harness compiles) or any (prebuilt C-ABI .so)")
     lc.add_argument("--repeat", type=int, default=5, help="timed reps per task; best (min) kept (default 5)")
     lc.add_argument("--oracle",
-                    default="numpy",
-                    choices=list(ORACLE_CHOICES),
-                    help="correctness reference (default numpy)")
+                    default="auto",
+                    choices=list(ORACLE_OPTIONS),
+                    help="correctness reference (default auto = the per-track default)")
     lc.add_argument("--baseline",
                     default="auto",
                     choices=list(BASELINE_OPTIONS),
@@ -1200,7 +1200,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "only judge). Every request must name it; a mismatch is refused (HTTP 421) rather than graded")
     sv.add_argument("--oracle",
                     default=None,
-                    choices=list(ORACLE_CHOICES),
+                    choices=list(ORACLE_OPTIONS),
                     help="correctness reference (default from config service.oracle)")
     sv.add_argument("--baseline",
                     default=None,

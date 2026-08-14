@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 from hpcagent_bench import config
 from hpcagent_bench.harness.agent import Agent
 from hpcagent_bench.harness.envelope import Submission
+from hpcagent_bench.harness.grading import AUTO_ORACLE
 from hpcagent_bench.harness.prompts import PromptConfig, build_run_prompt
 from hpcagent_bench.harness.scoring import Score, resolve_kernel_timeout, resolve_token_budget, score
 from hpcagent_bench.harness.task import Task
@@ -265,7 +266,7 @@ def _solve_rounds(agent: Agent,
                   datatype: str = "float64",
                   repeat: int = 5,
                   with_prompt: bool = True,
-                  oracle: str = "numpy",
+                  oracle: str = AUTO_ORACLE,
                   baseline: str = "c",
                   max_rounds: Optional[int] = None,
                   time_budget_s: Optional[float] = None,
@@ -377,7 +378,7 @@ def solve_task(agent: Agent,
                datatype: str = "float64",
                repeat: int = 5,
                with_prompt: bool = True,
-               oracle: str = "numpy",
+               oracle: str = AUTO_ORACLE,
                baseline: str = "c",
                max_rounds: Optional[int] = None,
                time_budget_s: Optional[float] = None,
@@ -455,7 +456,7 @@ def run_task(agent: Agent,
              datatype: str = "float64",
              repeat: int = 5,
              with_prompt: bool = True,
-             oracle: str = "numpy",
+             oracle: str = AUTO_ORACLE,
              baseline: str = "c",
              max_rounds: Optional[int] = None,
              budget: Optional[int] = None) -> RunRow:
@@ -483,7 +484,7 @@ def run_tasks(agent: Agent,
               preset: str = "S",
               datatype: str = "float64",
               repeat: int = 5,
-              oracle: str = "numpy",
+              oracle: str = AUTO_ORACLE,
               baseline: str = "c",
               max_rounds: Optional[int] = None) -> List[RunRow]:
     """Run ``agent`` over ``tasks`` in order, returning one row per task."""

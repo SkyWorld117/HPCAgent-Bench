@@ -49,7 +49,8 @@ class RunMode(str, Enum):
 
 
 class Oracle(str, Enum):
-    """Which reference grades correctness."""
+    """Which reference grades correctness. ``auto`` resolves per kernel track."""
+    AUTO = "auto"
     NUMPY = "numpy"
     C = "c"
     BOTH = "both"
@@ -113,7 +114,7 @@ class RunConfig:
     running judge's, not these fields -- only ``preset`` (and ``judge_url``) apply.
     """
     mode: RunMode = RunMode.NATIVE  # client-only: grade in-process vs against a judge
-    oracle: Oracle = Oracle.NUMPY
+    oracle: Oracle = Oracle.AUTO  # resolved per kernel track at grade time
     baseline: Optional[Baseline] = None  # None = auto-resolve per kernel track; "auto" on the wire/CLI/config
     input_mode: InputMode = InputMode.SOURCE  # server-only: what a submission may carry
     preset: str = "S"
