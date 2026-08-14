@@ -6,7 +6,7 @@ parameters:
   S:
     N: 128
   M:
-    N: 10240
+    N: 10241
   L:
     N: 14262
   XL:

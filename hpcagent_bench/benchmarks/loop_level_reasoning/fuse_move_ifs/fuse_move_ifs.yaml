@@ -6,7 +6,7 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 9216
+    LEN_2D: 9217
   L:
     LEN_2D: 12836
   XL:

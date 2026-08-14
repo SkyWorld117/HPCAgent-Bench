@@ -7,7 +7,7 @@ parameters:
     LEN_2D: 64
     VLEN: 8
   M:
-    LEN_2D: 12288
+    LEN_2D: 12289
     VLEN: 8
   L:
     LEN_2D: 15131
