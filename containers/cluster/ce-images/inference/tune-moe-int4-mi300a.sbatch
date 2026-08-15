@@ -53,37 +53,76 @@ PY
     test -d "${MODEL_PATH}"
     echo "model: ${MODEL_PATH}"
 
-    # The serve path (mp backend) never needs ray; only the tuner imports it. --target, not
-    # --user: the image python is a venv and refuses user installs (595059).
+    # NOT benchmark_moe.py --tune: its ray harness gives one whole batch-size per worker,
+    # streams tqdm only into ray worker logs inside the container /tmp, and needs a ray
+    # install fighting the visible-devices env (595059/595060/595061/595167/595201 -- two of
+    # those ran for hours with zero observable progress). Same search space, same
+    # benchmark_config, same save_configs -- driven sequentially on one GPU with one printed
+    # line per config, so cost and ETA are visible from the first minute. ray is imported by
+    # the module at load but never initialized.
     if ! python3 -c "import ray" 2>/dev/null; then
         python3 -m pip install --no-cache-dir --quiet --target "${RUN_DIR}/pydeps" ray
         export PYTHONPATH="${RUN_DIR}/pydeps:${PYTHONPATH:-}"
     fi
 
-    # Something imported between "import ray" and main() swaps HIP_VISIBLE_DEVICES back to
-    # ROCR_VISIBLE_DEVICES, which ray.init() hard-rejects (595061; the top-of-script translation
-    # was not enough). Re-normalize at the exact call site instead of chasing the culprit.
-    cp /opt/vllm-src/benchmarks/kernels/benchmark_moe.py "${RUN_DIR}/benchmark_moe.py"
-    sed -i "s/^    ray.init()$/    print(\"pre-ray env:\", os.environ.get(\"HIP_VISIBLE_DEVICES\"), os.environ.get(\"ROCR_VISIBLE_DEVICES\"), flush=True); os.environ.setdefault(\"HIP_VISIBLE_DEVICES\", os.environ.get(\"ROCR_VISIBLE_DEVICES\", \"0,1,2,3\")); os.environ.pop(\"ROCR_VISIBLE_DEVICES\", None); ray.init()/" \
-        "${RUN_DIR}/benchmark_moe.py"
-    grep -q "pre-ray env" "${RUN_DIR}/benchmark_moe.py"
-
     cd "${RUN_DIR}"
-    # TUNE_BATCH_SIZES (space-separated) restricts the sweep to those batch sizes -- ~20x
-    # faster and enough for a serving regime known in advance; empty tunes the full grid.
-    EXTRA_ARGS=()
-    if [[ -n "${TUNE_BATCH_SIZES:-}" ]]; then
-        read -r -a sizes <<<"${TUNE_BATCH_SIZES}"
-        EXTRA_ARGS+=(--batch-size "${sizes[@]}")
-    fi
-    python3 "${RUN_DIR}/benchmark_moe.py" \
-        --model "${MODEL_PATH}" \
-        --tp-size "${TP_SIZE}" \
-        --dtype int4_w4a16 \
-        --trust-remote-code \
-        --tune \
-        --save-dir "${RUN_DIR}" \
-        "${EXTRA_ARGS[@]}"
+    export TUNE_BATCH_SIZES="${TUNE_BATCH_SIZES:-64}"
+    python3 - <<PY
+import importlib.util
+import os
+import time
+
+import torch
+import triton
+
+spec = importlib.util.spec_from_file_location("benchmark_moe", "/opt/vllm-src/benchmarks/kernels/benchmark_moe.py")
+bm = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bm)
+
+model = os.environ["MODEL_PATH"]
+tp = int(os.environ["TP_SIZE"])
+run_dir = os.environ["RUN_DIR"]
+sizes = [int(s) for s in os.environ["TUNE_BATCH_SIZES"].split()]
+
+config = bm.get_config(model=model, trust_remote_code=True)
+E, topk, intermediate_size, hidden_size = bm.get_model_params(config)
+shard_intermediate_size = 2 * intermediate_size // tp
+dtype = bm.resolve_dtype(config)
+group_size = bm.get_quantization_group_size(config)
+assert group_size is not None, "no group_size in quantization config"
+block_quant_shape = [0, group_size]
+print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={hidden_size} "
+      f"group_size={group_size} dtype={dtype} sizes={sizes}", flush=True)
+
+torch.cuda.set_device(0)
+best_by_size = {}
+for bs in sizes:
+    space = bm.get_configs_compute_bound(False, None)
+    space = bm.prune_rocm_search_space(bs, shard_intermediate_size, hidden_size, space, False, topk)
+    print(f"[bs={bs}] search space: {len(space)} configs", flush=True)
+    best, best_time = None, float("inf")
+    for idx, cfg in enumerate(space):
+        wall = time.time()
+        try:
+            kt = bm.benchmark_config(cfg, bs, E, shard_intermediate_size, hidden_size, topk, dtype,
+                                     False, False, True, num_iters=20,
+                                     block_quant_shape=block_quant_shape, use_deep_gemm=False)
+        except triton.runtime.autotuner.OutOfResources:
+            continue
+        if kt < best_time:
+            best_time, best = kt, cfg
+        print(f"[bs={bs}] {idx + 1}/{len(space)} kernel={kt * 1e3:.1f}us wall={time.time() - wall:.1f}s "
+              f"best={best_time * 1e3:.1f}us", flush=True)
+        if idx > 0 and idx % bm.TRITON_CACHE_CLEAR_INTERVAL == 0:
+            bm.clear_triton_cache()
+    bm.clear_triton_cache()
+    assert best is not None, f"no config compiled for bs={bs}"
+    best_by_size[bs] = bm.sort_config(best)
+    print(f"[bs={bs}] DONE best={best_by_size[bs]}", flush=True)
+
+bm.save_configs(best_by_size, E, shard_intermediate_size, hidden_size, topk, dtype,
+                False, False, True, block_quant_shape, run_dir)
+PY
 '
 
 echo "===== emitted configs ====="
