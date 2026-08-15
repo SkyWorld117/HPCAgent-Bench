@@ -101,6 +101,8 @@ best_by_size = {}
 for bs in sizes:
     space = bm.get_configs_compute_bound(False, None)
     space = bm.prune_rocm_search_space(bs, shard_intermediate_size, hidden_size, space, False, topk)
+    for cfg in space:
+        cfg["SPLIT_K"] = 1
     print(f"[bs={bs}] search space: {len(space)} configs", flush=True)
     best, best_time = None, float("inf")
     for idx, cfg in enumerate(space):
