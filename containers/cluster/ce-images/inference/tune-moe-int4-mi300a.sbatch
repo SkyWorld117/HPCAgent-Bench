@@ -71,6 +71,7 @@ PY
     python3 - <<PY
 import importlib.util
 import os
+import random
 import time
 
 import torch
@@ -103,6 +104,12 @@ for bs in sizes:
     space = bm.prune_rocm_search_space(bs, shard_intermediate_size, hidden_size, space, False, topk)
     for cfg in space:
         cfg["SPLIT_K"] = 1
+    # ~18s per config, compile-dominated (595205): the full 4496-config space is a 23h job.
+    # A seeded random sample lands near-optimal with high probability and fits the wall limit.
+    max_configs = int(os.environ.get("TUNE_MAX_CONFIGS", "800"))
+    if len(space) > max_configs:
+        random.seed(0)
+        space = random.sample(space, max_configs)
     print(f"[bs={bs}] search space: {len(space)} configs", flush=True)
     best, best_time = None, float("inf")
     for idx, cfg in enumerate(space):
@@ -115,10 +122,14 @@ for bs in sizes:
             continue
         if kt < best_time:
             best_time, best = kt, cfg
-        print(f"[bs={bs}] {idx + 1}/{len(space)} kernel={kt * 1e3:.1f}us wall={time.time() - wall:.1f}s "
-              f"best={best_time * 1e3:.1f}us", flush=True)
+        print(f"[bs={bs}] {idx + 1}/{len(space)} kernel={kt:.1f} wall={time.time() - wall:.1f}s "
+              f"best={best_time:.1f}", flush=True)
         if idx > 0 and idx % bm.TRITON_CACHE_CLEAR_INTERVAL == 0:
             bm.clear_triton_cache()
+        # Checkpoint: a wall-limit death must still leave the best-so-far JSON behind.
+        if best is not None and idx > 0 and idx % 100 == 0:
+            bm.save_configs({**best_by_size, bs: bm.sort_config(best)}, E, shard_intermediate_size,
+                            hidden_size, topk, dtype, False, False, True, block_quant_shape, run_dir)
     bm.clear_triton_cache()
     assert best is not None, f"no config compiled for bs={bs}"
     best_by_size[bs] = bm.sort_config(best)
