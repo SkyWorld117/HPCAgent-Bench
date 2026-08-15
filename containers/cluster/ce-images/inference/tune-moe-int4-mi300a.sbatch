@@ -87,7 +87,14 @@ run_dir = os.environ["RUN_DIR"]
 sizes = [int(s) for s in os.environ["TUNE_BATCH_SIZES"].split()]
 
 config = bm.get_config(model=model, trust_remote_code=True)
-E, topk, intermediate_size, hidden_size = bm.get_model_params(config)
+# NOT bm.get_model_params: KimiK25ForConditionalGeneration is a multimodal wrapper it does not
+# know, so it falls into the Mixtral default and grabs the DENSE intermediate_size 18432 --
+# 595206 tuned N=4608 while serving wants N=512. The MoE fields live on the text sub-config.
+tc = config.get_text_config()
+E = tc.n_routed_experts
+topk = tc.num_experts_per_tok
+intermediate_size = tc.moe_intermediate_size
+hidden_size = tc.hidden_size
 shard_intermediate_size = 2 * intermediate_size // tp
 dtype = bm.resolve_dtype(config)
 group_size = bm.get_quantization_group_size(config)
