@@ -48,6 +48,10 @@ PY
     test -d "${MODEL_PATH}"
     echo "model: ${MODEL_PATH}"
 
+    # The serve path (mp backend) never needs ray; only the tuner imports it. Overlay-local
+    # install rather than an image patch for a one-off tuning dependency.
+    python3 -c "import ray" 2>/dev/null || python3 -m pip install --user --no-cache-dir --quiet ray
+
     cd "${RUN_DIR}"
     python3 /opt/vllm-src/benchmarks/kernels/benchmark_moe.py \
         --model "${MODEL_PATH}" \
