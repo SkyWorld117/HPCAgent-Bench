@@ -108,7 +108,6 @@ enroot start \
     export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 
     /opt/pytorch211/bin/python - <<PY
-import importlib
 import sys
 
 import torch
@@ -127,13 +126,16 @@ assert torch.__version__.startswith("2.11.0+rocm7.2")
 assert torch.cuda.device_count() >= 1
 
 # vLLM must both see the env knob and resolve its aiter MoE path -- the package being
-# importable is not the same thing as vLLM electing to use it.
+# importable is not the same thing as vLLM electing to use it. 0.23 centralizes this in
+# vllm/_aiter_ops.py (the old rocm_aiter_fused_moe module is gone, 595044).
 import vllm.envs as envs
 
 assert envs.VLLM_ROCM_USE_AITER, "vLLM does not see VLLM_ROCM_USE_AITER=1"
 
-mod = importlib.import_module("vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe")
-assert mod.is_rocm_aiter_moe_enabled(), "vLLM aiter MoE path reports disabled"
+from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
+
+assert is_aiter_found(), "vLLM does not find the aiter package"
+assert rocm_aiter_ops.is_fused_moe_enabled(), "vLLM aiter fused-MoE path reports disabled"
 
 # flash-attn from the previous patch must still import -- both live in the same venv.
 from flash_attn import flash_attn_varlen_func  # noqa: F401
