@@ -218,9 +218,10 @@ else
 fi
 
 stage "gate 2: unbatched-P2P warnings (594541 had 24; expect 0)"
-# wc -l, not grep -c: grep exits 1 on zero matches, and zero matches is the PASS here --
-# under set -e that killed 594708 at the exact moment it succeeded.
-p2p=$(grep -h "unbatched P2P op" "${RUN_DIR}"/vllm-rank*.log 2>/dev/null | wc -l)
+# Zero matches is the PASS here, and grep exits nonzero on it -- which pipefail propagates
+# through wc -l, so the bare pipeline killed 594708 AND 594710 at the moment they succeeded.
+# The || true must sit on grep itself, inside the pipe. Verified in isolation both ways.
+p2p=$({ grep -h "unbatched P2P op" "${RUN_DIR}"/vllm-rank*.log 2>/dev/null || true; } | wc -l)
 echo "unbatched P2P warnings: ${p2p}"
 
 stage "gate 3: DOES IT DECODE -- the gate every previous smoke skipped"
