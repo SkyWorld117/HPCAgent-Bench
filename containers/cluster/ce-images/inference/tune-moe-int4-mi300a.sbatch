@@ -48,9 +48,12 @@ PY
     test -d "${MODEL_PATH}"
     echo "model: ${MODEL_PATH}"
 
-    # The serve path (mp backend) never needs ray; only the tuner imports it. Overlay-local
-    # install rather than an image patch for a one-off tuning dependency.
-    python3 -c "import ray" 2>/dev/null || python3 -m pip install --user --no-cache-dir --quiet ray
+    # The serve path (mp backend) never needs ray; only the tuner imports it. --target, not
+    # --user: the image python is a venv and refuses user installs (595059).
+    if ! python3 -c "import ray" 2>/dev/null; then
+        python3 -m pip install --no-cache-dir --quiet --target "${RUN_DIR}/pydeps" ray
+        export PYTHONPATH="${RUN_DIR}/pydeps:${PYTHONPATH:-}"
+    fi
 
     cd "${RUN_DIR}"
     python3 /opt/vllm-src/benchmarks/kernels/benchmark_moe.py \
