@@ -38,7 +38,10 @@ ulimit -c 0
 
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/claude-roundtrip/logs/${SLURM_JOB_ID}"
-export HF_HOME="${SCRATCH}/hf"
+# iopsstor reads ~11x faster than capstor (job 593523); capstor keeps the durable copy.
+FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+[[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
+export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AGENT_EDF="${AGENT_EDF:-optarena-amd-mi300}"

@@ -40,7 +40,10 @@ ulimit -c 0
 
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/kimi-smoke/${SLURM_JOB_ID}"
-export HF_HOME="${SCRATCH}/hf"
+# iopsstor reads ~11x faster than capstor (job 593523); capstor keeps the durable copy.
+FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+[[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
+export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 # Slurm spools this script to /var/spool/slurmd, so BASH_SOURCE cannot locate the patch and
 # SLURM_SUBMIT_DIR is all there is. Resolving against ONE assumed submit directory is a trap --

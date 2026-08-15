@@ -29,7 +29,10 @@ ulimit -c 0
 
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/numpy-vectorize/logs/${SLURM_JOB_ID}"
-export HF_HOME="${SCRATCH}/hf"
+# iopsstor reads ~11x faster than capstor (job 593523); capstor keeps the durable copy.
+FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+[[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
+export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 REPO="${HPCAGENT_BENCH_REPO:-${SCRATCH}/optarena}"
 
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"

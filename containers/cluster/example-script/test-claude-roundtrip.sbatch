@@ -40,8 +40,10 @@ SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 REPO="${HPCAGENT_BENCH_REPO:-${SCRATCH}/optarena}"
 
 export RUN_DIR="${SCRATCH}/claude-roundtrip/logs/${SLURM_JOB_ID}"
-# The 120b weights are already in this cache; a cold cache turns stage 2 into a 65 GiB download.
-export HF_HOME="${SCRATCH}/hf"
+# iopsstor reads ~11x faster than capstor (job 593523); capstor keeps the durable copy.
+FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+[[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
+export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AGENT_EDF="${AGENT_EDF:-optarena-amd-mi300}"
