@@ -69,13 +69,21 @@ PY
     grep -q "pre-ray env" "${RUN_DIR}/benchmark_moe.py"
 
     cd "${RUN_DIR}"
+    # TUNE_BATCH_SIZES (space-separated) restricts the sweep to those batch sizes -- ~20x
+    # faster and enough for a serving regime known in advance; empty tunes the full grid.
+    EXTRA_ARGS=()
+    if [[ -n "${TUNE_BATCH_SIZES:-}" ]]; then
+        read -r -a sizes <<<"${TUNE_BATCH_SIZES}"
+        EXTRA_ARGS+=(--batch-size "${sizes[@]}")
+    fi
     python3 "${RUN_DIR}/benchmark_moe.py" \
         --model "${MODEL_PATH}" \
         --tp-size "${TP_SIZE}" \
         --dtype int4_w4a16 \
         --trust-remote-code \
         --tune \
-        --save-dir "${RUN_DIR}"
+        --save-dir "${RUN_DIR}" \
+        "${EXTRA_ARGS[@]}"
 '
 
 echo "===== emitted configs ====="
