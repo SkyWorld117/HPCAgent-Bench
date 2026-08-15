@@ -60,8 +60,16 @@ PY
         export PYTHONPATH="${RUN_DIR}/pydeps:${PYTHONPATH:-}"
     fi
 
+    # Something imported between "import ray" and main() swaps HIP_VISIBLE_DEVICES back to
+    # ROCR_VISIBLE_DEVICES, which ray.init() hard-rejects (595061; the top-of-script translation
+    # was not enough). Re-normalize at the exact call site instead of chasing the culprit.
+    cp /opt/vllm-src/benchmarks/kernels/benchmark_moe.py "${RUN_DIR}/benchmark_moe.py"
+    sed -i "s/^    ray.init()$/    print(\"pre-ray env:\", os.environ.get(\"HIP_VISIBLE_DEVICES\"), os.environ.get(\"ROCR_VISIBLE_DEVICES\"), flush=True); os.environ.setdefault(\"HIP_VISIBLE_DEVICES\", os.environ.get(\"ROCR_VISIBLE_DEVICES\", \"0,1,2,3\")); os.environ.pop(\"ROCR_VISIBLE_DEVICES\", None); ray.init()/" \
+        "${RUN_DIR}/benchmark_moe.py"
+    grep -q "pre-ray env" "${RUN_DIR}/benchmark_moe.py"
+
     cd "${RUN_DIR}"
-    python3 /opt/vllm-src/benchmarks/kernels/benchmark_moe.py \
+    python3 "${RUN_DIR}/benchmark_moe.py" \
         --model "${MODEL_PATH}" \
         --tp-size "${TP_SIZE}" \
         --dtype int4_w4a16 \
