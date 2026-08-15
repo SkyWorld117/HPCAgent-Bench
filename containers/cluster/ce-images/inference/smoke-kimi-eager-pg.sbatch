@@ -241,26 +241,32 @@ stage "gate 4: saturation probe, ${PROBE_STREAMS} concurrent x ${PROBE_MAX_TOKEN
 # max_tokens is a floor on how long each stream lives, and ignore_eos keeps it from finishing
 # early -- otherwise short answers drain the batch and the "saturated" number is measured
 # against a half-empty engine, which is the same mistake as reading 92 tok/s off idle arms.
+# Bracket the burst instead of timing a fixed window after a fill sleep: 594717 finished all
+# 32k tokens INSIDE the 25s fill sleep, so the window measured an idle engine and reported 0.
+g0=$(metric generation_tokens_total); t0=$SECONDS
+PROBE_PIDS=()
 for i in $(seq 1 "${PROBE_STREAMS}"); do
     curl -fsS --max-time 900 "http://${NODE0}:${API_PORT}/v1/completions" \
         -H 'Content-Type: application/json' \
         -d "{\"model\":\"${SERVED_MODEL}\",\"prompt\":\"Explain loop tiling, variation ${i}.\",\"max_tokens\":${PROBE_MAX_TOKENS},\"ignore_eos\":true}" \
         -o "${RUN_DIR}/probe-${i}.json" &
+    PROBE_PIDS+=($!)
 done
-# Let the batch fill before timing: the first seconds are prefill and ramp, not steady-state
-# decode, and including them understates the ceiling.
-sleep 25
-g0=$(metric generation_tokens_total); r0=$(metric num_requests_running); t0=$SECONDS
-sleep 60
-g1=$(metric generation_tokens_total); r1=$(metric num_requests_running); t1=$SECONDS
-awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v r0="${r0:-0}" -v r1="${r1:-0}" 'BEGIN{
-    conc = (r0 + r1) / 2
-    rate = (b - a) / dt
-    printf "SATURATED DECODE: %.1f tok/s aggregate over %ds at ~%.0f concurrent\n", rate, dt, conc
-    if (conc > 0) printf "                  %.1f tok/s per request\n", rate / conc
-    if (rate <= 0) { print "FAIL: no decode progress under load"; exit 1 }
-}' || exit 1
-wait
+: >"${RUN_DIR}/probe-conc.txt"
+( while :; do metric num_requests_running >>"${RUN_DIR}/probe-conc.txt"; sleep 5; done ) &
+SAMPLER_PID=$!
+wait "${PROBE_PIDS[@]}" || true
+g1=$(metric generation_tokens_total); t1=$SECONDS
+kill "${SAMPLER_PID}" 2>/dev/null || true
+awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" '
+    $1 > 0 { s += $1; n += 1; if ($1 > peak) peak = $1 }
+    END {
+        conc = n ? s / n : 0
+        rate = dt > 0 ? (b - a) / dt : 0
+        printf "SATURATED DECODE: %.1f tok/s aggregate over %ds (avg %.0f / peak %.0f concurrent)\n", rate, dt, conc, peak
+        if (conc > 0) printf "                  %.1f tok/s per request\n", rate / conc
+        if (rate <= 0) { print "FAIL: no decode progress under load"; exit 1 }
+    }' "${RUN_DIR}/probe-conc.txt" || exit 1
 
 touch "${SMOKE_DONE}"
 printf '\n===== KIMI EAGER-PG SMOKE PASSED =====\nlogs: %s\n' "${RUN_DIR}"
