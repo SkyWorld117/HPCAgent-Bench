@@ -23,7 +23,8 @@
 set -Eeuxo pipefail
 umask 0022
 
-SOURCE_IMAGE="${SOURCE_IMAGE:-docker.io/vllm/vllm-openai_rocm:kimi-k3}"
+# Hyphen, not the recipe's underscore: docker.io only knows vllm/vllm-openai-rocm (595215).
+SOURCE_IMAGE="${SOURCE_IMAGE:-docker.io/vllm/vllm-openai-rocm:kimi-k3}"
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 OUTPUT_SQSH="${OUTPUT_SQSH:-${SCRATCH}/ce-images/vllm-openai-rocm-kimi-k3.sqsh}"
 
