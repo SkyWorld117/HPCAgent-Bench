@@ -95,7 +95,8 @@ block_quant_shape = [0, group_size]
 print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={hidden_size} "
       f"group_size={group_size} dtype={dtype} sizes={sizes}", flush=True)
 
-torch.cuda.set_device(0)
+# benchmark_config allocates device-less; BenchmarkWorker relied on this too (595203).
+torch.set_default_device("cuda")
 best_by_size = {}
 for bs in sizes:
     space = bm.get_configs_compute_bound(False, None)
