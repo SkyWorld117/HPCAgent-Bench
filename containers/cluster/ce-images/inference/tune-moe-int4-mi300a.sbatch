@@ -51,6 +51,7 @@ print(snapshot_download(repo_id=os.environ["MODEL_REPO"], local_files_only=True)
 PY
 )"
     test -d "${MODEL_PATH}"
+    export MODEL_PATH
     echo "model: ${MODEL_PATH}"
 
     # NOT benchmark_moe.py --tune: its ray harness gives one whole batch-size per worker,
