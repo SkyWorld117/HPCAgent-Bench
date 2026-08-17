@@ -42,14 +42,24 @@ runs:
         # CI alone -- tests/test_parallelism_dispatch.py caught exactly that. Pin the major so the
         # runner answers for the same compiler the agent is graded on.
         #
-        # gfortran ONLY: gcc/g++ stay on the distro default, so this does not silently re-toolchain
-        # the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's PATH, and
-        # compilers.yaml names the driver unversioned, so the symlink is what makes it take effect.
+        # gfortran ONLY as far as the DRIVERS go: gcc/g++ stay on the distro default, so this does
+        # not re-toolchain the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's
+        # PATH, and compilers.yaml names the driver unversioned, so the symlink is what makes it
+        # take effect.
+        #
+        # libstdc++-<major>-dev is NOT optional, and not for gfortran's sake. Installing gfortran-15
+        # creates /usr/lib/gcc/<triple>/15, and clang selects the HIGHEST such directory whether or
+        # not gcc-15 itself is installed -- so a Fortran-only pin silently re-toolchained clang onto
+        # a GCC install carrying no C++ headers, and every clang C++ build died with
+        # "fatal error: 'cstdint' file not found" (clang says so itself, as
+        # -Wgcc-install-dir-libstdcxx: "'.../14' would be chosen over '.../15'"). That took out the
+        # warnings ratchet, test_frameworks, test_default_datatype_tolerance and Pluto's configure
+        # in one go. Complete the directory clang picks rather than pinning it to a path.
         set -euo pipefail
         GCC_MAJOR=15
         sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         sudo apt-get update
-        sudo apt-get install -y "gfortran-${GCC_MAJOR}"
+        sudo apt-get install -y "gfortran-${GCC_MAJOR}" "libstdc++-${GCC_MAJOR}-dev"
         sudo ln -sf "/usr/bin/gfortran-${GCC_MAJOR}" /usr/local/bin/gfortran
         gfortran --version | head -1
 
@@ -94,6 +104,15 @@ runs:
         done
         clang --version | head -1
         flang --version | head -1
+        # A version banner does not prove clang can COMPILE. It resolves its libstdc++ from whichever
+        # /usr/lib/gcc/<triple>/<major> directory sorts highest, so an unrelated step that installs a
+        # versioned GCC component can leave the driver unable to find <cstdint> while --version still
+        # answers happily. That shipped: five jobs went red before anything said the C++ arm was
+        # broken. Compile the smallest TU that needs the standard library, here, loudly.
+        printf '#include <cstdint>\nint main(){return 0;}\n' > "${RUNNER_TEMP}/cxx-smoke.cpp"
+        clang++ -std=c++23 -fsyntax-only "${RUNNER_TEMP}/cxx-smoke.cpp" \
+          || { echo "::error::clang++ cannot compile a <cstdint> TU -- its selected GCC install has no libstdc++ headers"; \
+               clang++ -v -x c++ -E /dev/null 2>&1 | grep -i 'selected gcc installation' >&2; exit 1; }
 
     - name: Base Python deps (translators + the frameworks every phase shares)
       shell: bash

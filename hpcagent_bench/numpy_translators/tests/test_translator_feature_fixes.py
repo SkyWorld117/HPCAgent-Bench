@@ -813,6 +813,36 @@ def test_fft_desugar_lowers_npfft_to_dft_loops():
     assert "] / " in out
 
 
+def test_fft_desugar_phase_divisor_casts_to_transform_precision():
+    """The DFT phase's divisor (``np.exp(-1j * (2*pi*k*n / N))``) must be cast to the
+    transform's OWN real dtype: dace constant-folds the phase's leading ``1j`` into the
+    surrounding product chain and codegens a raw ``complex128 / int64`` division, which
+    dace/runtime/include/dace/complex.h supplies mixed complex/int ``*`` for and no ``/``
+    at all (fft_1d's compile_fail). A REAL divisor of the SAME precision as the transform
+    resolves to std::complex's native ``operator/`` instead.
+
+    The cast is emitted SOURCE TEXT (``apply_precision`` only remaps dtype tables, never
+    body literals -- see the module docstring reference in ``_fft_inline_stmts``), so a
+    hardcoded ``np.float64`` cast would silently double the working precision of an fp32
+    kernel: this pins fp64 and fp32 to their OWN distinct, correct cast."""
+    from numpyto_common.numpy_desugar import desugar_for_python_backend
+    src = ("def k(x, y, z):\n"
+           "    y[:] = np.fft.fft(x)\n"
+           "    z[:] = np.fft.ifft(y)\n")
+    for complex_dtype, real_dtype in (("complex128", "float64"), ("complex64", "float32")):
+        arrays = [("x", complex_dtype, ("N", )), ("y", complex_dtype, ("N", )), ("z", complex_dtype, ("N", ))]
+        out = desugar_for_python_backend(src, _py_kir("k", src, arrays, [], ["x", "y", "z"]))
+        other_real = "float32" if real_dtype == "float64" else "float64"
+        assert f"/ np.{real_dtype}(" in out, f"{complex_dtype} kernel: no {real_dtype} divisor cast in:\n{out}"
+        assert f"/ np.{other_real}(" not in out, f"{complex_dtype} kernel: wrong-precision {other_real} cast leaked"
+        # No BARE-int divisor survives inside the phase itself (the ifft's separate whole-value
+        # normalize, `z[k] = z[k] / N`, is a real dace top-level Div that already auto-casts --
+        # only the PHASE's divisor, folded into np.exp()'s argument, hits the missing operator).
+        exp_lines = [line for line in out.splitlines() if "np.exp(" in line]
+        assert exp_lines and all("/ __ft" not in line for line in exp_lines), \
+            f"{complex_dtype} kernel: uncast phase divisor in:\n{out}"
+
+
 def test_mgrid_desugar_to_arange_broadcast():
     """``i, j = np.mgrid[0:R, 0:R]`` -> arange reshaped + broadcast (pythran has
     no np.mgrid)."""

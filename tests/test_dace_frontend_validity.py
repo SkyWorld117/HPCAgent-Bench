@@ -20,6 +20,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Set
 
@@ -255,14 +256,20 @@ def parse_one(path: pathlib.Path) -> dict:
     -- are exactly the ones an in-process loop cannot survive to report.
     """
     argv = [sys.executable, "-m", "tests.dace_parse_probe", str(path)]
+    started = time.monotonic()
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(REPO), timeout=PARSE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return {"verdict": "timeout", "error": f"the frontend did not finish parsing in {PARSE_TIMEOUT_S:.0f}s"}
+        return {
+            "verdict": "timeout",
+            "error": f"the frontend did not finish parsing in {PARSE_TIMEOUT_S:.0f}s",
+            "seconds": time.monotonic() - started,
+        }
+    elapsed = time.monotonic() - started
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith("{"):
-            return json.loads(line)
-    return {"verdict": "crash", "error": (proc.stderr or proc.stdout)[-400:]}
+            return dict(json.loads(line), seconds=elapsed)
+    return {"verdict": "crash", "error": (proc.stderr or proc.stdout)[-400:], "seconds": elapsed}
 
 
 def kernel_of(path: pathlib.Path) -> str:
@@ -302,7 +309,17 @@ def test_every_generated_dace_program_parses_or_is_a_known_refusal() -> None:
                 fixed.add(kernel)
         elif kernel not in REFUSED:
             regressions.append(f"{kernel}: {verdict['verdict']}: {verdict.get('error', '')[:200]}")
+    # A timeout alone cannot tell a wedged frontend from a runner four times slower than the box the
+    # budget was measured on, so a timing report rides along: if the slowest PASSING parses have also
+    # grown, the budget is what moved, not the frontend.
+    scale = ""
+    if any(": timeout:" in r for r in regressions):
+        slowest = sorted(
+            ((v.get("seconds", 0.0), kernel_of(p)) for p, v in zip(programs, verdicts) if v["verdict"] == "ok"),
+            reverse=True)[:5]
+        scale = ("\nslowest parses that still finished: " + ", ".join(f"{k} {s:.0f}s" for s, k in slowest) +
+                 f" (budget {PARSE_TIMEOUT_S:.0f}s, {PARSE_WORKERS} workers)")
     assert not regressions, ("the DaCe frontend refuses generated programs that used to parse:\n  " +
-                             "\n  ".join(sorted(regressions)))
+                             "\n  ".join(sorted(regressions)) + scale)
     assert not fixed, (f"these parse now and must come OFF the REFUSED list: {sorted(fixed)}. "
                        "A list that keeps a fixed entry stops measuring the next regression.")
