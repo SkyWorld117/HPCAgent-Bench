@@ -162,26 +162,13 @@ jobs:
           files=$(ls tests/test_*.py | grep -vxF -f "$excl")
           test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
           echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
-          # `real_fuzz` runs in its own step below. Those tests opt OUT of conftest's fuzz size cap
-          # deliberately -- they assert on the real large draws -- and one of them,
-          # test_metric.py::test_fuzz_iteration_draws_distinct_sizes, peaks at 7.7 GB and takes 7
-          # minutes (measured on the dev box). This runner has 16 GB and `-n auto` gives it two
-          # workers, so co-scheduling that with anything else is what killed this step twice with
-          # "the runner has received a shutdown signal": the sampler caught memory going
-          # 2.5 GB -> 14.8 GB in one 30 s interval with 1.1 GB left, disk untouched at 77 GB free.
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 -m 'not real_fuzz' $files
-
-      - name: Phase 1b -- the real-fuzz tests, one at a time (they draw multi-GB samples)
-        if: ${{ !cancelled() }}
-        # Serial and unsharded ON PURPOSE: see the marker note in the step above. Capping their
-        # draw would be capping what they exist to measure, so the fix is to stop running them
-        # next to anything else, not to make them smaller.
-        timeout-minutes: 45
-        run: |
-          excl=$(mktemp)
-          grep -vE '^\s*(#|$)' .github/dedicated_tests.txt > "$excl"
-          files=$(ls tests/test_*.py | grep -vxF -f "$excl")
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=2400 -m real_fuzz $files
+          # Killed twice here with "the runner has received a shutdown signal", both times at the
+          # same 38% mark. A step sampler named it: memory 2.5 GB -> 14.8 GB inside one 30 s
+          # interval with 1.1 GB left and disk untouched at 77 GB free -- an OOM, and the test in
+          # flight was test_metric.py::test_fuzz_iteration_draws_distinct_sizes, which drew 7.7 GB
+          # of arrays over 7 minutes. It runs under the ordinary fuzz size cap now, so the sampler
+          # and the -v it took to name it are both gone again.
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
@@ -988,9 +975,11 @@ jobs:
         env:
           HPCAGENT_BENCH_JUDGE_SIF: ${{ github.workspace }}/hpcagent_bench-cpu.sif
         run: |
-          # Killed twice with "the runner has received a shutdown signal" inside this step, which
-          # prints no summary -- the sampler is the only record of which resource ran out, and a
-          # SIF launch is the disk-hungriest thing this workflow does. Out once the cause is known.
+          # Killed with "the runner has received a shutdown signal" inside this step, which prints
+          # no summary. The sampler says it is MEMORY, not the disk a SIF launch would have been
+          # blamed for: 14.8 GB of 16 used, 1.1 GB left, 89 GB of disk still free -- the same
+          # signature as the unit sweep, from a different cause, since nothing here draws fuzz
+          # samples. -v names the test in flight next time. Both out once that cause is known.
           ( while sleep 30; do
               echo "SAMPLE $(date -u +%H:%M:%S)" \
                    "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
@@ -998,7 +987,7 @@ jobs:
             done ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 tests/test_container_launch.py
+          python -m pytest -v -p no:cacheprovider -rfEs --timeout=900 tests/test_container_launch.py
 
   # ===========================================================================================
   # mpi -- the whole MPI / distributed-residency track on its own runner (the "5th runner"): the
