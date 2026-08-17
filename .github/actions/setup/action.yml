@@ -57,15 +57,17 @@ runs:
       shell: bash
       run: |
         # ubuntu-latest ships LLVM 18, whose Fortran driver is still spelled `flang-new`. The
-        # harness is developed and measured against LLVM 21 (flags.POLLY_PAR's Polly findings, the
-        # clang OpenMP-spelling measurements behind flags.PLUTO_PAR), so CI runs the same major --
-        # a CI-only LLVM is how a count comes out 0 on a dev box and nonzero on a runner with
-        # nothing in the log to say the toolchains differed.
+        # harness is developed and measured against LLVM 22 -- envs/toolset.yaml names `clang-22`
+        # first and languages.resolve_compiler takes the highest major on PATH, so that is what a
+        # dev box resolves (flags.POLLY_PAR's Polly findings, the clang OpenMP-spelling
+        # measurements behind flags.PLUTO_PAR). CI runs the same major: a CI-only LLVM is how a
+        # count comes out 0 on a dev box and nonzero on a runner with nothing in the log to say
+        # the toolchains differed.
         #
-        # libomp-21-dev is the SECOND OpenMP runtime, required rather than optional:
+        # libomp-<major>-dev is the SECOND OpenMP runtime, required rather than optional:
         # tests/test_fork_openmp_safety.py asserts on it because libgomp deadlocks across fork()
         # and libomp recovers, so a suite that only ever sees libgomp cannot tell the fix from the
-        # forgiving runtime. It puts the LINKER name under /usr/lib/llvm-21/lib while only the
+        # forgiving runtime. It puts the LINKER name under /usr/lib/llvm-<major>/lib while only the
         # runtime libomp.so.N lands on the default path -- hence `ld: cannot find -lomp` with the
         # package installed, which languages.LLVM_LIB_GLOBS is what resolves.
         #
@@ -75,7 +77,7 @@ runs:
         # on the box would keep winning and the LLVM columns would silently stay on 18.
         # /usr/local/bin precedes /usr/bin on the runner's PATH.
         set -euo pipefail
-        LLVM_MAJOR=21
+        LLVM_MAJOR=22
         for attempt in 1 2 3; do
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null && break
