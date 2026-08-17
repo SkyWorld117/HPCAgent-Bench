@@ -152,6 +152,10 @@ def log_grade(route: str, body: dict, graded: dict | None) -> None:
         # grade and what the agent shipped, so it stands in both columns rather than one of them
         # guessing at the arm the judge was never told.
         delivered_language=language,
+        # The agent's cumulative token spend when it asked for this grade. Only the agent can
+        # count it (the judge never sees the transcript), so it rides in on the request body and
+        # is 0 for any client that does not send it.
+        tokens=int(body.get("tokens") or 0),
         # Resolved WITHOUT the body's 'compiler': the upstream judge drops that field (see
         # service._submission_from_body), so the pin/default is what really built this grade.
         compiler=languages.resolve_family(language))

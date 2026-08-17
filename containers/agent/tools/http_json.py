@@ -201,10 +201,67 @@ def identity_fields() -> dict[str, str]:
     return fields
 
 
+#: Every ``message.usage`` field that is a token the run CONSUMED. Same list as
+#: ``agent_driver.py``'s USAGE_FIELDS and for the same reason: consumption is dominated by the
+#: transcript re-sent each turn, so output alone would understate the spend by an order of
+#: magnitude. DELIBERATE DUPLICATION -- this container ships standalone with stdlib only and has
+#: no ``agent_driver`` on its path, the same rule ``syntax_check`` follows for compiler flags.
+USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def transcript_tokens() -> int:
+    """The agent's CUMULATIVE consumed tokens so far, read from its own stream-json transcript.
+
+    Only the agent can count this: the judge never sees the transcript, which is why every served
+    row logged 0 tokens before. One assistant turn arrives as several ``assistant`` events sharing
+    a ``message.id``, each repeating the whole turn's usage, so the LAST usage per id is the turn's
+    cost and summing the events would multiply it by the block count.
+
+    Never raises and never blocks a grade: a missing, unreadable or half-written transcript returns
+    0, because a token count is bookkeeping and the grade the agent is paying for is not.
+    """
+    path = os.environ.get("CLAUDE_LOG_PATH", "").strip() or "claude.log"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return 0
+    by_message: dict[str, int] = {}
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue  # the tail can be half-written while claude is mid-append
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        message_id = message.get("id")
+        usage = message.get("usage")
+        if not isinstance(message_id, str) or not isinstance(usage, dict):
+            continue
+        total = 0
+        seen = False
+        for field in USAGE_FIELDS:
+            value = usage.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            total += int(value)
+            seen = True
+        if seen:
+            by_message[message_id] = total
+    return sum(by_message.values())
+
+
 def post_judge(path: str, body: dict[str, Any]) -> dict[str, Any]:
-    """POST a judge route with ``body`` plus this client's rank and run identity -- merged HERE,
-    after the body, so no tool can forget them and no payload can overwrite them."""
-    data = json.dumps({**body, **identity_fields(), "rank": judge_rank()}).encode("utf-8")
+    """POST a judge route with ``body`` plus this client's rank, run identity and token spend --
+    merged HERE, after the body, so no tool can forget them and no payload can overwrite them."""
+    merged = {**body, **identity_fields(), "rank": judge_rank(), "tokens": transcript_tokens()}
+    data = json.dumps(merged).encode("utf-8")
     return call_json(f"{judge_base()}{path}", data, judge_timeout())
 
 

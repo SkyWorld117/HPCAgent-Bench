@@ -799,6 +799,7 @@ def record_call(score: Optional[Score],
                 datatype: str = "float64",
                 delivered_language: str = "",
                 compiler: Optional[str] = None,
+                tokens: int = 0,
                 path: Optional[str] = None) -> int:
     """Persist ONE served grade as a ``calls`` row; return its ``round`` (0 = not logged).
 
@@ -812,9 +813,11 @@ def record_call(score: Optional[Score],
     ``round`` is 1 + the calls already stored for ``(run_id, benchmark)``. A judge is the single
     writer of its own shard (see :func:`db_path`), so the COUNT is the whole sequence.
 
-    ``tokens`` is 0: the spend is the AGENT's and no judge request carries it, so a served row
-    logs a number it can see rather than inventing one (``record_trajectory`` has real tokens
-    because the runner it serves counted the calls itself).
+    ``tokens`` is the agent's CUMULATIVE spend at the moment it asked for this grade, as reported
+    in the request body; 0 when the caller sends none. It is cumulative rather than per-round
+    because the agent counts its own transcript and the judge cannot see the spend at all -- so
+    the cost of solving a kernel is the value on its LAST row, and a per-round cost is the
+    difference between consecutive rows.
 
     ``score`` is ``None`` when the request produced no verdict at all (``status``
     ``score_error``): speedup 0, correct 0, no baseline. Gated on ``record.log_calls``.
@@ -834,7 +837,7 @@ def record_call(score: Optional[Score],
                 execution)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, task.language, delivered_language, task.source_mode,
-             optimizer, int(prior) + 1, 0, float(score.speedup if score is not None else 0.0),
+             optimizer, int(prior) + 1, int(tokens), float(score.speedup if score is not None else 0.0),
              int(bool(score.correct) if score is not None else 0), status, route, compiler,
              (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution))
         conn.commit()
