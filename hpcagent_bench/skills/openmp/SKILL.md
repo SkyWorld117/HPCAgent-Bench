@@ -45,9 +45,19 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 - **`declare simd` on a helper called from the hot loop**, else that call is a vectorization
   barrier. **`collapse(n)`** when one loop is too short to fill cores or lanes; `private` /
   `lastprivate` to break a false dependence you cannot rewrite away.
+- **`default(none)` obliges you to name EVERY variable the region touches** -- miss one and the
+  build fails with `'x' not specified in enclosing 'parallel'`, once per variable. The one that
+  gets missed is the accumulator, because it belongs in `reduction(...)`, not in `shared` or
+  `private`. You are not required to write `default(none)` at all: leave it off and the default
+  sharing rules apply, which is the safe move here since the judge checks correctness anyway.
 - **Fortran spellings:** `!$omp parallel do` on the proven-independent loop; close it with
-  `end do` alone -- a trailing `!$omp end parallel do` is legal ONLY as the very next line and
-  a frequent build-breaker anywhere else, so omitting it is always safe. **`!$omp workshare`
+  `end do` alone. The closing directive is OPTIONAL, and omitting it is always safe -- but if
+  you write one it must name the SAME construct you opened, token for token. Opening
+  `!$omp parallel do simd` and closing `!$omp end parallel do` is a BUILD ERROR (the `simd` is
+  missing), and gfortran blames the closing line -- `Unexpected !$OMP END PARALLEL DO statement`
+  -- so the diagnostic points at the line that is not wrong. This is the single most common
+  Fortran OpenMP build failure on record. Just end the loop with `end do` and write nothing
+  after it. **`!$omp workshare`
   does NOT thread on the default `gcc` family** (gfortran lowers it to `single` -- measured,
   zero scaling on a compute-bound body; flang threads it only partially): rewrite array syntax
   as an explicit loop under `parallel do`. `!$omp simd` cannot sit on a `do concurrent` loop --

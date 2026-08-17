@@ -26,7 +26,11 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
 - `-fopenmp` always on. Grading is MULTI-CORE: the timed run owns its slot's physical cores
   (24 here, no SMT), `OMP_NUM_THREADS` preset to match. The default move is
   `!$omp parallel do simd` with `reduction(...)` on the outermost independent big loop; tiny
-  trip counts lose to spawn overhead. Full recipe in the openmp page.
+  trip counts lose to spawn overhead. **End that loop with `end do` and write nothing after it.**
+  The closing directive is optional, and a mismatched one is a build error: `!$omp end parallel do`
+  after `!$omp parallel do simd` drops the `simd` and gfortran rejects it, blaming the closing
+  line. Same trap with `default(none)`, which then obliges you to name every variable -- the
+  accumulator goes in `reduction(...)`, not `shared`. Full recipe in the openmp page.
 - `do concurrent` THREADS on every family: gcc via `-ftree-parallelize-loops`, llvm via
   `-fdo-concurrent-to-openmp=host`, oneapi under `-fopenmp`. Details in the do-concurrent page.
 - Coarrays are NOT a lever: no `-fcoarray` flag is on any build, so coarray code does not even
