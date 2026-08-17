@@ -377,6 +377,10 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 50
         run: |
+          # Which CPU this ran on, because the parse timings only mean something next to it:
+          # esirkepov_deposition took 274 s here and 24 s on the dev box, while mobilenet_v2 came
+          # in FASTER than its local number, so "the runner is slower" does not yet explain it.
+          lscpu | grep -E "^(Model name|CPU\(s\)|Thread|Core)" || true
           python -m pytest -q -p no:cacheprovider -rfsxX -m dace_frontend \
             --timeout=2400 tests/test_dace_frontend_validity.py
 
