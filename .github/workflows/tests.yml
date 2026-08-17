@@ -162,20 +162,26 @@ jobs:
           files=$(ls tests/test_*.py | grep -vxF -f "$excl")
           test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
           echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
-          # This step has twice been killed mid-sweep with "the runner has received a shutdown
-          # signal", both times at the SAME 38% of the sweep. A cancellation prints no summary, so
-          # -v is what names the tests that were in flight when it went, and the sampler says which
-          # resource ran out. It has to be a background job INSIDE this step: a cancelled job skips
-          # every later step, so anything written to a file for a later step to print is lost.
-          # Both come out once the cause is fixed.
-          ( while sleep 30; do
-              echo "SAMPLE $(date -u +%H:%M:%S)" \
-                   "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
-                   "disk=$(df -Pm / | awk 'NR==2{print $4"MB free"}')"
-            done ) &
-          sampler=$!
-          trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          python -m pytest -v -p no:cacheprovider -rfEs -n auto --timeout=600 $files
+          # `real_fuzz` runs in its own step below. Those tests opt OUT of conftest's fuzz size cap
+          # deliberately -- they assert on the real large draws -- and one of them,
+          # test_metric.py::test_fuzz_iteration_draws_distinct_sizes, peaks at 7.7 GB and takes 7
+          # minutes (measured on the dev box). This runner has 16 GB and `-n auto` gives it two
+          # workers, so co-scheduling that with anything else is what killed this step twice with
+          # "the runner has received a shutdown signal": the sampler caught memory going
+          # 2.5 GB -> 14.8 GB in one 30 s interval with 1.1 GB left, disk untouched at 77 GB free.
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 -m 'not real_fuzz' $files
+
+      - name: Phase 1b -- the real-fuzz tests, one at a time (they draw multi-GB samples)
+        if: ${{ !cancelled() }}
+        # Serial and unsharded ON PURPOSE: see the marker note in the step above. Capping their
+        # draw would be capping what they exist to measure, so the fix is to stop running them
+        # next to anything else, not to make them smaller.
+        timeout-minutes: 45
+        run: |
+          excl=$(mktemp)
+          grep -vE '^\s*(#|$)' .github/dedicated_tests.txt > "$excl"
+          files=$(ls tests/test_*.py | grep -vxF -f "$excl")
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=2400 -m real_fuzz $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
