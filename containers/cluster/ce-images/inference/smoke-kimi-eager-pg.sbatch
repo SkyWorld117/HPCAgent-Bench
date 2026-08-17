@@ -231,8 +231,11 @@ p2p=$({ grep -h "unbatched P2P op" "${RUN_DIR}"/vllm-rank*.log 2>/dev/null || tr
 echo "unbatched P2P warnings: ${p2p}"
 
 stage "gate 3: DOES IT DECODE -- the gate every previous smoke skipped"
+# aiter JIT-compiles kernels on FIRST use (one MHA kernel measured at 924 s in 595047), so a
+# cold cache blows a 300 s budget and the smoke reports "wedged" for a server that is merely
+# compiling. Raise it whenever AITER_JIT_DIR starts empty; 300 s is right for a warm cache.
 before=$(metric generation_tokens_total)
-curl -fsS --max-time 300 "http://${NODE0}:${API_PORT}/v1/completions" \
+curl -fsS --max-time "${FIRST_TOKEN_TIMEOUT:-300}" "http://${NODE0}:${API_PORT}/v1/completions" \
     -H 'Content-Type: application/json' \
     -d "{\"model\":\"${SERVED_MODEL}\",\"prompt\":\"Write one line of C.\",\"max_tokens\":64}" \
     -o "${RUN_DIR}/single.json" || true
