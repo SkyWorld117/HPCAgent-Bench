@@ -37,11 +37,10 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: Verdict classes (tests/dace_numeric_probe.py), in the order the probe can reach them:
 #:   parse_fail      ``to_sdfg(simplify=True)`` raised.
 #:   compile_fail    ``sdfg.compile()`` raised -- the generated C++ does not build, OR validation
-#:                   rejected the expanded graph. ``atax``/``gesummv`` land here: a gemv library
-#:                   node's ``out`` connector collides with the ARRAY named ``out``
-#:                   (dace/libraries/blas/nodes/gemv.py), and the expansion that surfaces it happens
-#:                   inside compile. ``REFUSED`` cannot see this class at all -- it parses with
-#:                   simplify=False and never expands a library node. Filed upstream.
+#:                   rejected the expanded graph. ``raman_fitting`` lands here: a solve library
+#:                   node's ``out`` connector collides with the ARRAY named ``out``, and the
+#:                   expansion that surfaces it happens inside compile. ``REFUSED`` cannot see this
+#:                   class at all -- it parses with simplify=False and never expands a library node.
 #:   unbound_symbols a free SDFG symbol nothing binds (neither an array shape nor a recipe).
 #:   run_fail        the compiled SDFG raised when called.
 #:   mismatch        it ran and the answer is wrong.
@@ -59,14 +58,15 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: consulted (``dace_numeric_probe``). Neither was DaCe's: ``floyd_warshall`` agrees and never needed
 #: an entry, three ``unbound_symbols`` entries are gone, and the fourth turned out to be a real
 #: ``mismatch`` the harness defect had been standing in front of.
+#: Remeasured 2026-08-17 against the pin's new SHA: the four gemv ``out``-connector kernels (atax,
+#: covariance2, gesummv, k3mm) and ``fragment_patch_density``'s einsum row-dot MatMul dispatch all
+#: agree upstream now, so their entries are gone. This is the bump the dace-canary exists to
+#: demand -- it went red on exactly these five before the pin moved.
 NUMERIC_BAD: Dict[str, str] = {
-    # `Connector name 'out' is already used as a symbol, constant, or array name` -- a gemv/solve
-    # library node's connector collides with the kernel's ARRAY named `out`. One upstream DaCe bug
-    # behind five kernels; raman_fitting is the same clash on `solve` (`list index out of range`).
-    "atax": "compile_fail",
-    "covariance2": "compile_fail",
-    "gesummv": "compile_fail",
-    "k3mm": "compile_fail",
+    # `Connector name 'out' is already used as a symbol, constant, or array name` -- a solve library
+    # node's connector collides with the kernel's ARRAY named `out` (`list index out of range`).
+    # The four gemv kernels that shared this bug (atax, covariance2, gesummv, k3mm) agree as of the
+    # pin below and are gone; raman_fitting is the `solve` half and still fails.
     "raman_fitting": "compile_fail",
     # The generated C++ does not build: `cmplx<double> / int64_t` has no operator/ in
     # dace/runtime/include/dace/complex.h, which supplies mixed complex/integer `*` and nothing
@@ -85,11 +85,6 @@ NUMERIC_BAD: Dict[str, str] = {
     # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
     # predicate". Neither is issue 07's operator gap.
     "stockham_fft": "compile_fail",
-    # np.einsum('xyzk,xyzk->xyz', ...) -- a row-wise dot -- lowers to a MatMul node that simplify
-    # collapses to [Lb**3, k] x [Lb**3, k], and the MatMul dispatch has no case for it
-    # (NotImplementedError at dace/libraries/blas/nodes/matmul.py:296). Only fires with simplify ON;
-    # filed as dace issue einsum_rowdot_matmul_dispatch. Verified vs extended a4740d4e7 2026-08-08.
-    "fragment_patch_density": "compile_fail",
     # `SympifyError: cannot sympify object of type <class 'function'>` out of the frontend.
     "crc16": "parse_fail",
     "dfa": "parse_fail",

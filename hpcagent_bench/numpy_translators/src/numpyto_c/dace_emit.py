@@ -5,6 +5,7 @@ import copy
 import re
 from typing import Dict, List, Optional
 
+from numpyto_common import dtypes
 from numpyto_common.frontend import fold_shape_expr
 from numpyto_common.ir import KernelIR
 from numpyto_common.numpy_desugar import desugar_for_python_backend
@@ -190,7 +191,22 @@ _DTYPE_TO_DACE = {
 
 
 def _dace_dtype(tag: str) -> str:
-    return _DTYPE_TO_DACE.get(tag, "dc_float")
+    """Map a numpy dtype tag to its dace spelling, FAILING LOUDLY on an unknown integer tag
+    rather than silently declaring a float. A declared-int array typed as ``dc_float`` reaches
+    the frontend as a double, and the first bitwise op on it dies inside dace with an operand-type
+    error that names nothing in this file (``BitAnd: 'double' and 'int64_t'`` -- int4 shipped that
+    way). Sub-byte dtypes route through their STORAGE dtype: an int4 array IS an int8 buffer."""
+    mapped = _DTYPE_TO_DACE.get(tag) or _DTYPE_TO_DACE.get(dtypes.storage_dtype(tag))
+    if mapped is not None:
+        return mapped
+    # float16/float128 and the fp8 pair have no dace spelling of their own here: like float64 and
+    # float32 they compute through the precision-driven float global.
+    if tag.startswith("complex"):
+        return "dc_complex_float"
+    if tag.startswith("float"):
+        return "dc_float"
+    raise ValueError(f"dace emit: cannot map dtype {tag!r} (not in _DTYPE_TO_DACE and not a float "
+                     f"family tag); refusing to default to a float declaration")
 
 
 def _array_annotation(arr) -> str:
@@ -1514,6 +1530,10 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     out.append("import dace as dc")
     imp = "dc_float, dc_complex_float" if (needs_complex or framework_dtype.used_complex) else "dc_float"
     out.append(f"from hpcagent_bench.frameworks.dace_framework import {imp}")
+    # BOTH spellings: the lowering emits bare `sqrt(x)` for a desugared numpy ufunc and keeps a
+    # QUALIFIED `math.sqrt(x)` the reference wrote by hand, and the name-import alone makes the
+    # second one a DaceSyntaxError ('Use of undefined variable "math"').
+    out.append("import math")
     out.append("from math import sin, cos, log, exp, pow, sqrt")
     out.append("")
     if symbol_names:

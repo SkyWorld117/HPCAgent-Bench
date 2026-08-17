@@ -744,3 +744,27 @@ def test_channel_flows_convergence_residual_is_seeded_as_a_float():
     """End to end: the Navier-Stokes channel solver's outer loop residual."""
     _, src = _emit("channel_flow")
     assert "udiff = 1.0" in src and "udiff = 1\n" not in src
+
+
+def test_a_qualified_math_call_gets_the_module_import_it_names():
+    """A reference that writes ``math.sqrt(x)`` reaches the frontend as a NAME lookup of ``math``.
+    The name-import alone left it undefined and every such kernel died with
+    ``DaceSyntaxError: Use of undefined variable "math"`` -- the three WarpX ports did, in CI only,
+    because nothing else in the corpus qualifies its math calls."""
+    _, src = _emit("warpx_boris_push")
+    assert "math.sqrt(" in src, "the reference's qualified spelling is what this pins"
+    header = src.split("@dc.program")[0]
+    assert "import math\n" in header
+
+
+def test_an_int4_array_is_declared_as_its_storage_dtype():
+    """int4 is a SEMANTIC dtype over an int8 buffer, so the dace declaration is int8. Declared
+    ``dc_float`` instead -- the old silent fallback -- the first bitwise op on it dies inside dace
+    with ``BitAnd: 'double' and 'int64_t'``, naming nothing in the emitter."""
+    assert _dace_dtype("int4") == "dc.int8"
+
+
+def test_an_unmappable_dtype_refuses_instead_of_defaulting_to_a_float():
+    """The pythran emitter already refuses loudly here; this closes the same hole on dace."""
+    with pytest.raises(ValueError, match="cannot map dtype"):
+        _dace_dtype("int3")
