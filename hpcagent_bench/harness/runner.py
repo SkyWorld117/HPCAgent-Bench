@@ -55,7 +55,7 @@ class CallPoint:
     tokens: int  # cumulative tokens spent through this call
     speedup: float  # speedup at this call (0.0 if not correct/scored)
     correct: bool
-    status: str  # ok | build_error | incorrect | overfit | agent_error | score_error
+    status: str  # ok | build_error | incorrect | overfit | timeout | agent_error | score_error
     seconds: float = 0.0  # wall-clock for this attempt (agent call + grade), the budget's unit
 
 
@@ -111,8 +111,15 @@ def status_of(result: Score) -> str:
     """The JSONL ``status`` for a graded result -- one source shared by the in-process
     loop and the two-stage pipeline's judge re-grade (:mod:`hpcagent_bench.harness.pipeline`)
     so the status vocabulary cannot drift between the two run paths."""
+    # Harness faults first: a judge that could not grade (dead oracle, contention OOM) says
+    # nothing about the submission, so it must not fall through to build_error/incorrect.
+    if result.harness_fault:
+        return "score_error"
     if not result.build_ok:
         return "build_error"
+    # Killed by the time budget: a performance outcome, not a correctness one.
+    if result.timed_out:
+        return "timeout"
     if result.correct:
         return "ok"
     # public-correct but held-out-failing = overfit (the visible oracle was gamed)

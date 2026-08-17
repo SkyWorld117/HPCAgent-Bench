@@ -41,6 +41,53 @@ WORKSPACE_ALIGN = 256
 OOM_RETRIES = 3
 OOM_BACKOFF_S = 5.0
 
+#: An output array at or above this size crosses the fork boundary as a ``.npy`` file next to
+#: the kernel image instead of through the result queue. The queue cannot deliver a multi-GB
+#: pickle: the feeder thread never flushes it and the child exits 0 having delivered nothing
+#: (config_select_branch at XL -- two ~2.9 GiB outputs -- died exactly this way, as did
+#: tsvc_2_s212's followups before they were reduced in-child; see :class:`Followup`).
+SPILL_BYTES = 64 * 1024**2
+
+
+class NativeCallTimeout(RuntimeError):
+    """The call was killed by the harness time budget (guillotine batch cap or per-rep alarm) --
+    a performance outcome of the submission, distinct from a crash or a wrong answer."""
+
+
+class NativeCallOOM(RuntimeError):
+    """A host OOM that survived every retry. The judge grades several kernels concurrently and
+    each materializes its own input copies, so this is machine contention -- a harness fault,
+    never evidence against the submission."""
+
+
+@dataclass(frozen=True)
+class SpilledArray:
+    """Queue stand-in for a large output array the child saved at ``path``."""
+    path: str
+
+
+def spill_outputs(outputs: Dict[str, Any], root: str, tag: str, threshold: int = SPILL_BYTES) -> Dict[str, Any]:
+    """Replace every ndarray of ``threshold`` bytes or more with a :class:`SpilledArray`."""
+    spilled = {}
+    for name, val in outputs.items():
+        if isinstance(val, np.ndarray) and val.nbytes >= threshold:
+            path = os.path.join(root, f"spill-{os.getpid()}-{tag}-{name}.npy")
+            np.save(path, val)
+            spilled[name] = SpilledArray(path)
+        else:
+            spilled[name] = val
+    return spilled
+
+
+def unspill_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Rehydrate :class:`SpilledArray` refs as read-only memmaps, so the parent pays no copy and
+    the mapping stays valid even after the sandbox directory is removed (POSIX unlink)."""
+    return {
+        name: np.load(val.path, mmap_mode="r") if isinstance(val, SpilledArray) else val
+        for name, val in outputs.items()
+    }
+
+
 #: ``ru_maxrss`` is KILOBYTES on Linux but BYTES on macOS/BSD; scale the raw value to
 #: bytes per platform so the memory metric (MU/NMU) is not 1024x inflated on macOS.
 _RSS_TO_BYTES = 1 if osinfo.IS_MACOS else 1024
@@ -749,6 +796,12 @@ def _native_call_worker(device,
         increment_bytes = max(0, int(call_rss) - int(entry_rss)) * _RSS_TO_BYTES  # kernel-attributable
         # Same rep-1 boundary as the host probe, so both numbers describe ONE call rather than the batch.
         device_bytes = max(0, entry_device_free - after_first_device[0]) if after_first_device else 0
+        if q is None:  # spill only across the process boundary; the in-process q path keeps its arrays
+            root = os.path.dirname(os.path.abspath(lib_path))
+            outputs = spill_outputs(outputs, root, "public")
+            extras = [
+                spill_outputs(e, root, f"followup{i}") if isinstance(e, dict) else e for i, e in enumerate(extras)
+            ]
         payload = (outputs, samples, peak_bytes, increment_bytes, extras, device_bytes)
         if q is not None:
             q.put(("ok", *payload))
@@ -861,14 +914,18 @@ def _call_isolated(
     if not run.ok:
         if run.signal == "TIMEOUT":
             per_rep = f"{guillotine_s:g}s/timed rep (guillotine)" if guillotine_s else f"{timeout:g}s/rep"
-            raise RuntimeError(f"native call exceeded its {batch_timeout:g}s batch budget "
-                               f"({per_rep} x {timed_reps} + {len(followups)} followups) and was killed")
+            raise NativeCallTimeout(f"native call exceeded its {batch_timeout:g}s batch budget "
+                                    f"({per_rep} x {timed_reps} + {len(followups)} followups) and was killed")
         if run.signal == signal.SIGALRM.name:  # _rep_guard's alarm: a timeout, not a crash
-            raise RuntimeError(f"native call exceeded {timeout:g}s on a single rep and was killed")
+            raise NativeCallTimeout(f"native call exceeded {timeout:g}s on a single rep and was killed")
         if run.signal or (run.exit_code or 0) != 0:  # fatal signal / non-zero exit -> crash
             sig = f", signal {run.signal}" if run.signal else ""
             raise RuntimeError(f"native call crashed (exit {run.exit_code}{sig})")
+        if _is_host_oom(run):  # contention that outlived every retry -- the judge's fault
+            raise NativeCallOOM(run.error)
         raise RuntimeError(run.error)  # in-child exception (traceback captured by run_forked)
     outputs, samples, peak_bytes, increment_bytes, extras, device_bytes = run.result
+    outputs = unspill_outputs(outputs)
+    extras = [unspill_outputs(e) if isinstance(e, dict) else e for e in extras]
     memory = MemoryUsage(peak_bytes=peak_bytes, increment_bytes=increment_bytes, device_bytes=device_bytes)
     return outputs, samples, memory, extras

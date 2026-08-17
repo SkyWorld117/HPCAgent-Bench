@@ -32,7 +32,7 @@ from hpcagent_bench import config, sizing
 from hpcagent_bench.fuzz import FUZZED_PRESET
 from hpcagent_bench.harness import mpi_call, mpi_sizing, timing
 from hpcagent_bench.harness.mpi_descriptor import Descriptor
-from hpcagent_bench.harness.native_call import Followup, _call_isolated
+from hpcagent_bench.harness.native_call import Followup, NativeCallOOM, NativeCallTimeout, _call_isolated
 from hpcagent_bench.harness.grading import BASELINE_CHOICES  # noqa: F401 -- re-exported for harbor_grade
 from hpcagent_bench.harness.grading import (AUTO_ORACLE, ReferencePlan, _data_seeded, _grade, _grade_against,
                                             _numpy_reference, _run_c_reference, _time_numpy, _time_numpy_samples,
@@ -159,6 +159,12 @@ class Score:
     baselines: Dict[str, int] = field(default_factory=dict)
     speedups: Dict[str, float] = field(default_factory=dict)
     oracle: str = "numpy"
+    # The two outcome classes that must not read as the submission's fault: ``timed_out`` is the
+    # harness time budget killing the run (a performance outcome, status "timeout"), and
+    # ``harness_fault`` is a judge-side failure -- a reference that would not emit/build/run, or
+    # an OOM under concurrent grading -- mapped to "score_error", never "build_error"/"incorrect".
+    timed_out: bool = False
+    harness_fault: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,9 +748,17 @@ def score(submission: Submission,
                                                                        compiler=ref_compiler,
                                                                        warmup=timing.warmup_count())
             except RuntimeError as exc:
-                # The C reference could not be emitted/built for this kernel.
+                # The C reference could not be emitted/built/run for this kernel. That is the
+                # JUDGE failing, not the submission: harness_fault keeps it out of the model's
+                # build_error/incorrect counts (an oracle that cannot run grades nothing).
                 if plan.oracle_wants_c:
-                    return Score(False, float("inf"), 0, False, f"{spec.short_name}: {exc}", oracle=oracle)
+                    return Score(False,
+                                 float("inf"),
+                                 0,
+                                 False,
+                                 f"{spec.short_name}: {exc}",
+                                 oracle=oracle,
+                                 harness_fault=True)
                 # Baseline-only C request: fall back to the numpy baseline (recorded
                 # honestly via the ``baseline`` label) rather than erroring the score --
                 # so "speedup over C" degrades gracefully on kernels that don't emit C.
@@ -754,7 +768,8 @@ def score(submission: Submission,
                                  0,
                                  False,
                                  f"{spec.short_name}: no denominator -- {exc}",
-                                 oracle=oracle)
+                                 oracle=oracle,
+                                 harness_fault=True)
             else:
                 if plan.oracle_wants_c:
                     expected_public["c"] = c_public
@@ -799,7 +814,8 @@ def score(submission: Submission,
                              0,
                              False,
                              f"{spec.short_name}: no {label} denominator built",
-                             oracle=oracle)
+                             oracle=oracle,
+                             harness_fault=True)
 
         if baselines and cached is None:
             if len(BASELINE_TIMING_CACHE) >= BASELINE_TIMING_CACHE_MAX:
@@ -856,7 +872,7 @@ def score(submission: Submission,
                 hidden_passed += int(ok)
                 if not ok and not detail:
                     detail = f"hidden[{label}]: {hdetail or 'numeric mismatch'}"
-        except RuntimeError as exc:  # native crash / timeout -> scored, never fatal
+        except RuntimeError as exc:  # native crash / timeout / judge OOM -> scored, never fatal
             return Score(False,
                          float("inf"),
                          0,
@@ -866,7 +882,9 @@ def score(submission: Submission,
                          baseline=primary or "numpy",
                          baselines=baselines,
                          oracle=oracle,
-                         public_correct=False)
+                         public_correct=False,
+                         timed_out=isinstance(exc, NativeCallTimeout),
+                         harness_fault=isinstance(exc, NativeCallOOM))
 
     hidden_total = len(cases)
     hidden_correct = (hidden_passed == hidden_total)

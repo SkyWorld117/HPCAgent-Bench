@@ -37,8 +37,12 @@ def _child(fn, args, kwargs, q):
     try:
         out = fn(*args, **kwargs)
         try:
+            # NOTE: put() only enqueues -- pickling happens later in the queue's feeder thread, so an
+            # unpicklable or oversized payload is NOT caught here. It surfaces in the parent as
+            # "child exited 0 with no result"; callers with large payloads must spill to disk
+            # (see native_call.spill_outputs). This except covers only put() itself failing.
             q.put(("ok", out))
-        except Exception:  # unpicklable return value -> success without a payload
+        except Exception:  # queue unusable -> success without a payload
             q.put(("ok", None))
     except BaseException:  # noqa: BLE001 -- surface EVERY failure, never swallow it
         tb = traceback.format_exc()
@@ -134,7 +138,9 @@ def run_forked(fn: Callable,
         except queue.Empty:
             return RunResult(ok=False,
                              exit_code=ec,
-                             error=f"{tag}child exited {ec} with no result",
+                             error=(f"{tag}child exited {ec} with no result "
+                                    "(a payload the queue feeder could not deliver -- oversized or "
+                                    "unpicklable -- dies exactly this way)"),
                              result=last_progress)
     status, payload = result_item
     if status == "ok":
