@@ -31,6 +31,28 @@ runs:
         sudo apt-get install -y build-essential gfortran pkg-config libopenblas-dev libfftw3-dev \
           liblapacke-dev ninja-build ccache
 
+    - name: GNU Fortran matching the graded image
+      shell: bash
+      run: |
+        # Same argument as the LLVM step below, for the OTHER family. The graded images
+        # (containers/cpu.def, judge.def) are built `From: ubuntu:26.04`, whose gfortran implements
+        # the F2018 DO CONCURRENT LOCALITY SPECS (`local()` / `shared()`); ubuntu-latest's
+        # gfortran 13 does not, and hard-errors with "Syntax error in DO statement". A skill page
+        # that teaches a construct the GRADED toolchain accepts then reads as a broken promise on
+        # CI alone -- tests/test_parallelism_dispatch.py caught exactly that. Pin the major so the
+        # runner answers for the same compiler the agent is graded on.
+        #
+        # gfortran ONLY: gcc/g++ stay on the distro default, so this does not silently re-toolchain
+        # the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's PATH, and
+        # compilers.yaml names the driver unversioned, so the symlink is what makes it take effect.
+        set -euo pipefail
+        GCC_MAJOR=15
+        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        sudo apt-get update
+        sudo apt-get install -y "gfortran-${GCC_MAJOR}"
+        sudo ln -sf "/usr/bin/gfortran-${GCC_MAJOR}" /usr/local/bin/gfortran
+        gfortran --version | head -1
+
     - name: LLVM toolchain (clang / clang++ / flang / libomp)
       shell: bash
       run: |

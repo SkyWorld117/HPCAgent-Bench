@@ -10,6 +10,7 @@ import ast
 import copy
 from typing import Dict, List
 
+from numpyto_common import dtypes
 from numpyto_common.ir import ArrayDesc, KernelIR
 
 
@@ -376,7 +377,9 @@ def _pythran_scalar_type(dtype: str, ctx: str) -> str:
     type in the ``#pythran export`` signature type-puns the oracle's
     positional call (an int/bool argument reinterpreted as a double), so a
     mis-declared param must abort the emit, not produce a wrong answer."""
-    ptype = _DTYPE_TO_PYTHRAN.get(dtype)
+    # A sub-byte dtype has no Pythran spelling of its own: an int4 array IS an int8 buffer, so the
+    # export signature declares its STORAGE dtype.
+    ptype = _DTYPE_TO_PYTHRAN.get(dtype) or _DTYPE_TO_PYTHRAN.get(dtypes.storage_dtype(dtype))
     if ptype is None:
         raise ValueError(f"pythran export: cannot map dtype {dtype!r} for {ctx} "
                          f"(not in _DTYPE_TO_PYTHRAN); refusing to default to float64")

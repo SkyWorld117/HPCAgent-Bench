@@ -1815,6 +1815,16 @@ class _FortranBodyEmitter(BaseEmitter):
             # A NESTED int(..) cast (max(0, int(..))) resets the same way.
             if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "int":
                 return _SYMBOL_INT_TAG
+            # A SCALAR element read of a narrow int array is emitted as INT(a(i), c_int64_t) by
+            # _emit_subscript, so its kind is the ABI integer -- NOT the array's declared width.
+            # Reporting the declared width here suffixed the paired literal to it and produced
+            # IAND(int64, 1_c_int8_t), which gfortran rejects for mismatched kinds. A SECTION read
+            # is not promoted, so it keeps the declared tag.
+            if isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name):
+                scalar_read = isinstance(sub.ctx,
+                                         ast.Load) and not any(isinstance(n, ast.Slice) for n in ast.walk(sub.slice))
+                if scalar_read and self._is_narrow_int_array(sub.value.id):
+                    return _SYMBOL_INT_TAG
             if isinstance(sub, ast.Name):
                 k = self._name_int_kind(sub.id)
                 if k is not None:
