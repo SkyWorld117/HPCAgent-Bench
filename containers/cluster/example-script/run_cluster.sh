@@ -123,6 +123,16 @@ run_vllm_node() {
         export PYTHONPATH="${eager_pg_dir}:${PYTHONPATH:-}"
     fi
 
+    # Tuned fused_moe Triton configs, keyed by (experts, N, device, dtype). vLLM looks up the
+    # CURRENT model's own shape, so pointing this at the folder is a no-op for any model without a
+    # matching file -- only kimi's E=384,N=512,MI300A,int4_w4a16 is in there. Unset, kimi serves on
+    # vLLM's default MoE config and warns it is sub-optimal (595040/595049: ~90 tok/s aggregate,
+    # 1.5 tok/s per request, ~11x off the reference for this shape).
+    local moe_configs_dir="${SCRIPT_DIR}/../ce-images/inference/moe-configs"
+    if [[ -d "${moe_configs_dir}" ]]; then
+        export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-${moe_configs_dir}}"
+    fi
+
     # Unset, this defaults under ~/.cache, which is unmounted here -- the cache died with the job
     # and 592283 re-ran 3 h 13 m of Inductor codegen. Graph capture stays uncached regardless.
     export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
