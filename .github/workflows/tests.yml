@@ -162,7 +162,20 @@ jobs:
           files=$(ls tests/test_*.py | grep -vxF -f "$excl")
           test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
           echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 $files
+          # This step has twice been killed mid-sweep with "the runner has received a shutdown
+          # signal", both times at the SAME 38% of the sweep. A cancellation prints no summary, so
+          # -v is what names the tests that were in flight when it went, and the sampler says which
+          # resource ran out. It has to be a background job INSIDE this step: a cancelled job skips
+          # every later step, so anything written to a file for a later step to print is lost.
+          # Both come out once the cause is fixed.
+          ( while sleep 30; do
+              echo "SAMPLE $(date -u +%H:%M:%S)" \
+                   "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
+                   "disk=$(df -Pm / | awk 'NR==2{print $4"MB free"}')"
+            done ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          python -m pytest -v -p no:cacheprovider -rfEs -n auto --timeout=600 $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
@@ -965,6 +978,16 @@ jobs:
         env:
           HPCAGENT_BENCH_JUDGE_SIF: ${{ github.workspace }}/hpcagent_bench-cpu.sif
         run: |
+          # Killed twice with "the runner has received a shutdown signal" inside this step, which
+          # prints no summary -- the sampler is the only record of which resource ran out, and a
+          # SIF launch is the disk-hungriest thing this workflow does. Out once the cause is known.
+          ( while sleep 30; do
+              echo "SAMPLE $(date -u +%H:%M:%S)" \
+                   "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
+                   "disk=$(df -Pm / | awk 'NR==2{print $4"MB free"}')"
+            done ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
           python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 tests/test_container_launch.py
 
   # ===========================================================================================
