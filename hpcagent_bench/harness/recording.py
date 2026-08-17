@@ -202,6 +202,24 @@ CREATE TABLE IF NOT EXISTS calls (
 #: the first compiler diagnostics, which is what a failure is classified by; the agent is shown the
 #: whole log regardless (``harness.runner._feedback``), so nothing it needs depends on this cap.
 DETAIL_CAP = 2000
+#: Share of the cap kept from the FRONT. A compiler log is classified by its first diagnostics, but
+#: a python traceback names its exception on the LAST line -- head-only truncation threw away the
+#: one line that identified a judge-side failure (an ArrayMemoryError read as a wrong answer).
+DETAIL_HEAD_FRACTION = 0.7
+
+
+def cap_detail(text: str, cap: int = DETAIL_CAP) -> str:
+    """Trim ``text`` to ``cap`` keeping BOTH ends, so neither the first diagnostic nor the final
+    exception line is lost. Returns the text unchanged when it already fits."""
+    text = text or ""
+    if len(text) <= cap:
+        return text
+    marker = "\n[... %d characters elided ...]\n"
+    head = int(cap * DETAIL_HEAD_FRACTION)
+    tail = cap - head
+    elided = len(text) - head - tail
+    return text[:head] + (marker % elided) + text[-tail:]
+
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_sub_bench ON submissions(benchmark, preset, datatype)",
@@ -742,7 +760,7 @@ def record(score: Score,
                 build_ok, correct, reason, detail, cpu, commit_sha, prompt_hash, execution)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, language, source_mode, optimizer, int(score.build_ok),
-             int(score.correct), reason, (score.detail or "")[:DETAIL_CAP], cpu, sha, prompt_hash, execution))
+             int(score.correct), reason, cap_detail(score.detail or ""), cpu, sha, prompt_hash, execution))
         conn.commit()
         return "attempts", reason
     finally:
@@ -855,7 +873,7 @@ def record_call(score: Optional[Score],
              optimizer, int(prior) + 1, int(tokens), float(score.speedup if score is not None else 0.0),
              int(bool(score.correct) if score is not None else 0), status, route, compiler,
              (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution,
-             (detail or (score.detail if score is not None else "") or "")[:DETAIL_CAP]))
+             cap_detail(detail or (score.detail if score is not None else "") or "")))
         conn.commit()
         return int(prior) + 1
     finally:

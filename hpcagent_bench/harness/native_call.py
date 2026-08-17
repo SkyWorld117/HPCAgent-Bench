@@ -35,6 +35,11 @@ from hpcagent_bench.frameworks.forked import run_forked
 #: Scratch-workspace buffers are aligned to this many bytes (ABI Sec. 11) so a kernel
 #: may assume an aligned base for vector loads/stores.
 WORKSPACE_ALIGN = 256
+#: Host-OOM retries for one graded call, and the base of the exponential backoff between them.
+#: numpy raises ``_ArrayMemoryError`` (a ``MemoryError`` subclass) from the child, so the name is
+#: what survives into ``RunResult.error`` as text.
+OOM_RETRIES = 3
+OOM_BACKOFF_S = 5.0
 
 #: ``ru_maxrss`` is KILOBYTES on Linux but BYTES on macOS/BSD; scale the raw value to
 #: bytes per platform so the memory metric (MU/NMU) is not 1024x inflated on macOS.
@@ -385,6 +390,11 @@ def _call_native_impl(
     # image starts with an empty cache. Untimed, so no sample moves.
     extras = [run_followup(make_src, call_with, rep_timeout) for make_src in followups]
     return outputs, samples, extras
+
+
+def _is_host_oom(run) -> bool:
+    """True when the forked child died of a host allocation failure rather than a bad submission."""
+    return "MemoryError" in (run.error or "")
 
 
 def _call_native(
@@ -824,22 +834,30 @@ def _call_isolated(
     batch_timeout = (guillotine_s or timeout) * timed_reps + timeout * len(followups)
     # run_forked owns the fork + wall-clock timeout + SIGTERM/SIGKILL escalation + reap;
     # the worker RETURNS its payload (or raises), which run_forked carries in .result.
-    run = run_forked(_native_call_worker,
-                     use_device,
-                     lib_path,
-                     binding,
-                     data,
-                     lang,
-                     memory_bytes,
-                     workspace_bytes,
-                     py_meta=py_meta,
-                     device_id=dev_id,
-                     reps=reps,
-                     warmup=warmup,
-                     rep_timeout=timeout,
-                     followups=tuple(followups),
-                     timeout=batch_timeout,
-                     mp_context=mp_context)
+    # A host OOM here is CONTENTION, not a property of the submission: the judge grades several
+    # kernels at once and each materializes its own input copies, so a large case can lose the
+    # allocation while the same case fits alone (597682 lost a 1.06 GiB input on
+    # ext_break_find_first and recorded it as a WRONG ANSWER). Back off and retry instead.
+    for attempt in range(OOM_RETRIES + 1):
+        run = run_forked(_native_call_worker,
+                         use_device,
+                         lib_path,
+                         binding,
+                         data,
+                         lang,
+                         memory_bytes,
+                         workspace_bytes,
+                         py_meta=py_meta,
+                         device_id=dev_id,
+                         reps=reps,
+                         warmup=warmup,
+                         rep_timeout=timeout,
+                         followups=tuple(followups),
+                         timeout=batch_timeout,
+                         mp_context=mp_context)
+        if run.ok or attempt == OOM_RETRIES or not _is_host_oom(run):
+            break
+        time.sleep(OOM_BACKOFF_S * (2**attempt))
     if not run.ok:
         if run.signal == "TIMEOUT":
             per_rep = f"{guillotine_s:g}s/timed rep (guillotine)" if guillotine_s else f"{timeout:g}s/rep"
