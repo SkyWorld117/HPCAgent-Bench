@@ -148,7 +148,6 @@ ARGS=(
     --generation-config vllm
     --enable-auto-tool-choice
     --tool-call-parser "${TOOL_PARSER}"
-    --reasoning-parser "${REASONING_PARSER}"
     --trust-remote-code
     --max-model-len 65536
     # 0.70 not 0.85: the fraction multiplies TOTAL board memory but only 96 of the MI300A's
@@ -156,6 +155,10 @@ ARGS=(
     --gpu-memory-utilization 0.70
     --max-num-seqs 128
 )
+# Optional: Qwen3-Coder-Instruct has no reasoning parser and the campaign env files pass none.
+if [[ -n "${REASONING_PARSER}" ]]; then
+    ARGS+=(--reasoning-parser "${REASONING_PARSER}")
+fi
 if [[ -n "${EXTRA_SERVE_ARGS}" ]]; then
     # shellcheck disable=SC2206 -- word-splitting is the contract, same as VLLM_EXTRA_ARGS
     ARGS+=(${EXTRA_SERVE_ARGS})
