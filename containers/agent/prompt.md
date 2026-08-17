@@ -17,13 +17,25 @@ compile error costs you a full judge round-trip and tells you less than the comp
 for free. Read the warnings too; nothing else in this run will show them to you.
 
 `syntax_check` only parses. Before scoring any real rewrite, COMPILE the file yourself with the
-same family the judge uses and read what comes back:
+judge's own build line and read what comes back. The judge builds every submission with:
 
-    gcc -c -O2 -fopenmp -Wall kernel.c -o /tmp/kernel.o        # g++ / gfortran likewise
+    -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math -fno-signed-zeros \
+    -fstrict-aliasing -fPIC -Wall -Wextra
+
+(`gcc` for c, `g++` for cpp, `gfortran` for fortran -- warnings are never errors, but read them.)
+So the local check is:
+
+    gcc -c -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math -fno-signed-zeros \
+        -fstrict-aliasing -Wall -Wextra kernel.c -o /tmp/kernel.o
 
 `-c` is enough -- you are checking your code, not linking a program. A clean local compile with
 zero warnings is the cheapest test you will ever run; do not spend a judge call to learn what it
 would have told you.
+
+Your `build` list is appended AFTER that baseline, so you can add flags the judge does not set:
+`-funroll-loops`, `-ffp-contract=fast`, even `-ffast-math` -- the judge does not filter them.
+The correctness gate still applies unchanged: a flag that reorders your math past rtol/atol
+fails the grade, so test locally and score before you submit with one.
 
 ## When something fails, read the error and fix it -- never move on, never resend unchanged
 
