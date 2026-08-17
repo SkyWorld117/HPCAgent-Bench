@@ -37,10 +37,22 @@ the body writes. Both levers are live; let the timed `score` decide.
 - **The independence claim is unchecked.** A `do concurrent` whose iterations really do
   conflict compiles, runs, and returns wrong answers with no diagnostic -- same trap as a
   wrong `!$omp parallel do`. Prove the loop independent first; the promise is yours.
-- **The locality specs you have are `local`, `local_init`, `shared` and `default(none)`** --
-  `local(tmp)` for a scalar the body writes, `shared(a)` for read-only arrays. All four build
-  here (verified). That is the F2018 set; a locality spec from a later standard is a BUILD
-  ERROR, so write Fortran 2018 and nothing newer.
+- **Locality specs are a BUILD ERROR here -- do not write any of them.** `local`, `local_init`,
+  `shared` and `default(none)` are all rejected by this toolchain's gfortran 14 (verified at
+  `-std=f2018`, `-std=f2023` and `-std=gnu` alike: locality specs arrived in GCC 15). For a
+  scalar temporary each iteration needs its own copy of, declare it in a `block` inside the
+  loop body -- that is F2008, it builds here, and it gives the per-iteration privacy `local`
+  would have:
+
+  ```fortran
+  do concurrent (i = 1:n)
+    block
+      real(c_double) :: t
+      t = a(i) * 2.0d0
+      a(i) = t
+    end block
+  end do
+  ```
 - **An accumulator is a reduction, and `do concurrent` has no reduction here.** Sum, max, min,
   count: use `!$omp parallel do reduction(+:s)` on a plain `do` instead. It threads on every
   family and it is the spelling that works.

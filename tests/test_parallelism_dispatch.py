@@ -115,20 +115,22 @@ integer(c_int) function stub_probe() bind(c, name="stub_probe")
 end function stub_probe
 """
 
-FORTRAN_DC_LOCALITY = """\
+FORTRAN_DC_BLOCK_LOCAL = """\
 integer(c_int) function stub_probe() bind(c, name="stub_probe")
    use, intrinsic :: iso_c_binding, only: c_int, c_double
    implicit none
    real(c_double), allocatable :: a(:), b(:)
-   real(c_double) :: t
    integer, volatile :: n
    integer :: i
    n = 4096
    allocate(a(n), b(n))
    a = 1.0_c_double
-   do concurrent (i = 1:n) local(t) shared(a, b)
-      t = a(i) * 3.0_c_double
-      b(i) = t
+   do concurrent (i = 1:n)
+      block
+         real(c_double) :: t
+         t = a(i) * 3.0_c_double
+         b(i) = t
+      end block
    end do
    stub_probe = merge(0_c_int, 1_c_int, abs(b(n) - 3.0_c_double) < 1.0e-9_c_double)
 end function stub_probe
@@ -595,7 +597,12 @@ SKILL_TAUGHT = (
     # `!$omp parallel do reduction` instead (2026-08-13); re-add the case here the day the
     # harness moves to -std=f2023.
     TaughtConstruct("doconcurrent-fortran", "fortran", "do-concurrent", "openmp", FORTRAN_DC_PLAIN),
-    TaughtConstruct("doconcurrent-fortran", "fortran", "do-concurrent-locality", "openmp", FORTRAN_DC_LOCALITY),
+    # Locality specs (`local`/`local_init`/`shared`/`default(none)`) are deliberately ABSENT: this
+    # gfortran is 14 and locality specs landed in GCC 15, so they are rejected at -std=f2018,
+    # -std=f2023 and -std=gnu alike. The page was corrected to teach a `block`-scoped temporary
+    # instead (2026-08-17), which is F2008 and gives the same per-iteration privacy; re-add a
+    # locality case the day the image moves to gfortran 15.
+    TaughtConstruct("doconcurrent-fortran", "fortran", "do-concurrent-block-local", "openmp", FORTRAN_DC_BLOCK_LOCAL),
     TaughtConstruct("openmp", "fortran", "omp-parallel-do-reduction", "openmp", FORTRAN_OMP_REDUCTION),
     TaughtConstruct("vectorization", "fortran", "omp-simd", None, FORTRAN_OMP_SIMD),
     TaughtConstruct("openmp", "c", "omp-parallel-for", "openmp", C_OMP_PARALLEL_FOR),
