@@ -585,8 +585,19 @@ jobs:
           git checkout "$PLUTO_COMMIT"
           git submodule update --init --recursive
           ./autogen.sh
+          # clang-17 is pinned because pet does not build against a newer clang API -- and a
+          # compiler that old cannot consume GCC 15's libstdc++ headers, which is what it now
+          # selects (the runner has /usr/lib/gcc/<triple>/15, and clang takes the highest). Pin it
+          # to the newest GCC install it predates rather than letting the driver pick.
+          gccdir=$(ls -d /usr/lib/gcc/x86_64-linux-gnu/14 2>/dev/null || true)
+          test -n "$gccdir" || { echo "::error::no GCC 14 install for clang-17 to sit on"; exit 1; }
+          # config.log holds the actual link line and error; without it a pet configure failure
+          # reads as one word ("unknown") and costs a full CI round-trip to diagnose.
           ./configure --with-clang-prefix=/usr/lib/llvm-17 \
-            CC=clang-17 CXX=clang++-17 CXXFLAGS='-std=c++17 -include cstdint'
+            CC=clang-17 CXX=clang++-17 \
+            CFLAGS="--gcc-install-dir=$gccdir" \
+            CXXFLAGS="-std=c++17 -include cstdint --gcc-install-dir=$gccdir" \
+            || { echo "::group::pet/config.log"; tail -200 pet/config.log 2>/dev/null; echo "::endgroup::"; exit 1; }
           make -j"$(nproc)"
           sudo make install          # polycc + pluto -> /usr/local/bin
           sudo ldconfig
