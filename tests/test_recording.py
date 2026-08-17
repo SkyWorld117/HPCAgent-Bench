@@ -251,6 +251,23 @@ def test_a_failed_score_grade_is_logged_as_a_call(tmp_path):
     assert _count(db, "submissions") == 0 and _count(db, "attempts") == 0
 
 
+def test_a_failed_grade_records_why_it_failed(tmp_path):
+    db = str(tmp_path / "r.db")
+    # Without this the compiler log is thrown away and a campaign's build failures cannot be
+    # classified afterwards -- which is exactly what happened to jobs 594529-594538.
+    log = "argmax.c:12:5: error: implicit declaration of function 'strdup'\n"
+    broken = Score(correct=False, max_rel_error=float("inf"), native_ns=0, build_ok=False, detail=log)
+    assert _call(db, "build_error", score=broken) == 1
+    assert _rows(db, "calls")[0]["detail"] == log
+
+
+def test_recorded_failure_text_is_capped(tmp_path):
+    db = str(tmp_path / "r.db")
+    huge = Score(correct=False, max_rel_error=float("inf"), native_ns=0, build_ok=False, detail="x" * 9000)
+    assert _call(db, "build_error", score=huge) == 1
+    assert len(_rows(db, "calls")[0]["detail"]) == recording.DETAIL_CAP
+
+
 def test_a_grade_records_the_agents_cumulative_token_spend(tmp_path):
     db = str(tmp_path / "r.db")
     # The agent reports its running total with every grade, so the cost of solving a kernel is the

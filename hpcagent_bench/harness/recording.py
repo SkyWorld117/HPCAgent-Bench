@@ -189,9 +189,19 @@ CREATE TABLE IF NOT EXISTS calls (
     cpu         TEXT,
     commit_sha  TEXT,
     prompt_hash TEXT,                        -- -> prompts(hash) / the stored prompt file
-    execution   TEXT                         -- native | container (where the runtime was measured)
+    execution   TEXT,                        -- native | container (where the runtime was measured)
+    -- WHY this grade came out the way it did: the compiler log for a build_error, the mismatch
+    -- for an incorrect. The text exists at grade time and the agent is shown all of it
+    -- (harness.runner._feedback); recording it is what makes a campaign's failures classifiable
+    -- afterwards. Capped like attempts.detail -- a wall of linker output is not worth a database.
+    detail      TEXT
 );
 """
+
+#: Longest failure text stored per row (``attempts.detail``, ``calls.detail``). Enough to carry
+#: the first compiler diagnostics, which is what a failure is classified by; the agent is shown the
+#: whole log regardless (``harness.runner._feedback``), so nothing it needs depends on this cap.
+DETAIL_CAP = 2000
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_sub_bench ON submissions(benchmark, preset, datatype)",
@@ -732,7 +742,7 @@ def record(score: Score,
                 build_ok, correct, reason, detail, cpu, commit_sha, prompt_hash, execution)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, language, source_mode, optimizer, int(score.build_ok),
-             int(score.correct), reason, (score.detail or "")[:2000], cpu, sha, prompt_hash, execution))
+             int(score.correct), reason, (score.detail or "")[:DETAIL_CAP], cpu, sha, prompt_hash, execution))
         conn.commit()
         return "attempts", reason
     finally:
@@ -800,6 +810,7 @@ def record_call(score: Optional[Score],
                 delivered_language: str = "",
                 compiler: Optional[str] = None,
                 tokens: int = 0,
+                detail: str = "",
                 path: Optional[str] = None) -> int:
     """Persist ONE served grade as a ``calls`` row; return its ``round`` (0 = not logged).
 
@@ -819,6 +830,10 @@ def record_call(score: Optional[Score],
     the cost of solving a kernel is the value on its LAST row, and a per-round cost is the
     difference between consecutive rows.
 
+    ``detail`` is WHY the grade came out this way -- the compiler log behind a ``build_error``,
+    the mismatch behind an ``incorrect``. It defaults to the score's own detail, so a caller that
+    passes nothing still records the reason; capped at :data:`DETAIL_CAP`.
+
     ``score`` is ``None`` when the request produced no verdict at all (``status``
     ``score_error``): speedup 0, correct 0, no baseline. Gated on ``record.log_calls``.
     """
@@ -834,12 +849,13 @@ def record_call(score: Optional[Score],
             """INSERT INTO calls(
                 run_id, ts, benchmark, preset, datatype, language, delivered_language, source_mode, optimizer,
                 round, tokens, speedup, correct, status, route, compiler, baseline, cpu, commit_sha, prompt_hash,
-                execution)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                execution, detail)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, task.language, delivered_language, task.source_mode,
              optimizer, int(prior) + 1, int(tokens), float(score.speedup if score is not None else 0.0),
              int(bool(score.correct) if score is not None else 0), status, route, compiler,
-             (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution))
+             (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution,
+             (detail or (score.detail if score is not None else "") or "")[:DETAIL_CAP]))
         conn.commit()
         return int(prior) + 1
     finally:
