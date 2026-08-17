@@ -233,6 +233,17 @@ images:
     agent: hpcagent_bench:cpu
     verifier: hpcagent_bench:judge
 
+# Sandboxed build of an agent submission (hpcagent_bench/harness/sandbox.py).
+grading:
+  allow_agent_build_flags: false  # off: a submission's `build` list contributes only -I/-D and
+                                  # -l/-L, so every submission is measured on the flags the matrix
+                                  # chose. On: it may ALSO pass tuning and autopar knobs
+                                  # (-funroll-*, -ftree-parallelize-loops, -floop-*, vectorizer
+                                  # width...). Flags that change FP semantics or the language
+                                  # dialect (-ffast-math, -Ofast, -std=...) stay refused either
+                                  # way -- they make a speedup incomparable. Turning this ON
+                                  # changes what an arm measures; record it beside the results.
+
 # Verify-gated persistence of scored submissions (hpcagent_bench/harness/recording.py).
 # The JUDGE writes rows, never the agent; a leaderboard row lands only after an
 # INDEPENDENT rebuild + re-run passes. Everything else goes to the attempts audit.
