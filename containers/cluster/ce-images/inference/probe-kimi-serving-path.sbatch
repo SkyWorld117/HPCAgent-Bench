@@ -52,6 +52,10 @@ export API_PORT="${API_PORT:-8000}"
 export MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 export READY_TIMEOUT="${READY_TIMEOUT:-5400}"
 export FIRST_TOKEN_TIMEOUT="${FIRST_TOKEN_TIMEOUT:-900}"
+# prefetch stages checkpoint shards through host RAM. At PP=4 each node stages a quarter of
+# the 555 GB checkpoint; at PP=2 it stages half, and 599253 had every rank SIGKILLed during
+# load on 513 GB nodes. Leave empty for the low-host-memory path.
+export LOAD_STRATEGY="${LOAD_STRATEGY:-}"
 # Each probe holds its clients open for SETTLE + WINDOW, then the counter delta over WINDOW is
 # the steady-state rate. A fixed window keeps the job bounded no matter how slow an arm is.
 export PROBE_SETTLE="${PROBE_SETTLE:-20}"
@@ -140,7 +144,7 @@ ARGS=(
     --master-port "${MASTER_PORT_BASE}"
     --distributed-timeout-seconds 7200
     --load-format safetensors
-    --safetensors-load-strategy prefetch
+    ${LOAD_STRATEGY:+--safetensors-load-strategy ${LOAD_STRATEGY}}
     --generation-config vllm
     --enable-auto-tool-choice
     --tool-call-parser "${TOOL_PARSER}"
