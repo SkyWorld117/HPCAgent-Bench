@@ -73,6 +73,13 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: the transform's OWN real dtype (``dtypes.real_component_dtype``) instead: a same-precision REAL
 #: divisor resolves to std::complex's native ``operator/``, and the cast tracks fp32/fp64 kernels
 #: correctly because it is derived from the array's dtype, never hardcoded.
+#: ``crc16`` and ``dfa`` left the list 2026-08-18, in the GENERATOR. Their ``SympifyError: cannot
+#: sympify object of type <class 'function'>`` was an argument named after a sympy CALLABLE
+#: (``poly``, ``symbols``): the moment the name reaches a symbolic context DaCe's parser resolves it
+#: to the FUNCTION, and ``sympy.abc._clash`` shields only one-letter and greek names. ``dace_emit``
+#: now renames every BOUND name the parser will not accept and exports the map as
+#: ``__hpcagent_bench_renames__``; a reserved name that is only CALLED (``sqrt``, ``exp``) is left
+#: alone, since DaCe resolves those through its own replacement table.
 NUMERIC_BAD: Dict[str, str] = {
     # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
     # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
@@ -103,9 +110,6 @@ NUMERIC_BAD: Dict[str, str] = {
     # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
     # predicate". Neither is issue 07's operator gap.
     "stockham_fft": "compile_fail",
-    # `SympifyError: cannot sympify object of type <class 'function'>` out of the frontend.
-    "crc16": "parse_fail",
-    "dfa": "parse_fail",
     "subset_sum": "parse_fail",  # KeyError: ConditionalBlock (if_32)
     # The `unbound_symbols` class is EMPTY. Its four entries (cp2k_density_matrix_trs4,
     # examinimd, gromacs_nbnxm, lavamd) were never a kernel defect: the symbols are manifest
