@@ -25,8 +25,9 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
 - `-ffast-math` NEVER on: the compiler will not reassociate FP for you.
 - `-fopenmp` always on. Grading is MULTI-CORE: the timed run owns its slot's physical cores
   (24 here, no SMT), `OMP_NUM_THREADS` preset to match. The default move is
-  `!$omp parallel do simd` with `reduction(...)` on the outermost independent big loop; tiny
-  trip counts lose to spawn overhead. **End that loop with `end do` and write nothing after it.**
+  CLASSIFY FIRST (parallel / reduction / recurrence / scatter -- the openmp page's four
+  bins), then `!$omp parallel do simd` with `reduction(...)` on the outermost loop the
+  classification cleared; tiny trip counts lose to spawn overhead. **End that loop with `end do` and write nothing after it.**
   The closing directive is optional, and a mismatched one is a build error: `!$omp end parallel do`
   after `!$omp parallel do simd` drops the `simd` and gfortran rejects it, blaming the closing
   line. Same trap with `default(none)`, which then obliges you to name every variable -- the

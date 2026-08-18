@@ -26,19 +26,29 @@ Fortran. Everything below applies to all three; clause syntax is identical.
   silly reference structure and writing the plain loop -- no directive beats that. Then thread,
   then vectorize, and only then consider intrinsics (hand-written AVX after `omp simd` already
   vectorized usually regresses and burns budget).
-- **The default move is `parallel for simd` (Fortran: `!$omp parallel do simd`) on the
-  OUTERMOST independent loop**: threads across the slot's cores plus vector lanes within each,
-  one directive. Prove independence FIRST, by reading the loop: a subscript like `x(i-1)`
-  on the written array (recurrence), a scalar carried between iterations, or a write through
-  an index array (`a(idx(i))` -- duplicates collide) makes threading ILLEGAL -- the answer
-  comes back wrong, not slow. Split such a loop (fission): thread the independent
-  statements, keep the recurrent one serial. Tridiagonal solves, wavefront sweeps and
-  in-place stencils are recurrences in disguise; a stencil needs a separate output array. Every
-  accumulator gets `reduction(+:acc)` -- never a shared variable, and no hand-built per-thread
-  partial-sum arrays; the clause is the whole pattern and it also authorizes the FP
-  reassociation the compiler refuses on its own (no `-ffast-math`) -- keep it only while the
-  answer stays inside tolerance. `schedule(static)` is the default and right for uniform
-  iterations; `dynamic`/`guided` only when per-iteration cost varies.
+- **The default move is CLASSIFY, then thread.** Read the loop and put it in one of four
+  bins before writing any directive; a loop misfiled as parallel comes back `correct: false`
+  and costs the round-trip:
+  - **PARALLEL** -- every write lands at this iteration's own subscript (`x(i)`), no scalar
+    carries state across iterations. Directive: `parallel for simd` (Fortran:
+    `!$omp parallel do simd`) on the OUTERMOST such loop -- threads across the slot's cores
+    plus vector lanes within each, one directive.
+  - **REDUCTION** -- the ONLY carried state is an accumulator (sum, max/min, count).
+    Same directive plus `reduction(+:acc)` -- never a shared variable, no hand-built
+    per-thread partial arrays; the clause also authorizes the FP reassociation the compiler
+    refuses on its own (no `-ffast-math`) -- keep it only while the answer stays inside
+    tolerance.
+  - **RECURRENCE** -- the written array is read at ANOTHER iteration's subscript: `x(i-1)`,
+    an in-place stencil, a tridiagonal solve, a wavefront sweep. Threading THIS loop is
+    wrong, not slow. Fission the independent statements into their own (threaded) loop and
+    keep the chain serial -- or find the parallel dimension the chain does not cross
+    (independent rows/systems; a wavefront's diagonals), or give a stencil a separate
+    output array.
+  - **SCATTER** -- writes through an index array (`a(idx(i))`): duplicate indices collide.
+    Per-thread copies merged after the loop, or `omp atomic` on the update (often slower
+    than serial), or leave it serial.
+  `schedule(static)` is the default and right for uniform iterations; `dynamic`/`guided`
+  only when per-iteration cost varies.
 - **Split the two halves when the shape demands it**: `parallel for` on the outer loop with
   `simd` on the unit-stride inner loop when they are different loops; `simd` alone on a tiny
   trip count where spawn overhead beats the win.

@@ -14,7 +14,8 @@ comes from the compiler AND from threads.
   -fno-signed-zeros -fstrict-aliasing`. NO `-ffast-math`: compiler will not reassociate FP.
 - `build:` keeps only `-I -D -l -L`; every other token silently DROPPED.
 - Grading is MULTI-CORE: the timed run owns its slot's physical cores (24 here, no SMT),
-  `OMP_NUM_THREADS` preset to match. The default move is `#pragma omp parallel for simd` with
+  `OMP_NUM_THREADS` preset to match. The default move is CLASSIFY FIRST (parallel / reduction / recurrence / scatter --
+  the openmp page's four bins), then `#pragma omp parallel for simd` with
   `reduction(...)` on the outermost independent big loop (or `par_unseq`, below); tiny trip
   counts lose to spawn overhead. Full recipe in the openmp page.
 - `<execution>` links `-ltbb` for you, nothing to declare. `par` spreads across the slot's
