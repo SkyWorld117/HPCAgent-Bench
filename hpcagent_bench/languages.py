@@ -490,7 +490,18 @@ def resolve_library_dir(soname: str) -> Optional[str]:
         for directory in sorted(glob.glob(pattern)):
             if os.path.exists(os.path.join(directory, f"lib{soname}.so")):
                 return directory
-    cache = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True).stdout
+    # ldconfig lives in /sbin, which is NOT on a non-root user's PATH on every distro -- the
+    # beverin login node raises FileNotFoundError here, and an unguarded spawn turns "one more
+    # place to look" into a crash that takes down every caller (scripts/verify_toolchain.py could
+    # not report a single library row). Absent ldconfig means no cache to consult, not an error.
+    for ldconfig in ("ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"):
+        try:
+            cache = subprocess.run([ldconfig, "-p"], capture_output=True, text=True, check=False).stdout
+            break
+        except OSError:
+            continue
+    else:
+        return None
     for line in cache.splitlines():
         _, _, path = line.partition("=> ")
         directory = os.path.dirname(path.strip())

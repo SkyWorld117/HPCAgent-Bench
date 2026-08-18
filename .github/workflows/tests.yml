@@ -97,16 +97,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -265,12 +259,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Same ccache + TBB rationale as `unit`; the key is namespaced by github.job, so this job
+      # Same ccache rationale as `unit`; the key is namespaced by github.job, so this job
       # warms its own cache rather than contending for that one.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -454,16 +448,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -540,16 +528,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -731,16 +713,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -859,16 +835,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
@@ -1097,16 +1067,10 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G

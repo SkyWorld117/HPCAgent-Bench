@@ -27,9 +27,17 @@ runs:
         #             every SDFG pays a full configure. Nothing reports it; the build is just slow.
         #   ccache -- DaCe knows nothing about ccache. It helps only through a compiler launcher or
         #             a PATH shim, so the package has to exist before either can point at it.
+        # libtbb-dev is the same shape of silent failure, and the reason it lives HERE rather than
+        # in the jobs that noticed: libstdc++ picks its parallel <execution> backend per TU with
+        # __has_include(<tbb/tbb.h>), so with the headers absent the par/par_unseq policies compile
+        # and run SEQUENTIALLY under a parallel name -- a wrong measurement, not a build failure.
+        # languages.stdpar_link_flags asks the compiler that same question before appending -ltbb,
+        # so this package is what actually turns the cpp_isopar column parallel. It used to be
+        # installed inline by seven jobs and missed by port-fidelity and gpu, which build C++ all
+        # the same. The graded image installs it too (ce-images/amd/Dockerfile).
         sudo apt-get update
         sudo apt-get install -y build-essential gfortran pkg-config libopenblas-dev libfftw3-dev \
-          liblapacke-dev ninja-build ccache
+          liblapacke-dev ninja-build ccache libtbb-dev
 
     - name: GNU Fortran matching the graded image
       shell: bash
@@ -45,8 +53,10 @@ runs:
         # The WHOLE GNU family moves together, gcc and g++ included. That used to be a
         # Fortran-only pin, but compilers.yaml now builds C at -std=c23, and the runner's default
         # gcc is 13: `gcc-13 -std=c23` is "unrecognized command line option ... did you mean
-        # '-std=c2x'?" (measured), so every GNU C build would fail on CI while the graded
-        # toolchain (GCC 16) compiles them clean. /usr/local/bin precedes /usr/bin on the runner's
+        # '-std=c2x'?" (measured), so every GNU C build would fail on CI. The major is the
+        # one the GRADED image pins (containers/cluster/ce-images/amd/Dockerfile, GCC 16 +
+        # LLVM 22), out of the same ubuntu-toolchain-r/test PPA, so CI answers for the
+        # compiler the agent is actually graded on. /usr/local/bin precedes /usr/bin on the runner's
         # PATH, and compilers.yaml names the driver unversioned, so the symlink is what makes it
         # take effect.
         #
@@ -59,7 +69,7 @@ runs:
         # warnings ratchet, test_frameworks, test_default_datatype_tolerance and Pluto's configure
         # in one go. Complete the directory clang picks rather than pinning it to a path.
         set -euo pipefail
-        GCC_MAJOR=15
+        GCC_MAJOR=16
         sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         sudo apt-get update
         sudo apt-get install -y "gcc-${GCC_MAJOR}" "g++-${GCC_MAJOR}" "gfortran-${GCC_MAJOR}" \
