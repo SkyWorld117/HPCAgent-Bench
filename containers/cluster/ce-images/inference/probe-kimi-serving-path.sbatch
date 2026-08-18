@@ -41,6 +41,13 @@ export TP_SIZE="${TP_SIZE:-4}"
 export PP_SIZE="${PP_SIZE:-4}"
 export TOOL_PARSER="${TOOL_PARSER:-kimi_k2}"
 export REASONING_PARSER="${REASONING_PARSER:-kimi_k2}"
+# AITER is installed in the image but nothing enables it: 598954 served on TRITON_MLA with all
+# sixteen VLLM_ROCM_USE_AITER* knobs unset, so both dominant costs -- MLA attention and the
+# expert GEMM -- ran on Triton. USE_AITER=1 flips the master switch, which turns on the MHA/MLA/
+# MOE/RMSNORM/ROPE sub-paths that default to following it. Point AITER_JIT_DIR at a prebuilt
+# cache or the first request pays a multi-minute kernel build (that is what killed 598021).
+export USE_AITER="${USE_AITER:-0}"
+export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit}"
 export API_PORT="${API_PORT:-8000}"
 export MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 export READY_TIMEOUT="${READY_TIMEOUT:-5400}"
@@ -63,9 +70,21 @@ NNODES=$((TP_SIZE * PP_SIZE / GPUS_PER_NODE))
     exit 1
 }
 
-PG_PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/external-eager-pg-patch"
-[[ -d "${PG_PATCH_DIR}" ]] || { echo "FAIL: no eager-PG patch at ${PG_PATCH_DIR}" >&2; exit 1; }
-MOE_DIR="$(dirname "${PG_PATCH_DIR}")/moe-configs"
+# BASH_SOURCE points at the spooled copy under /var/spool/slurmd once slurm runs the script,
+# so the submit directory is the only reliable anchor back to the repo (599092).
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+PG_PATCH_REL="containers/cluster/ce-images/inference/external-eager-pg-patch"
+for cand in "${PG_PATCH_DIR:-}" "${SUBMIT_DIR}/external-eager-pg-patch" "${SUBMIT_DIR}/${PG_PATCH_REL}"; do
+    if [[ -n "${cand}" && -f "${cand}/sitecustomize.py" ]]; then
+        PG_PATCH_DIR="${cand}"
+        break
+    fi
+done
+test -f "${PG_PATCH_DIR:-}/sitecustomize.py" 2>/dev/null || {
+    echo "FAIL: no sitecustomize.py found from SLURM_SUBMIT_DIR=${SUBMIT_DIR}" >&2
+    exit 2
+}
+MOE_DIR="${PG_PATCH_DIR%/external-eager-pg-patch}/moe-configs"
 [[ -d "${MOE_DIR}" ]] && export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-${MOE_DIR}}"
 export PG_PATCH_DIR
 
@@ -90,6 +109,11 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export PYTHONPATH="${PG_PATCH_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 unset VLLM_PORT
+if [[ "${USE_AITER}" == "1" ]]; then
+    export VLLM_ROCM_USE_AITER=1
+    export TORCH_BLAS_PREFER_HIPBLASLT=1
+    mkdir -p "${AITER_JIT_DIR}"
+fi
 
 MODEL_PATH="$(python3 - <<'PY' | tail -n 1
 import os
@@ -176,6 +200,11 @@ until curl -fsS --max-time 10 "http://${MASTER}:${API_PORT}/v1/models" -o "${RUN
     sleep 15
 done
 echo "ready: ${MASTER}"
+
+stage "which kernels the server actually picked"
+grep -ho "Using .*backend[^,]*\|moe_backend='"'"'[a-z]*'"'"'\|linear_backend='"'"'[a-z]*'"'"'" \
+    "${RUN_DIR}"/vllm-rank0.log | sort -u | sed 's/^/  /' || true
+echo "  USE_AITER=${USE_AITER} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-unset}"
 
 stage "warming the engine so no JIT or dynamo compile lands inside a measured window"
 curl -fsS --max-time "${FIRST_TOKEN_TIMEOUT}" "http://${MASTER}:${API_PORT}/v1/completions" \

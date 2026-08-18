@@ -64,6 +64,14 @@ PY
     export MODEL_PATH
     echo "model: ${MODEL_PATH}"
 
+    # benchmark_moe.py imports ray at module load and the image does not ship it (599091). It is
+    # never initialized here -- the search runs sequentially on one GPU -- but the import must
+    # resolve for the module to load at all.
+    if ! python3 -c "import ray" 2>/dev/null; then
+        python3 -m pip install --no-cache-dir --quiet --target "${RUN_DIR}/pydeps" ray
+        export PYTHONPATH="${RUN_DIR}/pydeps:${PYTHONPATH:-}"
+    fi
+
     cd "${RUN_DIR}"
     python3 - <<PY
 import importlib.util
