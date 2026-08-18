@@ -791,7 +791,10 @@ def _fft_inline_stmts(tname: str, sname: str, taxes: List[int], rank: int, inver
     d = [f"{p}_d{i}" for i in range(rank)]
     lines: List[str] = [f"{d[i]} = {sname}.shape[{i}]" for i in range(rank)]
     if alloc:
-        lines.append(f"{tname} = np.zeros(({', '.join(d)},), np.complex128)")
+        # The transform's OWN complex width, from the same real_dtype the phase divisor uses --
+        # a hardcoded complex128 doubles an fp32 port's working precision and turns the store
+        # back into its complex64 target into a narrowing copy.
+        lines.append(f"{tname} = np.zeros(({', '.join(d)},), np.{dtypes.complex_dtype_for(real_dtype)})")
     o = [f"{p}_k{i}" for i in range(rank)]
     ind = ""
     for i in range(rank):
@@ -898,6 +901,8 @@ def _mgrid_inline_stmts(tnames: List[str], slices: List[ast.AST], ctr: int) -> O
     lines = []
     for m in range(k):
         rshape = ", ".join(exts[mm] if mm == m else "1" for mm in range(k))
+        # int64 is numpy's OWN mgrid dtype (integer slice bounds -> the platform int), not a
+        # choice this lowering makes -- the broadcast zeros must not widen or narrow it.
         lines.append(f"{tnames[m]} = np.arange({los[m]}, {his[m]}).reshape({rshape}) + "
                      f"np.zeros(({full},), np.int64)")
     return ast.parse("\n".join(lines)).body
@@ -1845,12 +1850,22 @@ class _HistogramHoister(ast.NodeTransformer):
         else:
             lo_s, hi_s = f"({ast.unparse(lo)})", f"({ast.unparse(hi)})"
         temp = f"{p}_o"
-        add = f"{ast.unparse(weights)}[{p}_i]" if weights is not None else "1.0"
+        # numpy's histogram is int64 COUNTS when unweighted and the weights' own dtype when
+        # weighted -- never an unconditional float64, which both lies about the unweighted
+        # result and narrows a float32 weighted one. A non-Name weights expression is hoisted
+        # so the dtype can be read off a name rather than re-evaluating the expression.
+        if weights is None:
+            wdtype, add = "np.int64", "1"
+        else:
+            wname = weights.id if isinstance(weights, ast.Name) else f"{p}_w"
+            if not isinstance(weights, ast.Name):
+                lines.append(f"{wname} = {ast.unparse(weights)}")
+            wdtype, add = f"{wname}.dtype", f"{wname}[{p}_i]"
         # numpy drops samples outside [lo, hi] (only the last bin is closed); the clamp alone
         # would fold them into bin 0 / bin-1 instead. Guard the increment. For an auto lo/hi
         # (a.min()/a.max()) every element is in range, so the guard is a no-op there.
         lines += [
-            f"{temp} = np.zeros({bins}, np.float64)", f"for {p}_i in range({a}.shape[0]):",
+            f"{temp} = np.zeros({bins}, {wdtype})", f"for {p}_i in range({a}.shape[0]):",
             f"    if {lo_s} <= {a}[{p}_i] and {a}[{p}_i] <= {hi_s}:",
             f"        {p}_b = int(({a}[{p}_i] - {lo_s}) * {bins} / ({hi_s} - {lo_s}))",
             f"        if {p}_b < 0: {p}_b = 0", f"        if {p}_b > {bins} - 1: {p}_b = {bins} - 1",
@@ -1934,26 +1949,39 @@ class _HistogramInline(ast.NodeTransformer):
         return self._hoist(node)
 
 
-def _int_matmul_stmts(temp: str, a: str, b: str, ra: int, rb: int, ctr: int) -> List[str]:
-    """Source lines for an INTEGER matmul (``a @ b``) as an explicit loop.
-    An int64 accumulator holds exact integer sums (numba's BLAS-backed ``@`` is
-    float-only). Raises for ranks numba could not express even after batching."""
+def _int_matmul_acc_dtype(aid: str, bid: str, ka: str, kb: str) -> str:
+    """Accumulator dtype for an integer ``a @ b``, as source the emitted program evaluates.
+
+    numpy's ``@`` returns ``result_type(a, b)``, so the accumulator must too. A hardcoded
+    ``np.int64`` stored every int32 port's result through a NARROWING copy, which DaCe
+    cannot emit at all (comet_int4_gemm died on ``dace::CopyNDDynamic<int, 1, 0, 2>::
+    Dynamic::Copy(int64_t*, int*, ...)``). ``np.result_type``/``np.promote_types`` do not
+    survive the DaCe frontend, and this pass knows operand KINDS but never widths, so the
+    promotion is spelled as an operand's ``.dtype`` -- the form the lowerings here already
+    emit. A bool operand never decides it: ``bool @ int32`` is int32 in numpy."""
+    return f"{bid}.dtype" if (ka == "bool" and kb != "bool") else f"{aid}.dtype"
+
+
+def _int_matmul_stmts(temp: str, a: str, b: str, ra: int, rb: int, ctr: int, acc: str) -> List[str]:
+    """Source lines for an INTEGER matmul (``a @ b``) as an explicit loop, accumulating in
+    ``acc`` (:func:`_int_matmul_acc_dtype`). numba's BLAS-backed ``@`` is float-only, so the
+    loop is the lowering. Raises for ranks numba could not express even after batching."""
     p = f"__mm{ctr}"
     if ra == 1 and rb == 1:  # dot -> scalar
         return [f"{temp} = 0", f"for {p}_k in range({a}.shape[0]):", f"    {temp} += {a}[{p}_k] * {b}[{p}_k]"]
     if ra == 1 and rb == 2:  # (K,) @ (K, N) -> (N,)
         return [
-            f"{temp} = np.zeros({b}.shape[1], np.int64)", f"for {p}_j in range({b}.shape[1]):",
+            f"{temp} = np.zeros({b}.shape[1], {acc})", f"for {p}_j in range({b}.shape[1]):",
             f"    for {p}_k in range({a}.shape[0]):", f"        {temp}[{p}_j] += {a}[{p}_k] * {b}[{p}_k, {p}_j]"
         ]
     if ra == 2 and rb == 1:  # (M, K) @ (K,) -> (M,)
         return [
-            f"{temp} = np.zeros({a}.shape[0], np.int64)", f"for {p}_i in range({a}.shape[0]):",
+            f"{temp} = np.zeros({a}.shape[0], {acc})", f"for {p}_i in range({a}.shape[0]):",
             f"    for {p}_k in range({a}.shape[1]):", f"        {temp}[{p}_i] += {a}[{p}_i, {p}_k] * {b}[{p}_k]"
         ]
     if ra == 2 and rb == 2:  # (M, K) @ (K, N) -> (M, N)
         return [
-            f"{temp} = np.zeros(({a}.shape[0], {b}.shape[1]), np.int64)", f"for {p}_i in range({a}.shape[0]):",
+            f"{temp} = np.zeros(({a}.shape[0], {b}.shape[1]), {acc})", f"for {p}_i in range({a}.shape[0]):",
             f"    for {p}_j in range({b}.shape[1]):", f"        for {p}_k in range({a}.shape[1]):",
             f"            {temp}[{p}_i, {p}_j] += {a}[{p}_i, {p}_k] * {b}[{p}_k, {p}_j]"
         ]
@@ -1975,7 +2003,8 @@ class _IntMatmulHoister(ast.NodeTransformer):
         self.pre: List[ast.stmt] = []
 
     def _lower(self, a: ast.expr, b: ast.expr):
-        if _dtype_kind(a, self.dtypes) not in ("int", "bool") or _dtype_kind(b, self.dtypes) not in ("int", "bool"):
+        ka, kb = _dtype_kind(a, self.dtypes), _dtype_kind(b, self.dtypes)
+        if ka not in ("int", "bool") or kb not in ("int", "bool"):
             return None  # not (definitely) an integer matmul -> leave for numba's float @
         ra, rb = expr_rank(a, self.ranks), expr_rank(b, self.ranks)
         if ra is None or rb is None:
@@ -1990,7 +2019,8 @@ class _IntMatmulHoister(ast.NodeTransformer):
         if not isinstance(b, ast.Name):
             pre.append(f"{bid} = {ast.unparse(b)}")
         temp = f"{p}_o"
-        self.pre.extend(ast.parse("\n".join(pre + _int_matmul_stmts(temp, aid, bid, ra, rb, self.ctr))).body)
+        acc = _int_matmul_acc_dtype(aid, bid, ka, kb)
+        self.pre.extend(ast.parse("\n".join(pre + _int_matmul_stmts(temp, aid, bid, ra, rb, self.ctr, acc))).body)
         self.ctr += 1
         return ast.Name(id=temp, ctx=ast.Load())
 
@@ -2449,8 +2479,18 @@ def _fd_step(precision: Optional[str] = None) -> str:
     numpy finfo and falls back to the fp64 rule -- curve_fit at fp8 isn't
     emitted, so a wrong-but-fp64 step is the status quo, not a regression.
     """
-    dtype = dtypes.canonical(precision) if precision else "float64"
-    return repr(math.sqrt(dtypes.float_eps(dtype)))
+    return repr(math.sqrt(dtypes.float_eps(_working_float_dtype(precision))))
+
+
+def _working_float_dtype(precision: Optional[str] = None) -> str:
+    """The WORKING float dtype a lowering emits its own scratch in, from ``precision``.
+
+    Same rule :func:`_fd_step` reads its epsilon off, and for the same reason: these are
+    source-text emissions, so a lowering that hardcodes ``float64`` both runs an fp32 kernel's
+    scratch at double width and makes the store back into its fp32 target a narrowing copy.
+    ``None`` (no declared precision) keeps fp64, which is the status quo for an unannotated port.
+    """
+    return dtypes.canonical(precision) if precision else "float64"
 
 
 def _list_display_elts(node: ast.AST) -> Optional[List[ast.expr]]:
@@ -2721,15 +2761,19 @@ def _curve_fit_lm_lines(popt: str,
     """
     n, m = f"{p0}.shape[0]", f"{y}.shape[0]"
     i, c, a, b, it = f"{pfx}_i", f"{pfx}_c", f"{pfx}_a", f"{pfx}_b", f"{pfx}_it"
+    # Every array below is this fit's own scratch, so it is allocated at the WORKING precision
+    # the step size already tracks -- not a hardcoded fp64, which would run an fp32 fit at
+    # double width and then narrow on the store into popt's fp32 target.
+    wf = f"np.{_working_float_dtype(precision)}"
     return [
-        f"{popt} = np.zeros(({n},), dtype=np.float64)",
-        f"{pfx}_jac = np.zeros(({m}, {n}), dtype=np.float64)",
-        f"{pfx}_ata = np.zeros(({n}, {n}), dtype=np.float64)",
-        f"{pfx}_atad = np.zeros(({n}, {n}), dtype=np.float64)",
-        f"{pfx}_grad = np.zeros(({n},), dtype=np.float64)",
-        f"{pfx}_rhs = np.zeros(({n},), dtype=np.float64)",
-        f"{pfx}_pt = np.zeros(({n},), dtype=np.float64)",
-        f"{pfx}_r = np.zeros(({m},), dtype=np.float64)",
+        f"{popt} = np.zeros(({n},), dtype={wf})",
+        f"{pfx}_jac = np.zeros(({m}, {n}), dtype={wf})",
+        f"{pfx}_ata = np.zeros(({n}, {n}), dtype={wf})",
+        f"{pfx}_atad = np.zeros(({n}, {n}), dtype={wf})",
+        f"{pfx}_grad = np.zeros(({n},), dtype={wf})",
+        f"{pfx}_rhs = np.zeros(({n},), dtype={wf})",
+        f"{pfx}_pt = np.zeros(({n},), dtype={wf})",
+        f"{pfx}_r = np.zeros(({m},), dtype={wf})",
         f"for {i} in range({n}):",
         f"    {popt}[{i}] = {p0}[{i}]",
         f"{pfx}_lam = 0.001",
@@ -3274,7 +3318,37 @@ class _LinalgInline(ast.NodeTransformer):
         return self._hoist(node)
 
 
-def _eigh_jacobi_lines(w: str, y: str, c: str, n: str, p: str, is_real: bool = False) -> List[str]:
+def _eigh_w_dtype(is_real: bool, names, array_dtypes: Dict[str, str]) -> Optional[str]:
+    """Eigenvalue dtype for an ``eigh`` lowering, or ``None`` to let the loop use the input's
+    own ``.dtype``.
+
+    numpy's eigenvalues carry the REAL half of the operand dtype. A real operand says that
+    itself (``c.dtype``), so this returns ``None`` and the lowering emits the runtime form.
+    A COMPLEX operand cannot: ``.real.dtype`` is not something the DaCe frontend parses, so
+    the width is resolved HERE from the declared array dtypes -- the same rule and the same
+    fp64-when-unresolvable fallback :func:`_fft_real_dtype` uses, which matters because a
+    precision sweep remaps the dtype tables but never the literals in an emitted body.
+    """
+    if is_real:
+        return None
+    for nm in names:
+        dtype = array_dtypes.get(nm) if nm else None
+        if dtype is None:
+            continue
+        try:
+            return f"np.{dtypes.real_component_dtype(dtype)}"
+        except KeyError:
+            return f"np.{dtypes.canonical(dtype)}"
+    return "np.float64"
+
+
+def _eigh_jacobi_lines(w: str,
+                       y: str,
+                       c: str,
+                       n: str,
+                       p: str,
+                       is_real: bool = False,
+                       w_dtype: Optional[str] = None) -> List[str]:
     """Source lines diagonalising Hermitian ``n``x``n`` matrix ``c`` by cyclic
     complex Jacobi into eigenvalues ``w`` (ascending real, shape ``(n,)``) and
     eigenvectors ``y`` (unitary columns). Each sweep rotates every off-diagonal
@@ -3297,6 +3371,9 @@ def _eigh_jacobi_lines(w: str, y: str, c: str, n: str, p: str, is_real: bool = F
     # extra working copy is needed (and the C/Fortran backends need not infer a
     # copy-temp's complex dtype).
     a, v = c, f"{p}_jv"
+    # A real input's eigenvalues are its own dtype; a complex one's real half is not spellable
+    # in emitted source, so the caller resolves it and passes w_dtype.
+    wd_default = f"{c}.dtype"
     off_ap, app_ap, aqq_ap = f"{a}[{p}_pp, {p}_qq]", f"{a}[{p}_pp, {p}_pp]", f"{a}[{p}_qq, {p}_qq]"
     apq_ap, diag_ap = f"{p}_apq", f"{a}[{p}_i, {p}_i]"
     off_re = off_ap if is_real else f"{off_ap}.real"
@@ -3349,7 +3426,10 @@ def _eigh_jacobi_lines(w: str, y: str, c: str, n: str, p: str, is_real: bool = F
         f"                {p}_vkq = {v}[{p}_k, {p}_qq]",
         f"                {v}[{p}_k, {p}_pp] = {p}_c * {p}_vkp - {p}_s * np.conj({p}_ephi) * {p}_vkq",
         f"                {v}[{p}_k, {p}_qq] = {p}_s * {p}_ephi * {p}_vkp + {p}_c * {p}_vkq",
-        f"{w} = np.zeros({n}, np.float64)",
+        # Eigenvalues carry the REAL half of the input dtype (numpy: eigh(complex64) -> float32,
+        # eigh(float32) -> float32). A real input spells that as its own .dtype; a complex one
+        # is resolved by the caller (:func:`_eigh_w_dtype`), never assumed fp64 here.
+        f"{w} = np.zeros({n}, {w_dtype or wd_default})",
         f"for {p}_i in range({n}):",
         f"    {w}[{p}_i] = {diag_re}",
         f"for {p}_i in range({n}):",  # selection-sort ascending, permuting eigenvectors
@@ -3377,7 +3457,8 @@ def _eigh_stmts(w: str,
                 hi: str,
                 p: str,
                 native_std: bool = False,
-                is_real: bool = False) -> List[str]:
+                is_real: bool = False,
+                w_dtype: Optional[str] = None) -> List[str]:
     """Source lines for ``w, v = eigh(a[, b])[subset lo:hi]`` (ascending).
 
     The generalized Hermitian problem ``a x = w b x`` reduces to standard form
@@ -3403,8 +3484,8 @@ def _eigh_stmts(w: str,
     else:
         pre = [f"{p}_C = {a}.copy()"]
         cname = f"{p}_C"
-    std = ([f"{p}_wa, {p}_ya = np.linalg.eigh({cname})"]
-           if native_std else _eigh_jacobi_lines(f"{p}_wa", f"{p}_ya", cname, f"{a}.shape[0]", p, is_real=is_real))
+    std = ([f"{p}_wa, {p}_ya = np.linalg.eigh({cname})"] if native_std else _eigh_jacobi_lines(
+        f"{p}_wa", f"{p}_ya", cname, f"{a}.shape[0]", p, is_real=is_real, w_dtype=w_dtype))
     lines = pre + std
     xname = f"{p}_xa" if b is not None else f"{p}_ya"
     if b is not None:
@@ -3424,7 +3505,8 @@ def _eigh_c_stmts(w: str,
                   hi: str,
                   p: str,
                   eigenvalues_only: bool = False,
-                  is_real: bool = False) -> List[str]:
+                  is_real: bool = False,
+                  w_dtype: Optional[str] = None) -> List[str]:
     """Fully self-contained loop lowering of standard/generalized complex-
     Hermitian ``eigh`` for the C/Fortran backends, which have no ``np.linalg``
     and no matmul lowering for the ``L^-H`` conjugate-transpose operand. Emits
@@ -3495,7 +3577,7 @@ def _eigh_c_stmts(w: str,
             f"    for {p}_cj in range({n}):",
             f"        {cname}[{p}_ci, {p}_cj] = {a}[{p}_ci, {p}_cj]",
         ]
-    lines += _eigh_jacobi_lines(f"{p}_wa", f"{p}_ya", cname, n, p, is_real=is_real)
+    lines += _eigh_jacobi_lines(f"{p}_wa", f"{p}_ya", cname, n, p, is_real=is_real, w_dtype=w_dtype)
     if eigenvalues_only:  # eigvalsh: only the eigenvalue vector, no back-transform / U output
         lines.append(f"{w} = {p}_wa" if lo == "None" else f"{w} = {p}_wa[{lo}:{hi}]")
         return lines
@@ -3545,11 +3627,18 @@ class _EighLoopRewriter(ast.NodeTransformer):
     runs before helper inlining assigns local ranks/dtypes, so only names the
     manifest itself declares are known; everything else stays the safe unknown."""
 
-    def __init__(self, alias_names: set, dtypes: Dict[str, str], kernel_name: Optional[str] = None):
+    def __init__(self,
+                 alias_names: set,
+                 dtypes: Dict[str, str],
+                 kernel_name: Optional[str] = None,
+                 array_dtypes: Optional[Dict[str, str]] = None):
         self.alias_names = alias_names
         self.declared = dtypes
         self.dtypes = dtypes
         self.kernel_name = kernel_name
+        #: Declared RAW array dtypes (widths, not kinds), for the eigenvalue dtype a complex
+        #: operand cannot spell in emitted source (:func:`_eigh_w_dtype`).
+        self.array_dtypes = array_dtypes or {}
         self._ctr = 0
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
@@ -3610,7 +3699,9 @@ class _EighLoopRewriter(ast.NodeTransformer):
         # Standard form only (b_node None): a generalized C is complex-capable regardless of a/b's
         # own dtype (see _eigh_c_stmts).
         is_real = b_node is None and _eigh_operand_is_real(a_node, b_node, self.dtypes)
-        lines = pre + _eigh_c_stmts(w, v, aname, bname, lo, hi, p, eigenvalues_only=(v is None), is_real=is_real)
+        w_dtype = _eigh_w_dtype(is_real, (aname, bname), self.array_dtypes)
+        lines = pre + _eigh_c_stmts(
+            w, v, aname, bname, lo, hi, p, eigenvalues_only=(v is None), is_real=is_real, w_dtype=w_dtype)
         return [ast.copy_location(st, node) for st in ast.parse("\n".join(lines)).body]
 
 
@@ -3757,10 +3848,16 @@ class _EighInline(ast.NodeTransformer):
     consulted the same way :class:`_LinalgInline` consults it for its ``hermitian``
     flag -- see :func:`_eigh_operand_is_real`."""
 
-    def __init__(self, ranks: Dict[str, int], alias_names: set, dtypes: Dict[str, str]):
+    def __init__(self,
+                 ranks: Dict[str, int],
+                 alias_names: set,
+                 dtypes: Dict[str, str],
+                 array_dtypes: Optional[Dict[str, str]] = None):
         self.ranks = ranks
         self.alias_names = alias_names
         self.dtypes = dtypes
+        #: Declared array dtypes, for the eigenvalue width a complex operand cannot spell.
+        self.array_dtypes = array_dtypes or {}
         self.changed = False
         self._ctr = 0
 
@@ -3811,7 +3908,8 @@ class _EighInline(ast.NodeTransformer):
         # Standard form only (b_node None): a generalized C is complex-capable regardless of a/b's
         # own dtype (see _eigh_stmts).
         is_real = b_node is None and _eigh_operand_is_real(a_node, b_node, self.dtypes)
-        lines = pre + _eigh_stmts(w, vtmp, aname, bname, lo, hi, p, is_real=is_real)
+        w_dtype = _eigh_w_dtype(is_real, (aname, bname), self.array_dtypes)
+        lines = pre + _eigh_stmts(w, vtmp, aname, bname, lo, hi, p, is_real=is_real, w_dtype=w_dtype)
         self.changed = True
         return [ast.copy_location(s, node) for s in ast.parse("\n".join(lines)).body]
 
@@ -4612,7 +4710,7 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
             _BoolOpIfToChain(),
             _NormalizeNegativeAxis(ranks),
             _IxWriteToLoop(ranks, dtypes),
-            _EighInline(ranks, eigh_aliases, dtypes),
+            _EighInline(ranks, eigh_aliases, dtypes, kir_array_dtypes),
             _LinalgInline(ranks, dtypes, lower_linalg, lower_solve_rhs_ranks),
             _ReshapeMatmulInline(ranks),
             _BatchedMatmulToLoop(ranks),

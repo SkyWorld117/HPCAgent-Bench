@@ -797,6 +797,41 @@ def _py_kir(name, src, arrays, syms, input_args):
                     scalars=[])
 
 
+def test_lowerings_size_their_temps_from_the_operands_not_a_fixed_width():
+    """No lowering may hardcode a temp's dtype: numpy sizes each result from its operands,
+    and a fixed width both changes the working precision and makes the store back into a
+    narrower target a copy DaCe cannot emit (comet_int4_gemm's CopyNDDynamic<int,...>).
+
+    Asserted on the emitted ``np.zeros`` dtype argument per lowering -- the declaration is
+    where the defect lives, so a round-trip that happens to agree would not pin it.
+    """
+    from numpyto_common.numpy_desugar import desugar_for_python_backend
+
+    # FFT: the transform's own complex width, not an unconditional complex128.
+    # A bare-Name target is the form that ALLOCATES; ``y[:] =`` writes an existing buffer.
+    fsrc = ("def k(x, y):\n"
+            "    t = np.fft.fft(x)\n"
+            "    y[:] = t\n")
+    fout = desugar_for_python_backend(
+        fsrc, _py_kir("k", fsrc, [("x", "complex64", ("N", )), ("y", "complex64", ("N", ))], [], ["x", "y"]))
+    assert "np.complex128" not in fout, f"fp32 FFT still allocates complex128:\n{fout}"
+    assert "np.complex64" in fout
+
+    # histogram: int64 COUNTS unweighted (numpy's dtype), the weights' dtype when weighted.
+    hsrc = ("def k(r, h):\n"
+            "    h[:] = np.histogram(r, 8)[0]\n")
+    hout = desugar_for_python_backend(
+        hsrc, _py_kir("k", hsrc, [("r", "float64", ("N", )), ("h", "int64", ("B", ))], [], ["r", "h"]))
+    assert "np.int64" in hout and "np.float64)" not in hout, f"unweighted counts are not int64:\n{hout}"
+    wsrc = ("def k(r, w, h):\n"
+            "    h[:] = np.histogram(r, 8, weights=w)[0]\n")
+    wout = desugar_for_python_backend(
+        wsrc,
+        _py_kir("k", wsrc, [("r", "float64", ("N", )), ("w", "float32", ("N", )), ("h", "float32", ("B", ))], [],
+                ["r", "w", "h"]))
+    assert "w.dtype" in wout, f"weighted counts do not take the weights dtype:\n{wout}"
+
+
 def test_fft_desugar_lowers_npfft_to_dft_loops():
     """``np.fft.fft``/``ifft`` -> a naive-DFT loop nest (no np.fft survives;
     numba cannot type np.fft at all)."""
@@ -991,6 +1026,34 @@ def test_int_matmul_lowers_but_float_matmul_kept():
     assert "@" in fout  # float matmul untouched
 
 
+def test_int_matmul_accumulates_in_the_operand_dtype_not_int64():
+    """numpy's ``@`` returns ``result_type(a, b)``, so the lowered accumulator must too.
+
+    A hardcoded ``np.int64`` widened every int32 port, and storing that back through
+    ``out[...] = <int64>`` is a NARROWING copy DaCe cannot emit (comet_int4_gemm died on
+    ``dace::CopyNDDynamic<int, 1, 0, 2>::Dynamic::Copy(int64_t*, int*, ...)``). Asserted on
+    the emitted ``np.zeros`` dtype argument, not on a round-trip: the whole defect is
+    which dtype the temp is DECLARED with.
+    """
+    from numpyto_common.numpy_desugar import desugar_for_python_backend
+    src = ("def k(li, rj, out):\n"
+           "    out[:] = li @ rj\n")
+    out = desugar_for_python_backend(
+        src,
+        _py_kir("k", src, [("li", "int32", ("N", "N")), ("rj", "int32", ("N", "N")), ("out", "int32", ("N", "N"))], [],
+                ["li", "rj", "out"]))
+    assert "np.int64" not in out, f"accumulator still hardcodes int64:\n{out}"
+    assert "li.dtype" in out, f"accumulator does not take the operand dtype:\n{out}"
+    # A bool operand never decides the dtype -- numpy's bool @ int32 is int32.
+    bsrc = ("def k(mask, rj, out):\n"
+            "    out[:] = mask @ rj\n")
+    bout = desugar_for_python_backend(
+        bsrc,
+        _py_kir("k", bsrc, [("mask", "bool", ("N", "N")), ("rj", "int32", ("N", "N")), ("out", "int32", ("N", "N"))],
+                [], ["mask", "rj", "out"]))
+    assert "rj.dtype" in bout and "mask.dtype" not in bout, f"bool operand decided the dtype:\n{bout}"
+
+
 def test_reshape_batched_matmul_lowers():
     """doitgen's reshape(reshape(A,(NR,NQ,1,NP)) @ C4, (NR,NQ,NP)) -> contraction."""
     from numpyto_common.numpy_desugar import desugar_for_python_backend
@@ -1012,7 +1075,7 @@ def test_reshape_batched_matmul_lowers():
 def test_int_matmul_unsupported_rank_raises():
     from numpyto_common.numpy_desugar import _int_matmul_stmts, DesugarError
     with pytest.raises(DesugarError):
-        _int_matmul_stmts("out", "a", "b", 3, 2, 0)  # >2-D integer matmul: no lowering
+        _int_matmul_stmts("out", "a", "b", 3, 2, 0, "a.dtype")  # >2-D integer matmul: no lowering
 
 
 def test_reshape_matmul_non_2d_right_operand_raises():

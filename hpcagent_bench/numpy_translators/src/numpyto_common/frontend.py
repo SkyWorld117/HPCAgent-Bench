@@ -434,7 +434,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     # table exists until KIR helpers build one), but the rewriter propagates it across each
     # function's own assignments, so an operand built as a local is still resolvable.
     _eigh_dtypes = {name: _kind_of_dtype_str(dt) for name, dt in dtypes_raw.items()}
-    _EighLoopRewriter(_eigh_aliases, _eigh_dtypes, func_name).visit(tree)
+    _EighLoopRewriter(_eigh_aliases, _eigh_dtypes, func_name, dtypes_raw).visit(tree)
     # Canonicalise inf/nan spellings module-wide (see _NonFiniteNormalizer) so
     # both kernel and helpers are covered.
     _NonFiniteNormalizer().visit(tree)

@@ -276,6 +276,9 @@ _COMPLEX_REAL_COMPONENT = {
     "complex256": "float128",
 }
 
+#: The complex dtype each real dtype widens to -- the inverse of _COMPLEX_REAL_COMPONENT.
+_REAL_COMPLEX_COMPONENT = {real: cplx for cplx, real in _COMPLEX_REAL_COMPONENT.items()}
+
 
 def real_component_dtype(dtype: str) -> str:
     """The real dtype of one component of a complex ``dtype`` (``complex128`` -> ``float64``).
@@ -289,6 +292,20 @@ def real_component_dtype(dtype: str) -> str:
     if key not in _COMPLEX_REAL_COMPONENT:
         raise KeyError(f"{dtype!r} is not a complex dtype")
     return _COMPLEX_REAL_COMPONENT[key]
+
+
+def complex_dtype_for(real: str) -> str:
+    """The complex dtype holding ``real`` as each component (``float32`` -> ``complex64``).
+
+    The allocation counterpart of :func:`real_component_dtype`: a lowering that emits a complex
+    working buffer must size it from the transform's OWN precision, since a hardcoded
+    ``complex128`` in an fp32 port both doubles the working precision and makes the store back
+    into the fp32 target a narrowing copy. Raises ``KeyError`` for a non-real dtype.
+    """
+    key = canonical(real)
+    if key not in _REAL_COMPLEX_COMPONENT:
+        raise KeyError(f"{real!r} has no complex counterpart")
+    return _REAL_COMPLEX_COMPONENT[key]
 
 
 #: Machine epsilon of each real float dtype -- the ``numpy.finfo(x).eps`` constants inlined, so the
