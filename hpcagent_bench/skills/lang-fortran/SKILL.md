@@ -27,15 +27,11 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   (24 here, no SMT), `OMP_NUM_THREADS` preset to match. The default move is
   CLASSIFY FIRST (parallel / reduction / recurrence / scatter -- the openmp page's four
   bins), then `!$omp parallel do simd` with `reduction(...)` on the outermost loop the
-  classification cleared; tiny trip counts lose to spawn overhead. **End that loop with `end do` and write nothing after it.**
-  The closing directive is optional, and a mismatched one is a build error: `!$omp end parallel do`
-  after `!$omp parallel do simd` drops the `simd` and gfortran rejects it, blaming the closing
-  line. **Skip `default(none)`.** It buys nothing a correct `reduction(...)` does not already give
-  you, and forgetting one name is the single most common Fortran build failure on record (36 of 83
-  failing builds: `'x' not specified in enclosing 'parallel'`, once per variable). **One directive
-  per loop nest:** an `!$omp do` inside a region already opened by `!$omp parallel do` is
-  *"work-sharing region may not be closely nested inside of work-sharing"* -- thread the outer loop
-  and leave the inner one bare, or use `collapse`. Full recipe in the openmp page.
+  classification cleared; tiny trip counts lose to spawn overhead. Two traps are Fortran-only:
+  **end the loop with `end do` and write nothing after it** -- the closing directive is optional and
+  a mismatched one is rejected (`!$omp end parallel do` after `!$omp parallel do simd` drops the
+  `simd`, and gfortran blames the closing line); and **`aligned(...)` is simply unavailable** on ABI
+  dummies (*"must be POINTER, ALLOCATABLE, Cray pointer or C_PTR"*). Full recipe in the openmp page.
 - `do concurrent` THREADS on every family: gcc via `-ftree-parallelize-loops`, llvm via
   `-fdo-concurrent-to-openmp=host`, oneapi under `-fopenmp`. Details in the do-concurrent page.
 - Coarrays are NOT a lever: no `-fcoarray` flag is on any build, so coarray code does not even

@@ -95,38 +95,35 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 - **Split the two halves when the shape demands it**: `parallel for` on the outer loop with
   `simd` on the unit-stride inner loop when they are different loops; `simd` alone on a tiny
   trip count where spawn overhead beats the win.
-- **`omp unroll` belongs INSIDE a parallel region, on the loop you are already threading.**
-  It is a loop transformation, not a parallelization: on its own it asks the compiler for
-  something `-O3` already does, so it earns nothing by itself. It pays when it sits between a
-  worksharing directive and the loop, giving each thread a fatter body -- and there the clause
-  matters. `partial(n)` unrolls by `n` and leaves a loop behind, which is what the enclosing
-  `for` needs to distribute:
+- **`omp unroll` only pays inside a parallel region**, between the worksharing directive and the
+  loop, giving each thread a fatter body; alone it just asks for what `-O3` already does. Use
+  `partial(n)`, which leaves a loop for the enclosing `for` to distribute -- `full` deletes the
+  loop, so nothing remains to hand out. Order matters: the transformation goes AFTER the
+  worksharing directive, never before it. Fortran spells it `!$omp unroll partial(4)` (no closing
+  directive needed). Keep it only while `score` agrees.
 
         #pragma omp parallel for simd
         #pragma omp unroll partial(4)
         for (int64_t i = 0; i < n; i++)
             y[i] = a[i] * x[i] + b[i];
-
-  `full` deletes the loop entirely, so there is nothing left for `parallel for` to hand out --
-  it is only legal on an innermost loop with a small compile-time trip count, never directly
-  under a worksharing directive. Fortran spells them `!$omp unroll partial(4)` and
-  `!$omp end unroll`. Measure it: a fatter body helps a short chain and hurts once the loop
-  stops fitting, so keep it only while `score` agrees.
 - **`aligned(...)` claims: only on memory YOU allocated.** ABI input pointers carry natural
   alignment ONLY -- an `aligned(p:32|64)` clause or `__builtin_assume_aligned` on one is UB and
   the #1 crash cause on record (SIGSEGV at vector width, a full judge round trip lost). This is
   a fact about the data, not a risk to weigh. Your own `aligned_alloc` storage and the 256B
-  `workspace` are fair game. In Fortran the compiler stops you outright rather than miscompiling:
-  an assumed-size dummy in `aligned(...)` is *"must be POINTER, ALLOCATABLE, Cray pointer or
-  C_PTR"*, so the clause is simply not available on ABI arrays there.
+  `workspace` are fair game. (In Fortran the compiler rejects the clause outright on an ABI dummy
+  rather than miscompiling -- see the lang-fortran page.)
 - **`declare simd` on a helper called from the hot loop**, else that call is a vectorization
   barrier. **`collapse(n)`** when one loop is too short to fill cores or lanes; `private` /
   `lastprivate` to break a false dependence you cannot rewrite away.
-- **`default(none)` obliges you to name EVERY variable the region touches** -- miss one and the
-  build fails with `'x' not specified in enclosing 'parallel'`, once per variable. The one that
-  gets missed is the accumulator, because it belongs in `reduction(...)`, not in `shared` or
-  `private`. You are not required to write `default(none)` at all: leave it off and the default
-  sharing rules apply, which is the safe move here since the judge checks correctness anyway.
+- **Skip `default(none)`.** It obliges you to name every variable the region touches, and the one
+  missed is always the accumulator -- which belongs in `reduction(...)` anyway. Leaving it off
+  applies the default sharing rules and removes the most common build failure on record
+  (`'x' not specified in enclosing 'parallel'`, once per variable: 36 of 83 failed Fortran builds).
+- **A clause belongs to the construct that owns it, and one construct owns each loop.**
+  `schedule` is worksharing-only: on a bare `simd`, or on a non-rectangular `for`, it is a build
+  error. Likewise an `omp for` inside a region already opened by `parallel for` is *"work-sharing
+  region may not be closely nested inside of work-sharing"* -- thread the outer loop and leave the
+  inner bare, or use `collapse(n)`.
 
 ### Data-sharing clauses: every thread-local variable must be named
 
