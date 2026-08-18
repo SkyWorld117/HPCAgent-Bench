@@ -99,6 +99,36 @@ init:
     symmX: {shape: "(numSymm,)", dtype: int64}
     symmY: {shape: "(numSymm,)", dtype: int64}
     symmZ: {shape: "(numSymm,)", dtype: int64}
+    arealg: "(numElem,)"
+    delv: "(numElem,)"
+    delv_eta: "(numElem,)"
+    delv_xi: "(numElem,)"
+    delv_zeta: "(numElem,)"
+    delx_eta: "(numElem,)"
+    delx_xi: "(numElem,)"
+    delx_zeta: "(numElem,)"
+    dxx: "(numElem,)"
+    dyy: "(numElem,)"
+    dzz: "(numElem,)"
+    e: "(numElem,)"
+    elemBC: "(numElem,)"
+    elemMass: "(numElem,)"
+    letam: "(numElem,)"
+    letap: "(numElem,)"
+    lxim: "(numElem,)"
+    lxip: "(numElem,)"
+    lzetam: "(numElem,)"
+    lzetap: "(numElem,)"
+    p: "(numElem,)"
+    q: "(numElem,)"
+    ql: "(numElem,)"
+    qq: "(numElem,)"
+    ss: "(numElem,)"
+    v: "(numElem,)"
+    vdov: "(numElem,)"
+    vnew: "(numElem,)"
+    volo: "(numElem,)"
+    nodelist: "(numElem, 8)"
   # dtypes of SCALAR symbols only; an array's element type lives on its own
   # init.arrays entry. Both are int64 size/index symbols the C ABI must match.
   scalars:

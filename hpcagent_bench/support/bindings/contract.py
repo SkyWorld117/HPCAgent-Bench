@@ -261,8 +261,9 @@ def _dense_shape(spec: BenchSpec, name: str) -> Optional[Tuple[str, ...]]:
     inner = raw.strip()
     if inner.startswith("(") and inner.endswith(")"):
         inner = inner[1:-1]
-    toks = tuple(t.strip() for t in inner.split(",") if t.strip())
-    return toks or None
+    # `()` is a DECLARED rank-0 buffer, not a missing shape: collapsing it to None would make a
+    # scalar-shaped array indistinguishable from a legacy kernel that declares nothing at all.
+    return tuple(t.strip() for t in inner.split(",") if t.strip())
 
 
 def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:

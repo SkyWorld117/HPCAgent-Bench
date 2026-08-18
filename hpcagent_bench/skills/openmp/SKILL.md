@@ -95,17 +95,18 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 - **Split the two halves when the shape demands it**: `parallel for` on the outer loop with
   `simd` on the unit-stride inner loop when they are different loops; `simd` alone on a tiny
   trip count where spawn overhead beats the win.
-- **`omp unroll` only pays inside a parallel region**, between the worksharing directive and the
-  loop, giving each thread a fatter body; alone it just asks for what `-O3` already does. Use
-  `partial(n)`, which leaves a loop for the enclosing `for` to distribute -- `full` deletes the
-  loop, so nothing remains to hand out. Order matters: the transformation goes AFTER the
-  worksharing directive, never before it. Fortran spells it `!$omp unroll partial(4)` (no closing
-  directive needed). Keep it only while `score` agrees.
+- **`omp unroll` goes on the INNER loop of a nest you are already threading.** Alone it just asks
+  for what `-O3` already does; it pays when the outer loop is distributed across threads and the
+  inner one gets a fatter body. Always `partial(n)` -- `full` deletes the loop, so a worksharing
+  directive above it would have nothing left to hand out. Fortran spells it
+  `!$omp unroll partial(4)` (no closing directive needed). Keep it only while `score` agrees.
 
-        #pragma omp parallel for simd
-        #pragma omp unroll partial(4)
-        for (int64_t i = 0; i < n; i++)
-            y[i] = a[i] * x[i] + b[i];
+        #pragma omp parallel for
+        for (int64_t i = 0; i < n; i++) {
+            #pragma omp unroll partial(4)
+            for (int64_t j = 0; j < nj; j++)
+                y[i * nj + j] = a[i * nj + j] * x[j] + b[i * nj + j];
+        }
 - **`aligned(...)` claims: only on memory YOU allocated.** ABI input pointers carry natural
   alignment ONLY -- an `aligned(p:32|64)` clause or `__builtin_assume_aligned` on one is UB and
   the #1 crash cause on record (SIGSEGV at vector width, a full judge round trip lost). This is

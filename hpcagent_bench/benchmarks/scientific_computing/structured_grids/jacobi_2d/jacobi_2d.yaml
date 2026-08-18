@@ -17,6 +17,9 @@ parameters:
     TSTEPS: 244
     N: 32009
 init:
+  arrays:
+    A: "(N, N)"
+    B: "(N, N)"
   input_args:
   - N
   output_args:

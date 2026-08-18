@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Per-language call-stub generation (abi_contract.md Sec. 7): :func:`gen_call_stub` renders the exact
 signature for one language plus an empty TODO body -- never a reference solution."""
+import re
 from typing import List
 
 from hpcagent_bench.support.bindings.contract import (Arg, Binding, restrict_kw, workspace_c_params, WORKSPACE_DTYPE,
@@ -23,11 +24,6 @@ def _c_decl(a: Arg, lang: str) -> str:
     return f"const {base} {a.name}"
 
 
-# The stub's own signature already spells int64_t, and a rewrite reaches for memcpy, fabs or
-# std::min within a turn or two. Nothing here is transitively included by anything else, so a
-# stub that omits them turns the first edit into a build error ("unknown type name 'int64_t'",
-# "'uint8_t' has not been declared" -- the most frequent build failure on record). Ship the
-# vocabulary the ABI and ordinary kernel code need; an unused include costs nothing.
 # Every entry is something the skill pages actually send an agent after: int64_t from the ABI
 # signature, memcpy/memset, fabs/sqrt, aligned_alloc, omp_get_thread_num for the per-thread-copy
 # remedy the scatter and recurrence bins recommend, and for C++ the <execution> policy family
@@ -68,7 +64,7 @@ def _gen_c(binding: Binding, *, cpp: bool) -> str:
             f"}}\n")
 
 
-def _fortran_extents(arg: Arg) -> str:
+def _fortran_extents(arg: Arg, in_scope: frozenset) -> str:
     """Declared extents for a pointer dummy, as a real shape rather than assumed-size ``(*)``.
 
     The binding already carries each buffer's symbolic shape and passes every extent as its own
@@ -82,9 +78,19 @@ def _fortran_extents(arg: Arg) -> str:
     same bytes, with the fastest axis first where Fortran expects it. An explicit-shape dummy is
     passed exactly as assumed-size under ``bind(C)``, so this is a declaration change only.
     """
-    if not arg.shape:
+    if arg.shape is None:
         return "(*)"
-    return "(" + ", ".join(reversed(arg.shape)) + ")"
+    if not arg.shape:
+        return "(1)"  # declared rank-0: a one-element buffer, not an unknown extent
+    # A dimension can only be declared when every identifier in it is a dummy argument. cloudsc
+    # sizes arrays by `nclv`, a constant the ABI never passes, and naming it here is a hard
+    # "used before it is typed". Such an array stays assumed-size -- the only honest choice.
+    if not set(re.findall(r"[A-Za-z_]\w*", " ".join(arg.shape))) <= in_scope:
+        return "(*)"
+    # Shape expressions are written in Python, where `//` is floor division; in Fortran `//` is
+    # string concatenation and the unit will not compile. Extents are non-negative, so Fortran's
+    # truncating `/` gives the same value.
+    return "(" + ", ".join(d.replace("//", "/") for d in reversed(arg.shape)) + ")"
 
 
 def _gen_fortran(binding: Binding) -> str:
@@ -94,13 +100,14 @@ def _gen_fortran(binding: Binding) -> str:
     # Declaration order is NOT argument order: an extent must be typed before the array that uses
     # it as a bound, or -std=f2018 rejects the unit ("Symbol 'nj' is used before it is typed").
     # Scalars carry every extent, so they all come first; the signature above is untouched.
+    in_scope = frozenset(a.name for a in binding.args if a.kind == "scalar")
     scalar_decls: List[str] = []
     array_decls: List[str] = []
     for a in binding.args:
         kind = fortran_kind(a.dtype)
         if a.kind == "ptr":
             intent = "intent(inout)" if a.role == "output" else "intent(in)"
-            array_decls.append(f"  {kind}, {intent} :: {a.name}{_fortran_extents(a)}")
+            array_decls.append(f"  {kind}, {intent} :: {a.name}{_fortran_extents(a, in_scope)}")
         else:
             # Scalars by value -- one uniform C-ABI across every target (Sec. 5/Sec. 7).
             scalar_decls.append(f"  {kind}, value, intent(in) :: {a.name}")

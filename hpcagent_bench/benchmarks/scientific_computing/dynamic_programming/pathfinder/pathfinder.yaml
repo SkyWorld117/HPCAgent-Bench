@@ -17,6 +17,9 @@ parameters:
     rows: 16135
     cols: 258175
 init:
+  arrays:
+    grid: "(rows, cols)"
+    dp: "(cols,)"
   input_args:
   - rows
   - cols
