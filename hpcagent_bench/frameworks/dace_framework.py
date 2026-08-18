@@ -870,11 +870,20 @@ class DaceFramework(Framework):
 
     def call_args(self, bench: Benchmark, impl: Callable, resolved, bdata):
         """DaCe compiled programs take the inputs AND the symbol params as keywords (``A=..., NI=...``)."""
-        kwargs = {a: resolved[a] for a in bench.info["input_args"]}
+        renames = self.arg_renames(bench)
+        kwargs = {renames.get(a, a): resolved[a] for a in bench.info["input_args"]}
         for p in self.params(bench, impl):
-            kwargs[p] = bdata[p]
+            kwargs[renames.get(p, p)] = bdata[p]
         kwargs.update(self.shape_symbols(impl, bench, resolved, kwargs))
         return [], kwargs
+
+    def arg_renames(self, bench: Benchmark) -> Dict[str, str]:
+        """``{manifest name: emitted name}`` for arguments the emitter had to rename.
+
+        A kernel argument spelled like a sympy callable (crc16's ``poly``, dfa's ``symbols``) cannot
+        be a dace variable, so the emitter renames it and records the map. This is the ONE place it
+        is applied: everything past here already speaks the emitted spelling."""
+        return vars(self.kernel_module(bench)).get("__hpcagent_bench_renames__", {})
 
     def shape_symbols(self, impl: Callable, bench: Benchmark, resolved: Dict[str, Any],
                       bound: Dict[str, Any]) -> Dict[str, int]:
@@ -883,7 +892,12 @@ class DaceFramework(Framework):
         if not isinstance(impl, TimedCompiledSDFG):
             return {}
         recipes = vars(self.kernel_module(bench)).get("__hpcagent_bench_symbol_defs__", ())
-        return bind_free_symbols(impl.sdfg, recipes, bench.info["input_args"], resolved, bound)
+        renames = self.arg_renames(bench)
+        args = [renames.get(a, a) for a in bench.info["input_args"]]
+        # bind_free_symbols matches an array against ``sdfg.arrays``, which is keyed by the EMITTED
+        # name; a manifest-keyed lookup would miss and report the shape symbols as unbound.
+        values = {renames.get(k, k): v for k, v in resolved.items()} if renames else resolved
+        return bind_free_symbols(impl.sdfg, recipes, args, values, bound)
 
     def set_datatype(self, datatype):
         super().set_datatype(datatype)

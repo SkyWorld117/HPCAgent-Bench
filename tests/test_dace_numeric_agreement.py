@@ -7,8 +7,8 @@ not correctness: a program can parse, lower, compile and still return a differen
 one of those states grades submissions against a DaCe baseline nobody checked. Measured over the
 331 gated kernels on the day this landed, 19 of them parse clean and are still not usable --
 ``channel_flow`` and ``cp2k_grid_integrate`` returned wrong numbers (both fixed 2026-08-08, in the
-generator), ``fft_1d`` emits C++ that does not compile, ``nbody`` cannot be called at all. The
-parse gate is green for every one of them.
+generator), ``fft_1d`` emitted C++ that did not compile (fixed 2026-08-17, in the generator),
+``nbody`` cannot be called at all. The parse gate is green for every one of them.
 
 So the two gates ask different questions and neither subsumes the other. This one lowers with
 ``to_sdfg(simplify=True)`` -- the graph a run actually executes, library nodes expanded -- and
@@ -37,10 +37,9 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: Verdict classes (tests/dace_numeric_probe.py), in the order the probe can reach them:
 #:   parse_fail      ``to_sdfg(simplify=True)`` raised.
 #:   compile_fail    ``sdfg.compile()`` raised -- the generated C++ does not build, OR validation
-#:                   rejected the expanded graph. ``raman_fitting`` lands here: a solve library
-#:                   node's ``out`` connector collides with the ARRAY named ``out``, and the
-#:                   expansion that surfaces it happens inside compile. ``REFUSED`` cannot see this
-#:                   class at all -- it parses with simplify=False and never expands a library node.
+#:                   rejected the expanded graph. ``REFUSED`` cannot see this class at all -- it
+#:                   parses with simplify=False and never expands a library node, so every defect
+#:                   that lives in an EXPANSION is invisible to it and lands here instead.
 #:   unbound_symbols a free SDFG symbol nothing binds (neither an array shape nor a recipe).
 #:   run_fail        the compiled SDFG raised when called.
 #:   mismatch        it ran and the answer is wrong.
@@ -62,32 +61,55 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: covariance2, gesummv, k3mm) and ``fragment_patch_density``'s einsum row-dot MatMul dispatch all
 #: agree upstream now, so their entries are gone. This is the bump the dace-canary exists to
 #: demand -- it went red on exactly these five before the pin moved.
+#: ``raman_fitting`` left the list the same day, in the GENERATOR: its Levenberg-Marquardt step
+#: emits ``np.linalg.solve(atad, rhs)`` with a VECTOR rhs, and DaCe's ``Solve`` library node reads
+#: ``shape_out[1]`` unconditionally, so the expansion raised ``IndexError: list index out of range``.
+#: A backend capability is not all-or-nothing: ``numpy_desugar._LOWER_SOLVE_RHS_RANKS`` now lowers
+#: the 1-D-rhs solve to the existing Gauss-Jordan nest for DaCe and leaves the 2-D one native.
+#: ``fft_1d`` left the list the same day: its ``_FftInline`` desugar's DFT phase divides by an
+#: int64 loop-shape local, and DaCe constant-folds the phase's leading ``1j`` into the surrounding
+#: product chain, codegening a raw ``complex128 / int64`` division dace/runtime/include/dace/complex.h
+#: has no ``operator/`` for (issue 07). ``numpy_desugar._fft_inline_stmts`` now casts that divisor to
+#: the transform's OWN real dtype (``dtypes.real_component_dtype``) instead: a same-precision REAL
+#: divisor resolves to std::complex's native ``operator/``, and the cast tracks fp32/fp64 kernels
+#: correctly because it is derived from the array's dtype, never hardcoded.
+#: ``crc16`` and ``dfa`` left the list 2026-08-18, in the GENERATOR. Their ``SympifyError: cannot
+#: sympify object of type <class 'function'>`` was an argument named after a sympy CALLABLE
+#: (``poly``, ``symbols``): the moment the name reaches a symbolic context DaCe's parser resolves it
+#: to the FUNCTION, and ``sympy.abc._clash`` shields only one-letter and greek names. ``dace_emit``
+#: now renames every BOUND name the parser will not accept and exports the map as
+#: ``__hpcagent_bench_renames__``; a reserved name that is only CALLED (``sqrt``, ``exp``) is left
+#: alone, since DaCe resolves those through its own replacement table.
 NUMERIC_BAD: Dict[str, str] = {
-    # `Connector name 'out' is already used as a symbol, constant, or array name` -- a solve library
-    # node's connector collides with the kernel's ARRAY named `out` (`list index out of range`).
-    # The four gemv kernels that shared this bug (atax, covariance2, gesummv, k3mm) agree as of the
-    # pin below and are gone; raman_fitting is the `solve` half and still fails.
-    "raman_fitting": "compile_fail",
-    # The generated C++ does not build: `cmplx<double> / int64_t` has no operator/ in
-    # dace/runtime/include/dace/complex.h, which supplies mixed complex/integer `*` and nothing
-    # else. Filed upstream as issue 07.
-    "fft_1d": "compile_fail",
     # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
     # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
     # ("'real' was not declared in this scope; did you mean 'std::real'?", 6 sites each). Both
     # kernels reach it through the same `np.linalg.eigh` desugar, whose Jacobi sweep asks for
     # `np.real`/`np.imag` of a REAL operand: a complex operand would resolve to `std::real` by ADL,
-    # a `double` reaches no namespace at all and the runtime headers declare no `dace::real`.
-    # Filed as dace issue 08-unqualified-real-imag.
-    "largest_eigenval": "compile_fail",
-    "rayleigh_ritz_rotation": "compile_fail",
+    # a `double` reaches no namespace at all and the runtime headers declare no `dace::real`. Filed
+    # as dace issue 08-unqualified-real-imag; fixed in the desugar 2026-08-17 by not emitting the
+    # accessor at all when the eigh operand's dtype is PROVABLY real (numpy_desugar._eigh_jacobi_lines'
+    # `is_real`) -- `largest_eigenval` (`eigh(a)` on the bench_info-declared real `a`) is gone.
+    # `rayleigh_ritz_rotation` reached the guard too as of 2026-08-17, in two steps: `_dtype_kind`
+    # now traces dtype through `.T` and through `np.linalg.cholesky`/`inv`/`solve`, and
+    # `_EighLoopRewriter` PROPAGATES the manifest's declared kinds across each function's own
+    # assignments (`visit_FunctionDef`) instead of consulting a table holding only declared array
+    # names -- its operand `M = Linv @ h_sub @ Linv.T` is three assignments and two factorisations
+    # away from anything bench_info declares, so it read as unknown and the real branch was
+    # unreachable. It now compiles: the six `'real' was not declared in this scope` errors are gone.
+    #
+    # What it fails with instead is a SECOND defect the compile error was standing in front of --
+    # the compiled SDFG dies with SIGSEGV (probe rc -11), so the class moves compile_fail -> crash.
+    # The LOWERING is not what is wrong: `c` and `numba`, which build the same Jacobi sweep from the
+    # same desugar, both return `ok` on this kernel, and `largest_eigenval` takes the identical
+    # real branch and agrees. dace's native `cholesky` and `inv` were checked standalone against
+    # this box's NO_LAPACKE OpenBLAS and both run and agree, so that is not it either. The segfault
+    # is dace-side and NOT yet localised -- do not delete this entry until it is.
+    "rayleigh_ritz_rotation": "crash",
     # Two more codegen defects in one kernel, measured 2026-08-08: `complex128* + double` (a
     # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
     # predicate". Neither is issue 07's operator gap.
     "stockham_fft": "compile_fail",
-    # `SympifyError: cannot sympify object of type <class 'function'>` out of the frontend.
-    "crc16": "parse_fail",
-    "dfa": "parse_fail",
     "subset_sum": "parse_fail",  # KeyError: ConditionalBlock (if_32)
     # The `unbound_symbols` class is EMPTY. Its four entries (cp2k_density_matrix_trs4,
     # examinimd, gromacs_nbnxm, lavamd) were never a kernel defect: the symbols are manifest

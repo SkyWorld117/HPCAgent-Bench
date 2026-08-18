@@ -40,7 +40,7 @@ from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS, _eigh_alias_names,
-                                          expr_rank, rank_table, rewrite_curve_fit)
+                                          _kind_of_dtype_str, expr_rank, rank_table, rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -429,7 +429,12 @@ def parse_kernel(numpy_py: pathlib.Path,
     # direct-assign loop rewriter below can lower it.
     _EighCallHoister(_eigh_aliases).visit(tree)
     ast.fix_missing_locations(tree)
-    _EighLoopRewriter(_eigh_aliases).visit(tree)
+    # dtype KIND (not the raw tag) for the loop rewriter's real/complex Jacobi choice --
+    # bench_info is the only dtype SOURCE in scope this early (no per-function rank/dtype
+    # table exists until KIR helpers build one), but the rewriter propagates it across each
+    # function's own assignments, so an operand built as a local is still resolvable.
+    _eigh_dtypes = {name: _kind_of_dtype_str(dt) for name, dt in dtypes_raw.items()}
+    _EighLoopRewriter(_eigh_aliases, _eigh_dtypes, func_name, dtypes_raw).visit(tree)
     # Canonicalise inf/nan spellings module-wide (see _NonFiniteNormalizer) so
     # both kernel and helpers are covered.
     _NonFiniteNormalizer().visit(tree)

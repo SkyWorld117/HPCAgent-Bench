@@ -82,9 +82,14 @@ def test_the_global_budget_is_a_floor_never_a_ceiling():
     """``limits.kernel_memory_gb`` is the FLOOR: a tiny kernel is never capped tighter than the
     global budget, and a big one is not held down to it."""
     spec = BenchSpec.load(KERNEL)
-    with config.overridden("limits.kernel_memory_gb", 10):
-        assert sizing.kernel_memory_gb(spec, "S") == 10.0  # derived is a few KB -> floored
-        assert sizing.kernel_memory_gb(spec, "XL") > 10.0  # derived is ~30 GB -> the derivation wins
+    # The budget is taken FROM the kernel, never hardcoded: XL was 30 GB when this was written and
+    # is 3.6 GB since the loop_level_reasoning ladders were re-fit onto the 1 s target, which turned
+    # the "big" half into a second floored case and the assertion into a tautology.
+    derived_xl = cap_bytes("XL") / sizing.BYTES_PER_GB
+    budget = derived_xl / 2
+    with config.overridden("limits.kernel_memory_gb", budget):
+        assert sizing.kernel_memory_gb(spec, "S") == budget  # derived is a few KB -> floored
+        assert sizing.kernel_memory_gb(spec, "XL") == pytest.approx(derived_xl)  # the derivation wins
 
 
 def test_an_underivable_kernel_falls_back_to_the_global_budget():

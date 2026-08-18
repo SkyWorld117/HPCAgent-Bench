@@ -82,9 +82,15 @@ def test_aggregate_reports_token_cost():
 # --- the seeded fuzz sweep --------------------------------------------------
 
 
-@pytest.mark.real_fuzz  # this test asserts on the real large/distinct draws -> no size cap
 def test_fuzz_iteration_draws_distinct_sizes():
-    """seeds.fuzz makes consecutive iterations draw different samples, reaching _data_seeded."""
+    """seeds.fuzz makes consecutive iterations draw different samples, reaching _data_seeded.
+
+    Runs under conftest's fuzz size cap like everything else. It used to opt out with
+    ``real_fuzz`` to draw at the true range, which is LEN_1D ~288 M -- 7.7 GB of materialised
+    arrays over 7 minutes, and the OOM that killed the CI runner twice. The cap SCALES the
+    draw rather than clamping it, so consecutive iterations still come out different sizes,
+    which is the whole property under test; the size they come out at is not.
+    """
     spec = BenchSpec.load(_FUZZ_KERNEL)
     p0 = fuzz.sample_params(spec.parameters, 0)
     p1 = fuzz.sample_params(spec.parameters, 1)

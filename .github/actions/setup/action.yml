@@ -42,14 +42,24 @@ runs:
         # CI alone -- tests/test_parallelism_dispatch.py caught exactly that. Pin the major so the
         # runner answers for the same compiler the agent is graded on.
         #
-        # gfortran ONLY: gcc/g++ stay on the distro default, so this does not silently re-toolchain
-        # the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's PATH, and
-        # compilers.yaml names the driver unversioned, so the symlink is what makes it take effect.
+        # gfortran ONLY as far as the DRIVERS go: gcc/g++ stay on the distro default, so this does
+        # not re-toolchain the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's
+        # PATH, and compilers.yaml names the driver unversioned, so the symlink is what makes it
+        # take effect.
+        #
+        # libstdc++-<major>-dev is NOT optional, and not for gfortran's sake. Installing gfortran-15
+        # creates /usr/lib/gcc/<triple>/15, and clang selects the HIGHEST such directory whether or
+        # not gcc-15 itself is installed -- so a Fortran-only pin silently re-toolchained clang onto
+        # a GCC install carrying no C++ headers, and every clang C++ build died with
+        # "fatal error: 'cstdint' file not found" (clang says so itself, as
+        # -Wgcc-install-dir-libstdcxx: "'.../14' would be chosen over '.../15'"). That took out the
+        # warnings ratchet, test_frameworks, test_default_datatype_tolerance and Pluto's configure
+        # in one go. Complete the directory clang picks rather than pinning it to a path.
         set -euo pipefail
         GCC_MAJOR=15
         sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         sudo apt-get update
-        sudo apt-get install -y "gfortran-${GCC_MAJOR}"
+        sudo apt-get install -y "gfortran-${GCC_MAJOR}" "libstdc++-${GCC_MAJOR}-dev"
         sudo ln -sf "/usr/bin/gfortran-${GCC_MAJOR}" /usr/local/bin/gfortran
         gfortran --version | head -1
 
@@ -94,6 +104,15 @@ runs:
         done
         clang --version | head -1
         flang --version | head -1
+        # A version banner does not prove clang can COMPILE. It resolves its libstdc++ from whichever
+        # /usr/lib/gcc/<triple>/<major> directory sorts highest, so an unrelated step that installs a
+        # versioned GCC component can leave the driver unable to find <cstdint> while --version still
+        # answers happily. That shipped: five jobs went red before anything said the C++ arm was
+        # broken. Compile the smallest TU that needs the standard library, here, loudly.
+        printf '#include <cstdint>\nint main(){return 0;}\n' > "${RUNNER_TEMP}/cxx-smoke.cpp"
+        clang++ -std=c++23 -fsyntax-only "${RUNNER_TEMP}/cxx-smoke.cpp" \
+          || { echo "::error::clang++ cannot compile a <cstdint> TU -- its selected GCC install has no libstdc++ headers"; \
+               clang++ -v -x c++ -E /dev/null 2>&1 | grep -i 'selected gcc installation' >&2; exit 1; }
 
     - name: Base Python deps (translators + the frameworks every phase shares)
       shell: bash
@@ -129,7 +148,7 @@ runs:
         # --recurse-submodules stays MANDATORY either way: dace vendors its runtime headers as
         # submodules (external/moodycamel/blockingconcurrentqueue.h is included by
         # dace/runtime/include/dace/stream.h), so without them every SDFG build dies on a missing header.
-        DACE_SHA="${DACE_SHA:-53fbf8fe2a38ae11ddb9b84138fcaf38c9b539bf}"
+        DACE_SHA="${DACE_SHA:-ae8cb308488f1257fe6be172677627b2e450cbd6}"
         mkdir -p "$RUNNER_TEMP/dace"
         git -C "$RUNNER_TEMP/dace" init -q
         git -C "$RUNNER_TEMP/dace" remote add origin https://github.com/spcl/dace.git
@@ -140,7 +159,12 @@ runs:
         # Echo the RESOLVED sha: a job that grades against dace must say which dace, or a triage
         # reader has to guess from the run date.
         echo "dace @ $(git -C "$RUNNER_TEMP/dace" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-        pip_retry "jax[cpu]" numba pythran pyarrow
+        # pythran is PINNED for the same reason DACE_SHA is: it is a compiler this suite GRADES
+        # kernels through, and it moved under the gate. 0.19.0 landed between run 31842426040
+        # (08-14) and 32065774711 (08-17) and turned subset_sum from green into a >600 s hang,
+        # then a SIG11 -- the kernel itself unchanged and still green here on 0.18.1. Bump this in
+        # its own commit, and expect the e2e statuses to move with it.
+        pip_retry "jax[cpu]" numba pythran==0.18.1 pyarrow
         # DELIBERATELY no `DACE_compiler_build_mode=native` here. It used to be exported for speed
         # (native skips the per-SDFG cmake configure), and it silently DEFEATED the build cache the
         # framework pins: a DACE_* environment variable outranks Config.set, so

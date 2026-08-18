@@ -2,6 +2,7 @@
 
 import ast
 import copy
+import functools
 import re
 from typing import Dict, List, Optional
 
@@ -1385,6 +1386,59 @@ class _SplitReassignedSize(ast.NodeTransformer):
         return node
 
 
+@functools.lru_cache(maxsize=None, typed=True)
+def sympy_reserved(name: str) -> bool:
+    """True when dace's parser resolves ``name`` to a sympy CALLABLE instead of a free symbol.
+
+    ``poly``, ``symbols``, ``trace``, ``im``, ``sign`` and friends are sympy functions, so a kernel
+    argument spelled that way is not a variable to dace: the moment the name reaches a symbolic
+    context (a memlet subset, a shape, a promoted scalar) sympify gets the function object back and
+    the parse dies as ``SympifyError: cannot sympify object of type <class 'function'>``, nowhere
+    near the argument that caused it. ``sympy.abc._clash`` only shields one-letter and greek names.
+
+    The probe has to be a COMPOUND expression: ``pystr_to_symbolic`` short-circuits a bare name
+    straight to ``symbol()`` and would call every name safe.
+    """
+    try:
+        from dace.symbolic import pystr_to_symbolic  # deferred: dace is not a translator dependency
+    except ImportError:
+        return False  # no dace, no sympy namespace to collide with
+    try:
+        expr = pystr_to_symbolic(f"{name} + 1")
+    except Exception:  # noqa: BLE001 -- any sympify failure means the name is unusable as a symbol
+        return True
+    return not any(str(s) == name for s in expr.free_symbols)
+
+
+class RenameNames(ast.NodeTransformer):
+    """Rewrite renamed identifiers wherever they appear -- loads, stores and arguments alike."""
+
+    def __init__(self, renames: Dict[str, str]):
+        self.renames = renames
+
+    def visit_Name(self, node: ast.Name):
+        node.id = self.renames.get(node.id, node.id)
+        return node
+
+    def visit_arg(self, node: ast.arg):
+        node.arg = self.renames.get(node.arg, node.arg)
+        return node
+
+
+def bound_names(body: List[ast.stmt]) -> OrderedSet:
+    """The names the body BINDS -- the only ones a rename may touch.
+
+    A reserved name that is merely CALLED (``sqrt(x)``, ``exp(x)``, ``log(x)``) is resolved by
+    dace's own replacement table and renaming it would break the call.
+    """
+    names: OrderedSet = OrderedSet()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+    return names
+
+
 def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     """Return the source of a ``<short>_dace.py`` module for ``kir``."""
     name = fn_name or kir.kernel_name
@@ -1523,6 +1577,21 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
             and isinstance(body[0].value.value, str)):
         body = body[1:]
 
+    # A bound name that collides with a sympy callable is not a variable to dace (see
+    # sympy_reserved). Rename every one of them and record the map: the emitted program is the only
+    # place the new spelling exists, so the caller has to rewrite its keyword arguments to match.
+    param_names = [p.split(":", 1)[0].strip() for p in params]
+    candidates = OrderedSet([*param_names, *symbol_names, *bound_names(body)])
+    renames = {n: f"__{n}" for n in candidates if sympy_reserved(n)}
+    if renames:
+        body = [RenameNames(renames).visit(stmt) for stmt in body]
+        params = [f"{renames.get(n, n)}: {p.split(':', 1)[1].strip()}" for n, p in zip(param_names, params)]
+        symbol_names = [renames.get(n, n) for n in symbol_names]
+        # The recipe is evaluated by the CALLER over the renamed keyword arguments, so its free
+        # names have to be renamed with them or the eval below raises NameError on the old spelling.
+        symbol_defs = [(renames.get(n, n), ast.unparse(RenameNames(renames).visit(ast.parse(e, mode="eval")).body))
+                       for n, e in symbol_defs]
+
     out: List[str] = []
     out.append('"""DaCe program auto-generated from the numpy reference '
                'by numpyto_c.dace_emit."""')
@@ -1548,6 +1617,11 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     if symbol_defs:
         # Per-dimension binding recipe: caller evaluates these in order at call time. See sparse_oracle._run_dace.
         out.append(f"__hpcagent_bench_symbol_defs__ = {symbol_defs!r}")
+        out.append("")
+    if renames:
+        # ``{manifest name: emitted name}``. See dace_framework.call_args, the one place that
+        # applies it -- everything downstream of there already speaks the emitted spelling.
+        out.append(f"__hpcagent_bench_renames__ = {renames!r}")
         out.append("")
     out.append("")
     out.append("@dc.program")

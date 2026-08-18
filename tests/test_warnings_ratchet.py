@@ -93,25 +93,33 @@ def toolchain_versions() -> str:
     return "; ".join(out)
 
 
-def _run_build(cmds: List[List[str]], cwd: pathlib.Path) -> Tuple[bool, int, List[str]]:
-    """Run a compile/link argv sequence, returning ``(ok, warning_count, warning_lines)`` summed
-    over every step's stderr. ``ok`` is False on the first nonzero exit -- the new -Wall -Wextra
-    flags being REJECTED is a build break, not a warning to count, and must fail loudly.
+def _run_build(cmds: List[List[str]], cwd: pathlib.Path) -> Tuple[Optional[str], int, List[str]]:
+    """Run a compile/link argv sequence, returning ``(failure, warning_count, warning_lines)``
+    summed over every step's stderr. ``failure`` is None when every step exited zero, else the
+    failing command and its stderr -- the new -Wall -Wextra flags being REJECTED is a build break,
+    not a warning to count, and must fail loudly.
 
     The lines come back alongside the count because the count alone is unactionable: this ratchet
     is toolchain-sensitive (it builds with ``-march=native`` under whichever gcc/clang the host
     has), so it can be zero on a dev box and nonzero on a CI runner. A failure that reports only
     a number leaves the CI log with nothing to fix -- the text is the whole diagnostic.
+
+    That reasoning applies to a BROKEN build at least as strongly, and this returned a bare
+    ``False`` for one until 2026-08-17: clang selecting a GCC install with no libstdc++ headers
+    reached CI as "the new -Wall -Wextra flags broke the build" and nothing else, when clang had
+    said exactly what was wrong ("fatal error: 'cstdint' file not found", plus a
+    -Wgcc-install-dir-libstdcxx note naming the directory it picked). Diagnosing it took a log
+    from a different job that happened to print its stderr. Carry the text.
     """
     warnings = 0
     lines: List[str] = []
     for argv in cmds:
         proc = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
         if proc.returncode != 0:
-            return False, warnings, lines
+            return f"{' '.join(argv)}\nrc={proc.returncode}\n{proc.stderr.strip()}", warnings, lines
         warnings += len(_WARNING_RE.findall(proc.stderr))
         lines += [ln.strip() for ln in proc.stderr.splitlines() if _WARNING_RE.search(ln)]
-    return True, warnings, lines
+    return None, warnings, lines
 
 
 @pytest.mark.integration
@@ -145,8 +153,9 @@ def test_warnings_ratchet(tmp_path: pathlib.Path) -> None:
                                              build_dir=build_dir,
                                              mode=Mode.SINGLE_CORE,
                                              compiler=compiler)
-            ok, warnings, lines = _run_build(cmds, build_dir)
-            assert ok, f"{short} ({framework}): the new -Wall -Wextra flags broke the build"
+            failure, warnings, lines = _run_build(cmds, build_dir)
+            assert failure is None, (f"{short} ({framework}): the build broke under -Wall -Wextra\n"
+                                     f"Toolchain: {toolchain_versions()}\n{failure}")
             total_builds += 1
             total_warnings += warnings
             seen += [f"{short} ({framework}): {ln}" for ln in lines]

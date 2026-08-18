@@ -192,7 +192,13 @@ def test_device_free_bytes_tracks_a_real_device_allocation():
     ``cudaMalloc`` inside its own ``.so`` and never touch cupy's allocator. This pins the primitive
     that measurement rests on: a known device allocation must show up as a drop in free bytes."""
     cp = import_or_skip("cupy")
-    if cp.cuda.runtime.getDeviceCount() < 1:
+    # An installed cupy on a box with no visible GPU RAISES cudaErrorNoDevice here rather than
+    # answering 0, so the count alone is not the no-device check -- that is a skip, not a failure.
+    try:
+        devices = cp.cuda.runtime.getDeviceCount()
+    except cp.cuda.runtime.CUDARuntimeError as exc:
+        pytest.skip(f"no CUDA device: {exc}")
+    if devices < 1:
         pytest.skip("no CUDA device")
     before = native_call._device_free_bytes()
     assert before > 0, "a present device must report a positive free-byte count"
