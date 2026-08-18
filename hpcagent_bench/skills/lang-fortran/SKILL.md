@@ -30,8 +30,12 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   classification cleared; tiny trip counts lose to spawn overhead. **End that loop with `end do` and write nothing after it.**
   The closing directive is optional, and a mismatched one is a build error: `!$omp end parallel do`
   after `!$omp parallel do simd` drops the `simd` and gfortran rejects it, blaming the closing
-  line. Same trap with `default(none)`, which then obliges you to name every variable -- the
-  accumulator goes in `reduction(...)`, not `shared`. Full recipe in the openmp page.
+  line. **Skip `default(none)`.** It buys nothing a correct `reduction(...)` does not already give
+  you, and forgetting one name is the single most common Fortran build failure on record (36 of 83
+  failing builds: `'x' not specified in enclosing 'parallel'`, once per variable). **One directive
+  per loop nest:** an `!$omp do` inside a region already opened by `!$omp parallel do` is
+  *"work-sharing region may not be closely nested inside of work-sharing"* -- thread the outer loop
+  and leave the inner one bare, or use `collapse`. Full recipe in the openmp page.
 - `do concurrent` THREADS on every family: gcc via `-ftree-parallelize-loops`, llvm via
   `-fdo-concurrent-to-openmp=host`, oneapi under `-fopenmp`. Details in the do-concurrent page.
 - Coarrays are NOT a lever: no `-fcoarray` flag is on any build, so coarray code does not even
@@ -42,11 +46,16 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   the symbol: the build "succeeds" and the load fails. ABI drift is the single most frequent
   Fortran build failure on record. The exact shape, every time:
   ```fortran
-  subroutine <kernel>(a, ..., n, workspace, workspace_size) bind(C)
+  subroutine <kernel>(a, ni, nj, workspace, workspace_size) bind(C)
     use iso_c_binding
-    real(c_double), intent(in) :: a(*)          ! arrays FLAT assumed-size
-    integer(c_int64_t), value, intent(in) :: n  ! scalars by VALUE
+    integer(c_int64_t), value, intent(in) :: ni, nj  ! scalars by VALUE, declared FIRST
+    real(c_double), intent(inout) :: a(nj, ni)       ! real declared shape, not a(*)
   ```
+  Extents are declared, not assumed: every buffer's shape is known symbolically and each extent
+  arrives as its own argument, so the stub gives you `a(nj, ni)` rather than `a(*)`. That is what
+  makes `a = 2.0d0 * a`, `size(a, 1)`, sections and `collapse(2)` legal here at all. Declaration
+  order matters -- an extent must be typed before the array that uses it, or `-std=f2018` rejects
+  the unit ("Symbol 'nj' is used before it is typed"); the generated stub already orders them.
   (`_gen_fortran`, `hpcagent_bench/support/bindings/stubs.py`; the task text prints the real
   argument list -- match it token for token, `syntax_check` catches drift free).
 - `syntax_check` before every `score`/`submit`; iterate with `score`, and leave `preset` UNSET:
@@ -74,16 +83,18 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
 - `contiguous` on every assumed-shape dummy (`x(:)`) you declare, else the callee carries a stride
   check and a copy-in fallback.
 - Column-major: in an array YOU declare the first index varies fastest, so it belongs innermost.
-- ABI buffers are flat, laid out like the NumPy reference (C order) -- there the LAST reference axis
-  is the contiguous one. Read the task semantics, do not assume.
-- 1-based: `a(*)` starts at 1 = the caller's element 0, so `a[i][j]` of the reference is
-  `a(i * nj + j + 1)`.
+- **Your arrays are ordinary Fortran arrays: first index fastest, innermost.** Nothing is
+  transposed and nothing needs flattening -- the declaration you are given already puts the
+  contiguous axis first, so `do i` over the outer extent with `do j` over `a(j, i)` inside is the
+  unit-stride order. The one rule for reading the task text: an element the reference writes as
+  `a[i][j]` is `a(j + 1, i + 1)` here -- subscripts in the reverse order, starting at 1.
 - `intent(in|out|inout)` on every dummy; omitting it means `inout`, the weakest thing you can tell
   the optimizer.
 - **Say it on whole arrays, not element by element.** `b = 2.0d0 * a`, `c = a * b`,
   `where (m) a = 0.0d0` -- an array expression states the independence a loop only implies, so the
   compiler vectorizes it without dependence analysis and `-ftree-parallelize-loops` can thread it.
-  Two caveats. Temporaries: an expression over OVERLAPPING sections or non-contiguous slices
+  The dummies carry declared extents, so `b = 2.0d0 * a` and `where (m) a = 0.0d0` compile as
+  written -- no bounds to spell out, no `a(1:n)` ceremony. Two caveats. Temporaries: an expression over OVERLAPPING sections or non-contiguous slices
   materializes a copy, which costs more than the loop it replaced. Recurrences: array syntax
   evaluates the WHOLE right side from OLD values, so `x(2:n) = a(2:n)*x(1:n-1) + b(2:n)` is a
   DIFFERENT computation from the loop `x(i) = a(i)*x(i-1) + b(i)` -- rewriting a recurrence as

@@ -116,7 +116,9 @@ Fortran. Everything below applies to all three; clause syntax is identical.
   alignment ONLY -- an `aligned(p:32|64)` clause or `__builtin_assume_aligned` on one is UB and
   the #1 crash cause on record (SIGSEGV at vector width, a full judge round trip lost). This is
   a fact about the data, not a risk to weigh. Your own `aligned_alloc` storage and the 256B
-  `workspace` are fair game.
+  `workspace` are fair game. In Fortran the compiler stops you outright rather than miscompiling:
+  an assumed-size dummy in `aligned(...)` is *"must be POINTER, ALLOCATABLE, Cray pointer or
+  C_PTR"*, so the clause is simply not available on ABI arrays there.
 - **`declare simd` on a helper called from the hot loop**, else that call is a vectorization
   barrier. **`collapse(n)`** when one loop is too short to fill cores or lanes; `private` /
   `lastprivate` to break a false dependence you cannot rewrite away.
