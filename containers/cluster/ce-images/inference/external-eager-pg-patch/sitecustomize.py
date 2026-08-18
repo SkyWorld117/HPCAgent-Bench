@@ -1,5 +1,7 @@
+import faulthandler
 import inspect
 import os
+import signal
 import sys
 
 import torch
@@ -63,3 +65,12 @@ def eager_new_group(*args, **kwargs):
 
 dist.init_process_group = eager_init_process_group
 dist.new_group = eager_new_group
+
+# Opt-in stack dumper. py-spy is not in this image, so the only way to see WHERE a worker is
+# blocked during the ~200s ramp (599301: prefill completes, then decode does not start) is to
+# ask the process itself. SIGUSR1 then dumps every thread's Python stack to stderr, which lands
+# in that rank's vllm log. Off unless DUMP_STACKS_ON_SIGUSR1 is set, so normal runs are
+# byte-identical.
+if os.environ.get("DUMP_STACKS_ON_SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+    print("[external-eager-pg] SIGUSR1 stack dumper armed", file=sys.stderr, flush=True)
