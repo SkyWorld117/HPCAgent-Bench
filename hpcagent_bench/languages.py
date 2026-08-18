@@ -395,14 +395,20 @@ COMPILER_ALIASES: Dict[str, Tuple[str, ...]] = {
 #: feature the stubs emit -- ``constexpr`` on an object definition, N3018 -- only lands in clang 19
 #: (clang.llvm.org/c_status.html). A clang 18 host therefore ACCEPTS the dialect and then rejects
 #: the constant, failing only the kernels that declare ``init.constants``; the floor turns that
-#: into a clean resolution miss instead. flang still pins nothing version-gated here (its
-#: LLVM >= 20 requirement for ``-fdo-concurrent-to-openmp`` is a preflight check, not a
-#: resolution one), and inventing a floor for it would only reject working hosts.
+#: into a clean resolution miss instead.
+#:
+#: flang's floor is ``-fdo-concurrent-to-openmp=host``, which arrived in LLVM 20. That used to be
+#: a preflight concern only, and the note here said inventing a floor would just reject working
+#: hosts -- no longer true: the flag now rides on EVERY graded flang build (the flang block's
+#: ``doconcurrent_ref``), because a `do concurrent` loop compiled without it runs serial under a
+#: parallel name. Below 20 the driver rejects the flag and no Fortran builds at all, so this is a
+#: resolution question now, and a versioned flang-20+ sibling should win over an older default.
 COMPILER_MIN_MAJOR: Dict[str, int] = {
     "gcc": 14,
     "g++": 12,
     "gfortran": 8,
     "clang": 19,
+    "flang": 20,
 }
 
 

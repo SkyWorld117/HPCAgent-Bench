@@ -167,6 +167,9 @@ ifx:
   cc: ifx
   baseline_ref: CPU_BASELINE_ICPX
   autopar_ref: null
+  # No doconcurrent_ref, and that is not an omission: ifx parallelizes `do concurrent` on the
+  # host off -fopenmp, which CPU_BASELINE_ICPX already carries, so there is no second flag to
+  # add. tests/test_do_concurrent_and_stdpar_wired.py asserts exactly this exemption.
   compile: ["{cc}", "{baseline}", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}"]
 
@@ -208,12 +211,17 @@ mpicc:
   link:    ["{cc}", "{objs}", "-o", "{exe}"]
   link_extra: ["-lm"]
 
+# The stdpar_link_ref is the g++ block's, for the same reason: libstdc++ routes the parallel
+# <execution> policies through TBB, and without -ltbb at link the par/par_unseq calls resolve to
+# the sequential fallback. languages.stdpar_link_flags probes the wrapper before appending it, so
+# a wrapper over a non-TBB backend still gets nothing.
 mpicxx:
   lang: cpp
   mpi: true
   install: {apt: libmpich-dev, spack: mpich}
   cc: mpicxx.mpich
   baseline_ref: CPU_BASELINE_GCC
+  stdpar_link_ref: STDPAR_LINK_TBB
   compile: ["{cc}", "{baseline}", "-std=c++23", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "{objs}", "-o", "{exe}"]
   link_extra: ["-lm"]
@@ -224,6 +232,10 @@ mpifort:
   install: {apt: libmpich-dev, spack: mpich}
   cc: mpifort.mpich
   baseline_ref: CPU_BASELINE_GFORTRAN   # wraps gfortran -- see the gfortran block
+  # Same flag as the gfortran block, for the same reason: without it a `do concurrent` loop
+  # compiles to a SERIAL loop under a parallel name -- a wrong number, not a build error. The
+  # wrapper forwards it to the gfortran it wraps.
+  doconcurrent_ref: DO_CONCURRENT_GFORTRAN
   compile: ["{cc}", "{baseline}", "-ffree-form", "-ffree-line-length-none", "-std=f2018", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "{objs}", "-o", "{exe}"]
 

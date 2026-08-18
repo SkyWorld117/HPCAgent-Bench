@@ -1,0 +1,9 @@
+model_list:
+  - model_name: optarena-llm
+    litellm_params:
+      model: hosted_vllm/optarena-vllm
+      api_base: http://nid001:8000/v1
+      api_key: EMPTY
+litellm_settings:
+  drop_params: true
+  set_verbose: false
