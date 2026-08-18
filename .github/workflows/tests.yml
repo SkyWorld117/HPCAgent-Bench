@@ -576,8 +576,12 @@ jobs:
           set -euo pipefail
           # clang-17 feeds pet via --with-clang-prefix; libgmp/flex/bison/texinfo/libltdl
           # build isl/cloog/candl; pkg-config + libyaml-dev are pet's configure deps.
+          # libstdc++-14-dev is the C++ standard library clang-17 is pinned onto below: the
+          # runner's /usr/lib/gcc/<triple>/14 is a GCC install directory, not a guarantee that
+          # /usr/include/c++/14 came with it, and pinning clang at a headerless GCC install is
+          # the exact failure this pin exists to avoid.
           sudo apt-get install -y --no-install-recommends \
-            clang-17 llvm-17 llvm-17-dev libclang-17-dev \
+            clang-17 llvm-17 llvm-17-dev libclang-17-dev libstdc++-14-dev \
             autoconf automake libtool pkg-config libgmp-dev libyaml-dev flex bison texinfo libltdl-dev
           # pet prefers the monolithic -lclang-cpp, but Ubuntu ships only libclang-cpp.so.17
           # (no unversioned .so), so pet falls back to individual -lclang* libs and misses
@@ -599,15 +603,30 @@ jobs:
           # compiler that old cannot consume GCC 15's libstdc++ headers, which is what it now
           # selects (the runner has /usr/lib/gcc/<triple>/15, and clang takes the highest). Pin it
           # to the newest GCC install it predates rather than letting the driver pick.
+          #
+          # This pin covers PET'S OWN BUILD and nothing else. The kernels polycc transforms are
+          # compiled by the ordinary native toolchain (hpcagent_bench.languages), which tracks the
+          # newest compiler on the box -- clang-17/llvm-17 appear nowhere outside this step, and
+          # must not, or the benchmark would be graded through a compiler three releases old.
           gccdir=$(ls -d /usr/lib/gcc/x86_64-linux-gnu/14 2>/dev/null || true)
           test -n "$gccdir" || { echo "::error::no GCC 14 install for clang-17 to sit on"; exit 1; }
+          # The pin rides on CC/CXX, NOT on CFLAGS/CXXFLAGS: pet's configure OVERWRITES CXXFLAGS
+          # with its own '-fno-rtti' for the clang checks, so anything passed there is silently
+          # dropped and clang++ slides back onto GCC 15 (run 32076991237: every clang/Lex/* header
+          # check answered "no" and pet died on "unable to link against libclang-cpp").
+          clangxx="clang++-17 --gcc-install-dir=$gccdir"
+          # Prove the pinned pair compiles+links C++ here, where the error names the toolchain,
+          # instead of 90 seconds later as a configure result spelled "unknown".
+          printf '%s\n' '#include <cstdint>' '#include <string>' \
+            'int main() { return (int)std::string("x").size() - 1; }' \
+            | $clangxx -std=c++17 -x c++ - -o "$RUNNER_TEMP/cxx-smoke" && "$RUNNER_TEMP/cxx-smoke"
           # config.log holds the actual link line and error; without it a pet configure failure
-          # reads as one word ("unknown") and costs a full CI round-trip to diagnose.
+          # reads as one word ("unknown") and costs a full CI round-trip to diagnose. Grep for the
+          # failing conftest -- the tail of config.log is the variable dump, not the error.
           ./configure --with-clang-prefix=/usr/lib/llvm-17 \
-            CC=clang-17 CXX=clang++-17 \
-            CFLAGS="--gcc-install-dir=$gccdir" \
-            CXXFLAGS="-std=c++17 -include cstdint --gcc-install-dir=$gccdir" \
-            || { echo "::group::pet/config.log"; tail -200 pet/config.log 2>/dev/null; echo "::endgroup::"; exit 1; }
+            CC="clang-17 --gcc-install-dir=$gccdir" CXX="$clangxx" \
+            CXXFLAGS="-std=c++17 -include cstdint" \
+            || { echo "::group::pet/config.log"; grep -B5 -A15 -iE '\berror\b' pet/config.log 2>/dev/null | tail -150; echo "::endgroup::"; exit 1; }
           make -j"$(nproc)"
           sudo make install          # polycc + pluto -> /usr/local/bin
           sudo ldconfig
