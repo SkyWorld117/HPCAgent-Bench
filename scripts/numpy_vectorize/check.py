@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Verify a ``<kernel>_autogen_numpy.py`` against the shipped ``<kernel>_numpy.py``.
+"""Verify a ``<kernel>_better_numpy.py`` against the shipped ``<kernel>_numpy.py``.
 
-The comparison is the benchmark's own scorer, not a bespoke one: the autogen module is handed
+The comparison is the benchmark's own scorer, not a bespoke one: the generated module is handed
 to :func:`hpcagent_bench.harness.scoring.score` as a ``python`` delivery, which makes the
 SHIPPED numpy reference both the correctness oracle and the timing baseline. So ``correct``
 means "agrees with the reference on visible AND held-out inputs at the kernel's own tolerance",
-and ``speedup`` is exactly ``shipped_numpy_time / autogen_time``. Resubmitting the shipped file
+and ``speedup`` is exactly ``shipped_numpy_time / better_numpy_time``. Resubmitting the shipped file
 unchanged scores ~1.0, which is the calibration: anything a vectorization really bought shows
 up above it.
 
@@ -32,7 +32,7 @@ from hpcagent_bench.spec import KERNELS, BenchSpec  # noqa: E402
 
 TRACK = "scientific_computing"
 BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
-SUFFIX = "_autogen_numpy.py"
+SUFFIX = "_better_numpy.py"
 
 
 def specs() -> list:
@@ -56,7 +56,7 @@ def shipped_numpy(spec) -> pathlib.Path:
     return kernel_dir(spec) / f"{spec.module_name}_numpy.py"
 
 
-def autogen(spec) -> pathlib.Path:
+def generated(spec) -> pathlib.Path:
     return kernel_dir(spec) / f"{spec.module_name}{SUFFIX}"
 
 
@@ -78,8 +78,8 @@ def loop_count(path: pathlib.Path) -> int:
 
 
 def check(spec, preset: str, repeat: int) -> dict:
-    """Score the kernel's autogen module against its shipped numpy reference."""
-    path = autogen(spec)
+    """Score the kernel's generated module against its shipped numpy reference."""
+    path = generated(spec)
     row = {
         "kernel": spec.short_name,
         "path": str(path.relative_to(REPO)),

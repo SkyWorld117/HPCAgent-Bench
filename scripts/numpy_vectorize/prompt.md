@@ -13,10 +13,10 @@ For each kernel in your worklist there is a directory holding, among other files
 ```
 <kernel>.yaml              the manifest: parameters, init arrays, dtypes, output_args
 <kernel>_numpy.py          the SHIPPED reference -- often a Python loop nest
-<kernel>_autogen_numpy.py  <- YOU WRITE THIS
+<kernel>_better_numpy.py  <- YOU WRITE THIS
 ```
 
-Write `<kernel>_autogen_numpy.py`: the same computation as `<kernel>_numpy.py`, vectorized.
+Write `<kernel>_better_numpy.py`: the same computation as `<kernel>_numpy.py`, vectorized.
 
 **Never modify `<kernel>_numpy.py`.** It is the correctness oracle you are checked against.
 Changing it makes the check vacuous. Same for the `.yaml`, the `_dace.py`, and every other
@@ -76,7 +76,7 @@ def kernel(alpha, beta, C, A):
             C[i, :i + 1] += alpha * A[i, k] * A[:i + 1, k]
 ```
 
-Written `syrk_autogen_numpy.py` -- same name `kernel`, same parameters, same in-place ABI:
+Written `syrk_better_numpy.py` -- same name `kernel`, same parameters, same in-place ABI:
 
 ```python
 import numpy as np
@@ -119,6 +119,22 @@ procedure, not as prose to skim.
 ## Goal
 
 Convert typed Python numerical code -> idiomatic NumPy.
+
+What "better" means here is concrete: get the work into as few, as WIDE numpy calls as possible,
+because every Python-level iteration is one interpreted step and every array op is a compiled loop
+over contiguous memory. In rough order of what it buys you:
+
+1. `@` and `np.linalg.*` (section 16, 16b) -- the only ops that reach a threaded BLAS/LAPACK and
+   use more than one core. If the kernel is a matmul, a solve, or a factorization, say so.
+2. Slices and views (section 7) -- zero copy, unit stride, and they keep the array contiguous for
+   whatever runs next.
+3. Broadcasting and element-wise ufuncs (sections 2, 6) -- one pass over memory, no temporaries
+   beyond the result.
+4. Fancy/boolean indexing and the scatter-gather family (sections 9, 10, 15) -- still compiled,
+   but they copy and they lose unit stride, so prefer a slice when the access is regular.
+
+A loop that survives all four is either a genuine recurrence (section 18) or a case where
+vectorizing costs more memory than it saves (section 27). Those are real; say which one it is.
 
 Assume:
 
@@ -166,6 +182,7 @@ regular strided access -> slice
 sliding window         -> sliding_window_view
 Cartesian loop         -> broadcasting / meshgrid
 matrix product         -> @
+linear solve / factorization -> np.linalg.solve / cholesky / qr / svd / eigh
 general contraction    -> np.einsum
 recurrence             -> cumsum / accumulate / keep loop
 axis permutation       -> transpose / moveaxis / swapaxes
@@ -696,6 +713,56 @@ Related: `np.dot`, `np.inner`, `np.outer`, `np.tensordot`, `np.linalg.multi_dot`
 
 ---
 
+# 16b. Linear Algebra -> `np.linalg` (this is the BLAS/LAPACK door)
+
+`@` and `np.linalg.*` are not "numpy being convenient" -- they are the only ops here that reach a
+THREADED, blocked, cache-tuned library. Everything else in this document is one thread walking
+memory. So when a loop nest is a linear-algebra kernel, naming it as one is worth more than any
+amount of clever indexing: a hand-rolled triangular solve stays interpreted per element, while
+`np.linalg.solve` drops into LAPACK and uses every core.
+
+Recognise the kernel, then call it:
+
+```
+solve A x = b (square)         -> np.linalg.solve(A, b)
+   ... many rhs, same A        -> np.linalg.solve(A, B)        B is [N,K], one call
+least squares / overdetermined -> np.linalg.lstsq(A, b, rcond=None)
+symmetric positive definite    -> np.linalg.cholesky, then solve
+eigenproblem                   -> np.linalg.eig / eigh (eigh when symmetric/hermitian)
+singular values                -> np.linalg.svd
+orthogonalization (Gram-Schmidt loop) -> np.linalg.qr
+determinant / log-determinant  -> np.linalg.det / slogdet
+matrix norm, condition number  -> np.linalg.norm / cond
+matrix power A@A@A...          -> np.linalg.matrix_power
+```
+
+**Never form an inverse to solve a system.** `np.linalg.inv(A) @ b` is slower than
+`np.linalg.solve(A, b)` and loses accuracy; the loop it replaces was probably already doing back
+substitution, which IS a solve. Only call `inv` when the inverse itself is the output.
+
+**These stack.** Every routine above treats leading axes as a batch, so a Python loop over
+independent systems becomes ONE call:
+
+```
+# loop: M independent NxN systems
+for m in range(M):
+    x[m] = solve_system(A[m], b[m])
+
+# vectorized: A is [M,N,N], b is [M,N] -> one LAPACK call over the whole batch
+x = np.linalg.solve(A, b)
+```
+
+Two cautions. `np.linalg` wants floating dtypes, so an integer array needs an explicit cast, and
+the shipped reference's dtype is what the checker compares against (section 23). And a batched
+call materializes the whole batch: if `A` is [M,N,N] with big M and N, that is M*N*N elements
+resident at once, which can cost more than it saves -- see section 27.
+
+**Sequential-looking is not always sequential.** An iterative solver whose ITERATIONS carry a
+dependence is section 18 -- but the body of one iteration is almost always a matvec or a solve,
+and that body still belongs here. Vectorize the body, keep the iteration loop.
+
+---
+
 # 17. General Tensor Contraction -> `einsum`
 
 `@` when matmul. `einsum` when more general.
@@ -1204,7 +1271,7 @@ The kernels assigned to you are listed below. Work them in order. For each one:
 
 1. `cat` the kernel's `.yaml` and its `_numpy.py`.
 2. Classify every loop (Sec. 26 step 3).
-3. Write `<kernel>_autogen_numpy.py`.
+3. Write `<kernel>_better_numpy.py`.
 4. `python3 scripts/numpy_vectorize/check.py <kernel>` until `status ok`.
 5. Move to the next kernel. Do not stop early; do not leave a `fail` behind.
 

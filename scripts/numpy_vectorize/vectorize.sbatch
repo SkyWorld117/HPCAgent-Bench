@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=numpy-vectorize
 #SBATCH --partition=mi300
-#SBATCH --nodes=5
+#SBATCH --nodes=9
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=0
@@ -13,13 +13,22 @@
 #
 # NOT a benchmark run: no judge, no results DB, no campaign arm. The agents edit the repo and
 # verify with scripts/numpy_vectorize/check.py, which reuses the benchmark's own scorer to
-# compare each <kernel>_autogen_numpy.py against the shipped <kernel>_numpy.py.
+# compare each <kernel>_better_numpy.py against the shipped <kernel>_numpy.py.
 #
 #   mkdir -p /capstor/scratch/cscs/ybudanaz/x86_64/numpy-vectorize/logs
-#   sbatch --account=a-g200 scripts/numpy_vectorize/vectorize.sbatch
+#   sbatch --account=a-g200 scripts/numpy_vectorize/vectorize.sbatch          # REPLICAS=2, 9 nodes
+#   REPLICAS=1 sbatch --nodes=5 --account=a-g200 scripts/numpy_vectorize/vectorize.sbatch
 #
-# Topology (the shape proven by test-kimi-messages-probe.sbatch): nodes 0-3 serve Kimi at
-# tp=4 pp=4, node 4 runs the 10 agents. 136 kernels / 10 agents is ~14 each.
+# Topology: REPLICAS independent Kimi engines at tp=4 pp=4 (the shape proven by
+# test-kimi-messages-probe.sbatch), 4 nodes each, plus one agent node -- so 4*REPLICAS+1.
+# 136 kernels / 10 agents is ~14 each.
+#
+# REPLICAS defaults to 2 because ONE engine cannot feed 10 agents. Measured on this exact
+# tp=4 pp=4 shape (599301): per-request decode is 9.97 tok/s at concurrency 1, 6.06 at 8,
+# 4.44 at 16, and concurrency 64 never reached steady state at all. Ten agents on one engine
+# sit at ~5 tok/s each, under the >=8 tok/s an agent needs to finish its shard; striped over
+# two engines they see concurrency 5 and ~7 tok/s. run_agents.py deals agent i to
+# endpoint i % len(endpoints), so striping needs nothing but a second --endpoint.
 
 set -Eeuo pipefail
 
@@ -44,17 +53,22 @@ export API_PORT="${API_PORT:-8000}"
 export MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 READY_TIMEOUT="${READY_TIMEOUT:-7200}"
 AGENTS="${AGENTS:-10}"
+REPLICAS="${REPLICAS:-2}"
 AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS:-28800}"
 
 mkdir -p "${RUN_DIR}"
 
 mapfile -t NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
-if (( ${#NODES[@]} != 5 )); then
-    echo "FAIL: need exactly 5 nodes (4 inference + 1 agent), allocation has ${#NODES[@]}" >&2
+NEED=$(( 4 * REPLICAS + 1 ))
+if (( ${#NODES[@]} != NEED )); then
+    echo "FAIL: REPLICAS=${REPLICAS} needs exactly ${NEED} nodes (4 per engine + 1 agent), " \
+         "allocation has ${#NODES[@]}" >&2
+    echo "submit with: sbatch --nodes=${NEED} ..." >&2
     exit 2
 fi
+# The agent node is the LAST one, so replica r owns NODES[4r .. 4r+3] whatever REPLICAS is.
+AGENT_NODE="${NODES[${#NODES[@]} - 1]}"
 export NODE0="${NODES[0]}"
-AGENT_NODE="${NODES[4]}"
 
 SERVE_SCRIPT="${RUN_DIR}/serve.sh"
 AGENT_SCRIPT="${RUN_DIR}/agents.sh"
@@ -65,7 +79,7 @@ stage() { printf '\n===== stage: %s =====\n' "$*"; }
 cat <<EOF
 job:       ${SLURM_JOB_ID}
 repo:      ${REPO}
-inference: ${NODE0}..${NODES[3]} (${INFERENCE_EDF}, tp=4 pp=4) port ${API_PORT}
+inference: ${REPLICAS} x tp=4 pp=4 (${INFERENCE_EDF}) port ${API_PORT}, heads ${NODES[0]}...
 agents:    ${AGENT_NODE} (${AGENT_EDF}) x ${AGENTS}
 logs:      ${RUN_DIR}
 EOF
@@ -80,6 +94,10 @@ export VLLM_ENGINE_READY_TIMEOUT_S=7200
 # Per-step deadline for one execute_model RPC. vLLM's own default is 300 s and
 # --distributed-timeout-seconds does NOT cover it, so a slow first decode kills the engine.
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+# RCCL probes and ENABLES GPU-direct RDMA on its own; on this fabric that path corrupts
+# cross-node collectives intermittently and produces silent wrong results rather than an error.
+# Omitting the variable is NOT the same as having GDR off.
+export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-0}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_FILE="${RUN_DIR}/nccl.%h.%p.log"
 # VLLM_DISABLE_PYNCCL is deliberately NOT set. test-kimi-messages-probe.sbatch sets it to 1 and
@@ -166,7 +184,7 @@ export CLAUDE_MODEL="${SERVED_MODEL}"
 
 python3 scripts/numpy_vectorize/run_agents.py \
     --agents "${AGENTS}" \
-    --endpoint "http://${NODE0}:${API_PORT}" \
+    ${ENDPOINT_FLAGS} \
     --run-dir "${RUN_DIR}/agents" \
     --timeout "${AGENT_TIMEOUT_SECONDS}"
 
@@ -182,38 +200,58 @@ AGENTS_SH
 chmod +x "${SERVE_SCRIPT}" "${AGENT_SCRIPT}"
 rm -f "${AGENTS_DONE}"
 
-stage "starting kimi tp=4 pp=4 on ${NODE0}..${NODES[3]}"
-srun --nodes=4 --ntasks=4 --ntasks-per-node=1 --exclusive --export=ALL \
-    --nodelist="${NODE0},${NODES[1]},${NODES[2]},${NODES[3]}" --environment="${INFERENCE_EDF}" \
-    bash "${SERVE_SCRIPT}" >"${RUN_DIR}/vllm-step.log" 2>&1 &
-SERVER_STEP_PID=$!
+# One srun per replica. Each engine gets its OWN master addr and port -- the ranks inside a
+# replica rendezvous with each other and must not find another replica's store.
+SERVER_STEP_PIDS=()
+ENDPOINT_FLAGS=""
+for (( r = 0; r < REPLICAS; r++ )); do
+    head="${NODES[4 * r]}"
+    slice="${head},${NODES[4 * r + 1]},${NODES[4 * r + 2]},${NODES[4 * r + 3]}"
+    stage "starting kimi replica ${r} tp=4 pp=4 on ${slice}"
+    NODE0="${head}" MASTER_PORT=$(( MASTER_PORT + r )) REPLICA="${r}" \
+    srun --nodes=4 --ntasks=4 --ntasks-per-node=1 --exclusive --export=ALL \
+        --nodelist="${slice}" --environment="${INFERENCE_EDF}" \
+        bash "${SERVE_SCRIPT}" >"${RUN_DIR}/vllm-step-${r}.log" 2>&1 &
+    SERVER_STEP_PIDS+=("$!")
+    ENDPOINT_FLAGS+=" --endpoint http://${head}:${API_PORT}"
+done
+export ENDPOINT_FLAGS
 
 cleanup_steps() {
     touch "${AGENTS_DONE}"
-    if kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
-        sleep 10
-        kill "${SERVER_STEP_PID}" 2>/dev/null || true
-    fi
+    local pid
+    for pid in "${SERVER_STEP_PIDS[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+            sleep 10
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done
     wait 2>/dev/null || true
 }
 trap cleanup_steps EXIT INT TERM
 
-stage "waiting for http://${NODE0}:${API_PORT}/v1/models (up to ${READY_TIMEOUT}s)"
+# Every replica must answer before the agents start: run_agents.py deals shards round-robin, so
+# an endpoint that never came up silently strands its share of the worklist.
 deadline=$((SECONDS + READY_TIMEOUT))
-until curl -fsS --max-time 10 "http://${NODE0}:${API_PORT}/v1/models" -o "${RUN_DIR}/models.json"; do
-    kill -0 "${SERVER_STEP_PID}" 2>/dev/null || {
-        echo "FAIL: the vLLM step exited before the API came up" >&2
-        tail -n 80 "${RUN_DIR}/vllm-rank0.log" >&2 || true
-        exit 1
-    }
-    (( SECONDS < deadline )) || { echo "FAIL: API not ready in ${READY_TIMEOUT}s" >&2; exit 1; }
-    sleep 15
+for (( r = 0; r < REPLICAS; r++ )); do
+    head="${NODES[4 * r]}"
+    stage "waiting for http://${head}:${API_PORT}/v1/models (up to ${READY_TIMEOUT}s total)"
+    until curl -fsS --max-time 10 "http://${head}:${API_PORT}/v1/models" \
+              -o "${RUN_DIR}/models-${r}.json"; do
+        kill -0 "${SERVER_STEP_PIDS[r]}" 2>/dev/null || {
+            echo "FAIL: vLLM step for replica ${r} exited before its API came up" >&2
+            tail -n 80 "${RUN_DIR}/vllm-rank0.log" >&2 || true
+            exit 1
+        }
+        (( SECONDS < deadline )) || { echo "FAIL: replica ${r} not ready in ${READY_TIMEOUT}s" >&2; exit 1; }
+        sleep 15
+    done
+    cat "${RUN_DIR}/models-${r}.json"
 done
-cat "${RUN_DIR}/models.json"
 
 stage "running ${AGENTS} agents on ${AGENT_NODE}"
 set +e
-srun --nodes=1 --ntasks=1 --exclusive --export=ALL,REPO="${REPO}",AGENTS="${AGENTS}",AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS}" \
+srun --nodes=1 --ntasks=1 --exclusive --export=ALL,REPO="${REPO}",AGENTS="${AGENTS}",AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS}",ENDPOINT_FLAGS="${ENDPOINT_FLAGS}" \
     --nodelist="${AGENT_NODE}" --environment="${AGENT_EDF}" bash "${AGENT_SCRIPT}"
 agent_status=$?
 set -e
