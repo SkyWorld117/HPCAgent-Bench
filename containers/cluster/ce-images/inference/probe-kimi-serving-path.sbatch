@@ -121,6 +121,11 @@ unset VLLM_PORT
 if [[ "${USE_AITER}" == "1" ]]; then
     export VLLM_ROCM_USE_AITER=1
     export TORCH_BLAS_PREFER_HIPBLASLT=1
+    # The master switch turns the MLA path on too, and 599260 hung there: weights loaded, then
+    # the engine blocked before graph capture, emitting shm_broadcast "no block in 60 seconds"
+    # every minute for over an hour. AITER_MLA=0 keeps the other aiter paths while leaving
+    # attention on TRITON_MLA, which is what isolates the hang.
+    export VLLM_ROCM_USE_AITER_MLA="${AITER_MLA:-1}"
     mkdir -p "${AITER_JIT_DIR}"
 fi
 
