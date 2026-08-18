@@ -4,6 +4,7 @@
 # Extra args go to sbatch verbatim (e.g. --partition). Account defaults to a-g200.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+. ./arm_nodes.sh
 
 ACCOUNT="${ACCOUNT:-a-g200}"
 # Kimi decodes at 6.06 tok/s per request with 8 concurrent (599301, this exact tp4/pp4 topology),
@@ -22,7 +23,7 @@ done
 for lang in ${LANGS}; do
     for suffix in "" "-skills"; do
         arm="llr4-kimi27code-${lang}${suffix}"
-        sbatch --nodes=6 --time="${TIME}" -A "${ACCOUNT}" "$@" \
+        sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" -A "${ACCOUNT}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
         echo "submitted ${arm}"
     done
