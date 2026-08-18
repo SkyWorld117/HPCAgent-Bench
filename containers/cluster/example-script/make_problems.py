@@ -52,16 +52,14 @@ def skills_section(language: str, extra_root: str = "") -> str:
         wanted += [s.name for s in extra]
         by_name.update({s.name: s for s in extra})
     pages = "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
-    # Inlined pages alone get read past. The preamble turns each page into a step the agent
-    # must visibly perform, so applying the skill is part of the working procedure, not a
-    # suggestion (ablation 2: silently-inlined pages measured null-to-negative).
-    preamble = ("# Skills -- mandatory checklists, not background reading\n\n"
-                "The pages below are part of the task. Apply them like this:\n"
-                "1. BEFORE your first score call: for each page, write one line naming which of its\n"
-                "   patterns appear in THIS kernel (or 'none applies' -- with the reason).\n"
-                "2. Every optimization decision cites the pattern or checklist line that licenses it;\n"
-                "   a decision that contradicts a page states why it is safe here.\n"
-                "3. On every correct: false, re-read the matching pattern before editing.\n")
+    # A light touch on purpose: an enforced classify-and-cite protocol can cost a small
+    # model more than the pages gain it. The one hook that pays for itself is tying the
+    # pages to the FAILURE loop -- that is the moment the matching pattern is the answer.
+    preamble = ("# Skills\n\n"
+                "The pages below describe patterns that decide what is safe in this kernel. Skim them\n"
+                "before your first rewrite. Whenever a score returns correct: false, re-read the page\n"
+                "section matching the failure before editing -- wrong answers here are usually one of\n"
+                "the listed patterns applied unsafely.\n")
     return preamble + "\n" + pages
 
 
