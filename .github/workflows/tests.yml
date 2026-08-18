@@ -1008,13 +1008,20 @@ jobs:
         run: |
           # Killed with "the runner has received a shutdown signal" inside this step, which prints
           # no summary. The sampler says it is MEMORY, not the disk a SIF launch would have been
-          # blamed for: 14.8 GB of 16 used, 1.1 GB left, 89 GB of disk still free -- the same
-          # signature as the unit sweep, from a different cause, since nothing here draws fuzz
-          # samples. -v names the test in flight next time. Both out once that cause is known.
-          ( while sleep 30; do
+          # blamed for, and -v named the test: test_two_containers_judge_and_agent_via_tools, at
+          # 15752/15989 MB used with 237 MB left and 89 GB of disk still free (run 32076991237).
+          #
+          # What it does NOT say is WHICH process. `free`'s "used" excludes tmpfs, so the
+          # --writable-tmpfs overlays are not it -- something is allocating ~15 GB of anonymous
+          # memory, and the two candidates (the host-side pytest, and the judge serving inside the
+          # container) call for opposite fixes. So sample every 5 s and print the top RSS
+          # consumers with their command lines; a 30 s interval already missed one whole ramp.
+          # All of this comes out once the consumer is named.
+          ( while sleep 5; do
               echo "SAMPLE $(date -u +%H:%M:%S)" \
                    "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
                    "disk=$(df -Pm / | awk 'NR==2{print $4"MB free"}')"
+              ps -eo rss=,args= --sort=-rss | head -3 | awk '{printf "  TOP %dMB %.100s\n", $1/1024, $0}'
             done ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
