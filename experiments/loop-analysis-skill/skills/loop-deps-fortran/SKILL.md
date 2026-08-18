@@ -63,8 +63,16 @@ assume distinct dummies are distinct.
         b(i) = b(i-1) + a(i) + d(i)  ! recurrence  -- stays serial
     end do
 
-as two loops: the first takes `parallel do`/`simd`, the second stays serial (or becomes
-a scan). Statement order decides the easy cases too: `a(i) = a(i+1)` reads the OLD
+as two loops: the first takes `parallel do`/`simd`, the second stays serial -- or, for a
+genuine prefix sum, takes the OpenMP scan directive:
+
+    !$omp parallel do simd reduction(inscan,+:s)
+    do i = 1, n
+        s = s + a(i)
+        !$omp scan inclusive(s)
+        out(i) = s
+    end do
+ Statement order decides the easy cases too: `a(i) = a(i+1)` reads the OLD
 neighbor and is safe as written; `a(i+1) = a(i)` propagates one value and is not --
 saving the old values to a temporary first (node splitting) often breaks the cycle.
 

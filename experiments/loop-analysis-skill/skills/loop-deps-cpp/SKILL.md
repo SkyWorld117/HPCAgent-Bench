@@ -28,8 +28,10 @@ serial -- do not "fix" it into a different algorithm unless the tolerance proves
     for (size_t i = 0; i < n; ++i) { out[i] = run; run += in[i]; }
 
 `run` carries the whole prefix: this is an exclusive scan, not a reduction -- a
-`reduction` clause gives the total but every `out[i]` is wrong. Remedy: a two-pass
-block-scan (per-thread partial sums, then offset pass), or `std::exclusive_scan`; a plain
+`reduction` clause gives the total but every `out[i]` is wrong. Remedy: the OpenMP scan
+directive -- `reduction(inscan,+:run)` on the loop with `#pragma omp scan exclusive(run)`
+between the use (`out[i] = run`) and the accumulation (`run += in[i]`) -- or
+`std::exclusive_scan`; a plain
 running maximum with its position is a max-location reduction (per-thread best, merged
 after). A scalar that only accumulates a total is the easy case: `reduction(+:run)`,
 minding the reassociated sum against the tolerance.
