@@ -90,16 +90,18 @@ config = bm.get_config(model=model, trust_remote_code=True)
 # NOT bm.get_model_params: KimiK25ForConditionalGeneration is a multimodal wrapper it does not
 # know, so it falls into the Mixtral default and grabs the DENSE intermediate_size 18432 --
 # 595206 tuned N=4608 while serving wants N=512. The MoE fields live on the text sub-config.
-tc = config.get_text_config()
-E = tc.n_routed_experts
-topk = tc.num_experts_per_tok
-intermediate_size = tc.moe_intermediate_size
-hidden_size = tc.hidden_size
+tc = config.get_text_config().to_dict()
+# deepseek-style configs (kimi) name it n_routed_experts; qwen3-moe names it num_experts.
+E = tc.get("n_routed_experts") or tc["num_experts"]
+topk = tc["num_experts_per_tok"]
+intermediate_size = tc["moe_intermediate_size"]
+hidden_size = tc["hidden_size"]
 shard_intermediate_size = 2 * intermediate_size // tp
 dtype = bm.resolve_dtype(config)
+# group_size present = int4 W4A16 checkpoint (kimi); absent = plain bf16/fp16 MoE (qwen30b).
 group_size = bm.get_quantization_group_size(config)
-assert group_size is not None, "no group_size in quantization config"
-block_quant_shape = [0, group_size]
+use_int4 = group_size is not None
+block_quant_shape = [0, group_size] if use_int4 else None
 print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={hidden_size} "
       f"group_size={group_size} dtype={dtype} sizes={sizes}", flush=True)
 
@@ -130,7 +132,7 @@ for bs in sizes:
         wall = time.time()
         try:
             kt = bm.benchmark_config(cfg, bs, E, shard_intermediate_size, hidden_size, topk, dtype,
-                                     False, False, True, num_iters=20,
+                                     False, False, use_int4, num_iters=20,
                                      block_quant_shape=block_quant_shape, use_deep_gemm=False)
         except triton.runtime.autotuner.OutOfResources:
             continue
@@ -143,14 +145,14 @@ for bs in sizes:
         # Checkpoint: a wall-limit death must still leave the best-so-far JSON behind.
         if best is not None and idx > 0 and idx % 100 == 0:
             bm.save_configs({**best_by_size, bs: bm.sort_config(best)}, E, shard_intermediate_size,
-                            hidden_size, topk, dtype, False, False, True, block_quant_shape, run_dir)
+                            hidden_size, topk, dtype, False, False, use_int4, block_quant_shape, run_dir)
     bm.clear_triton_cache()
     assert best is not None, f"no config compiled for bs={bs}"
     best_by_size[bs] = bm.sort_config(best)
     print(f"[bs={bs}] DONE best={best_by_size[bs]}", flush=True)
 
 bm.save_configs(best_by_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-                False, False, True, block_quant_shape, run_dir)
+                False, False, use_int4, block_quant_shape, run_dir)
 PY
 '
 
