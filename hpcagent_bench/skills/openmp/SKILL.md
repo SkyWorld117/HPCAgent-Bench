@@ -71,9 +71,12 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 
     `exclusive(s)` is the value-BEFORE-this-iteration variant (read `s` first, scan, then
     accumulate). It reassociates the sum like any reduction -- tolerance check applies.
-  - **SCATTER** -- writes through an index array (`a(idx(i))`): duplicate indices collide.
-    Per-thread copies merged after the loop, or `omp atomic` on the update (often slower
-    than serial), or leave it serial.
+  - **SCATTER** -- writes through an index array (`a(idx(i))`). The question is whether two
+    iterations can share an index. CONFLICT-FREE -- the task guarantees `idx` is a
+    permutation / all-distinct (read the reference: a pure gather-then-store, a reindexing) --
+    is just PARALLEL: plain `parallel for simd`, no atomics, full speed. Only DUPLICATE
+    indices collide; then: per-thread copies merged after the loop, or `omp atomic` on the
+    update (often slower than serial), or leave it serial.
 
         #pragma omp parallel for                /* two i can share bin[i]: */
         for (int64_t i = 0; i < m; i++) {
