@@ -39,10 +39,10 @@ ulimit -c 0
 SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 export RUN_DIR="${SCRATCH}/numpy-vectorize/logs/${SLURM_JOB_ID}"
 # iopsstor reads ~11x faster than capstor (job 593523); capstor keeps the durable copy.
-FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
+export FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
 [[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
 export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
-REPO="${HPCAGENT_BENCH_REPO:-${SCRATCH}/optarena}"
+export REPO="${HPCAGENT_BENCH_REPO:-${SCRATCH}/optarena}"
 
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AGENT_EDF="${AGENT_EDF:-optarena-amd-mi300-v4}"
@@ -97,6 +97,19 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 # RCCL probes and ENABLES GPU-direct RDMA on its own; on this fabric that path corrupts
 # cross-node collectives intermittently and produces silent wrong results rather than an error.
 # Omitting the variable is NOT the same as having GDR off.
+# The three things that make THIS shape fast and correct, all of which the campaign path
+# (containers/cluster/example-script/run_cluster.sh) sets and this standalone job did not:
+#
+# 1. Tuned fused_moe Triton configs, keyed by (experts, N, device, dtype). Unset, kimi serves on
+#    vLLM's default MoE config and warns it is sub-optimal -- measured ~11x off the reference for
+#    the E=384,N=512,int4_w4a16 shape, and the tuning committed here is worth 1.71x.
+# 2. The eager process-group patch. At pp=4 the lazy path mints a per-pair NCCL communicator over
+#    CXI and the engine decodes ZERO tokens (594541-543). This is the same tp=4 pp=4 shape.
+# 3. A cache root that survives the job: the default lives under ~/.cache, which is not mounted
+#    here, and 592283 paid 3 h 13 m re-running Inductor codegen because of it.
+export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-${REPO}/containers/cluster/ce-images/inference/moe-configs}"
+export PYTHONPATH="${REPO}/containers/cluster/ce-images/inference/external-eager-pg-patch:${PYTHONPATH:-}"
+export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
 export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-0}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_FILE="${RUN_DIR}/nccl.%h.%p.log"
