@@ -2,7 +2,7 @@
 
 The numpy reference runs ``TMAX`` timesteps of four sequential sub-steps::
 
-    ey[0, :]   = _fict_[t]
+    ey[0, :]   = fict[t]
     ey[1:, :] -= ey_courant * (hz[1:, :] - hz[:-1, :])
     ex[:, 1:] -= ex_courant * (hz[:, 1:] - hz[:, :-1])
     hz[:-1, :-1] -= hz_courant * (ex[:-1, 1:] - ex[:-1, :-1] + ey[1:, :-1] - ey[:-1, :-1])
@@ -14,7 +14,7 @@ step PrimFuncs and drive the TMAX loop in Python, running them in order. Each
 step writes back into its own array buffer (safe to alias in/out: every output
 cell reads only the *other* arrays plus its own input cell at the same index).
 
-``_fict_[t]`` and the Courant coefficients (``ey_courant``/``ex_courant``/
+``fict[t]`` and the Courant coefficients (``ey_courant``/``ex_courant``/
 ``hz_courant``, default 0.5/0.5/0.7) are passed as runtime scalars (``te.var``,
 never build-time constants). We return
 ``(ex, ey, hz)`` in ``output_args`` order; numpy returns None so its validation
@@ -96,7 +96,7 @@ _K_hz_cpu = TvmKernel("fdtd_2d_hz_cpu", _build_step_hz, cpu_target, lambda: tvm.
 _K_hz_gpu = TvmKernel("fdtd_2d_hz_gpu", _build_step_hz, gpu_target, lambda: tvm.cuda(0))
 
 
-def kernel(TMAX, ex, ey, hz, _fict_, ey_courant=0.5, ex_courant=0.5, hz_courant=0.7):
+def kernel(TMAX, ex, ey, hz, fict, ey_courant=0.5, ex_courant=0.5, hz_courant=0.7):
     _K_ex = active_kernel(_K_ex_cpu, _K_ex_gpu)
     _K_ey = active_kernel(_K_ey_cpu, _K_ey_gpu)
     _K_hz = active_kernel(_K_hz_cpu, _K_hz_gpu)
@@ -105,7 +105,7 @@ def kernel(TMAX, ex, ey, hz, _fict_, ey_courant=0.5, ex_courant=0.5, hz_courant=
     exe_ey = _K_ey.get(key)
     exe_ex = _K_ex.get(key)
     exe_hz = _K_hz.get(key)
-    fict_host = _fict_.numpy()
+    fict_host = fict.numpy()
     ey_courant, ex_courant, hz_courant = float(ey_courant), float(ex_courant), float(hz_courant)
     for t in range(TMAX):
         exe_ey(float(fict_host[t]), ey_courant, ey, hz, ey)

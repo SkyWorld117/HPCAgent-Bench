@@ -39,6 +39,8 @@ parameters:
     nlev: [16, 137]
     klon: [64, 1024]
 init:
+  constants:
+    nclv: 5
   func_name: initialize
   input_args:
   - nlev

@@ -5,34 +5,34 @@ kind: microkernel
 level: 1
 parameters:
   S:
-    b: 2
-    i: 3
-    j: 4
-    k: 6
-    l: 5
+    nb: 2
+    ni: 3
+    nj: 4
+    nk: 6
+    nl: 5
   M:
-    b: 4
-    i: 64
-    j: 64
-    k: 384
-    l: 384
+    nb: 4
+    ni: 64
+    nj: 64
+    nk: 384
+    nl: 384
   L:
-    b: 8
-    i: 128
-    j: 128
-    k: 627
-    l: 627
+    nb: 8
+    ni: 128
+    nj: 128
+    nk: 627
+    nl: 627
   XL:
-    b: 15
-    i: 255
-    j: 255
-    k: 1023
-    l: 1023
+    nb: 15
+    ni: 255
+    nj: 255
+    nk: 1023
+    nl: 1023
 init:
   arrays:
-    A: (b, i, j, l)
-    B: (l, k)
-    out: (b, i, j, k)
+    A: (nb, ni, nj, nl)
+    B: (nl, nk)
+    out: (nb, ni, nj, nk)
 output_args:
 - out
 taxonomy:

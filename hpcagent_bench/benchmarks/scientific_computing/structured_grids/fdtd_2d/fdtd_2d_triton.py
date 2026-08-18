@@ -100,13 +100,13 @@ def _kernel_update_hz(hz_ptr, ex_ptr, ey_ptr, hz_courant, nx, ny, BLOCK_SIZE_X: 
     tl.store(hz_ptr + offsets_2d, hz_new, mask=mask_2d)
 
 
-def kernel(TMAX, ex, ey, hz, _fict_, ey_courant=0.5, ex_courant=0.5, hz_courant=0.7):
+def kernel(TMAX, ex, ey, hz, fict, ey_courant=0.5, ex_courant=0.5, hz_courant=0.7):
     nx, ny = ex.shape
 
     grid_2d_ey = lambda meta: (triton.cdiv(nx, meta['BLOCK_SIZE_X']), triton.cdiv(ny, meta['BLOCK_SIZE_Y']))
     grid_2d_hz = lambda meta: (triton.cdiv(nx - 1, meta['BLOCK_SIZE_X']), triton.cdiv(ny - 1, meta['BLOCK_SIZE_Y']))
 
-    fict_vals = _fict_.cpu().numpy()
+    fict_vals = fict.cpu().numpy()
     for t in range(TMAX):
         # Update ey
         _kernel_update_fields_fused[grid_2d_ey](ex, ey, float(fict_vals[t]), hz, float(ey_courant), float(ex_courant),

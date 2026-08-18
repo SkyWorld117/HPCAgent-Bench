@@ -1,5 +1,6 @@
 # OptArena benchmark manifest (KernelBench port).
 name: conv_transpose2d_global_avg_pool_bias_add_logsumexp_sum_multiply
+short_name: convt2d_gap_bias_lse_mul
 func_name: conv_transpose2d_global_avg_pool_bias_add_logsumexp_sum_multiply
 kind: microkernel
 level: 2

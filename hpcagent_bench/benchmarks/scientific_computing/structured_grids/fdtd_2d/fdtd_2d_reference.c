@@ -29,11 +29,11 @@
 /* Array initialization. */
 static void init_array(int tmax, int nx, int ny, DATA_TYPE POLYBENCH_2D(ex, NX, NY, nx, ny),
                        DATA_TYPE POLYBENCH_2D(ey, NX, NY, nx, ny), DATA_TYPE POLYBENCH_2D(hz, NX, NY, nx, ny),
-                       DATA_TYPE POLYBENCH_1D(_fict_, TMAX, tmax)) {
+                       DATA_TYPE POLYBENCH_1D(fict, TMAX, tmax)) {
   int i, j;
 
   for (i = 0; i < tmax; i++)
-    _fict_[i] = (DATA_TYPE)i;
+    fict[i] = (DATA_TYPE)i;
   for (i = 0; i < nx; i++)
     for (j = 0; j < ny; j++) {
       ex[i][j] = ((DATA_TYPE)i * (j + 1)) / nx;
@@ -82,14 +82,14 @@ static void print_array(int nx, int ny, DATA_TYPE POLYBENCH_2D(ex, NX, NY, nx, n
    including the call and return. */
 static void kernel_fdtd_2d(int tmax, int nx, int ny, DATA_TYPE POLYBENCH_2D(ex, NX, NY, nx, ny),
                            DATA_TYPE POLYBENCH_2D(ey, NX, NY, nx, ny), DATA_TYPE POLYBENCH_2D(hz, NX, NY, nx, ny),
-                           DATA_TYPE POLYBENCH_1D(_fict_, TMAX, tmax)) {
+                           DATA_TYPE POLYBENCH_1D(fict, TMAX, tmax)) {
   int t, i, j;
 
 #pragma scop
 
   for (t = 0; t < _PB_TMAX; t++) {
     for (j = 0; j < _PB_NY; j++)
-      ey[0][j] = _fict_[t];
+      ey[0][j] = fict[t];
     for (i = 1; i < _PB_NX; i++)
       for (j = 0; j < _PB_NY; j++)
         ey[i][j] = ey[i][j] - SCALAR_VAL(0.5) * (hz[i][j] - hz[i - 1][j]);
@@ -114,16 +114,16 @@ int main(int argc, char **argv) {
   POLYBENCH_2D_ARRAY_DECL(ex, DATA_TYPE, NX, NY, nx, ny);
   POLYBENCH_2D_ARRAY_DECL(ey, DATA_TYPE, NX, NY, nx, ny);
   POLYBENCH_2D_ARRAY_DECL(hz, DATA_TYPE, NX, NY, nx, ny);
-  POLYBENCH_1D_ARRAY_DECL(_fict_, DATA_TYPE, TMAX, tmax);
+  POLYBENCH_1D_ARRAY_DECL(fict, DATA_TYPE, TMAX, tmax);
 
   /* Initialize array(s). */
-  init_array(tmax, nx, ny, POLYBENCH_ARRAY(ex), POLYBENCH_ARRAY(ey), POLYBENCH_ARRAY(hz), POLYBENCH_ARRAY(_fict_));
+  init_array(tmax, nx, ny, POLYBENCH_ARRAY(ex), POLYBENCH_ARRAY(ey), POLYBENCH_ARRAY(hz), POLYBENCH_ARRAY(fict));
 
   /* Start timer. */
   polybench_start_instruments;
 
   /* Run kernel. */
-  kernel_fdtd_2d(tmax, nx, ny, POLYBENCH_ARRAY(ex), POLYBENCH_ARRAY(ey), POLYBENCH_ARRAY(hz), POLYBENCH_ARRAY(_fict_));
+  kernel_fdtd_2d(tmax, nx, ny, POLYBENCH_ARRAY(ex), POLYBENCH_ARRAY(ey), POLYBENCH_ARRAY(hz), POLYBENCH_ARRAY(fict));
 
   /* Stop and print timer. */
   polybench_stop_instruments;
@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
   POLYBENCH_FREE_ARRAY(ex);
   POLYBENCH_FREE_ARRAY(ey);
   POLYBENCH_FREE_ARRAY(hz);
-  POLYBENCH_FREE_ARRAY(_fict_);
+  POLYBENCH_FREE_ARRAY(fict);
 
   return 0;
 }

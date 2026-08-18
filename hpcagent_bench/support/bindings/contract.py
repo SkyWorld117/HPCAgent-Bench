@@ -97,6 +97,8 @@ class Binding:
     args: Tuple[Arg, ...]
     packed: Tuple[PackedGroup, ...] = ()
     symbols: Dict[str, str] = field(default_factory=dict)
+    #: Compile-time extents the ABI does not pass; the stub declares them as constants.
+    constants: Dict[str, int] = field(default_factory=dict)
     abi: str = ABI_TAG
 
     #: The default symbol the harness binds against (the C leg).
@@ -359,9 +361,19 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
     # Canonical symbol: <short>[_<config>]_fp64, same for every language; a sparse config is part
     # of the stem (each layout is its own kernel).
     base = spec.short_name if config in (None, "dense") else f"{spec.short_name}_{config}"
-    symbols = {lang: f"{base}_fp64" for lang in LANG_SYMBOLS}
+    # Lowercase always: Fortran folds case, so a symbol differing from another only in case is the
+    # same symbol there, and a mixed-case name reads differently in each language's convention.
+    symbols = {lang: f"{base}_fp64".lower() for lang in LANG_SYMBOLS}
+    sym = symbols["c"]
+    if not sym[0].isalpha():
+        raise ValueError(f"{spec.short_name}: symbol {sym!r} must start with a letter -- Fortran "
+                         f"rejects it otherwise; set a `short_name:` in the manifest")
+    if len(sym) > 63:
+        raise ValueError(f"{spec.short_name}: symbol {sym!r} is {len(sym)} characters; Fortran "
+                         f"allows 63 -- set a shorter `short_name:` in the manifest")
 
     return Binding(
+        constants=dict(spec.init.constants) if spec.init is not None else {},
         kernel=spec.short_name,
         config=config,
         args=args,

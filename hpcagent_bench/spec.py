@@ -185,6 +185,9 @@ class InitSpec:
     output_args: Tuple[str, ...]
     shapes: Dict[str, str] = field(default_factory=dict)
     scalars: Dict[str, float] = field(default_factory=dict)
+    #: Compile-time sizes referenced by ``shapes`` that the ABI never passes as arguments
+    #: (cloudsc's ``nclv``). Emitted as a PARAMETER/constexpr in the generated stub.
+    constants: Dict[str, int] = field(default_factory=dict)
     #: Per-array dtype overrides -- ``{name: dtype_str}`` (e.g.
     #: ``{"ip": "int32"}``). An array listed here has a FIXED dtype that
     #: overrides the global fp64/fp32 precision sweep -- the canonical
@@ -1237,6 +1240,7 @@ class BenchSpec:
                 output_args=tuple(init_out),
                 shapes=shapes,
                 scalars=scalars,
+                constants=dict(init_raw.get("constants", {}) or {}),
                 dtypes=dtypes,
                 dists=dists,
                 domains=domains,
