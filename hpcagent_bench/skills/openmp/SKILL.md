@@ -28,7 +28,12 @@ Fortran. Everything below applies to all three; clause syntax is identical.
   vectorized usually regresses and burns budget).
 - **The default move is `parallel for simd` (Fortran: `!$omp parallel do simd`) on the
   OUTERMOST independent loop**: threads across the slot's cores plus vector lanes within each,
-  one directive. Prove independence first: no iteration writes what another reads. Every
+  one directive. Prove independence FIRST, by reading the loop: a subscript like `x(i-1)`
+  on the written array (recurrence), a scalar carried between iterations, or a write through
+  an index array (`a(idx(i))` -- duplicates collide) makes threading ILLEGAL -- the answer
+  comes back wrong, not slow. Split such a loop (fission): thread the independent
+  statements, keep the recurrent one serial. Tridiagonal solves, wavefront sweeps and
+  in-place stencils are recurrences in disguise; a stencil needs a separate output array. Every
   accumulator gets `reduction(+:acc)` -- never a shared variable, and no hand-built per-thread
   partial-sum arrays; the clause is the whole pattern and it also authorizes the FP
   reassociation the compiler refuses on its own (no `-ffast-math`) -- keep it only while the

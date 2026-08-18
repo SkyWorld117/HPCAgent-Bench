@@ -79,8 +79,11 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
 - **Say it on whole arrays, not element by element.** `b = 2.0d0 * a`, `c = a * b`,
   `where (m) a = 0.0d0` -- an array expression states the independence a loop only implies, so the
   compiler vectorizes it without dependence analysis and `-ftree-parallelize-loops` can thread it.
-  The caveat is temporaries: an expression over OVERLAPPING sections or non-contiguous slices
-  materializes a copy, which costs more than the loop it replaced.
+  Two caveats. Temporaries: an expression over OVERLAPPING sections or non-contiguous slices
+  materializes a copy, which costs more than the loop it replaced. Recurrences: array syntax
+  evaluates the WHOLE right side from OLD values, so `x(2:n) = a(2:n)*x(1:n-1) + b(2:n)` is a
+  DIFFERENT computation from the loop `x(i) = a(i)*x(i-1) + b(i)` -- rewriting a recurrence as
+  array syntax silently changes the answer; such a loop stays a loop.
 - **Reach for the intrinsic before writing the loop.** `matmul` (the GEMM: gfortran forwards it to
   a blocked implementation you will not beat by hand), `dot_product`, `sum`/`product` with an
   optional `dim=`, `maxval`/`minval`/`maxloc`, `merge` for a branch-free select, `pack`/`count`,
