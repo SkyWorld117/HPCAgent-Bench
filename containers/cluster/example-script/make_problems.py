@@ -24,7 +24,7 @@ from hpcagent_bench.harness.prompts import LANGUAGE_SKILL, MODEL_SKILL_LANGUAGES
 from hpcagent_bench.spec import KERNELS, BenchSpec  # noqa: E402
 
 
-def skills_section(language: str) -> str:
+def skills_section(language: str, extra_root: str = "") -> str:
     """The shipped ``lang-<language>`` skill body plus the parallelism-model pages the language
     can spell (MODEL_SKILL_LANGUAGES), rendered plainly.
 
@@ -41,6 +41,16 @@ def skills_section(language: str) -> str:
     missing = [name for name in wanted if name not in by_name]
     if missing:
         raise SystemExit(f"missing shipped skill: {', '.join(missing)}")
+    if extra_root:
+        # Experiment track: also inline this root's pages for the packet language. Only pages the
+        # root ADDS are considered (a root shadowing a built-in is a different experiment), and a
+        # page belongs to a language by the -<language> suffix convention (loop-deps-c, ...).
+        _, merged = load_skills((extra_root, ))
+        extra = [s for s in merged if s.name not in by_name and (language == "any" or s.name.endswith(f"-{language}"))]
+        if not extra:
+            raise SystemExit(f"--extra-skill-root {extra_root} adds no page for language {language}")
+        wanted += [s.name for s in extra]
+        by_name.update({s.name: s for s in extra})
     return "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
 
 
@@ -58,11 +68,17 @@ def main() -> int:
     parser.add_argument("--skills",
                         action="store_true",
                         help="append the shipped lang-<language> skill page to every task text")
+    parser.add_argument("--extra-skill-root",
+                        default="",
+                        help="experiment track: also inline skills/*/SKILL.md pages from this root "
+                        "that match the packet language (suffix convention: <name>-<language>)")
     args = parser.parse_args()
 
     # Language is fixed for the whole run (every kept kernel supports it), so the section is the
     # same for every problem -- computed once rather than once per kernel.
-    skills_text = skills_section(args.language or "any") if args.skills else ""
+    skills_text = skills_section(args.language or "any", args.extra_skill_root) if args.skills else ""
+    if args.extra_skill_root and not args.skills:
+        raise SystemExit("--extra-skill-root requires --skills (track 3 = skills + extra pages)")
 
     written = 0
     for name in sorted(KERNELS):
