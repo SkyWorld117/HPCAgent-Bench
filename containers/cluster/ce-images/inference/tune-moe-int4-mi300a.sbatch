@@ -98,10 +98,18 @@ intermediate_size = tc["moe_intermediate_size"]
 hidden_size = tc["hidden_size"]
 shard_intermediate_size = 2 * intermediate_size // tp
 dtype = bm.resolve_dtype(config)
-# group_size present = int4 W4A16 checkpoint (kimi); absent = plain bf16/fp16 MoE (qwen30b).
+# Three weight formats: int4 W4A16 (kimi, has group_size), fp8 w8a8 (qwen FP8 checkpoints,
+# quant_method=fp8 + block-quant shape), plain bf16/fp16 (no quantization_config).
+qc = config.to_dict().get("quantization_config") or {}
+use_fp8 = qc.get("quant_method") == "fp8"
 group_size = bm.get_quantization_group_size(config)
-use_int4 = group_size is not None
-block_quant_shape = [0, group_size] if use_int4 else None
+use_int4 = group_size is not None and not use_fp8
+if use_int4:
+    block_quant_shape = [0, group_size]
+elif use_fp8:
+    block_quant_shape = bm.get_weight_block_size_safety(config)
+else:
+    block_quant_shape = None
 print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={hidden_size} "
       f"group_size={group_size} dtype={dtype} sizes={sizes}", flush=True)
 
@@ -132,7 +140,7 @@ for bs in sizes:
         wall = time.time()
         try:
             kt = bm.benchmark_config(cfg, bs, E, shard_intermediate_size, hidden_size, topk, dtype,
-                                     False, False, use_int4, num_iters=20,
+                                     use_fp8, False, use_int4, num_iters=20,
                                      block_quant_shape=block_quant_shape, use_deep_gemm=False)
         except triton.runtime.autotuner.OutOfResources:
             continue
@@ -145,14 +153,14 @@ for bs in sizes:
         # Checkpoint: a wall-limit death must still leave the best-so-far JSON behind.
         if best is not None and idx > 0 and idx % 100 == 0:
             bm.save_configs({**best_by_size, bs: bm.sort_config(best)}, E, shard_intermediate_size,
-                            hidden_size, topk, dtype, False, False, use_int4, block_quant_shape, run_dir)
+                            hidden_size, topk, dtype, use_fp8, False, use_int4, block_quant_shape, run_dir)
     bm.clear_triton_cache()
     assert best is not None, f"no config compiled for bs={bs}"
     best_by_size[bs] = bm.sort_config(best)
     print(f"[bs={bs}] DONE best={best_by_size[bs]}", flush=True)
 
 bm.save_configs(best_by_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-                False, False, use_int4, block_quant_shape, run_dir)
+                use_fp8, False, use_int4, block_quant_shape, run_dir)
 PY
 '
 
