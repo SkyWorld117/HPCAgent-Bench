@@ -168,7 +168,14 @@ jobs:
           # flight was test_metric.py::test_fuzz_iteration_draws_distinct_sizes, which drew 7.7 GB
           # of arrays over 7 minutes. It runs under the ordinary fuzz size cap now, so the sampler
           # and the -v it took to name it are both gone again.
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 $files
+          #
+          # --timeout-method=thread, not pytest-timeout's default: in run 32076991237 this sweep
+          # reached 93%, wedged, and sat there for 25m46s without the 600 s timeout ever firing --
+          # then died on the STEP timeout, which prints no summary and so names nothing. The
+          # default method arms SIGALRM, and this suite forks and waits on subprocesses, where the
+          # signal never lands. The thread method owns its own timer, so a wedge dumps the stack of
+          # the test that is actually hanging instead of costing the whole job.
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 --timeout-method=thread $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
@@ -301,10 +308,15 @@ jobs:
         #
         # Capped well under the job ceiling so a wedged build still fails as a STEP, leaving the
         # coverage upload below to run -- the cap is a hang detector, not the budget it used to be.
+        #
+        # --timeout-method=thread for the same reason Phase 1 carries it: in run 32076991237 this
+        # phase hung for 38 minutes past its last line with the 900 s timeout never firing, because
+        # the default method arms SIGALRM and the wedge was below a fork/subprocess wait. The
+        # thread method reports the hanging test instead of losing the phase to the step cap.
         timeout-minutes: 70
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 -m integration \
-            tests/ hpcagent_bench/numpy_translators/tests/
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 --timeout-method=thread \
+            -m integration tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: ccache statistics
         if: always()
