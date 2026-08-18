@@ -78,4 +78,4 @@ Wrong answer, no shell: bisect with `tool="none"` prints. Leave `preset` unset: 
 problem size, and `submit` HONORS a `preset` you pass -- the recorded grade then measures the
 wrong size and the analysis discards it; when copying a `score` payload into `submit`, DELETE
 the preset key. A version tuned at `S`/`M` can lose at the default. The `linuxperf` dump runs to hundreds of KB -- ask at most once; your context is
-~64k, so never re-`Read` the file after an edit that reported success.
+finite, so never re-`Read` the file after an edit that reported success.

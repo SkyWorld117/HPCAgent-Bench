@@ -20,6 +20,9 @@ family instead -- `nvhpc`'s `-stdpar` story only applies where its commands are 
 
 ## Using them well
 
+- **A policy checks nothing.** `par`/`par_unseq` are the same independence PROMISE as an
+  OpenMP directive: a recurrence or a colliding indexed write under a policy races and
+  returns wrong answers with no diagnostic. Classify the loop first (openmp page's bins).
 - **Say what the loop means:** `transform`, `reduce`, `transform_reduce`, `inclusive_scan`,
   `for_each` over an index view. `accumulate` is ordered by definition and takes no policy;
   `reduce` is its parallel spelling.

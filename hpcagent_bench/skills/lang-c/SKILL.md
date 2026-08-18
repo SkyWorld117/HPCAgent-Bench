@@ -92,5 +92,5 @@ No shell: `Bash` is denied (`containers/agent/start_agents.sh`), tools are
 4. **`profile` `tool: "linuxperf"`** -- hotspots plus call graph, confirms the loop you changed is
    the one that costs. `counters: true` with `counter_group` `cache`/`branch`/`stalls` says why.
    One extra measured run per metric, so ask after the call graph. Its dump runs to hundreds of
-   KB: ask at most once. Your context is ~64k and the kernel is under 100 lines -- do not
+   KB: ask at most once. Your context is finite and the kernel is under 100 lines -- do not
    re-`Read` the file after an edit that reported success; a quarter of all runs die on context.
