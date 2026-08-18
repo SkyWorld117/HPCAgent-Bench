@@ -7,23 +7,28 @@ block is extracted, wrapped in the smallest unit that can hold it, and built wit
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-SKILLS = Path("/capstor/scratch/cscs/ybudanaz/x86_64/optarena/hpcagent_bench/skills")
-OUT = Path("/tmp/skillex")
-OUT.mkdir(exist_ok=True)
+from hpcagent_bench import paths
+from hpcagent_bench.languages import std_flag
 
+SKILLS = paths.ROOT / "hpcagent_bench" / "skills"
+OUT = Path(tempfile.mkdtemp(prefix="skillex-"))
+
+# The `-std=` comes from the compilers.yaml pin, never a literal: a gate that checks the pages
+# against a dialect the judge does not build with can only certify the wrong thing.
 C_FLAGS = [
-    "-std=c23", "-O3", "-march=native", "-fopenmp", "-fno-math-errno", "-fno-trapping-math", "-fno-signed-zeros",
+    std_flag("c"), "-O3", "-march=native", "-fopenmp", "-fno-math-errno", "-fno-trapping-math", "-fno-signed-zeros",
     "-fstrict-aliasing", "-Wall"
 ]
 CPP_FLAGS = [
-    "-std=c++23", "-O3", "-march=native", "-fopenmp", "-fno-math-errno", "-fno-trapping-math", "-fno-signed-zeros",
+    std_flag("cpp"), "-O3", "-march=native", "-fopenmp", "-fno-math-errno", "-fno-trapping-math", "-fno-signed-zeros",
     "-fstrict-aliasing", "-Wall"
 ]
 F_FLAGS = [
-    "-std=f2018", "-ffree-form", "-ffree-line-length-none", "-O3", "-march=native", "-fopenmp", "-fno-math-errno",
-    "-fno-trapping-math", "-fno-signed-zeros", "-fstrict-aliasing", "-Wall"
+    std_flag("fortran"), "-ffree-form", "-ffree-line-length-none", "-O3", "-march=native", "-fopenmp",
+    "-fno-math-errno", "-fno-trapping-math", "-fno-signed-zeros", "-fstrict-aliasing", "-Wall"
 ]
 
 # Names the examples use without declaring; anything the snippet declares itself is dropped from

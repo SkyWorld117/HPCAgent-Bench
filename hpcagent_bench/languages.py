@@ -384,17 +384,25 @@ COMPILER_ALIASES: Dict[str, Tuple[str, ...]] = {
 #:
 #:     gcc-7   -std=c17    -> unrecognized command line option, did you mean '-std=c11'?
 #:     g++-7   -std=c++23  -> unrecognized command line option, did you mean '-std=c++03'?
-#:     gcc-12  -std=c17    -> ok          g++-12/13/14 -std=c++23 -> ok
+#:     gcc-12/13 -std=c23  -> unrecognized command line option, did you mean '-std=c2x'?
+#:     gcc-14  -std=c23    -> ok          g++-12/13/14 -std=c++23 -> ok
 #:
 #: One number per DRIVER, not per family, each traceable to the flag its own block pins:
-#: ``-std=c17`` and ``-std=f2018`` arrived in GCC 8; ``-std=c++23`` is spelled ``c++2b`` before
-#: GCC 12. Drivers absent here carry NO floor -- clang and flang pin nothing version-gated at
-#: this layer (flang's LLVM >= 20 requirement for ``-fdo-concurrent-to-openmp`` is a preflight
-#: check, not a resolution one), and inventing a floor for them would only reject working hosts.
+#: ``-std=c23`` arrived in GCC 14 (``c2x`` before it) and ``-std=f2018`` in GCC 8; ``-std=c++23``
+#: is spelled ``c++2b`` before GCC 12.
+#:
+#: clang carries a floor for a DIFFERENT reason: it takes ``-std=c23`` from clang 18, but the C23
+#: feature the stubs emit -- ``constexpr`` on an object definition, N3018 -- only lands in clang 19
+#: (clang.llvm.org/c_status.html). A clang 18 host therefore ACCEPTS the dialect and then rejects
+#: the constant, failing only the kernels that declare ``init.constants``; the floor turns that
+#: into a clean resolution miss instead. flang still pins nothing version-gated here (its
+#: LLVM >= 20 requirement for ``-fdo-concurrent-to-openmp`` is a preflight check, not a
+#: resolution one), and inventing a floor for it would only reject working hosts.
 COMPILER_MIN_MAJOR: Dict[str, int] = {
-    "gcc": 8,
+    "gcc": 14,
     "g++": 12,
     "gfortran": 8,
+    "clang": 19,
 }
 
 

@@ -46,7 +46,7 @@ SYNTAX_ONLY_FLAGS = ("-fsyntax-only", "-fopenmp", "-Wall", "-Wextra")
 #: The DIALECT flags the JUDGE compiles each language with (``hpcagent_bench/envs/compilers.yaml``).
 #:
 #: Without these the check runs at the compiler's DEFAULT dialect -- gnu17 for gcc, gnu++17 for
-#: g++ -- which ACCEPTS GNU extensions the judge's -std=c17 / -std=c++23 reject. A file could pass
+#: g++ -- which ACCEPTS GNU extensions the judge's -std=c23 / -std=c++23 reject. A file could pass
 #: here and fail the build, which is the one outcome this tool exists to prevent, and qwen30b spent
 #: 25-28% of its grades on build_error while calling this tool (594529-594532).
 #:
@@ -58,7 +58,7 @@ SYNTAX_ONLY_FLAGS = ("-fsyntax-only", "-fopenmp", "-Wall", "-Wextra")
 UNRECOGNIZED_OPTION = "unrecognized command line option"
 
 LANGUAGE_DIALECT: dict[str, tuple[str, ...]] = {
-    "c": ("-std=c17", ),
+    "c": ("-std=c23", ),
     "cpp": ("-std=c++23", ),
     "fortran": ("-std=f2018", "-ffree-form", "-ffree-line-length-none"),
 }

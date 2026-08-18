@@ -21,7 +21,7 @@ g++ -c -o /dev/null -O2 -Wall -Wextra -std=c++23 \
     -Werror=return-type -Werror=sizeof-pointer-memaccess kernel.cpp
 ```
 
-**The `-std=` is the harness's, not a habit.** `c++23` and `c17`, from `hpcagent_bench/envs/compilers.yaml`
+**The `-std=` is the harness's, not a habit.** `c++23` and `c23`, from `hpcagent_bench/envs/compilers.yaml`
 -- analysing at a standard the build never selects analyses a translation unit that never ships.
 
 Clang spells a subset: drop `maybe-uninitialized`, `stringop-overflow`, `free-nonheap-object`, add
@@ -40,7 +40,7 @@ drops the diagnostic and the run reads clean.
 gcc build gets `-fanalyzer`, clang build gets the LLVM analyzer, so the analysis matches the
 toolchain that made the binary -- the other one's model of your flags is a guess.
 ```sh
-gcc -c -o /dev/null -fanalyzer -std=c17 -Werror=analyzer-use-of-uninitialized-value \
+gcc -c -o /dev/null -fanalyzer -std=c23 -Werror=analyzer-use-of-uninitialized-value \
     -Werror=analyzer-possible-null-dereference -Werror=analyzer-out-of-bounds \
     -Werror=analyzer-malloc-leak kernel.c   # also: -use-after-free, -double-free
 ```

@@ -1,6 +1,6 @@
 ---
 name: lang-c
-description: "Make the C17 compiler vectorize the kernel: loop shapes, restrict, reductions, and the tools you can actually run here."
+description: "Make the C23 compiler vectorize the kernel: loop shapes, restrict, reductions, and the tools you can actually run here."
 ---
 
 # lang-c
@@ -10,8 +10,12 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
 
 ## Harness facts
 
-- `-std=c17`. Judge builds `-O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math
-  -fno-signed-zeros -fstrict-aliasing`. Source: `hpcagent_bench/flags.py`.
+- `-std=c23`. Judge builds `-O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math
+  -fno-signed-zeros -fstrict-aliasing`. Source: `hpcagent_bench/flags.py`. The toolchain is
+  **GNU 16** (`gcc`, the default) and **LLVM 22** (`clang`, request it with the submission's
+  `compiler` field). C23 is what the judge PARSES, so `constexpr`, `typeof`, `nullptr` and bare
+  `bool`/`true`/`false` are all available -- and any compile-time extent the ABI does not pass
+  arrives already declared at the top of your stub as `constexpr int64_t`.
 - `-ffast-math` NEVER on. Compiler will not reassociate FP for you.
 - `-fopenmp` always on, you never add or remove it. Grading is MULTI-CORE: the timed run owns
   its slot's physical cores (24 here, no SMT) with `OMP_NUM_THREADS` preset to match. The

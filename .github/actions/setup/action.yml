@@ -42,8 +42,11 @@ runs:
         # CI alone -- tests/test_parallelism_dispatch.py caught exactly that. Pin the major so the
         # runner answers for the same compiler the agent is graded on.
         #
-        # gfortran ONLY as far as the DRIVERS go: gcc/g++ stay on the distro default, so this does
-        # not re-toolchain the C and C++ arms. /usr/local/bin precedes /usr/bin on the runner's
+        # The WHOLE GNU family moves together, gcc and g++ included. That used to be a
+        # Fortran-only pin, but compilers.yaml now builds C at -std=c23, and the runner's default
+        # gcc is 13: `gcc-13 -std=c23` is "unrecognized command line option ... did you mean
+        # '-std=c2x'?" (measured), so every GNU C build would fail on CI while the graded
+        # toolchain (GCC 16) compiles them clean. /usr/local/bin precedes /usr/bin on the runner's
         # PATH, and compilers.yaml names the driver unversioned, so the symlink is what makes it
         # take effect.
         #
@@ -59,8 +62,12 @@ runs:
         GCC_MAJOR=15
         sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         sudo apt-get update
-        sudo apt-get install -y "gfortran-${GCC_MAJOR}" "libstdc++-${GCC_MAJOR}-dev"
-        sudo ln -sf "/usr/bin/gfortran-${GCC_MAJOR}" /usr/local/bin/gfortran
+        sudo apt-get install -y "gcc-${GCC_MAJOR}" "g++-${GCC_MAJOR}" "gfortran-${GCC_MAJOR}" \
+          "libstdc++-${GCC_MAJOR}-dev"
+        for driver in gcc g++ gfortran; do
+          sudo ln -sf "/usr/bin/${driver}-${GCC_MAJOR}" "/usr/local/bin/${driver}"
+        done
+        gcc --version | head -1
         gfortran --version | head -1
 
     - name: LLVM toolchain (clang / clang++ / flang / libomp)

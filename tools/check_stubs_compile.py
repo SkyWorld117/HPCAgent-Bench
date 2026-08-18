@@ -12,13 +12,17 @@ import subprocess
 import sys
 import tempfile
 
+from hpcagent_bench.languages import std_flag
 from hpcagent_bench.spec import KERNELS, BenchSpec
 from hpcagent_bench.support.bindings import binding_from_spec, gen_call_stub
 
+#: The dialect comes from `languages.std_flag`, never a literal: this gate compiled C at a
+#: hardcoded `-std=c23` while `compilers.yaml` still pinned c17, so it was proving stubs against
+#: a build the judge did not perform. Read the pin, and the gate cannot drift from it again.
 CC = {
-    "fortran": (["gfortran", "-std=f2018", "-ffree-form", "-ffree-line-length-none"], ".f90"),
-    "c": (["gcc", "-std=c23"], ".c"),
-    "cpp": (["g++", "-std=c++23"], ".cpp"),
+    "fortran": (["gfortran", std_flag("fortran"), "-ffree-form", "-ffree-line-length-none"], ".f90"),
+    "c": (["gcc", std_flag("c")], ".c"),
+    "cpp": (["g++", std_flag("cpp")], ".cpp"),
 }
 COMMON = ["-O3", "-fopenmp", "-fno-math-errno", "-fstrict-aliasing"]
 

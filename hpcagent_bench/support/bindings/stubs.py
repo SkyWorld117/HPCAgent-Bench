@@ -50,16 +50,18 @@ _CPP_STUB_HEADERS = ("#include <cstdint>\n"
                      "#include <omp.h>\n")
 
 
-def _c_constants(binding: Binding, *, cpp: bool) -> str:
+def _c_constants(binding: Binding) -> str:
     """Compile-time extents the ABI never passes, in each language's own idiom.
 
-    They size arrays the kernel indexes, so the body needs the name in scope: `constexpr` in C++,
-    an object-like macro in C, `parameter` in Fortran (see :func:`_gen_fortran`).
+    They size arrays the kernel indexes, so the body needs the name in scope. C and C++ both get
+    `constexpr` -- a TYPED, scoped constant the compiler folds like a literal, where an
+    object-like macro would text-substitute into any local of the same name the agent declares.
+    C is built at `-std=c23` (`compilers.yaml`), which is what makes `constexpr` legal there;
+    Fortran uses `parameter` (see :func:`_gen_fortran`).
     """
     if not binding.constants:
         return ""
-    lines = [(f"constexpr int64_t {n} = {int(v)};" if cpp else f"#define {n} {int(v)}")
-             for n, v in sorted(binding.constants.items())]
+    lines = [f"constexpr int64_t {n} = {int(v)};" for n, v in sorted(binding.constants.items())]
     return "\n".join(lines) + "\n"
 
 
@@ -71,7 +73,7 @@ def _gen_c(binding: Binding, *, cpp: bool) -> str:
     sig = ",\n    ".join(parts)
     linkage = 'extern "C" ' if cpp else ""
     headers = _CPP_STUB_HEADERS if cpp else _C_STUB_HEADERS
-    return (f"{headers}{_c_constants(binding, cpp=cpp)}\n"
+    return (f"{headers}{_c_constants(binding)}\n"
             f"{linkage}void {sym}(\n    {sig}) {{\n"
             f"    /* {TODO} */\n"
             f"}}\n")
@@ -162,7 +164,7 @@ def _gen_gpu(binding: Binding, lang: str, residency: str = "host") -> str:
         note = f"    /* {TODO}: H2D copy, launch __global__ kernel(s), D2H copy. */\n"
     return (f"{header}\n"
             f"#include <stdint.h>\n"
-            f"{_c_constants(binding, cpp=True)}"
+            f"{_c_constants(binding)}"
             f'extern "C" void {sym}(\n    {sig}) {{\n'
             f"{note}"
             f"}}\n")
