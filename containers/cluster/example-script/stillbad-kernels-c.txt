@@ -1,0 +1,2 @@
+# kernels still never-correct after the skills-v3 smoke (599283-599288)
+reroll_saxpy7
