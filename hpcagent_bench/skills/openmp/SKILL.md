@@ -43,7 +43,20 @@ Fortran. Everything below applies to all three; clause syntax is identical.
     wrong, not slow. Fission the independent statements into their own (threaded) loop and
     keep the chain serial -- or find the parallel dimension the chain does not cross
     (independent rows/systems; a wavefront's diagonals), or give a stencil a separate
-    output array.
+    output array. The ONE recurrence with a directive of its own is the PREFIX SUM:
+    `reduction(inscan,+:s)` on the loop, with `#pragma omp scan inclusive(s)`
+    (Fortran: `!$omp scan inclusive(s)`) splitting the body -- statements before the scan
+    feed the sum, statements after read the scanned value:
+
+        #pragma omp parallel for simd reduction(inscan,+:s)
+        for (int64_t i = 0; i < n; i++) {
+            s += a[i];
+            #pragma omp scan inclusive(s)
+            out[i] = s;
+        }
+
+    `exclusive(s)` is the value-BEFORE-this-iteration variant (read `s` first, scan, then
+    accumulate). It reassociates the sum like any reduction -- tolerance check applies.
   - **SCATTER** -- writes through an index array (`a(idx(i))`): duplicate indices collide.
     Per-thread copies merged after the loop, or `omp atomic` on the update (often slower
     than serial), or leave it serial.
