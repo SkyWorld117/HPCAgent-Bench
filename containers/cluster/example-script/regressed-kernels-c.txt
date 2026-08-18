@@ -1,0 +1,20 @@
+# kernels the oss120b skills arm got INCORRECT while the base arm was clean
+# source: judge DBs of 598186-598191, status='incorrect'
+argmax_with_index
+heat3d_tiled_sym
+jacobi2d_double_tiled_const
+jacobi2d_double_tiled_sym
+jacobi2d_tiled_const
+quasi_affine_floor_div_scatter
+reroll_saxpy7
+scan_strided_2
+tsvc_2_s1111
+tsvc_2_s118
+tsvc_2_s127
+tsvc_2_s151
+tsvc_2_s211
+tsvc_2_s222
+tsvc_2_s315
+tsvc_2_s4115
+tsvc_2_vtv
+vertical_flux_prefix_scan

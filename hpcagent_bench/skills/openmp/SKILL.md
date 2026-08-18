@@ -57,7 +57,9 @@ Fortran. Everything below applies to all three; clause syntax is identical.
         for (int64_t i = 1; i < n; i++) {
             a[i] += c[i] * d[i];                /* independent -- fission this out, thread it */
             b[i] = b[i-1] + a[i];               /* chain -- stays serial; NO directive fixes it */
-        } The ONE recurrence with a directive of its own is the PREFIX SUM:
+        }
+
+    The ONE recurrence with a directive of its own is the PREFIX SUM:
     `reduction(inscan,+:s)` on the loop, with `#pragma omp scan inclusive(s)`
     (Fortran: `!$omp scan inclusive(s)`) splitting the body -- statements before the scan
     feed the sum, statements after read the scanned value:
