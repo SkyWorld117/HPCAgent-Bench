@@ -7,6 +7,11 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 ACCOUNT="${ACCOUNT:-a-g200}"
 LANGS="${LANGS:-c cpp fortran}"
+# Which side of the skills-on/off pair to submit, so re-running ONE side does not need a
+# hand-rolled sbatch:  ARMS="off" ...  or  ARMS="skills" ...  (default: both).
+# Spelled with words rather than the raw suffix because the off arm's suffix is the empty
+# string, and an empty element cannot survive a shell word list.
+ARMS="${ARMS:-off skills}"
 # 598185 hit exactly its 16 h limit while its siblings finished in 2-6 h.
 TIME="${TIME:-20:00:00}"
 # Skills arms read the llr4 packet (lang page + openmp/openacc/stdpar/do-concurrent pages);
@@ -18,7 +23,8 @@ for lang in ${LANGS}; do
 done
 
 for lang in ${LANGS}; do
-    for suffix in "" "-skills"; do
+    for arm_kind in ${ARMS}; do
+        [[ "${arm_kind}" == "off" ]] && suffix="" || suffix="-${arm_kind}"
         arm="llr4-oss120b-${lang}${suffix}"
         sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" -A "${ACCOUNT}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch

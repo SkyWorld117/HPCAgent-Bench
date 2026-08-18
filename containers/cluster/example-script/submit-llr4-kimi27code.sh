@@ -11,6 +11,11 @@ ACCOUNT="${ACCOUNT:-a-g200}"
 # so an arm gets through a fraction of the 242 kernels a qwen/oss arm covers in the same window.
 # LANGS narrows the submission to the languages worth spending that on; TIME is the wall clock.
 LANGS="${LANGS:-c cpp fortran}"
+# Which side of the skills-on/off pair to submit, so re-running ONE side does not need a
+# hand-rolled sbatch:  ARMS="off" ...  or  ARMS="skills" ...  (default: both).
+# Spelled with words rather than the raw suffix because the off arm's suffix is the empty
+# string, and an empty element cannot survive a shell word list.
+ARMS="${ARMS:-off skills}"
 TIME="${TIME:-24:00:00}"
 # Skills arms read the llr4 packet (lang page + openmp/openacc/stdpar/do-concurrent pages);
 # off arms reuse the unchanged llr2 task text. Refuse to submit against a stale or missing list.
@@ -21,7 +26,8 @@ for lang in ${LANGS}; do
 done
 
 for lang in ${LANGS}; do
-    for suffix in "" "-skills"; do
+    for arm_kind in ${ARMS}; do
+        [[ "${arm_kind}" == "off" ]] && suffix="" || suffix="-${arm_kind}"
         arm="llr4-kimi27code-${lang}${suffix}"
         sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" -A "${ACCOUNT}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
