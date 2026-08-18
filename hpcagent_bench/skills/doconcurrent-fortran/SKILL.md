@@ -21,8 +21,7 @@ cores of the slot you are timed on. You neither add it nor change it. The standa
 - **llvm (`flang`)**: THREADS via `-fdo-concurrent-to-openmp=host`, on `do concurrent` loops
   ONLY. It becomes a real OpenMP loop and does follow `OMP_NUM_THREADS`. The "experimental"
   line in the build log is normal.
-- **oneapi (`ifx`)**: threads it under the `-fopenmp` already on the build. Believe a TIMED
-  score, not the docs: if the time does not move, it ran serial.
+- **oneapi (`ifx`)**: threads it under the `-fopenmp` already on the build.
 
 `!$omp parallel do` (see the openmp page) is the other spelling of the same thing and threads
 on every family too; the `do concurrent` loop you already proved independent converts
