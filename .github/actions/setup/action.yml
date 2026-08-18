@@ -159,7 +159,12 @@ runs:
         # Echo the RESOLVED sha: a job that grades against dace must say which dace, or a triage
         # reader has to guess from the run date.
         echo "dace @ $(git -C "$RUNNER_TEMP/dace" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-        pip_retry "jax[cpu]" numba pythran pyarrow
+        # pythran is PINNED for the same reason DACE_SHA is: it is a compiler this suite GRADES
+        # kernels through, and it moved under the gate. 0.19.0 landed between run 31842426040
+        # (08-14) and 32065774711 (08-17) and turned subset_sum from green into a >600 s hang,
+        # then a SIG11 -- the kernel itself unchanged and still green here on 0.18.1. Bump this in
+        # its own commit, and expect the e2e statuses to move with it.
+        pip_retry "jax[cpu]" numba pythran==0.18.1 pyarrow
         # DELIBERATELY no `DACE_compiler_build_mode=native` here. It used to be exported for speed
         # (native skips the per-SDFG cmake configure), and it silently DEFEATED the build cache the
         # framework pins: a DACE_* environment variable outranks Config.set, so
