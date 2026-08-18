@@ -50,6 +50,19 @@ _CPP_STUB_HEADERS = ("#include <cstdint>\n"
                      "#include <omp.h>\n")
 
 
+def _c_constants(binding: Binding, *, cpp: bool) -> str:
+    """Compile-time extents the ABI never passes, in each language's own idiom.
+
+    They size arrays the kernel indexes, so the body needs the name in scope: `constexpr` in C++,
+    an object-like macro in C, `parameter` in Fortran (see :func:`_gen_fortran`).
+    """
+    if not binding.constants:
+        return ""
+    lines = [(f"constexpr int64_t {n} = {int(v)};" if cpp else f"#define {n} {int(v)}")
+             for n, v in sorted(binding.constants.items())]
+    return "\n".join(lines) + "\n"
+
+
 def _gen_c(binding: Binding, *, cpp: bool) -> str:
     lang = "cpp" if cpp else "c"
     sym = binding.symbols[lang]
@@ -58,7 +71,7 @@ def _gen_c(binding: Binding, *, cpp: bool) -> str:
     sig = ",\n    ".join(parts)
     linkage = 'extern "C" ' if cpp else ""
     headers = _CPP_STUB_HEADERS if cpp else _C_STUB_HEADERS
-    return (f"{headers}\n"
+    return (f"{headers}{_c_constants(binding, cpp=cpp)}\n"
             f"{linkage}void {sym}(\n    {sig}) {{\n"
             f"    /* {TODO} */\n"
             f"}}\n")
@@ -149,6 +162,7 @@ def _gen_gpu(binding: Binding, lang: str, residency: str = "host") -> str:
         note = f"    /* {TODO}: H2D copy, launch __global__ kernel(s), D2H copy. */\n"
     return (f"{header}\n"
             f"#include <stdint.h>\n"
+            f"{_c_constants(binding, cpp=True)}"
             f'extern "C" void {sym}(\n    {sig}) {{\n'
             f"{note}"
             f"}}\n")
