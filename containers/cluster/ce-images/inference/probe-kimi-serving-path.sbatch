@@ -56,9 +56,14 @@ export FIRST_TOKEN_TIMEOUT="${FIRST_TOKEN_TIMEOUT:-900}"
 # the 555 GB checkpoint; at PP=2 it stages half, and 599253 had every rank SIGKILLed during
 # load on 513 GB nodes. Leave empty for the low-host-memory path.
 export LOAD_STRATEGY="${LOAD_STRATEGY:-}"
-# Each probe holds its clients open for SETTLE + WINDOW, then the counter delta over WINDOW is
-# the steady-state rate. A fixed window keeps the job bounded no matter how slow an arm is.
+# Each probe waits for generation to actually START, then measures the counter delta over WINDOW.
+# A FIXED settle does not work here: 599252 showed every change in the request set is followed by
+# roughly four minutes during which the engine emits nothing at all (prompt throughput 0.2-5.6
+# tok/s, no logger lines), after which it runs at 84-94 tok/s. A 20s settle put the whole window
+# inside that dead period and reported 0.0 tok/s for four of nine arms. So poll until the counter
+# moves, report that ramp as a result in its own right, and only then measure.
 export PROBE_SETTLE="${PROBE_SETTLE:-20}"
+export PROBE_RAMP_TIMEOUT="${PROBE_RAMP_TIMEOUT:-600}"
 export PROBE_WINDOW="${PROBE_WINDOW:-120}"
 # Large enough that no stream finishes inside settle+window even at the single-stream rate --
 # a client that completes early stops generating and would silently deflate the measured rate.
@@ -281,22 +286,36 @@ measure() {
     local label="$1" conc="$2" endpoint="$3" body="$4"
     local pids=() i g0 g1 t0 t1
     for ((i = 0; i < conc; i++)); do
-        curl -fsS -N --max-time $((PROBE_SETTLE + PROBE_WINDOW + 60)) \
+        curl -fsS -N --max-time $((PROBE_SETTLE + PROBE_RAMP_TIMEOUT + PROBE_WINDOW + 60)) \
             "http://${MASTER}:${API_PORT}${endpoint}" \
             -H 'Content-Type: application/json' -d @"${RUN_DIR}/${body}" >/dev/null 2>&1 &
         pids+=($!)
     done
+    # Wait for the engine to actually begin emitting for THIS arm. The ramp is the headline
+    # number for a campaign: agents change the request set constantly, so if every change costs
+    # minutes the server never reaches the steady rate measured below.
+    local ramp=0 gp gc
     sleep "${PROBE_SETTLE}"
+    gp=$(metric generation_tokens_total)
+    while (( ramp < PROBE_RAMP_TIMEOUT )); do
+        sleep 10
+        ramp=$((ramp + 10))
+        gc=$(metric generation_tokens_total)
+        awk -v a="${gp:-0}" -v b="${gc:-0}" 'BEGIN{ exit (b - a > 20) ? 0 : 1 }' && break
+        gp="${gc}"
+    done
     g0=$(metric generation_tokens_total); t0=$SECONDS
     local running; running=$(metric num_requests_running)
     sleep "${PROBE_WINDOW}"
     g1=$(metric generation_tokens_total); t1=$SECONDS
     kill "${pids[@]}" 2>/dev/null || true
     wait "${pids[@]}" 2>/dev/null || true
-    awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1 - t0))" -v c="${conc}" -v r="${running:-0}" -v l="${label}" '
+    awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1 - t0))" -v c="${conc}" -v r="${running:-0}" \
+        -v l="${label}" -v ramp="${ramp}" -v cap="${PROBE_RAMP_TIMEOUT}" '
         BEGIN {
             rate = dt > 0 ? (b - a) / dt : 0
-            printf "%-28s conc=%-4d running=%-5.0f %8.1f tok/s   %6.2f tok/s/req\n", l, c, r, rate, c ? rate / c : 0
+            printf "%-28s conc=%-4d running=%-5.0f ramp=%4ds%s %8.1f tok/s   %6.2f tok/s/req\n",
+                   l, c, r, ramp, (ramp >= cap ? "!" : " "), rate, c ? rate / c : 0
         }'
     # Let the queue drain so the next arm starts from the same clean state.
     sleep 15
