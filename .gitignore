@@ -250,3 +250,11 @@ perf_reports/**
 # put 356 empty files in the repo (one per kernel) and leave an untracked `.cache/` in `git status`
 # for every kernel ever run -- the same reason perf_reports/ is one root dir, not one per kernel.
 containers/cluster/example-script/problems-*.jsonl
+
+# Crash dumps from cluster jobs (ROCm/vLLM workers drop multi-GB cores next to the sbatch)
+core_*
+core.[0-9]*
+
+# Per-run job logs written beside the launcher, one pair per SLURM id
+containers/cluster/example-script/results/
+containers/cluster/example-script/*.err
