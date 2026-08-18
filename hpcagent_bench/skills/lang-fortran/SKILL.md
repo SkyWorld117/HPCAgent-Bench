@@ -61,7 +61,10 @@ One kernel, a full slot of cores. Score = speedup vs a SERIAL same-toolchain gfo
   once, then stop with the good version in place. No compiled reference exists on disk; `search`
   is not provisioned. Sub-microsecond kernels jitter 20-50% between identical calls: under
   ~1.15x is not a result. Some kernels ship deliberately silly structure -- deleting it for the
-  plain loop beats every directive (the largest recorded wins, 24x, are that).
+  plain loop beats every directive (the largest recorded wins, 24x, are that). Keep its TRIP
+  COUNT though: a hand-unrolled `do i = 1, n - 3, 4` writing `i..i+3` stops at the last whole
+  group and leaves the tail alone on purpose, so `do i = 1, n` writes elements the reference
+  never touches -- wrong whenever `mod(n, 4) /= 0`, which fuzzed sizes usually are.
 
 ## 1. Writing good Fortran
 

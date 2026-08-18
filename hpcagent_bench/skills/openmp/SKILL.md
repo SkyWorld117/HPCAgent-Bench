@@ -23,7 +23,12 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 ## What pays, in order
 
 - **Fix the structure first.** The largest recorded wins (24x) came from deleting deliberately
-  silly reference structure and writing the plain loop -- no directive beats that. Then thread,
+  silly reference structure and writing the plain loop -- no directive beats that. Keep the TRIP
+  COUNT the reference had: a hand-unrolled body (`for (i = 0; i < n - 3; i += 4)` writing
+  `i..i+3`) stops at the last whole group of four, so any tail element past it is deliberately
+  left UNTOUCHED. Rerolling that to `for (i = 0; i < n; i++)` also writes the tail and is a wrong
+  answer whenever `n % 4 != 0` -- and graded sizes are fuzzed, so they usually are not. Then
+  thread,
   then vectorize, and only then consider intrinsics (hand-written AVX after `omp simd` already
   vectorized usually regresses and burns budget).
 - **The default move is CLASSIFY, then thread.** Read the loop and put it in one of four
@@ -90,6 +95,23 @@ Fortran. Everything below applies to all three; clause syntax is identical.
 - **Split the two halves when the shape demands it**: `parallel for` on the outer loop with
   `simd` on the unit-stride inner loop when they are different loops; `simd` alone on a tiny
   trip count where spawn overhead beats the win.
+- **`omp unroll` belongs INSIDE a parallel region, on the loop you are already threading.**
+  It is a loop transformation, not a parallelization: on its own it asks the compiler for
+  something `-O3` already does, so it earns nothing by itself. It pays when it sits between a
+  worksharing directive and the loop, giving each thread a fatter body -- and there the clause
+  matters. `partial(n)` unrolls by `n` and leaves a loop behind, which is what the enclosing
+  `for` needs to distribute:
+
+        #pragma omp parallel for simd
+        #pragma omp unroll partial(4)
+        for (int64_t i = 0; i < n; i++)
+            y[i] = a[i] * x[i] + b[i];
+
+  `full` deletes the loop entirely, so there is nothing left for `parallel for` to hand out --
+  it is only legal on an innermost loop with a small compile-time trip count, never directly
+  under a worksharing directive. Fortran spells them `!$omp unroll partial(4)` and
+  `!$omp end unroll`. Measure it: a fatter body helps a short chain and hurts once the loop
+  stops fitting, so keep it only while `score` agrees.
 - **`aligned(...)` claims: only on memory YOU allocated.** ABI input pointers carry natural
   alignment ONLY -- an `aligned(p:32|64)` clause or `__builtin_assume_aligned` on one is UB and
   the #1 crash cause on record (SIGSEGV at vector width, a full judge round trip lost). This is

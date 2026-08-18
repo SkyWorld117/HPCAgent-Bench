@@ -49,6 +49,11 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
 - Read the reference for what it COMPUTES, not how. Some kernels ship deliberately silly
   structure (4-level tiling on a 3-point stencil, dead intermediates); deleting the structure
   and writing the plain loop beats every pragma -- the largest wins on record (24x) are that.
+  What you must copy exactly is the TRIP COUNT. A hand-unrolled body -- `for (i = 0; i < n - 3;
+  i += 4)` writing `i..i+3` -- stops at the last whole group of four, so the tail elements are
+  deliberately left untouched. Rerolling it to `for (i = 0; i < n; i++)` writes that tail as
+  well and is a wrong answer whenever `n % 4 != 0`; graded sizes are fuzzed, so they usually
+  are not multiples of four.
 
 ## 1. Writing good C
 

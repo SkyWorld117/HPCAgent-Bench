@@ -39,7 +39,10 @@ re-checks a SECOND seed (near-tolerance reassociation tricks fail there), and an
 the good version in place. No compiled reference exists on disk (`/shared/tasks/<kernel>/` is
 the NumPy file `task` already returned); `search` is not provisioned. Some kernels ship
 deliberately silly structure -- deleting it for the plain loop beats every pragma (largest wins
-on record, 24x, are that). Sub-microsecond kernels jitter 20-50% between identical calls: under
+on record, 24x, are that), but copy its TRIP COUNT exactly: a hand-unrolled `i < n - 3; i += 4`
+body writing `i..i+3` leaves the tail elements untouched on purpose, and rerolling it to
+`i < n; i++` writes them too -- a wrong answer whenever `n % 4 != 0`, which fuzzed sizes usually
+are. Sub-microsecond kernels jitter 20-50% between identical calls: under
 ~1.15x is not a result, re-score before believing it.
 
 ## 1. Writing good C++
