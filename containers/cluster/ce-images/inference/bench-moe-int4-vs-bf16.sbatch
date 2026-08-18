@@ -104,9 +104,12 @@ dtype = bm.resolve_dtype(config)
 group_size = bm.get_quantization_group_size(config)
 assert group_size is not None, "checkpoint is not int4 grouped; nothing to compare against bf16"
 
-# The only difference between the two arms. Activations stay bf16 in both -- W4A16 means the
-# weights are int4 and the activations are not, so this isolates the weight format.
-ARMS = [("int4_w4a16", True, [0, group_size]), ("bf16", False, None)]
+# The only difference between the two arms. Activations stay unquantized in both -- W4A16 means
+# the weights are int4 and the activations are not, so this isolates the weight format.
+# The int4 path lands in fused_moe_kernel_gptq_awq, whose signature requires SPLIT_K; the plain
+# bf16 kernel has no such parameter and rejects it (599251 died on the missing key). So the extra
+# key belongs to the arm, not to the shared search space.
+ARMS = [("int4_w4a16", True, [0, group_size], {"SPLIT_K": 1}), ("bf16", False, None, {})]
 
 print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={hidden_size} "
       f"group_size={group_size} act_dtype={dtype}", flush=True)
@@ -114,12 +117,13 @@ print(f"E={E} topk={topk} shard_intermediate={shard_intermediate_size} hidden={h
 torch.set_default_device("cuda")
 results = {}
 for bs in sizes:
-    for name, use_int4, block_quant_shape in ARMS:
+    for name, use_int4, block_quant_shape, extra_keys in ARMS:
         space = bm.get_configs_compute_bound(False, None)
         space = bm.prune_rocm_search_space(bs, shard_intermediate_size, hidden_size, space, False, topk)
         if len(space) > max_configs:
             random.seed(0)
             space = random.sample(space, max_configs)
+        space = [{**cfg, **extra_keys} for cfg in space]
         best, best_time = None, float("inf")
         for cfg in space:
             try:
@@ -128,6 +132,11 @@ for bs in sizes:
                                          block_quant_shape=block_quant_shape, use_deep_gemm=False)
             except triton.runtime.autotuner.OutOfResources:
                 continue
+            except TypeError as exc:
+                # A kernel signature the config for this arm does not match: report it once
+                # than silently benchmarking nothing (599251 failed this way).
+                print(f"[{name}] bs={bs} signature mismatch: {exc}", flush=True)
+                break
             if kt < best_time:
                 best_time, best = kt, cfg
         bm.clear_triton_cache()
