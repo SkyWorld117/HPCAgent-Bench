@@ -70,6 +70,7 @@ PY
     export TUNE_BATCH_SIZES="${TUNE_BATCH_SIZES:-64}"
     python3 - <<PY
 import importlib.util
+import json
 import os
 import random
 import time
@@ -90,7 +91,11 @@ config = bm.get_config(model=model, trust_remote_code=True)
 # NOT bm.get_model_params: KimiK25ForConditionalGeneration is a multimodal wrapper it does not
 # know, so it falls into the Mixtral default and grabs the DENSE intermediate_size 18432 --
 # 595206 tuned N=4608 while serving wants N=512. The MoE fields live on the text sub-config.
-tc = config.get_text_config().to_dict()
+# NOT get_text_config().to_dict(): this transformers build prunes model-specific keys from
+# to_dict (num_experts vanished, 598780). config.json raw is the one authority both models obey;
+# kimi nests the MoE fields under text_config, qwen keeps them top-level.
+raw = json.load(open(os.path.join(model, "config.json")))
+tc = raw.get("text_config") or raw
 # deepseek-style configs (kimi) name it n_routed_experts; qwen3-moe names it num_experts.
 E = tc.get("n_routed_experts") or tc["num_experts"]
 topk = tc["num_experts_per_tok"]
@@ -100,7 +105,7 @@ shard_intermediate_size = 2 * intermediate_size // tp
 dtype = bm.resolve_dtype(config)
 # Three weight formats: int4 W4A16 (kimi, has group_size), fp8 w8a8 (qwen FP8 checkpoints,
 # quant_method=fp8 + block-quant shape), plain bf16/fp16 (no quantization_config).
-qc = config.to_dict().get("quantization_config") or {}
+qc = raw.get("quantization_config") or {}
 use_fp8 = qc.get("quant_method") == "fp8"
 group_size = bm.get_quantization_group_size(config)
 use_int4 = group_size is not None and not use_fp8
