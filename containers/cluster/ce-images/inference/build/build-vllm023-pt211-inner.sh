@@ -12,8 +12,11 @@ export PYTORCH_ROCM_ARCH=gfx942
 export ROCM_PATH=/opt/rocm
 export MAX_JOBS="${MAX_JOBS:-32}"
 export CMAKE_BUILD_TYPE=Release
-export VLLM_VERSION_OVERRIDE=0.23.0
-export SETUPTOOLS_SCM_PRETEND_VERSION=0.23.0
+# Which vLLM tag to build. Defaults to the version that produced the serving image, so an
+# un-parameterised run is unchanged; the sbatch passes it in for anything newer.
+VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+export VLLM_VERSION_OVERRIDE="${VLLM_VERSION}"
+export SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION}"
 
 PYTHON=/opt/pytorch211/bin/python
 PIP=("$PYTHON" -m pip)
@@ -104,14 +107,14 @@ rm -rf /var/lib/apt/lists/*
   more-itertools
 
 echo "========================================"
-echo "CLONE VLLM 0.23.0"
+echo "CLONE VLLM ${VLLM_VERSION}"
 echo "========================================"
 
 "${PIP[@]}" uninstall -y vllm 2>/dev/null || true
 rm -rf /opt/vllm-src
 
 git clone \
-  --branch v0.23.0 \
+  --branch "v${VLLM_VERSION}" \
   --depth 1 \
   https://github.com/vllm-project/vllm.git \
   /opt/vllm-src
@@ -247,7 +250,7 @@ rm -rf \
   /root/.cache/torch_extensions
 
 echo "========================================"
-echo "BUILD VLLM 0.23.0"
+echo "BUILD VLLM ${VLLM_VERSION}"
 echo "========================================"
 
 cd /opt/vllm-src
@@ -336,5 +339,5 @@ vllm serve --help >/tmp/vllm-serve-help.txt
 rm -rf /root/.cache/pip
 
 echo "========================================"
-echo "VLLM 0.23.0 + PYTORCH 2.11 BUILD PASSED"
+echo "VLLM ${VLLM_VERSION} + PYTORCH 2.11 BUILD PASSED"
 echo "========================================"
