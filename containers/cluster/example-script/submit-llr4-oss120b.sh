@@ -26,7 +26,7 @@ for lang in ${LANGS}; do
     for arm_kind in ${ARMS}; do
         [[ "${arm_kind}" == "off" ]] && suffix="" || suffix="-${arm_kind}"
         arm="llr4-oss120b-${lang}${suffix}"
-        sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" -A "${ACCOUNT}" "$@" \
+        sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" -A "${ACCOUNT}" --job-name="${arm}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
         echo "submitted ${arm}"
     done
