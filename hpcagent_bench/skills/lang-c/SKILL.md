@@ -25,6 +25,13 @@ baseline. Whole job is making the vectorizer succeed and the outer loop scale.
   trip counts lose to spawn overhead; full recipe in the openmp page.
 - Kernel ABI already spells restrict: `void k(const double *restrict a, double *restrict out,
   int64_t n)`. Symbols are `int64_t`.
+- **Keep the stub's include block.** The file opens with `<stdint.h> <stddef.h> <stdbool.h>
+  <stdlib.h> <string.h> <math.h> <omp.h>`, and the signature is spelled in `int64_t` and
+  `uint8_t *restrict workspace` -- so a rewrite that pastes back only the function loses the
+  headers and fails on the signature itself with `unknown type name 'int64_t'`, before one line
+  of your work is even parsed. This is the LARGEST build failure on record (168 of 185 in the two
+  recorded C arms; a third of the corpus hit it), and it costs a full round trip every time.
+  Edit in place rather than replacing the whole file, and `syntax_check` before every `score`.
 - Workflow: `syntax_check` before every `score`/`submit`. Iterate with `score`. What gets
   recorded is your LAST graded version, not your best -- and MOST prior runs (60%) ended on a
   worse experiment and lost real speedup. So the invariant is per-iteration, not end-of-session:

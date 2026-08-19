@@ -22,6 +22,13 @@ comes from the compiler AND from threads.
   cores (TBB sizes itself from the affinity mask), `unseq` vectorizes -- `par_unseq` takes both.
 - glibc `libmvec` on: `exp/log/sin` loops CAN vectorize without fast-math.
 - Signature fixed, already spells `__restrict__`. Keep every qualifier.
+- **Keep the stub's include block.** The file opens with `<cstdint> <cstddef> <cstdlib>
+  <cstring> <cmath> <algorithm> <numeric> <execution> <memory> <span> <vector> <omp.h>`, and
+  the signature itself is spelled in `std::int64_t` and `uint8_t *__restrict__ workspace` --
+  so a rewrite that pastes back only the function loses the headers and dies on the signature
+  with `'uint8_t' has not been declared`, before a line of your work is parsed. This is the
+  LARGEST build failure on record (71 of 81 in the two recorded C++ arms), one wasted round
+  trip each. Edit in place rather than replacing the whole file; `syntax_check` catches it free.
 - Only `workspace_bytes` scratch is aligned (256B); inputs are NOT -- lying with
   `assume_aligned` OR an OpenMP `aligned(p:32|64)` clause gives SIGSEGV at vector width.
   `workspace` may be null and `workspace_size` zero unless you asked; check both first.
