@@ -129,6 +129,27 @@ enroot start \
       --no-cache \
       .
 
+    # The ASM v3 varlen path cannot express our mask. cpp_itfs/mha_fwd.cu maps causal to
+    # mask 2 ONLY when seqlen_q == seqlen_k, and returns -1 otherwise -- which surfaces from
+    # asm_mha_varlen_fwd.cu:494 as "invalid argument for fmha_v3_varlen_fwd". Chunked prefill
+    # against a warm prefix cache ALWAYS has q shorter than k (88-95% hit rate on our arms), so
+    # every MLA prefill hits it. can_impl_fmha_v3_fwd claims the shape anyway: its one 192x128
+    # guard is skipped when block_table is set, and vLLM always pages. Adding the missing
+    # condition makes the predicate fall through to the else branch -- aiter CK-tile
+    # mha_varlen_fwd, still aiter -- instead of crashing. Upstream bug: the predicate promises
+    # what the dispatcher cannot serve.
+    /opt/pytorch211/bin/python - <<PATCH
+import pathlib
+p = pathlib.Path("/opt/pytorch211/lib/python3.12/site-packages/aiter/ops/mha.py")
+s = p.read_text()
+tail = "        return ret\n"
+old = "        if hdim_q == 192 and hdim_v == 128 and block_table is None:\n            ret = ret and not _fmha_kv_byte_extent_ge_u32(max_seqlen_k, k, v)\n" + tail
+assert s.count(old) == 1, "anchor count " + str(s.count(old))
+new = old[: -len(tail)] + "        ret = ret and ((not causal) or (max_seqlen_q == max_seqlen_k))\n" + tail
+p.write_text(s.replace(old, new, 1))
+print("patched can_impl_fmha_v3_fwd varlen: mask/seqlen guard added")
+PATCH
+
     export VLLM_ROCM_USE_AITER=1
     export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 
