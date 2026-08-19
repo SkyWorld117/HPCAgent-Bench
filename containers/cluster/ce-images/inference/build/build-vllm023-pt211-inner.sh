@@ -97,7 +97,10 @@ rm -rf /var/lib/apt/lists/*
 "${PIP[@]}" install --upgrade \
   'cmake>=3.26.1,<4' \
   ninja \
-  pybind11 \
+  # Pinned below 3.1: pybind11 3.1.0 bumped its internals id v11 -> v12 and refuses to share
+  # registered types across that boundary, so a v12 build cannot accept tensors from the
+  # v11 torch extensions. ROCm/aiter#4770, vllm-project/vllm#52400.
+  'pybind11==3.0.*' \
   'packaging>=24.2' \
   'setuptools>=77.0.3,<81' \
   'setuptools-scm>=8' \
