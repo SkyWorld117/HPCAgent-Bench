@@ -12,10 +12,10 @@ parameters:
     LEN_1D: 67108864
     SSYM: 1
   L:
-    LEN_1D: 268435456
+    LEN_1D: 132189132
     SSYM: 1
   XL:
-    LEN_1D: 536870912
+    LEN_1D: 260382392
     SSYM: 1
 init:
   output_args:

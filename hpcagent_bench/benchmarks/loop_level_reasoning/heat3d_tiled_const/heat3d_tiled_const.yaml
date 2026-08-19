@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_3D: 448
   L:
-    LEN_3D: 603
+    LEN_3D: 535
   XL:
-    LEN_3D: 812
+    LEN_3D: 638
 init:
   arrays:
     a: (LEN_3D,LEN_3D,LEN_3D)

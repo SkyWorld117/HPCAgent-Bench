@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 67108864
   L:
-    LEN_1D: 154981283
+    LEN_1D: 107931974
   XL:
-    LEN_1D: 357913941
+    LEN_1D: 173588261
 config:
   K:
     domain: [1, -1]

@@ -8,9 +8,9 @@ parameters:
   M:
     N: 20971521
   L:
-    N: 47453134
+    N: 33047284
   XL:
-    N: 107374182
+    N: 52076478
 init:
   arrays:
     mass_fl: (N,)

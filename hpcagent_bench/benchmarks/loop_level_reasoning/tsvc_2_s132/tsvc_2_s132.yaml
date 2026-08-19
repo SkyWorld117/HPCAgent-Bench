@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_2D: 60000001
   L:
-    LEN_2D: 126909919
+    LEN_2D: 88382532
   XL:
-    LEN_2D: 268435456
+    LEN_2D: 130191196
 init:
   arrays:
     # Two rows, not LEN_2D of them: the loop touches only rows 0 and 1, so a square aa spent the

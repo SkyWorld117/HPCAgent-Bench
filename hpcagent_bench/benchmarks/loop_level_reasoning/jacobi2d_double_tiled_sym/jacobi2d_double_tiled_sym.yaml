@@ -12,11 +12,11 @@ parameters:
     T1: 64
     T2: 8
   L:
-    LEN_2D: 16156
+    LEN_2D: 13482
     T1: 64
     T2: 8
   XL:
-    LEN_2D: 23170
+    LEN_2D: 16136
     T1: 64
     T2: 8
 init:

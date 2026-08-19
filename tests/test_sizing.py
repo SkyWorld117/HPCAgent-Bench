@@ -18,7 +18,7 @@ import pytest
 
 from hpcagent_bench.sizing import (PRESETS, XL_BYTE_CEILING, build_ladder, derive_ladder, fit_to_ceiling,
                                    footprint_symbols, interpolate, interpolate_symbol, ladder_violations,
-                                   parameters_span, rewrite_parameters, working_bytes)
+                                   parameters_span, rewrite_parameters, working_bytes, xl_ceiling)
 from hpcagent_bench.spec import KERNELS
 
 MANIFEST = """\
@@ -242,10 +242,16 @@ def test_a_proposal_that_moves_a_structural_knob_is_refused():
 
 
 def test_a_proposal_that_only_scales_sizes_is_accepted():
-    """The guard must not fault an honest proposal -- the same ladder with the knobs left alone."""
+    """The guard must not fault an honest proposal -- the same ladder with the knobs left alone.
+
+    The XL end is fitted to the track's CURRENT ceiling rather than a hardcoded multiple of M. A
+    plain ``LEN_2D * 2`` is 4x the bytes on a 2-D array, which sat just under the 8 GB llr ceiling
+    and broke the moment that ceiling moved to 4 GB -- failing on the size, which is not what this
+    test is about.
+    """
     spec = spec_for("jacobi2d_double_tiled_sym")
     small = dict(spec.parameters["M"])
-    large = {**small, "LEN_2D": small["LEN_2D"] * 2}
+    large = fit_to_ceiling(spec, {**small, "LEN_2D": small["LEN_2D"] * 2}, xl_ceiling(spec.track))
     _ladder, problems = derive_ladder(spec, small, large)
     assert problems == []
 

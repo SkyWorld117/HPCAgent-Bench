@@ -403,6 +403,12 @@ ALWAYS_INLINE_MANUALS = frozenset({
     # optimizing agent's prompt at all; listed here so the size gate does not silently absorb it
     # into the instrument set while that decision is still open.
     "pytorch-to-numpy",
+    # Crossed the manual threshold on 2026-08-19 (166 lines) and belongs here rather than behind a
+    # gate: it carries the multi-core grading regime, the classify-then-thread rule and the four
+    # bins, which decide whether a submission is CORRECT, not merely fast. Every language page
+    # routes to it, and the campaign's skills packet inlines it for all three languages, so gating
+    # it would remove the page exactly where it is being measured.
+    "openmp",
 })
 
 #: Submission language -> the page that governs writing it.
