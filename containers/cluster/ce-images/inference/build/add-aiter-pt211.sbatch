@@ -75,6 +75,7 @@ enroot create \
 enroot start \
   --root \
   --rw \
+  -e AITER_PIN="${AITER_PIN:-}" \
   "$BUILD_NAME" \
   bash -lc '
     set -Eeuxo pipefail
@@ -86,10 +87,18 @@ enroot start \
 
     if ! command -v git; then apt-get update -qq && apt-get install -y -qq git; fi
 
-    # vLLM pins the aiter it was validated against in its ROCm dockerfiles.
-    AITER_PIN="$(grep -rhoE "AITER_(BRANCH|COMMIT|BRANCH_OR_COMMIT)=\"?[A-Za-z0-9._/-]+" \
-        /opt/vllm-src/docker/ 2>/dev/null | head -1 | sed "s/.*=\"\\?//" || true)"
-    echo "aiter pin from vllm docker files: ${AITER_PIN:-<none, using main>}"
+    # vLLM pins the aiter it was validated against in its ROCm dockerfiles -- EXCEPT when it
+    # does not: 0.27.1 spells that pin `main`, a moving branch, so 600659 built whatever main
+    # happened to be that day. Pass AITER_PIN explicitly to get a tagged release instead; the
+    # tags state which ROCm they target, `main` states nothing.
+    AITER_PIN="${AITER_PIN:-}"
+    if [[ -z "${AITER_PIN}" ]]; then
+        AITER_PIN="$(grep -rhoE "AITER_(BRANCH|COMMIT|BRANCH_OR_COMMIT)=\"?[A-Za-z0-9._/-]+" \
+            /opt/vllm-src/docker/ 2>/dev/null | head -1 | sed "s/.*=\"\\?//" || true)"
+        echo "aiter pin from vllm docker files: ${AITER_PIN:-<none, using main>}"
+    else
+        echo "aiter pin from AITER_PIN: ${AITER_PIN}"
+    fi
 
     cd /opt
     rm -rf aiter-src
