@@ -64,15 +64,15 @@ Three scripts, one per model. Each takes two knobs and passes any extra argument
 | `ACCOUNT` | Slurm account | `a-g200` |
 
 ```bash
-./submit-llr4-qwen30b.sh          # 6 arms x 10 nodes -- WAY over budget, always narrow it
+MODEL=qwen30b ./submit-llr4.sh          # 6 arms x 10 nodes -- WAY over budget, always narrow it
 ```
 
 So in practice always name the slice:
 
 ```bash
-LANGS=c ARMS=off    ./submit-llr4-qwen30b.sh      # 1 arm, 10 nodes
-LANGS=c ARMS=skills ./submit-llr4-oss120b.sh      # 1 arm, 10 nodes
-LANGS=c             ./submit-llr4-kimi27code.sh   # 2 arms (off + skills), 6 nodes each
+LANGS=c ARMS=off    MODEL=qwen30b ./submit-llr4.sh      # 1 arm, 10 nodes
+LANGS=c ARMS=skills MODEL=oss120b ./submit-llr4.sh      # 1 arm, 10 nodes
+LANGS=c             MODEL=kimi27code ./submit-llr4.sh   # 2 arms (off + skills), 6 nodes each
 ```
 
 ## A full wave, inside the budget
@@ -80,9 +80,9 @@ LANGS=c             ./submit-llr4-kimi27code.sh   # 2 arms (off + skills), 6 nod
 C first, both sides of the skills pair, all three models. 26 nodes:
 
 ```bash
-LANGS=c ARMS=off    ./submit-llr4-qwen30b.sh
-LANGS=c ARMS=off    ./submit-llr4-oss120b.sh
-LANGS=c ARMS=off    ./submit-llr4-kimi27code.sh
+LANGS=c ARMS=off    MODEL=qwen30b ./submit-llr4.sh
+LANGS=c ARMS=off    MODEL=oss120b ./submit-llr4.sh
+LANGS=c ARMS=off    MODEL=kimi27code ./submit-llr4.sh
 ```
 
 Then chain the skills side behind it rather than doubling the footprint -- see below.
@@ -96,12 +96,12 @@ judge DB, and you want the pair either way.
 ```bash
 # 1. submit the off side and capture its job id.  `tee /dev/stderr` keeps the submitter's own
 #    "submitted <arm>" confirmation visible -- a bare $( ) would swallow it with the id.
-off_id=$(LANGS=c ARMS=off ./submit-llr4-qwen30b.sh | tee /dev/stderr \
+off_id=$(LANGS=c ARMS=off MODEL=qwen30b ./submit-llr4.sh | tee /dev/stderr \
              | grep -oP 'Submitted batch job \K[0-9]+')
 echo "off arm: ${off_id}"
 
 # 2. submit the skills side held behind it
-LANGS=c ARMS=skills ./submit-llr4-qwen30b.sh --dependency="afterany:${off_id}"
+LANGS=c ARMS=skills MODEL=qwen30b ./submit-llr4.sh --dependency="afterany:${off_id}"
 ```
 
 The extra `--dependency=...` lands on the `sbatch` line unchanged, which is what `"$@"` in the
@@ -111,9 +111,9 @@ For all three models chained in pairs (26 nodes at any instant, six arms total):
 
 ```bash
 for model in qwen30b oss120b kimi27code; do
-    off_id=$(LANGS=c ARMS=off "./submit-llr4-${model}.sh" | grep -oP 'Submitted batch job \K[0-9]+')
+    off_id=$(LANGS=c ARMS=off MODEL="${model}" ./submit-llr4.sh | grep -oP 'Submitted batch job \K[0-9]+')
     [[ -n "${off_id}" ]] || { echo "no job id from ${model} -- sbatch refused, stopping" >&2; break; }
-    LANGS=c ARMS=skills "./submit-llr4-${model}.sh" --dependency="afterany:${off_id}"
+    LANGS=c ARMS=skills MODEL="${model}" ./submit-llr4.sh --dependency="afterany:${off_id}"
 done
 ```
 
@@ -127,8 +127,8 @@ Same commands with `LANGS` changed. Run them only once the C wave has drained, s
 32-node ceiling holds:
 
 ```bash
-LANGS=cpp     ARMS=off ./submit-llr4-qwen30b.sh
-LANGS=fortran ARMS=off ./submit-llr4-qwen30b.sh
+LANGS=cpp     ARMS=off MODEL=qwen30b ./submit-llr4.sh
+LANGS=fortran ARMS=off MODEL=qwen30b ./submit-llr4.sh
 ```
 
 ## The regression smoke
