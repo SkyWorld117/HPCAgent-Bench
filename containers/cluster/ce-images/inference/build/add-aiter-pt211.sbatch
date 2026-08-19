@@ -113,7 +113,14 @@ enroot start \
     /opt/pytorch211/bin/python -m uv pip install \
       --python /opt/pytorch211/bin/python \
       --no-cache \
-      ninja cmake pybind11 pandas
+      ninja cmake "pybind11==3.0.*" pandas
+    # pybind11 PINNED below 3.1. pybind11 3.1.0 (2026-08-06) bumped its internals id from v11 to
+    # v12, and pybind11 refuses to share registered types across modules whose internals differ.
+    # The pip headers win over the torch bundled ones on the include path, so an unpinned build
+    # compiles aiter against v12 while the torch extensions stay v11 -- and every torch.Tensor
+    # handed to an aiter op is then rejected as the wrong type. That is the
+    # "invalid argument for fmha_v3_varlen_fwd" in 600662/600673/600688/600689: an ABI split,
+    # not a bad kernel. Upstream: ROCm/aiter#4770, vllm-project/vllm#52400.
 
     # --no-build-isolation: aiter setup imports torch, which must be the image torch.
     /opt/pytorch211/bin/python -m uv pip install \
