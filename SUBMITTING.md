@@ -209,6 +209,13 @@ sbatch --account=a-g34 --export=ALL,OPTARENA_REPO=<repo root> \
 # env var, and the internal API the pp collective split depends on. One node, ~2 minutes,
 # no weights. Run it BEFORE spending a 4-node hour on a decode gate.
 sbatch --account=a-g34 inference/gate-0271-serving-surface.sbatch
+
+# aiter into a freshly built image. NOT optional on 0.27.1: its Kimi ViT patch-embed imports
+# aiter unconditionally during the multimodal dummy profile_run, so an aiter-less 0.27.1 dies
+# at startup before the API binds even on a text-only campaign (600649). Patches in place with
+# a .before-aiter backup, so a decode gate must be re-run after it.
+VLLM_VERSION=0.27.1 sbatch --account=a-g34 --export=ALL,VLLM_VERSION=0.27.1 \
+    inference/build/add-aiter-pt211.sbatch
 ```
 
 Promoting a candidate image is a rename, and only when nothing has the old one mounted:

@@ -16,7 +16,12 @@
 # kimi smoke will price in before any campaign decision.
 #
 # Patches the image IN PLACE with a .before-aiter backup, exactly like add-flash-attn-pt211.sbatch.
-# The name stays rocm723-vllm-0.23.0-pytorch211-ofi so every env file and EDF keep working.
+# The name keeps its version so every env file and EDF keep working.
+#
+# VLLM_VERSION picks WHICH image to patch (default 0.23.0, the measured one). 0.27.1 needs this
+# too, and not only for MoE speed: its Kimi ViT patch-embed does a bare `from aiter.ops.triton...`
+# import inside the multimodal dummy profile_run, so an aiter-less 0.27.1 image dies at startup
+# with ModuleNotFoundError before the API ever binds -- what 600649 hit, on a text-only campaign.
 #SBATCH --job-name=pt211-aiter
 #SBATCH --partition=mi300
 #SBATCH --nodes=1
@@ -43,12 +48,16 @@ fi
 
 CE_IMAGE_DIR="${CE_IMAGE_DIR:-$DEFAULT_IMAGE_DIR}"
 
-SOURCE_IMAGE="${CE_IMAGE_DIR}/rocm723-vllm-0.23.0-pytorch211-ofi.sqsh"
-TEMP_IMAGE="${CE_IMAGE_DIR}/rocm723-vllm-0.23.0-pytorch211-ofi.aiter.tmp.sqsh"
-FINAL_IMAGE="${CE_IMAGE_DIR}/rocm723-vllm-0.23.0-pytorch211-ofi.sqsh"
-BACKUP_IMAGE="${CE_IMAGE_DIR}/rocm723-vllm-0.23.0-pytorch211-ofi.before-aiter.sqsh"
+VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+IMAGE_STEM="${CE_IMAGE_DIR}/rocm723-vllm-${VLLM_VERSION}-pytorch211-ofi"
 
-BUILD_NAME="rocm723-pt211-aiter-patch"
+SOURCE_IMAGE="${IMAGE_STEM}.sqsh"
+TEMP_IMAGE="${IMAGE_STEM}.aiter.tmp.sqsh"
+FINAL_IMAGE="${IMAGE_STEM}.sqsh"
+BACKUP_IMAGE="${IMAGE_STEM}.before-aiter.sqsh"
+
+# Enroot names are machine-global, so the version keeps two concurrent patches from colliding.
+BUILD_NAME="rocm723-pt211-aiter-patch-${VLLM_VERSION//./}"
 
 test -f "$SOURCE_IMAGE"
 
@@ -77,7 +86,7 @@ enroot start \
 
     if ! command -v git; then apt-get update -qq && apt-get install -y -qq git; fi
 
-    # vLLM 0.23 pins the aiter it was validated against in its ROCm dockerfiles.
+    # vLLM pins the aiter it was validated against in its ROCm dockerfiles.
     AITER_PIN="$(grep -rhoE "AITER_(BRANCH|COMMIT|BRANCH_OR_COMMIT)=\"?[A-Za-z0-9._/-]+" \
         /opt/vllm-src/docker/ 2>/dev/null | head -1 | sed "s/.*=\"\\?//" || true)"
     echo "aiter pin from vllm docker files: ${AITER_PIN:-<none, using main>}"
