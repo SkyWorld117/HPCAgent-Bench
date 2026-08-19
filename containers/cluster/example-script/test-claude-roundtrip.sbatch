@@ -45,7 +45,7 @@ FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
 [[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
 export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 AGENT_EDF="${AGENT_EDF:-optarena-amd-mi300}"
 
 export MODEL_REPO="${MODEL_REPO:-openai/gpt-oss-120b}"

@@ -97,7 +97,7 @@ MOE_DIR="${PG_PATCH_DIR%/external-eager-pg-patch}/moe-configs"
 [[ -d "${MOE_DIR}" ]] && export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-${MOE_DIR}}"
 export PG_PATCH_DIR
 
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 NODELIST="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | paste -sd,)"
 MASTER="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
 export NODELIST MASTER

@@ -40,7 +40,7 @@ export BENCH_BATCH_SIZES="${BENCH_BATCH_SIZES:-1 4 16 64 256}"
 # Both dtypes get the same budget so neither wins on search effort alone.
 export BENCH_MAX_CONFIGS="${BENCH_MAX_CONFIGS:-24}"
 
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 
 mkdir -p "${RUN_DIR}"
 printf 'job:    %s\nmodel:  %s tp=%s\nsizes:  %s (max %s configs per dtype per size)\nlogs:   %s\n\n' \

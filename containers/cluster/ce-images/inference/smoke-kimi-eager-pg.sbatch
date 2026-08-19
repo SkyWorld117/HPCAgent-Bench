@@ -67,7 +67,12 @@ for cand in "${PG_PATCH_DIR:-}" "${SUBMIT_DIR}/external-eager-pg-patch" "${SUBMI
     fi
 done
 
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
+# 0.27.1, not 0.23.0. Standing decision 2026-08-20: everything serves on 0.27. NOT because
+# 0.23 lacks flags -- flagcheck3/600939 proved 0.23 HAS --attention-config, --block-size,
+# --language-model-only, --generation-config and --all2all-backend, all of them. 0.27 is
+# where the aiter v3-varlen predicate patch, the MLA prefill work and MORI are targeted,
+# and mixing versions across runs makes results incomparable.
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 export MODEL_REPO="${MODEL_REPO:-moonshotai/Kimi-K2.7-Code}"
 export SERVED_MODEL="${SERVED_MODEL:-optarena-vllm}"
 export API_PORT="${API_PORT:-8000}"
