@@ -80,6 +80,23 @@ def check_tuned_config_env() -> None:
     report("tuned MoE config present", bool(configs), ", ".join(configs) or f"no MI300A json under {folder}")
 
 
+def check_kv_connectors() -> None:
+    """The recipe's CPU KV offload names a connector by STRING, which vLLM resolves at engine
+    start -- so a missing one is a crash after the whole checkpoint has loaded, not a serve-arg
+    error. Ask the factory's registry instead."""
+    # Deferred for the same reason as check_sibling_group_api: this drags in torch.distributed.
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+    registry = vars(KVConnectorFactory).get("_registry", {})
+    wanted = os.environ.get("KV_CONNECTORS", "SimpleCPUOffloadConnector").split(",")
+    for name in wanted:
+        name = name.strip()
+        if not name:
+            continue
+        report(f"kv connector {name}", name in registry,
+               "registered" if name in registry else f"NOT registered; have: {', '.join(sorted(registry)) or '<none>'}")
+
+
 def check_sibling_group_api() -> None:
     """The pp collective split calls make_sibling_device_group(group_desc=...) -- an internal API."""
     # Deferred: vllm.distributed pulls in torch.distributed, so it is imported per check rather
@@ -132,6 +149,7 @@ def main() -> int:
     check_serve_flags(help_text)
     check_parser_choices(help_text)
     check_tuned_config_env()
+    check_kv_connectors()
     check_sibling_group_api()
     check_patch_installs()
 
