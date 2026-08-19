@@ -181,6 +181,60 @@ scancel -u "$USER" --name=llr4-qwen30b-c     # by arm name, since every arm is -
 Judge shards written before the cancel survive under `<RUN_ROOT>/<jobid>/judge/`, so a cancelled
 arm still carries partial results.
 
+## Infrastructure jobs (images, gates, weights)
+
+These are not campaign arms. They take one to four nodes and are what you submit when the
+question is "can the campaign move", not "how did the model score".
+
+```bash
+cd containers/cluster/ce-images
+
+# Agent image. Compilers are pinned by MAJOR version only (gcc 16, LLVM 22) because the PPA
+# serves 16.0.1, not a fixed point release; the build records what it actually resolved to in
+# /usr/local/share/toolchain-provenance. Lands as ...-v5-candidate.sqsh, never over v4.
+sbatch --account=a-g34 amd/build-agent-image.sbatch
+
+# vLLM image, parameterised by version. The artefact name carries the version, so a new build
+# lands BESIDE the one every measured arm ran on rather than over it.
+VLLM_VERSION=0.27.1 sbatch --account=a-g34 \
+    --export=ALL,VLLM_BUILD_ROOT=$PWD/inference \
+    inference/build/build-vllm023-pt211.sbatch
+
+# 2-node RCCL/CXI check. OPTARENA_REPO is REQUIRED -- Slurm spools the script, so it cannot
+# find its own driver.
+sbatch --account=a-g34 --export=ALL,OPTARENA_REPO=<repo root> \
+    ../example-script/test-rccl-ofi-2node.sbatch
+
+# 0.27.1 serving-surface gate: serve-arg parity, tool/reasoning parser choices, the tuned-MoE
+# env var, and the internal API the pp collective split depends on. One node, ~2 minutes,
+# no weights. Run it BEFORE spending a 4-node hour on a decode gate.
+sbatch --account=a-g34 inference/gate-0271-serving-surface.sbatch
+```
+
+Promoting a candidate image is a rename, and only when nothing has the old one mounted:
+
+```bash
+squeue -u "$USER" -o "%.9i %.24j"          # must show no arm using the image you are replacing
+mv $SCRATCH/ce-images/optarena-ce-amd-mi300-v5-candidate.sqsh \
+   $SCRATCH/ce-images/optarena-ce-amd-mi300-v5.sqsh
+```
+
+### Weights: iopsstor and striping (already done -- verify, do not redo)
+
+`run_cluster.sh` puts `HF_HOME` and `VLLM_CACHE_ROOT` on iopsstor (9.45 GB/s at 16 readers vs
+capstor's 0.83) and sets a PFL default on the hub dir: narrow below 64 MiB, 16 OSTs at 4 MiB
+above. Verified 2026-08-19 -- every large blob of all five models is striped 16. Re-check with:
+
+```bash
+lfs getstripe -c <blob> | head -1     # head, NOT tail: getstripe prints a trailing blank line
+```
+
+Only if that ever reports a narrow count, and only while NOTHING is reading the model:
+
+```bash
+lfs migrate -c 16 -S 4M <blob>
+```
+
 ## Known traps
 
 - **kimi27code is `INFERENCE_MODE=pp`** (4 nodes, one engine). The other two are
