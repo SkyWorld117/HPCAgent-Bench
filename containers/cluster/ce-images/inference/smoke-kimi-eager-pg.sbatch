@@ -44,7 +44,17 @@ export RUN_DIR="${SCRATCH}/kimi-smoke/${SLURM_JOB_ID}"
 FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
 [[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
 export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
+# Unset, this defaults under ~/.cache, which is unmounted here, so every smoke re-ran Inductor
+# codegen from scratch before the API could bind.
+export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+# Tuned fused_moe Triton configs, the folder run_cluster.sh has pointed the campaign at since
+# 7726aed4. Unset, vLLM falls back to its default MoE config for this shape: 69 ms per kernel at
+# bs=64 against 4.4 ms tuned (45e16a46), on a kernel that is ~88% of decode time for a W4A16 MoE
+# (AMD measured 87.8-89.7% for the same kernel on Kimi at MI300X). EVERY smoke up to 600906 ran
+# WITHOUT it, which is why they all read ~90-96 tok/s aggregate -- that is the untuned signature
+# recorded in run_cluster.sh, not a topology result. Set TUNED_MOE_DIR= to reproduce the old runs.
+export TUNED_MOE_DIR="${TUNED_MOE_DIR-${SUBMIT_DIR}/moe-configs}"
 # Slurm spools this script to /var/spool/slurmd, so BASH_SOURCE cannot locate the patch and
 # SLURM_SUBMIT_DIR is all there is. Resolving against ONE assumed submit directory is a trap --
 # 594563 died on it in 1 s because the job was submitted from the repo root, not from here -- so
@@ -98,6 +108,8 @@ job:    ${SLURM_JOB_ID}
 model:  ${MODEL_REPO} tp=${TP_SIZE} pp=${PP_SIZE} on ${NNODES} node(s): ${NODELIST}
 patch:  ${PG_PATCH_DIR}
 logs:   ${RUN_DIR}
+moe:    ${TUNED_MOE_DIR:-<none: vLLM default MoE config>}
+extra:  ${EXTRA_SERVE_ARGS:-<none>}
 EOF
 
 cat >"${SERVE_SCRIPT}" <<'SERVE'
@@ -109,6 +121,7 @@ export TOKENIZERS_PARALLELISM=false
 export VLLM_ENGINE_READY_TIMEOUT_S=7200
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+if [[ -n "${TUNED_MOE_DIR:-}" ]]; then export VLLM_TUNED_CONFIG_FOLDER="${TUNED_MOE_DIR}"; fi
 export NCCL_DEBUG_FILE="${RUN_DIR}/nccl.%h.%p.log"
 # THE POINT OF THIS JOB. sitecustomize is imported automatically by the interpreter at startup
 # for every entry on sys.path, so putting the patch dir on PYTHONPATH reaches every vLLM worker
@@ -145,7 +158,7 @@ ARGS=(
     --distributed-timeout-seconds 7200
     --load-format safetensors
     --safetensors-load-strategy prefetch
-    --generation-config vllm
+    --generation-config auto
     --enable-auto-tool-choice
     --tool-call-parser "${TOOL_PARSER}"
     --trust-remote-code
