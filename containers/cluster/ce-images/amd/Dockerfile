@@ -25,6 +25,12 @@ ARG PYTHON_REQUIREMENTS=requirements/amd.txt
 # in-place install loops below.
 ARG GCC_MAJOR=16
 ARG LLVM_MAJOR=22
+# MAJOR version only. A full-version pin makes the image un-buildable the moment an archive
+# rolls a point release -- 600505 died exactly there, on a gcc 16.1.0 pin against a PPA that had
+# moved to 16.0.1. The major is what decides which language features and which OpenMP level the
+# graded submissions get; the point release is not worth a broken build. What the image actually
+# resolved to is recorded in /usr/local/share/toolchain-provenance and printed by the gate, so a
+# point-release drift is visible rather than silent.
 # NVIDIA HPC SDK -- nvfortran/nvc++ for the OpenACC + `-stdpar` methods. OFF by default: the SDK
 # layer measures ~10-25 GB unpacked (the multi-arch CUDA payload dominates), which is several times
 # the rest of this image, and it is only reachable from a submission that requests `compiler: nvhpc`.
@@ -252,6 +258,15 @@ RUN set -eux; \
       || { echo "pinned LLVM ${LLVM_MAJOR} unavailable; image has ${llvm_major:-none}" >&2; exit 1; }; \
     gcc -dumpversion | cut -d. -f1 | grep -qx "${GCC_MAJOR}" \
       || { echo "pinned GCC ${GCC_MAJOR} unavailable; bare gcc is $(gcc -dumpfullversion)" >&2; exit 1; }; \
+    # Record what the majors actually resolved to. The install block above walks a fallback \
+    # chain, so "gcc 16" can be any point release and can come from more than one source; an \
+    # image that does not say which is an image whose graded numbers cannot be compared later. \
+    { \
+      echo "gcc $(gcc -dumpfullversion) $(readlink -f "$(command -v gcc)")"; \
+      echo "clang $(clang --version | head -1) $(readlink -f "$(command -v clang)")"; \
+      echo "flang $(flang --version | head -1) $(readlink -f "$(command -v flang)")"; \
+    } > /usr/local/share/toolchain-provenance; \
+    cat /usr/local/share/toolchain-provenance; \
     man -w gcc >/dev/null \
       || { echo "manpages missing: unminimize did not take" >&2; exit 1; }; \
     sh /stdpar-gate.sh; \
