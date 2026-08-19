@@ -216,6 +216,18 @@ sbatch --account=a-g34 inference/gate-0271-serving-surface.sbatch
 # a .before-aiter backup, so a decode gate must be re-run after it.
 VLLM_VERSION=0.27.1 sbatch --account=a-g34 --export=ALL,VLLM_VERSION=0.27.1 \
     inference/build/add-aiter-pt211.sbatch
+
+# aiter JIT cache, then the decode gate, both chained behind it. aiter ships no prebuilt .so,
+# so an unprimed image builds module_aiter_core inside the serving job and can miss the API
+# timeout outright (598021). Give each vLLM version its OWN AITER_JIT_DIR -- the pin is
+# discovered from the image, so two versions sharing one cache is a silent kernel mismatch.
+JIT=/iopsstor/scratch/cscs/$USER/aiter-jit-0271
+sbatch --account=a-g34 --dependency=afterok:<aiter job> \
+    --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
+    inference/prebuild-aiter-jit.sbatch
+sbatch --account=a-g34 --dependency=afterok:<prebuild job> \
+    --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
+    inference/smoke-kimi-eager-pg.sbatch
 ```
 
 Promoting a candidate image is a rename, and only when nothing has the old one mounted:
