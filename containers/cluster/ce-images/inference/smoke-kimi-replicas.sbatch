@@ -5,7 +5,7 @@
 # This is the topology the kimi campaign needs (~900 tok/s gate / ~154 tok/s per tuned 4-node
 # replica = ~6 replicas); the per-group serve line is byte-compatible with the proven
 # smoke-kimi-eager-pg.sbatch, only the (nnodes, node-rank, master) triple is group-local.
-# Submit: mkdir -p logs && sbatch --account=a-g200 smoke-kimi-replicas.sbatch     # 8 nodes = 2 replicas
+# Submit: mkdir -p logs && sbatch smoke-kimi-replicas.sbatch     # 8 nodes = 2 replicas
 #         sbatch --nodes=12 ... for 3 replicas, etc. NNODES must divide by REPLICA_SIZE.
 #SBATCH --job-name=smoke-kimi-replicas
 #SBATCH --partition=mi300

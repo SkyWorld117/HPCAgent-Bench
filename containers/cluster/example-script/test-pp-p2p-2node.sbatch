@@ -20,7 +20,7 @@
 # Each variant below runs the same probe under a different env, in ONE allocation: about two minutes
 # each, against three hours for a vLLM probe that answers the same question.
 #
-#   sbatch --account=a-g200 test-pp-p2p-2node.sbatch
+#   sbatch test-pp-p2p-2node.sbatch
 #
 # Each variant prints `allreduce=<v> p2p_size2=<v> p2p_size4=<v>`, and the two P2P columns are the
 # point. torch mints a lazy 2-rank communicator only when the group is WIDER than the pair actually

@@ -17,7 +17,7 @@
 # recorded gate was single-node single-rank. So this job proves the plugin loads AND that CXI
 # actually carries an inter-node collective, before any campaign depends on it.
 #
-#   sbatch --account=a-g200 test-rccl-ofi-2node.sbatch
+#   sbatch test-rccl-ofi-2node.sbatch
 #
 # Stages:
 #   1 preflight, one node   -- ldd -r the plugin, confirm libfabric resolves to the HOST 2.3.1

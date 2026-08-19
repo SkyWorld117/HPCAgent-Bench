@@ -10,7 +10,7 @@
 # arm starts reading a half-written inode table. Build to a candidate, verify, then promote by
 # rename when nothing is using it.
 #
-#   sbatch --account=a-g200 build-agent-image.sbatch
+#   sbatch build-agent-image.sbatch
 #   OUTPUT_SQSH=$SCRATCH/ce-images/optarena-ce-amd-mi300-v5.sqsh sbatch ... build-agent-image.sbatch
 #
 #SBATCH --job-name=build-agent-image

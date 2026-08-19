@@ -186,35 +186,41 @@ arm still carries partial results.
 These are not campaign arms. They take one to four nodes and are what you submit when the
 question is "can the campaign move", not "how did the model score".
 
+No `--account` on beverin. The user default association is `root`, and `root`, `a-g200` and
+`a-g34` all carry QOS `normal` with no GrpTRES, MaxJobs, MaxSubmit, MaxTRES or priority set --
+measured, and a 2-node accountless job allocated and ran (600940). Omitting the flag therefore
+costs nothing in scheduling, and it stops jobs from silently splitting across two project
+accounts depending on which command line was typed.
+
 ```bash
 cd containers/cluster/ce-images
 
 # Agent image. Compilers are pinned by MAJOR version only (gcc 16, LLVM 22) because the PPA
 # serves 16.0.1, not a fixed point release; the build records what it actually resolved to in
 # /usr/local/share/toolchain-provenance. Lands as ...-v5-candidate.sqsh, never over v4.
-sbatch --account=a-g34 amd/build-agent-image.sbatch
+sbatch amd/build-agent-image.sbatch
 
 # vLLM image, parameterised by version. The artefact name carries the version, so a new build
 # lands BESIDE the one every measured arm ran on rather than over it.
-VLLM_VERSION=0.27.1 sbatch --account=a-g34 \
+VLLM_VERSION=0.27.1 sbatch \
     --export=ALL,VLLM_BUILD_ROOT=$PWD/inference \
     inference/build/build-vllm023-pt211.sbatch
 
 # 2-node RCCL/CXI check. OPTARENA_REPO is REQUIRED -- Slurm spools the script, so it cannot
 # find its own driver.
-sbatch --account=a-g34 --export=ALL,OPTARENA_REPO=<repo root> \
+sbatch --export=ALL,OPTARENA_REPO=<repo root> \
     ../example-script/test-rccl-ofi-2node.sbatch
 
 # 0.27.1 serving-surface gate: serve-arg parity, tool/reasoning parser choices, the tuned-MoE
 # env var, and the internal API the pp collective split depends on. One node, ~2 minutes,
 # no weights. Run it BEFORE spending a 4-node hour on a decode gate.
-sbatch --account=a-g34 inference/gate-0271-serving-surface.sbatch
+sbatch inference/gate-0271-serving-surface.sbatch
 
 # aiter into a freshly built image. NOT optional on 0.27.1: its Kimi ViT patch-embed imports
 # aiter unconditionally during the multimodal dummy profile_run, so an aiter-less 0.27.1 dies
 # at startup before the API binds even on a text-only campaign (600649). Patches in place with
 # a .before-aiter backup, so a decode gate must be re-run after it.
-VLLM_VERSION=0.27.1 sbatch --account=a-g34 --export=ALL,VLLM_VERSION=0.27.1 \
+VLLM_VERSION=0.27.1 sbatch --export=ALL,VLLM_VERSION=0.27.1 \
     inference/build/add-aiter-pt211.sbatch
 
 # aiter JIT cache, then the decode gate, both chained behind it. aiter ships no prebuilt .so,
@@ -222,10 +228,10 @@ VLLM_VERSION=0.27.1 sbatch --account=a-g34 --export=ALL,VLLM_VERSION=0.27.1 \
 # timeout outright (598021). Give each vLLM version its OWN AITER_JIT_DIR -- the pin is
 # discovered from the image, so two versions sharing one cache is a silent kernel mismatch.
 JIT=/iopsstor/scratch/cscs/$USER/aiter-jit-0271
-sbatch --account=a-g34 --dependency=afterok:<aiter job> \
+sbatch --dependency=afterok:<aiter job> \
     --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
     inference/prebuild-aiter-jit.sbatch
-sbatch --account=a-g34 --dependency=afterok:<prebuild job> \
+sbatch --dependency=afterok:<prebuild job> \
     --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
     inference/smoke-kimi-eager-pg.sbatch
 ```

@@ -23,7 +23,7 @@
 # PROGRESS and nothing else, then measures the saturated ceiling.
 #
 #   cd containers/cluster/ce-images/inference
-#   mkdir -p logs && sbatch --account=a-g200 smoke-kimi-eager-pg.sbatch
+#   mkdir -p logs && sbatch smoke-kimi-eager-pg.sbatch
 #
 #SBATCH --job-name=smoke-kimi-eager-pg
 #SBATCH --partition=mi300
