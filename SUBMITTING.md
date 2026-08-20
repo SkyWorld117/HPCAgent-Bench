@@ -53,7 +53,7 @@ Three arms at once is the practical shape: `10 + 10 + 6 = 26`, or `10 + 10 + 10 
 
 ## The submitters
 
-Three scripts, one per model. Each takes two knobs and passes any extra argument through to
+One script, `MODEL` names the family. Each takes two knobs and passes any extra argument through to
 `sbatch` verbatim.
 
 | knob | values | default |
@@ -61,7 +61,7 @@ Three scripts, one per model. Each takes two knobs and passes any extra argument
 | `LANGS` | `c` `cpp` `fortran`, space separated | all three |
 | `ARMS` | `off` `skills` | both |
 | `TIME` | wall clock | 20 h (qwen/oss), 24 h (kimi) |
-| `ACCOUNT` | Slurm account | `a-g200` |
+| `ACCOUNT` | Slurm account | unset -- **no `--account` on beverin** |
 
 ```bash
 MODEL=qwen30b ./submit-llr4.sh          # 6 arms x 10 nodes -- WAY over budget, always narrow it
