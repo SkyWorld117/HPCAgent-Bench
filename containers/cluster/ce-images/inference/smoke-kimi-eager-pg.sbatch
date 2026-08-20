@@ -78,6 +78,18 @@ export SERVED_MODEL="${SERVED_MODEL:-optarena-vllm}"
 export API_PORT="${API_PORT:-8000}"
 export MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 READY_TIMEOUT="${READY_TIMEOUT:-5400}"
+# How long the workers may go completely silent before we call it wedged. A healthy start
+# is SLOW but never INDEFINITELY quiet, and 601165 hung with all 16 ranks stopped at the
+# same NCCL bootstrap line, wrote nothing for 81 minutes, and still burned the full
+# READY_TIMEOUT. Silence separates the two cases; elapsed time does not, which is why
+# READY_TIMEOUT stays where it is -- 600903 legitimately needed 73 of its 90 minutes.
+#
+# 2700 clears every healthy observation with room to spare. Longest quiet stretch in a
+# run that went on to serve: 1768 s (600903; 600756/600762/600720/600737/598021 ranged
+# 651-898). Slowest NCCL bootstrap: 1335 s (601168, tp2pp8; the other eight of that fleet
+# ranged 235-558). A tighter bound is tempting and wrong -- 1200 would have killed both
+# 600903 and 601168 mid-startup.
+STALL_LIMIT="${STALL_LIMIT:-2700}"
 PROBE_STREAMS="${PROBE_STREAMS:-64}"
 PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-512}"
 
@@ -225,11 +237,45 @@ trap cleanup_steps EXIT INT TERM
 metric() { { curl -fsS --max-time 10 "http://${NODE0}:${API_PORT}/metrics" 2>/dev/null || true; } |
     awk -v k="vllm:$1" '$0 ~ "^"k {print $2; exit}'; }
 
-stage "waiting for the API (up to ${READY_TIMEOUT}s)"
+# Newest mtime across every worker log, or 0 before the first one appears.
+newest_log_write() {
+    local newest=0 mtime
+    for log in "${RUN_DIR}"/vllm-rank*.log "${RUN_DIR}"/nccl.*.log; do
+        [[ -f "${log}" ]] || continue
+        mtime=$(stat -c %Y "${log}")
+        (( mtime > newest )) && newest=${mtime}
+    done
+    echo "${newest}"
+}
+
+# What a wedged bootstrap looks like, printed once so the failure explains itself instead of
+# needing a log dig: nobody reaches "Init COMPLETE" and every rank stops on the same line.
+report_stall() {
+    echo "--- rank progress at the stall ---" >&2
+    local done_count
+    done_count=$({ grep -lh "Init COMPLETE" "${RUN_DIR}"/nccl.*.log 2>/dev/null || true; } | wc -l)
+    echo "nccl logs reaching Init COMPLETE: ${done_count}" >&2
+    for log in "${RUN_DIR}"/vllm-rank*.log; do
+        [[ -f "${log}" ]] || continue
+        echo "$(basename "${log}"): $(tail -1 "${log}" | cut -c1-140)" >&2
+    done
+}
+
+stage "waiting for the API (up to ${READY_TIMEOUT}s, wedged if silent for ${STALL_LIMIT}s)"
 deadline=$((SECONDS + READY_TIMEOUT))
+start_epoch=$(date +%s)
 until curl -fsS --max-time 10 "http://${NODE0}:${API_PORT}/v1/models" -o "${RUN_DIR}/models.json"; do
     kill -0 "${SERVER_STEP_PID}" 2>/dev/null || { echo "FAIL: vLLM died before the API came up" >&2; exit 1; }
     (( SECONDS < deadline )) || { echo "FAIL: API not ready in ${READY_TIMEOUT}s" >&2; exit 1; }
+    newest=$(newest_log_write)
+    # Before any log exists there is nothing to have gone quiet, so measure from the loop instead.
+    (( newest > 0 )) || newest=$((start_epoch))
+    quiet=$(( $(date +%s) - newest ))
+    if (( quiet >= STALL_LIMIT )); then
+        echo "FAIL: startup wedged -- no worker wrote a log line in ${quiet}s" >&2
+        report_stall
+        exit 1
+    fi
     sleep 15
 done
 
