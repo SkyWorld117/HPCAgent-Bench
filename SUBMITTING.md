@@ -17,10 +17,18 @@ Hard ceiling: **32 nodes in flight**, agreed with the team sharing the machine. 
 | model | nodes per arm | why |
 |---|---|---|
 | qwen30b | 10 | 1 inference + 1 agent + 8 judge |
-| oss120b | 10 | 1 inference + 1 agent + 8 judge |
+| qwen3next | 10 | 1 inference + 1 agent + 8 judge |
+| oss120b | 8 | 1 inference + 1 agent + 6 judge |
 | kimi27code | 6 | 4 inference (pp=4) + 1 agent + 1 judge |
 
-Three arms at once is the practical shape: `10 + 10 + 6 = 26`, or `10 + 10 + 10 = 30`.
+Three arms at once is the practical shape: `10 + 8 + 6 = 24`, or `10 + 10 + 8 = 28`.
+
+Every arm carries **80 agents** (`AGENT_NODES=1`, `AGENTS_PER_NODE=80`). It is a batch-size
+knob, not a throughput knob: agents are in tools or a compile most of their wall clock, so 48
+of them held a mean vLLM batch of 20 and 40 split across 3 oss120b replicas held 1.4
+(600514/600515/600516). A 384-expert MoE reads every expert weight per step regardless of how
+few tokens ride along, so a small batch wastes the engine outright. Do not lower it, and do not
+add replicas to a family without scaling agents with them.
 
 ## Before you submit anything
 
@@ -77,7 +85,7 @@ LANGS=c             MODEL=kimi27code ./submit-llr4.sh   # 2 arms (off + skills),
 
 ## A full wave, inside the budget
 
-C first, both sides of the skills pair, all three models. 26 nodes:
+C first, both sides of the skills pair, all three models. 24 nodes:
 
 ```bash
 LANGS=c ARMS=off    MODEL=qwen30b ./submit-llr4.sh
@@ -107,7 +115,7 @@ LANGS=c ARMS=skills MODEL=qwen30b ./submit-llr4.sh --dependency="afterany:${off_
 The extra `--dependency=...` lands on the `sbatch` line unchanged, which is what `"$@"` in the
 submitter is for.
 
-For all three models chained in pairs (26 nodes at any instant, six arms total):
+For all three models chained in pairs (24 nodes at any instant, six arms total):
 
 ```bash
 for model in qwen30b oss120b kimi27code; do

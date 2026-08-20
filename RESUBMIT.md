@@ -14,12 +14,17 @@ One submitter, `submit-llr4.sh`. `MODEL` names the family and therefore the env 
 | MODEL | langs | arms | nodes/arm | all arms |
 |---|---|---|---|---|
 | `qwen30b` | c, cpp, fortran | off + skills | 10 | 6 |
-| `oss120b` | c, cpp, fortran | off + skills | 10 | 6 |
+| `oss120b` | c, cpp, fortran | off + skills | 8 | 6 |
 | `kimi27code` | c, cpp, fortran | off + skills | 6 | 6 |
 | `qwen3next` | c, cpp, fortran | off + skills | 10 | 6 |
 
 24 arms total. The ceiling is **32 nodes at any instant**, so they never all run at once --
 `MODEL=qwen30b ./submit-llr4.sh` alone is 60 nodes and will sit in the queue.
+
+Every arm runs **80 agents** against its engine. That is not a throughput knob, it is what
+keeps the vLLM decode batch above 32: an agent sits in tools or a compile most of its wall
+clock, so 48 agents held a mean batch of only 20 (600514/600515). Lowering it starves the
+engine rather than relieving it.
 
 No `--account` on beverin. `root`, `a-g200` and `a-g34` are scheduling-identical there, so
 the submitter passes `-A` only if you set `ACCOUNT=` yourself.
@@ -27,7 +32,7 @@ the submitter passes `-A` only if you set `ACCOUNT=` yourself.
 ## Resubmit everything
 
 One language at a time, both sides of each skills pair chained so the pair costs wall clock
-instead of nodes. Each `for` body is 26 nodes at peak (10 + 10 + 6).
+instead of nodes. Each `for` body is 24 nodes at peak (10 + 8 + 6).
 
 ```bash
 cd containers/cluster/example-script
@@ -42,7 +47,7 @@ for lang in c cpp fortran; do
 done
 
 # qwen3next is a 4th 10-node family, so give it its own wave rather than adding it
-# to the loop above -- 10 + 10 + 6 + 10 would be 36 nodes.
+# to the loop above -- 10 + 8 + 6 + 10 would be 34 nodes.
 for lang in c cpp fortran; do
     off=$(LANGS="$lang" ARMS=off MODEL=qwen3next ./submit-llr4.sh \
               | grep -oP 'Submitted batch job \K[0-9]+')
