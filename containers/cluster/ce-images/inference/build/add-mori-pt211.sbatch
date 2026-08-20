@@ -82,6 +82,16 @@ enroot start \
     # only as a stub, which is exactly why the inter-node path is in doubt above.
     apt-get update -qq
     apt-get install -y -qq libpci-dev libibverbs-dev ibverbs-utils
+    # mori/cpp is a compiled extension linked against libgrpc++.so.1.51. Without it EVERY MoE
+    # model in the image dies at import -- vllm fused_moe/all2all_utils.py imports the mori
+    # prepare/finalize unconditionally once the package is present, so 600908 shipped an image
+    # that could not serve Kimi, gpt-oss or Qwen (600517 + 600926-600937, 13 jobs).
+    # The soname is spelled differently across Ubuntu releases, so try the candidates and
+    # verify the soname itself rather than trusting a package name.
+    apt-get install -y -qq libgrpc++1.51t64 || apt-get install -y -qq libgrpc++1.51 || \
+        apt-get install -y -qq libgrpc++-dev || true
+    ldconfig
+    ldconfig -p | grep -F libgrpc++.so.1.51
 
     /opt/pytorch211/bin/python -m pip install --no-cache-dir "${MORI_PACKAGE}"
 
@@ -99,11 +109,21 @@ print("PyTorch: ", torch.__version__)
 assert sys.executable == "/opt/pytorch211/bin/python"
 assert torch.__version__.startswith("2.11.0+rocm7.2")
 
-# What matters is not that mori imports, but that vLLM can select it. The all2all backends are
-# constructed lazily per run, so this only proves the import path vLLM uses resolves.
+# mori.ops is a LAZY attribute (mori/__init__.py __getattr__), so a bare `import mori` loads
+# none of the C++ extension. 600908 passed on exactly that and still shipped a broken image.
+# Touch mori.ops to force mori.cpp, then import the two vLLM modules that every MoE model
+# pulls in -- fused_moe, and the mori prepare/finalize all2all_utils imports from it.
+print("mori.ops: ", mori.ops)
+
 import vllm.distributed.device_communicators.all2all as a2a
+import vllm.model_executor.layers.fused_moe as fused_moe
+from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
+    MoriPrepareAndFinalize,
+)
 
 print("vllm all2all module:", a2a.__file__)
+print("vllm fused_moe:     ", fused_moe.__file__)
+print("MoriPrepareAndFinalize:", MoriPrepareAndFinalize)
 print("MORI IMPORT VALIDATION PASSED -- transport NOT yet proven on Slingshot")
 PY
 
