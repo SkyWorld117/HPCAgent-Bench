@@ -341,5 +341,15 @@ awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" '
         if (rate <= 0) { print "FAIL: no decode progress under load"; exit 1 }
     }' "${RUN_DIR}/probe-conc.txt" || exit 1
 
+if (( AGENTLIKE_DURATION_S > 0 )); then
+    stage "gate 5: agent-shaped load, ${AGENTLIKE_STREAMS} streams x long shared prefix for ${AGENTLIKE_DURATION_S}s"
+    srun --nodes=1 --ntasks=1 --overlap --nodelist="${NODE0}" --environment="${INFERENCE_EDF}" \
+        /opt/pytorch211/bin/python "${SUBMIT_DIR}/agentlike-probe.py" \
+            --base "http://${NODE0}:${API_PORT}" --model "${SERVED_MODEL}" \
+            --streams "${AGENTLIKE_STREAMS}" --shared-words "${AGENTLIKE_SHARED_WORDS}" \
+            --max-tokens "${PROBE_MAX_TOKENS}" --duration "${AGENTLIKE_DURATION_S}" \
+        || { echo "FAIL: agent-shaped load did not survive" >&2; touch "${SMOKE_DONE}"; exit 1; }
+fi
+
 touch "${SMOKE_DONE}"
 printf '\n===== KIMI EAGER-PG SMOKE PASSED =====\nlogs: %s\n' "${RUN_DIR}"
