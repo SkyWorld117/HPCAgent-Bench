@@ -135,8 +135,13 @@ set -Eeuo pipefail
 rank="${SLURM_PROCID:-0}"
 
 export TOKENIZERS_PARALLELISM=false
-export VLLM_ENGINE_READY_TIMEOUT_S=7200
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
+# Overridable so a run can tell a DEADLOCK from mere slowness. 602296 hung in a gloo
+# recv_object on the pp pair; gloo's pair timeout and this RPC timeout are both 1800 s, so
+# one 30-minute stall trips both at once and we cannot see whether the engine would have
+# recovered. Raise both and the answer is direct: recovery means backpressure, continued
+# silence means a true deadlock.
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 if [[ -n "${TUNED_MOE_DIR:-}" ]]; then export VLLM_TUNED_CONFIG_FOLDER="${TUNED_MOE_DIR}"; fi
 export NCCL_DEBUG_FILE="${RUN_DIR}/nccl.%h.%p.log"
