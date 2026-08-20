@@ -16,9 +16,9 @@ One submitter, `submit-llr4.sh`. `MODEL` names the family and therefore the env 
 | `qwen30b` | c, cpp, fortran | off + skills | 10 | 6 |
 | `oss120b` | c, cpp, fortran | off + skills | 10 | 6 |
 | `kimi27code` | c, cpp, fortran | off + skills | 6 | 6 |
-| `qwen3next` | **c only** | off + skills | 10 | 2 |
+| `qwen3next` | c, cpp, fortran | off + skills | 10 | 6 |
 
-20 arms total. The ceiling is **32 nodes at any instant**, so they never all run at once --
+24 arms total. The ceiling is **32 nodes at any instant**, so they never all run at once --
 `MODEL=qwen30b ./submit-llr4.sh` alone is 60 nodes and will sit in the queue.
 
 No `--account` on beverin. `root`, `a-g200` and `a-g34` are scheduling-identical there, so
@@ -41,12 +41,16 @@ for lang in c cpp fortran; do
     done
 done
 
-# qwen3next has C arms only
-off=$(LANGS=c ARMS=off MODEL=qwen3next ./submit-llr4.sh | grep -oP 'Submitted batch job \K[0-9]+')
-LANGS=c ARMS=skills MODEL=qwen3next ./submit-llr4.sh --dependency="afterany:${off}"
+# qwen3next is a 4th 10-node family, so give it its own wave rather than adding it
+# to the loop above -- 10 + 10 + 6 + 10 would be 36 nodes.
+for lang in c cpp fortran; do
+    off=$(LANGS="$lang" ARMS=off MODEL=qwen3next ./submit-llr4.sh \
+              | grep -oP 'Submitted batch job \K[0-9]+')
+    LANGS="$lang" ARMS=skills MODEL=qwen3next ./submit-llr4.sh --dependency="afterany:${off}"
+done
 ```
 
-That queues all 20. Slurm releases each wave as the previous drains; nothing here exceeds the
+That queues all 24. Slurm releases each wave as the previous drains; nothing here exceeds the
 ceiling on its own.
 
 To resubmit **one** arm:
