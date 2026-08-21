@@ -25,10 +25,20 @@ def backend_from_call(args, kwargs, positional_index):
     return backend
 
 
+# Escape hatch for the truncation probe: eager init (device_id set) turns unbatched P2P into
+# independent collectives serialized on the group, and `received 1024 instead of 256` on
+# isend_tensor_dict -- a receiver matching the WRONG message -- killed 3 of 4 four-node probes
+# in warmup (603524/603714/603718). 0 skips the device_id everywhere, returning the world and
+# every subgroup to lazy init while KEEPING the collective/P2P split below, which may be what
+# the original lazy PG5 hang actually needed. Default 1 = today's behavior, byte-identical.
+EAGER_DEVICE_ID = os.environ.get("VLLM_EAGER_PG_DEVICE_ID", "1") == "1"
+
+
 def eager_init_process_group(*args, **kwargs):
     backend = backend_from_call(args, kwargs, 0)
 
-    if ("nccl" in str(backend).lower() and kwargs.get("device_id") is None and torch.cuda.is_available()):
+    if (EAGER_DEVICE_ID and "nccl" in str(backend).lower() and kwargs.get("device_id") is None
+            and torch.cuda.is_available()):
         device = local_device()
         kwargs["device_id"] = device
 
@@ -47,8 +57,8 @@ def eager_new_group(*args, **kwargs):
     # ranks, timeout, backend, ...
     backend = backend_from_call(args, kwargs, 2)
 
-    if ("device_id" in _new_group_parameters and "nccl" in str(backend).lower() and kwargs.get("device_id") is None
-            and torch.cuda.is_available()):
+    if (EAGER_DEVICE_ID and "device_id" in _new_group_parameters and "nccl" in str(backend).lower()
+            and kwargs.get("device_id") is None and torch.cuda.is_available()):
         device = local_device()
         kwargs["device_id"] = device
 
