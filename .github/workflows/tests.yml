@@ -336,8 +336,8 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: port-fidelity (dace frontend reads the generated corpus)
     runs-on: ubuntu-latest
-    # Phase 8 (50) + Phase 8b (25) + checkout/setup/torch, which is ~10 on a warm cache.
-    timeout-minutes: 100
+    # Phase 8 (75) + Phase 8b (25) + checkout/setup/torch, which is ~10 on a warm cache.
+    timeout-minutes: 125
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
@@ -371,18 +371,19 @@ jobs:
         # No -n: the sweep is ONE test that already forks a subprocess per program, so xdist would
         # shard nothing. The concurrency lives in the test (PARSE_WORKERS). Measured 2026-08-08 on
         # the full 625-program corpus: 4.3 min to emit + 45 min to parse serially -- which is why
-        # this step timed out at 40 twice on 08-07 -- against 4.3 + 20 at two workers. Five REFUSED
-        # entries are `hang`, 180 s of pure timeout each, and serially they alone are 15 minutes.
-        # 50 rather than 25 because a hosted runner is slower than the machine that was measured.
+        # this step timed out at 40 twice on 08-07 -- against 4.3 + 20 at two workers. Three REFUSED
+        # entries are `hang` and spend the whole PARSE_TIMEOUT_S each; at the 900 s that budget was
+        # raised to on 08-21 they alone are 22 min across the two workers, so the 20 min this step
+        # measured at 360 s becomes ~34. 75 rather than 50 keeps the same margin over that.
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 75
         run: |
           # Which CPU this ran on, because the parse timings only mean something next to it:
           # esirkepov_deposition took 274 s here and 24 s on the dev box, while mobilenet_v2 came
           # in FASTER than its local number, so "the runner is slower" does not yet explain it.
           lscpu | grep -E "^(Model name|CPU\(s\)|Thread|Core)" || true
           python -m pytest -q -p no:cacheprovider -rfsxX -m dace_frontend \
-            --timeout=2400 tests/test_dace_frontend_validity.py
+            --timeout=4200 tests/test_dace_frontend_validity.py
 
       - name: Phase 8b -- the ML ports still compute what their PyTorch models compute
         # The numpy reference is the oracle for every backend, so a port that drifted from the

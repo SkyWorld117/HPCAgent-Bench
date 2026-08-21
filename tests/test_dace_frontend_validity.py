@@ -31,14 +31,19 @@ BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
 
 #: Seconds one kernel's PARSE may take before it counts as a hang. Generous next to the ~2 s a
 #: kernel actually takes: the budget is here to bound a wedged frontend, not to time anything.
-#: 360 not 180: mobilenet_v2 legitimately parses in 171 s on an idle box, so 180 flipped it to
-#: ``timeout`` whenever a hang co-scheduled with it (measured twice locally, seen on CI runners
-#: since 2026-08-08). The slowest legit parse must clear the budget WITH contention margin.
-PARSE_TIMEOUT_S = 360.0
+#: The slowest legit parse must clear the budget WITH contention margin, because a timeout on an
+#: UNLISTED kernel is reported as a regression -- the ratchet cannot tell a slow parse from a
+#: refusal, so too tight a budget makes this gate fail for reasons the corpus did not cause.
+#: 900 not 360: shufflenet parses in 338 s under this sweep's own two-worker contention and
+#: mobilenet_v2 in 180 s idle but past 360 s contended (both measured 2026-08-21), so 360 left
+#: shufflenet 22 s of margin and flipped mobilenet_v2 on a loaded runner. 900 is ~2.7x the
+#: slowest legit parse. The cost is bounded and small: only the three ``hang`` entries ever spend
+#: the full budget, 22 min of pure timeout across two workers against the CI step's 75.
+PARSE_TIMEOUT_S = 900.0
 
 #: How many kernels are in flight at once. The sweep is a SUBPROCESS per program already, so this
 #: changes no verdict and no per-kernel budget -- it only stops the three ``hang`` entries, at
-#: :data:`PARSE_TIMEOUT_S` each, from serialising 15 minutes of pure timeout ahead of the 620
+#: :data:`PARSE_TIMEOUT_S` each, from serialising 45 minutes of pure timeout ahead of the 620
 #: kernels that take ~2 s. Measured on the whole corpus 2026-08-08: 45 min serial against 20 min at
 #: two workers, which is the difference between fitting the CI step's budget and not. Two, not
 #: ``auto``: a parse of the deep vision nets is memory-bound in sympy, not core-bound.
