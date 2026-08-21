@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 import pytest
 
@@ -37,12 +37,20 @@ BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
 PARSE_TIMEOUT_S = 360.0
 
 #: How many kernels are in flight at once. The sweep is a SUBPROCESS per program already, so this
-#: changes no verdict and no per-kernel budget -- it only stops the five ``hang`` entries, at
+#: changes no verdict and no per-kernel budget -- it only stops the three ``hang`` entries, at
 #: :data:`PARSE_TIMEOUT_S` each, from serialising 15 minutes of pure timeout ahead of the 620
 #: kernels that take ~2 s. Measured on the whole corpus 2026-08-08: 45 min serial against 20 min at
 #: two workers, which is the difference between fitting the CI step's budget and not. Two, not
 #: ``auto``: a parse of the deep vision nets is memory-bound in sympy, not core-bound.
 PARSE_WORKERS = 2
+
+#: Reasons that are a WALL-CLOCK verdict rather than a frontend refusal. A faster runner, or one
+#: under less load, finishes such a kernel inside :data:`PARSE_TIMEOUT_S` and reports ``ok`` without
+#: anything having been fixed. They are therefore exempt from the SHRINK direction of the ratchet
+#: below -- an entry named here may parse without failing the test, and comes off the list by hand
+#: once the generator makes it reliably fast. Every other reason still must come off the moment it
+#: parses, which is what keeps the list measuring.
+TIMEOUT_REASONS = frozenset({"hang"})
 
 #: Kernels whose generated DaCe program the frontend does not accept today, with the cause. Shrink
 #: this list by fixing the GENERATOR (a desugar in ``dace_emit``) or by fixing DaCe -- never by
@@ -282,6 +290,23 @@ def kernel_of(path: pathlib.Path) -> str:
     return path.parent.relative_to(BENCHMARKS).as_posix()
 
 
+def ratchet_findings(items: Iterable[Tuple[str, dict]]) -> Tuple[List[str], Set[str]]:
+    """Split ``(kernel, verdict)`` pairs into the two ways the list can be wrong.
+
+    ``regressions`` are refusals nothing excuses; ``fixed`` are entries that parse and must come
+    off. A :data:`TIMEOUT_REASONS` entry never lands in ``fixed`` -- see the ratchet's docstring.
+    """
+    regressions: List[str] = []
+    fixed: Set[str] = set()
+    for kernel, verdict in items:
+        if verdict["verdict"] == "ok":
+            if kernel in REFUSED and REFUSED[kernel] not in TIMEOUT_REASONS:
+                fixed.add(kernel)
+        elif kernel not in REFUSED:
+            regressions.append(f"{kernel}: {verdict['verdict']}: {verdict.get('error', '')[:200]}")
+    return regressions, fixed
+
+
 @pytest.mark.dace_frontend
 def test_the_refusal_list_names_kernels_that_exist() -> None:
     """A stale entry would silently excuse a kernel that no longer exists, and hide a real
@@ -295,20 +320,13 @@ def test_the_refusal_list_names_kernels_that_exist() -> None:
 @pytest.mark.dace_frontend
 def test_every_generated_dace_program_parses_or_is_a_known_refusal() -> None:
     """The ratchet. A NEW refusal fails; a refusal that started parsing fails too, so the list can
-    only shrink, and it shrinks by fixing the generator."""
+    only shrink, and it shrinks by fixing the generator. Exception: a :data:`TIMEOUT_REASONS` entry
+    that parsed is runner speed, not a fix, so it does not fail the shrink direction."""
     programs = generated_programs()
     assert programs, "no generated DaCe programs found -- the glob or the corpus moved"
-    regressions: List[str] = []
-    fixed: Set[str] = set()
     with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as pool:
         verdicts = list(pool.map(parse_one, programs))
-    for path, verdict in zip(programs, verdicts):
-        kernel = kernel_of(path)
-        if verdict["verdict"] == "ok":
-            if kernel in REFUSED:
-                fixed.add(kernel)
-        elif kernel not in REFUSED:
-            regressions.append(f"{kernel}: {verdict['verdict']}: {verdict.get('error', '')[:200]}")
+    regressions, fixed = ratchet_findings((kernel_of(p), v) for p, v in zip(programs, verdicts))
     # A timeout alone cannot tell a wedged frontend from a runner slower than the box the budget was
     # measured on. The MEDIAN is what separates them: a uniformly slower runner moves it, and a
     # kernel that alone went from 24 s to 274 s (esirkepov_deposition, CI 2026-08-17, while
@@ -326,4 +344,41 @@ def test_every_generated_dace_program_parses_or_is_a_known_refusal() -> None:
     assert not regressions, ("the DaCe frontend refuses generated programs that used to parse:\n  " +
                              "\n  ".join(sorted(regressions)) + scale)
     assert not fixed, (f"these parse now and must come OFF the REFUSED list: {sorted(fixed)}. "
-                       "A list that keeps a fixed entry stops measuring the next regression.")
+                       "A list that keeps a fixed entry stops measuring the next regression. "
+                       f"(Reasons in {sorted(TIMEOUT_REASONS)} are exempt -- a parse that finished "
+                       "only says the runner was fast enough.)")
+
+
+@pytest.mark.dace_frontend
+def test_a_timeout_class_refusal_that_parsed_does_not_have_to_come_off_the_list() -> None:
+    """``hang`` is a wall-clock verdict. A runner fast enough to finish one inside the budget has
+    fixed nothing, so the shrink direction must not fire -- otherwise the ratchet goes red and
+    green with runner load, and a red that means nothing gets ignored when it means something."""
+    hung = sorted(k for k, why in REFUSED.items() if why in TIMEOUT_REASONS)
+    assert hung, "no TIMEOUT_REASONS entry left in REFUSED -- drop this test with the last one"
+    regressions, fixed = ratchet_findings((k, {"verdict": "ok"}) for k in hung)
+    assert not fixed
+    assert not regressions
+
+
+@pytest.mark.dace_frontend
+def test_a_real_refusal_that_parsed_must_come_off_the_list() -> None:
+    """The other side of the exemption: everything that is not a wall-clock verdict still shrinks
+    the moment it parses. A blanket exemption would stop the list measuring anything."""
+    real = sorted(k for k, why in REFUSED.items() if why not in TIMEOUT_REASONS)
+    assert real, "REFUSED holds nothing but timeouts -- the ratchet has no shrink direction left"
+    _, fixed = ratchet_findings((k, {"verdict": "ok"}) for k in real)
+    assert fixed == set(real)
+
+
+@pytest.mark.dace_frontend
+def test_an_unexcused_refusal_is_a_regression_whatever_the_verdict() -> None:
+    """A kernel off the list may not fail, and the verdict and error text reach the message: a
+    regression report naming only the kernel sends the reader back to the CI log to learn what
+    broke."""
+    regressions, fixed = ratchet_findings([("scientific_computing/brand_new", {
+        "verdict": "timeout",
+        "error": "the frontend did not finish parsing in 360s",
+    })])
+    assert not fixed
+    assert regressions == ["scientific_computing/brand_new: timeout: the frontend did not finish parsing in 360s"]
