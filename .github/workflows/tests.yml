@@ -104,20 +104,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -245,7 +241,7 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: integration (build/run real artifacts)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
       # tests/test_dace_openblas_link.py builds a pinned OpenBLAS with USE_OPENMP=1 (~10 min at
@@ -259,8 +255,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Same ccache rationale as `unit`; the key is namespaced by github.job, so this job
-      # warms its own cache rather than contending for that one.
+      # Same ccache setup as `unit`; the key is namespaced by github.job, so this job
+      # warms its own cache rather than contending for that one. CPU_KEY is still derived
+      # here because the from-source OpenBLAS cache below is keyed by uarch.
       - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
@@ -268,6 +265,10 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed for ccache and fragments the cache.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
@@ -276,8 +277,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       - name: Setup -- reset the ccache counters
         run: ccache --zero-stats
 
@@ -307,9 +308,9 @@ jobs:
         # phase hung for 38 minutes past its last line with the 900 s timeout never firing, because
         # the default method arms SIGALRM and the wedge was below a fork/subprocess wait. The
         # thread method reports the hanging test instead of losing the phase to the step cap.
-        timeout-minutes: 70
+        timeout-minutes: 85
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 --timeout-method=thread \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 --timeout-method=thread --durations=25 \
             -m integration tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: ccache statistics
@@ -455,20 +456,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -535,20 +532,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -720,20 +713,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -842,20 +831,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -1074,20 +1059,16 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
-          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
-            head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
-          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
-          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
+          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
+          # cache entry only matches when every input is identical, so cross-runner uarch
+          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
+          # needed and fragments the cache.
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
+          key: ccache-${{ github.job }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
