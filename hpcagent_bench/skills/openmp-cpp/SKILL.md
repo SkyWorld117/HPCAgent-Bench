@@ -49,6 +49,9 @@ for (int64_t i = 0; i < n; i++) {
 }
 ```
 
+`exclusive(s)` is the value-before-this-iteration variant. Scans reassociate, so tolerance
+still applies.
+
 **SCATTER** -- writes through an index array, `a[idx[i]]`. If the task guarantees distinct indices
 it is PARALLEL, no atomics. Only DUPLICATE indices collide: then per-thread copies merged after the
 loop (usually fastest), or `omp atomic` on the update (often slower than serial).
@@ -76,7 +79,9 @@ answer under load. Induction variables are private already. `collapse(n)` when o
 short to fill cores -- needs exactly n PERFECTLY nested loops, nothing between the headers. `declare simd`
 on a helper called from the hot loop, else the call is a vectorization barrier. `unroll partial(4)`
 on the INNER loop of a nest you already thread -- never `full`, it deletes the loop the
-worksharing directive above needs.
+worksharing directive above needs. Split the halves
+when the shape demands it: `parallel` worksharing on the outer loop, `simd` alone on the
+unit-stride inner one.
 
 ## Build errors that cost a turn
 
