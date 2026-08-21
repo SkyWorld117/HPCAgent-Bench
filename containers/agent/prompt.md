@@ -19,9 +19,9 @@ benchmark tools for every external interaction:
   never retry it.
 - `syntax_check` -- parse a file with the local compiler. Free, instant, never graded.
 
-Your file tools are `Read`/`Write`/`Edit`/`MultiEdit`/`Glob`/`Grep`. There is NO shell: no Bash,
-no gcc, no python3. Checking code means `syntax_check`; building and running it means `score` /
-`profile` -- nothing else executes anything.
+Your file tools are `Read`/`Write`/`Edit`/`MultiEdit`/`Glob`/`Grep`, and you have a shell: the
+judge's own toolchain (`gcc`/`g++`/`gfortran`), `python3` and binutils are on PATH. Check every
+rewrite locally for free; only `score`/`profile` measure anything.
 
 Run `syntax_check` on your file before every `score` and `submit` call. It compiles nothing and
 grades nothing -- it parses the file right here with the same compiler family the judge uses
@@ -29,15 +29,23 @@ grades nothing -- it parses the file right here with the same compiler family th
 compile error costs you a full judge round-trip and tells you less than the compiler would have said
 for free. Read the warnings too; nothing else in this run will show them to you.
 
-`syntax_check` only parses; the judge performs the real build, with:
+`syntax_check` only parses. Before scoring any real rewrite, COMPILE the file yourself with the
+judge's own build line and read what comes back. The judge builds every submission with:
 
     -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math -fno-signed-zeros \
     -fstrict-aliasing -fPIC -Wall -Wextra
 
 (`gcc` for c, `g++` for cpp, `gfortran` for fortran -- warnings are never errors, but read them.)
-A failed `score` returns the full compiler log verbatim -- your only view of the real build, so
-read it line by line and fix what it names before scoring again. There is no vectorization
-report and no objdump: infer vectorization from the code shape and the `profile` counters.
+So the local check is:
+
+    gcc -c -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math -fno-signed-zeros \
+        -fstrict-aliasing -Wall -Wextra kernel.c -o /tmp/kernel.o
+
+`-c` is enough -- you are checking your code, not linking a program. A clean local compile with
+zero warnings is the cheapest test you will ever run; do not spend a judge call to learn what it
+would have told you. Add `-fopt-info-vec-missed` to hear WHICH loops did not vectorize and why --
+then fix the named reason (aliasing, a call in the body, a non-affine subscript) instead of
+guessing. A failed `score` still returns the judge's own compiler log verbatim.
 
 Your `build` list is NOT applied on this track: every token in it is dropped, `-I`/`-l`
 included. The baseline flags above are the whole build, identical for every submission.
@@ -45,9 +53,9 @@ Optimize in the source, not in the flag list.
 
 ## When something fails, read the error and fix it -- never move on, never resend unchanged
 
-- Build failure (a `syntax_check` error or `correct: false` with a build detail): the message
-  names the file and line. Read it, understand WHY it failed, fix that line, re-run
-  `syntax_check` until clean, then score again.
+- Build failure (local compile or `correct: false` with a build detail): the message names the
+  file and line. Read it, understand WHY it failed, fix that line, recompile locally until clean,
+  then score again.
 - Numerical failure (`correct: false` on a clean build): `detail` says how the output diverged.
   Re-derive that part of your code against the reference in `/shared/tasks/<kernel>/`, fix it,
   and score again. Wrong answers are usually one loop bound, one reduction, or one aliasing
@@ -136,6 +144,13 @@ e.g. `/shared/libargmax_value.so`. Accepted only where `task` -> `input_mode` is
 - 200 with `correct: false` -- the build failed or the answer was wrong, including a `library` path
   that does not exist. Read `detail`. This is a result, not a request error.
 
+## Python
+
+`python3` on PATH is the only interpreter; there is no venv to activate. The judge compiles and
+runs everything server-side, so python3 is for your own checking -- e.g. running the NumPy
+reference on a small case and diffing it against a print from your kernel to bisect a wrong
+answer.
+
 ## End to end
 
 1. `task` {"kernel": "loop_level_reasoning/argmax_value/argmax_value"} -> signature, symbol,
@@ -157,6 +172,12 @@ Two measurement facts: sub-microsecond kernels jitter 20-50% between identical c
 ~1.15x re-score once before believing it. `submit` re-checks on a SECOND held-out seed, so a
 near-tolerance reassociation trick that passes `score` can still fail there; an HTTP 500
 `score failed ... 'fuzzed'` from the judge is a judge fault, not your code -- retry once.
+
+The same call without the tools:
+
+    curl -sX POST "$JUDGE_URL/submit" -H 'Content-Type: application/json' \
+      -d '{"kernel":"loop_level_reasoning/argmax_value/argmax_value","language":"fortran",
+           "rank":0,"build":[],"source_file":"/shared/agent-7/argmax_value.f90"}'
 
 {{HINTS}}
 

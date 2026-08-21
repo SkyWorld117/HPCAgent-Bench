@@ -938,12 +938,14 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
         "--mcp-config",
         str(mcp_config),
         "--strict-mcp-config",
+        # Bash is ON: the local toolchain (gcc/g++/gfortran, python3, objdump) is how an agent
+        # checks a rewrite for free before spending a judge call.
         "--tools",
-        "Read,Write,Edit,MultiEdit,Glob,Grep",
+        "Read,Write,Edit,MultiEdit,Glob,Grep,Bash",
         "--allowedTools",
+        "Bash",
         *[f"mcp__optarena__{name}" for name in AGENT_TOOLS],
         "--disallowedTools",
-        "Bash",
         "WebFetch",
         "WebSearch",
         "Task",

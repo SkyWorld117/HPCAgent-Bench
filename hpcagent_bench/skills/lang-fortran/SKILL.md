@@ -61,11 +61,10 @@ side effects inside.
 
 ## Workflow
 
-- `syntax_check` before every `score`/`submit` -- gfortran's own parse in the judge's dialect,
-  free and in-turn (there is no shell to run it yourself), and it catches a `bind(C)` interface
-  drifted off the ABI. READ its warnings even when `ok: true`. Iterate until clean before
-  spending a judge call; a failed `score` returns the full compiler log -- read it line by line
-  and fix what it names.
+- Compile locally with the judge's own build line (printed in the main prompt) and READ every
+  error and warning; iterate until clean before spending a judge call. `-fopt-info-vec-missed`
+  names the loops that did not vectorize and why. `syntax_check` is the free in-turn parse and
+  catches a `bind(C)` interface drifted off the ABI.
 - Iterate with `score`; `submit` every correct improvement.
 - Profiling is its own tool (`profile`, see its page): reach for it when a correct version stops
   improving, not before.

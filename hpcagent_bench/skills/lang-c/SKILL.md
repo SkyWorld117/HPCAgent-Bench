@@ -50,11 +50,11 @@ token rather than re-deriving it.
 
 ## Workflow
 
-- `syntax_check` before every `score`/`submit` -- the local compiler's own parse, free and
-  in-turn (there is no shell to run gcc yourself). READ its warnings even when `ok: true`; a
-  dropped omp clause or an unused accumulator shows up there and nowhere else. Iterate until
-  clean before spending a judge call; a failed `score` returns the full compiler log -- read it
-  line by line and fix what it names.
+- Compile locally with the judge's own build line (printed in the main prompt) and READ every
+  error and warning -- a dropped omp clause or an unused accumulator shows up there and nowhere
+  else. Iterate until clean before spending a judge call. `-fopt-info-vec-missed` names the
+  loops that did not vectorize and why; fix the named reason. `syntax_check` is the free
+  in-turn parse.
 - Iterate with `score`; `submit` every correct improvement.
 - Profiling is its own tool (`profile`, see its page): reach for it when a correct version stops
   improving, not before.
