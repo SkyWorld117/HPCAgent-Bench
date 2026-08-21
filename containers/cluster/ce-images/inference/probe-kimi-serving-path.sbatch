@@ -39,6 +39,13 @@ export MODEL_REPO="${MODEL_REPO:-moonshotai/Kimi-K2.7-Code}"
 export SERVED_MODEL="${SERVED_MODEL:-optarena-vllm}"
 export TP_SIZE="${TP_SIZE:-4}"
 export PP_SIZE="${PP_SIZE:-4}"
+# KV comes out of MI300A unified memory and the wedged runs never touched 1% of it, so the
+# reservation is a knob that can be A/B-ed on its own instead of a literal in the arg list.
+export GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.70}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
+# 0 = lazy PG init (device_id withheld) with the collective/P2P split kept -- the truncation probe.
+export VLLM_EAGER_PG_DEVICE_ID="${VLLM_EAGER_PG_DEVICE_ID:-1}"
 export TOOL_PARSER="${TOOL_PARSER:-kimi_k2}"
 export REASONING_PARSER="${REASONING_PARSER:-kimi_k2}"
 # AITER is installed in the image but nothing enables it: 598954 served on TRITON_MLA with all
@@ -71,6 +78,14 @@ export PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-16384}"
 export SWEEP_CONCURRENCY="${SWEEP_CONCURRENCY:-1 8 16 32 64}"
 # 20 is what the wedged campaign actually ran, so the path arms reproduce its load exactly.
 export PATH_CONCURRENCY="${PATH_CONCURRENCY:-20}"
+# The campaign wedges with 107-123 resident sequences carrying ~20k-token prompts, and neither
+# is reachable with the defaults above: a short prompt puts almost nothing in the KV cache, so
+# a sweep that survives conc=128 on 30-token prompts has not tested the campaign's regime.
+# Filler is repeated whole words so the tokenizer yields roughly one token per word.
+export PROBE_PROMPT_TOKENS="${PROBE_PROMPT_TOKENS:-0}"
+# Flag-for-flag passthrough to `vllm serve`, same trusted word-list contract as run_cluster.sh.
+# Without it the probe serves a DIFFERENT model configuration than the arm it is explaining.
+export VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 
 GPUS_PER_NODE=4
 NNODES=$((TP_SIZE * PP_SIZE / GPUS_PER_NODE))
@@ -159,11 +174,15 @@ ARGS=(
     --enable-auto-tool-choice
     --tool-call-parser "${TOOL_PARSER}"
     --trust-remote-code
-    --max-model-len 65536
-    --gpu-memory-utilization 0.70
-    --max-num-seqs 128
+    --max-model-len "${MAX_MODEL_LEN}"
+    --gpu-memory-utilization "${GPU_MEM_UTIL}"
+    --max-num-seqs "${MAX_NUM_SEQS}"
 )
 [[ -n "${REASONING_PARSER}" ]] && ARGS+=(--reasoning-parser "${REASONING_PARSER}")
+if [[ -n "${VLLM_EXTRA_ARGS:-}" ]]; then
+    read -r -a extra <<<"${VLLM_EXTRA_ARGS}"
+    ARGS+=("${extra[@]}")
+fi
 if (( rank == 0 )); then
     ARGS+=(--host 0.0.0.0 --port "${API_PORT}")
 else
@@ -221,9 +240,22 @@ grep -ho "Using .*backend[^,]*\|moe_backend='"'"'[a-z]*'"'"'\|linear_backend='"'
 echo "  USE_AITER=${USE_AITER} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-unset}"
 
 stage "warming the engine so no JIT or dynamo compile lands inside a measured window"
+# 603524 died on a SHORT warmup while PROBE_PROMPT_TOKENS reached only the sweep bodies, so the
+# long-prompt leg never ran and the 20k prefill shape never got its JIT pass.
+python3 - <<'PY' >"${RUN_DIR}/warm-body.json"
+import json
+import os
+
+pad = int(os.environ.get("PROBE_PROMPT_TOKENS", "0"))
+prompt = "Write one line of C."
+if pad > 0:
+    filler = "The kernel iterates over the array and accumulates into the result buffer. "
+    prompt = (filler * (pad // len(filler.split()) + 1)) + prompt
+print(json.dumps({"model": os.environ["SERVED_MODEL"], "prompt": prompt, "max_tokens": 64}))
+PY
 curl -fsS --max-time "${FIRST_TOKEN_TIMEOUT}" "http://${MASTER}:${API_PORT}/v1/completions" \
     -H 'Content-Type: application/json' \
-    -d "{\"model\":\"${SERVED_MODEL}\",\"prompt\":\"Write one line of C.\",\"max_tokens\":64}" \
+    -d @"${RUN_DIR}/warm-body.json" \
     -o "${RUN_DIR}/warm-completions.json" || true
 curl -fsS --max-time "${FIRST_TOKEN_TIMEOUT}" "http://${MASTER}:${API_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
@@ -243,6 +275,10 @@ run_dir = os.environ["RUN_DIR"]
 model = os.environ["SERVED_MODEL"]
 max_tokens = int(os.environ["PROBE_MAX_TOKENS"])
 prompt = "Explain loop tiling and why it helps cache reuse."
+pad = int(os.environ.get("PROBE_PROMPT_TOKENS", "0"))
+if pad > 0:
+    filler = "The kernel iterates over the array and accumulates into the result buffer. "
+    prompt = (filler * (pad // len(filler.split()) + 1)) + prompt
 
 # Shaped like the optarena MCP surface the agents actually carry, so the tool-schema arm costs
 # the parser what a real turn costs it.
@@ -332,12 +368,16 @@ for c in ${SWEEP_CONCURRENCY}; do
     measure "sweep-completions" "${c}" "/v1/completions" "body-completions.json"
 done
 
+# Stage 2 costs four more measure() rounds. Set PROBE_SHAPES=0 when the question is the sweep
+# alone and the allocation is meant to be short.
+if [[ "${PROBE_SHAPES:-1}" == "1" ]]; then
 stage "stage 2: request-shape isolation at concurrency ${PATH_CONCURRENCY} (the campaign's load)"
 echo "each arm adds ONE thing over the arm above it; the step that collapses is the cause"
 measure "1-completions"        "${PATH_CONCURRENCY}" "/v1/completions"      "body-completions.json"
 measure "2-chat"               "${PATH_CONCURRENCY}" "/v1/chat/completions" "body-chat.json"
 measure "3-chat+stream"        "${PATH_CONCURRENCY}" "/v1/chat/completions" "body-chat-stream.json"
 measure "4-chat+stream+tools"  "${PATH_CONCURRENCY}" "/v1/chat/completions" "body-chat-stream-tools.json"
+fi
 
 touch "${SMOKE_DONE}"
 printf '\n===== PROBE DONE (tp=%s pp=%s) =====\nlogs: %s\n' "${TP_SIZE}" "${PP_SIZE}" "${RUN_DIR}"
