@@ -71,7 +71,10 @@ for (int64_t i = 0; i < m; i++) {
 
 Getting sharing wrong is a RACE, not a build error: it compiles, runs, and returns a different
 answer under load. Induction variables are private already. `collapse(n)` when one loop is too
-short to fill cores -- needs exactly n PERFECTLY nested loops, nothing between the headers.
+short to fill cores -- needs exactly n PERFECTLY nested loops, nothing between the headers. `declare simd`
+on a helper called from the hot loop, else the call is a vectorization barrier. `unroll partial(4)`
+on the INNER loop of a nest you already thread -- never `full`, it deletes the loop the
+worksharing directive above needs.
 
 ## Build errors that cost a turn
 
@@ -81,7 +84,7 @@ short to fill cores -- needs exactly n PERFECTLY nested loops, nothing between t
 - **Skip `default(none)`.** The one variable you miss is always the accumulator -- which belongs in
   `reduction(...)` anyway. Leaving it off removed the most common build failure on record.
 - **Nothing between the directive and its loop, and the loop must be canonical**: one induction
-  variable initialized IN the header, `for (; i >= 0; i -= 4)` is a build error.
+  variable, `int64_t` like every subscript, initialized IN the header, `for (; i >= 0; i -= 4)` is a build error.
 - **`simd` is part of the directive NAME**: `parallel for simd schedule(static)`, never
   `parallel for schedule(static) simd`.
 - **No `break` / `return` / `goto` out of a threaded loop.** A search loop keeps its trip count

@@ -33,11 +33,11 @@ Two flags on that line decide what your source is ALLOWED to contain, so read th
 write:
 {% if language in ("c", "cpp") %}
 {% if language == "c" %}
-- `-std=c17` selects the ISO dialect rather than the `gnu17` default, but `-pedantic-errors` is
-  NOT passed, so the common GNU extensions still compile -- verified on this toolchain: **stack
-  VLAs** (`int a[n];`), statement expressions (`({ ... })`) and nested functions all build. What
-  strict mode does remove is the unprefixed spelling of extension keywords: write `__typeof__`,
-  not `typeof`.
+- `-std=c23` selects the ISO C23 dialect rather than the `gnu` default, but `-pedantic-errors`
+  is NOT passed, so the common GNU extensions (stack VLAs, statement expressions) still compile.
+  C23 itself brings `constexpr`, `typeof`, `nullptr` and bare `bool`/`true`/`false` -- and any
+  compile-time extent the ABI does not pass arrives declared at the top of your stub as
+  `constexpr int64_t`.
 {% endif %}
 {% if language == "cpp" %}
 - `-std=c++23` selects the ISO dialect rather than the `gnu++` default, but `-pedantic-errors` is

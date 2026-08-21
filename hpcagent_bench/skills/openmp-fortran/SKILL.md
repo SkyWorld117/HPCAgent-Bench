@@ -91,7 +91,10 @@ end subroutine hist
 
 Getting sharing wrong is a RACE, not a build error: it compiles, runs, and returns a different
 answer under load. Loop indices are private already. `collapse(n)` when one loop is too short to
-fill cores -- needs exactly n PERFECTLY nested loops, nothing between the `do` statements.
+fill cores -- needs exactly n PERFECTLY nested loops, nothing between the `do` statements. `declare simd`
+on a helper called from the hot loop, else the call is a vectorization barrier. `unroll partial(4)`
+on the INNER loop of a nest you already thread -- never `full`, it deletes the loop the
+worksharing directive above needs.
 
 ## Build errors that cost a turn
 

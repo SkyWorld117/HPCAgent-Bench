@@ -1,23 +1,13 @@
 ---
 name: lang-c
-description: "C23 here: the ABI, the mistakes that cost most of the recorded turns, and writing fast C."
+description: "Writing fast C here: the mistakes that cost most of the recorded turns, and the idioms that vectorize."
 ---
 
 # lang-c
 
-Score = MULTI-CORE speedup vs a SERIAL same-toolchain C baseline. Threading: the openmp-c page.
-
-## Harness facts
-
-- Flags (fixed, also shown in the main prompt): `gcc -std=c23 -O3 -march=native -fopenmp` plus the
-  strict-FP set. `-ffast-math` is never on -- reassociation is yours to authorize per loop
-  (`reduction`) and must stay inside tolerance. LLVM 22 (`clang`) via the submission's `compiler`
-  field.
-- The ABI already spells restrict: `void k(const double *restrict a, double *restrict out,
-  int64_t n)`. Symbols are `int64_t`. `workspace` may be NULL and `workspace_size` 0 unless you
-  asked via `workspace_bytes` -- check both. It is the only 256B-aligned buffer you get.
-- C23 is parsed: `constexpr`, `typeof`, `nullptr`, bare `bool` -- and compile-time extents arrive
-  declared at the top of your stub as `constexpr int64_t`.
+Threading and loop classification: the openmp-c page. The task text prints the exact signature,
+build line (`-std=c23`, OpenMP on, fast-math off) and scoring -- match the signature token for
+token rather than re-deriving it.
 
 ## The expensive mistakes
 
@@ -33,6 +23,18 @@ Score = MULTI-CORE speedup vs a SERIAL same-toolchain C baseline. Threading: the
    `for (i = 0; i < n - 3; i += 4)` body stops at the last whole group on purpose; rerolling it to
    `i < n` writes elements the reference does not. Sizes are fuzzed, so `n % 4 != 0` is the normal
    case.
+
+## What you are allowed to reach for
+
+- **`restrict`** -- the ABI already spells it on the kernel's pointers; use it on every
+  non-aliasing pointer you declare yourself. It is the single biggest vectorization enabler.
+- **C23 is the dialect** (`-std=c23`): `constexpr` for compile-time constants, `typeof`,
+  `nullptr`, bare `bool`/`true`/`false` all compile. Compile-time extents the ABI does not pass
+  arrive at the top of your stub as `constexpr int64_t` -- use them as loop bounds directly, the
+  compiler unrolls and vectorizes against known trip counts.
+- **OpenMP** is always linked (`-fopenmp`): every directive on the openmp-c page works.
+- The 256B-aligned `workspace` (request via `workspace_bytes`) and your own `aligned_alloc`
+  storage -- the only pointers you may claim alignment on.
 
 ## Writing fast C
 

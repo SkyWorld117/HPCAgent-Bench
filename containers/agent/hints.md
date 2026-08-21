@@ -26,6 +26,8 @@ FP reassociation is allowed as long as the result stays inside the graded tolera
 - An FP reduction needs its `reduction` clause -- the compiler will not reassociate on its own.
 - Turn data-dependent branches in the inner loop into arithmetic (select/blend), not `if`.
 - Hand-written intrinsics after a clean `simd` loop usually regress -- measure before keeping.
+- Math-function loops (`exp`/`log`/`sin`) CAN vectorize here: libmvec is linked, no
+  fast-math needed.
 
 **Threading**
 

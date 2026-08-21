@@ -1,23 +1,13 @@
 ---
 name: lang-cpp
-description: "C++23 here: the ABI, the parallel policies that really are parallel, and writing fast C++."
+description: "Writing fast C++ here: the parallel policies that really are parallel, and the mistakes that cost most of the recorded turns."
 ---
 
 # lang-cpp
 
-Score = MULTI-CORE speedup vs a SERIAL same-toolchain build. Threading: the openmp-cpp page, or a
-parallel algorithm below -- one spelling per loop.
-
-## Harness facts
-
-- Flags (fixed, also shown in the main prompt): `g++ -std=c++23 -O3 -march=native -fopenmp` plus
-  the strict-FP set. `-ffast-math` is never on -- reassociation is yours to authorize per loop and
-  must stay inside tolerance. LLVM 22 (`clang++`) via the submission's `compiler` field.
-- `<execution>` asks nothing of you: the judge finds oneTBB and appends `-ltbb` to every C++ link.
-  Declare no library.
-- The signature is fixed and already spells `__restrict__`; keep every qualifier. `workspace` may
-  be NULL and `workspace_size` 0 unless you asked via `workspace_bytes` -- check both. It is the
-  only 256B-aligned buffer.
+Threading and loop classification: the openmp-cpp page, or a parallel algorithm below -- one
+spelling per loop. The task text prints the exact signature, build line (`-std=c++23`, OpenMP on,
+fast-math off) and scoring -- match the signature token for token, keep every qualifier.
 
 ## The expensive mistakes
 
@@ -34,17 +24,24 @@ parallel algorithm below -- one spelling per loop.
 
 ## Parallel algorithms (`<execution>`)
 
-`par` / `par_unseq` are genuinely parallel here -- same standing as an OpenMP directive, and the
-same independence PROMISE: a recurrence or colliding indexed write under a policy races and
-returns wrong answers with no diagnostic. Classify the loop first (openmp-cpp bins).
+The policies are genuinely parallel here -- same standing as an OpenMP directive, and the same
+independence PROMISE: a recurrence or colliding indexed write under a policy races and returns
+wrong answers with no diagnostic. Classify the loop first (openmp-cpp bins).
+
+**Prefer `std::execution::par_unseq` whenever it is legal.** `par` spreads elements across the
+slot's cores; `unseq` additionally lets the compiler VECTORIZE the element function, so a legal
+`par_unseq` is threads times lanes from one call. It is legal when the element callable is
+self-contained: no locks or blocking (the policy promises no forward progress between elements,
+so anything that waits can deadlock), no allocation, no shared mutable capture, no throwing.
+Step down to `par` only when the body genuinely needs one of those; below that, an OpenMP
+directive or a plain loop.
 
 - Say what the loop means: `transform`, `reduce`, `transform_reduce`, `inclusive_scan` /
   `exclusive_scan` (the parallel spelling of a running sum), `for_each` over an index view.
   `accumulate` / `partial_sum` are ordered by definition and take no policy.
-- `par_unseq` over `par` where the body allows it. `reduce`/`transform_reduce` reassociate FP --
-  that is what makes them parallel; `score` is the check.
-- The element callable must be self-contained: no allocation, no locks, no shared mutable capture,
-  no throwing.
+- `reduce`/`transform_reduce` reassociate FP -- that is what makes them parallel; `score` is the
+  check. TBB's pool is INDEPENDENT of `OMP_NUM_THREADS`; both size themselves from the same
+  affinity mask.
 - Contiguous random-access iterators only -- raw pointers or `std::span`. One policy call per
   loop, hoisted out of any enclosing loop.
 
@@ -59,7 +56,7 @@ double s = std::transform_reduce(std::execution::par_unseq, w, w + n, v, 0.0, st
 - **`__restrict__` on every non-aliasing pointer**; helpers and local copies lose it unless
   re-spelled. Inner loop over a raw pointer or `std::span`, bound once outside.
 - **Scalars over length-1 arrays**: accumulate in a scalar local, store once.
-- **One index type everywhere**: `int64_t`, matching the ABI symbols.
+- **One index type everywhere**: `int64_t`, matching the stub.
 - **No hidden calls in hot loops**: `virtual`, `std::function`, out-of-TU helpers. Keep helpers
   `static` and in-file.
 - Plain countable loops: bound known at entry, one exit, induction variable not mutated.
