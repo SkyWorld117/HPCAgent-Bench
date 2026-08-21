@@ -54,6 +54,8 @@ side effects inside.
   vectorizes without dependence analysis. Two caveats: overlapping or non-contiguous sections
   materialize a temporary; and array syntax reads the WHOLE right side from OLD values, so
   `x(2:n) = a(2:n)*x(1:n-1)` is a DIFFERENT computation from the loop. A recurrence stays a loop.
+  And array syntax VECTORIZES but never THREADS here -- a loop that needs cores stays explicit
+  under `parallel do` (the openmp-fortran page).
 - **Reach for the intrinsic first**: `matmul` (blocked, you will not beat it by hand),
   `dot_product`, `sum`/`maxval`/`minloc` with `dim=`, `merge`, `pack`/`count`, `transpose`.
 - **`elemental`** for your own per-element work (implicitly `pure`, applies to whole arrays,
@@ -62,10 +64,10 @@ side effects inside.
 ## Workflow
 
 - Compile locally with the judge's own build line (printed in the main prompt) and READ every
-  error and warning; iterate until clean before spending a judge call. `-fopt-info-vec-missed`
-  names the loops that did not vectorize and why. `syntax_check` is the free in-turn parse and
-  catches a `bind(C)` interface drifted off the ABI.
+  error and warning; iterate until clean before spending a judge call. `syntax_check` is the
+  free in-turn parse and catches a `bind(C)` interface drifted off the ABI.
+- The default family is gcc (`gfortran`); LLVM 22 (`flang`) via the submission's `compiler`
+  field. The two vectorize and thread `do concurrent` differently -- when a loop refuses to
+  speed up, score BOTH variants before redesigning.
 - Iterate with `score`; `submit` every correct improvement.
-- Profiling is its own tool (`profile`, see its page): reach for it when a correct version stops
-  improving, not before.
 - Your context is finite: do NOT re-read the file after an edit that reported success.

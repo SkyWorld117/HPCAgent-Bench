@@ -93,13 +93,17 @@ end subroutine hist
 | `reduction(op:x)` | per-thread copy at `op`'s identity, combined at the end. What a sum/max/count wants. |
 
 Getting sharing wrong is a RACE, not a build error: it compiles, runs, and returns a different
-answer under load. Loop indices are private already. `collapse(n)` when one loop is too short to
-fill cores -- needs exactly n PERFECTLY nested loops, nothing between the `do` statements. `declare simd`
-on a helper called from the hot loop, else the call is a vectorization barrier. `unroll partial(4)`
-on the INNER loop of a nest you already thread -- never `full`, it deletes the loop the
-worksharing directive above needs. Split the halves
-when the shape demands it: `parallel` worksharing on the outer loop, `simd` alone on the
-unit-stride inner one.
+answer under load. Loop indices are private already.
+
+## Worth one line each
+
+- `collapse(n)` when one loop is too short to fill cores -- exactly n PERFECTLY nested loops,
+  nothing between the `do` statements.
+- `declare simd` on a helper called from the hot loop, else the call is a vectorization barrier.
+- `!$omp unroll partial(4)` on the INNER loop of a nest you already thread -- never `full`:
+  it deletes the loop the worksharing directive above needs.
+- Split the construct when the shape demands it: `parallel do` on the outer loop, `simd`
+  alone on the unit-stride inner one.
 
 ## Build errors that cost a turn
 

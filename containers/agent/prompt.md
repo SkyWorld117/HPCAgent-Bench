@@ -43,9 +43,10 @@ So the local check is:
 
 `-c` is enough -- you are checking your code, not linking a program. A clean local compile with
 zero warnings is the cheapest test you will ever run; do not spend a judge call to learn what it
-would have told you. Add `-fopt-info-vec-missed` to hear WHICH loops did not vectorize and why --
-then fix the named reason (aliasing, a call in the body, a non-affine subscript) instead of
-guessing. A failed `score` still returns the judge's own compiler log verbatim.
+would have told you. Add `-fopt-info-vec-missed` (gcc family; clang spells it
+`-Rpass-missed=loop-vectorize`) to hear WHICH loops did not vectorize and why -- then fix the
+named reason (aliasing, a call in the body, a non-affine subscript) instead of guessing. A
+failed `score` still returns the judge's own compiler log verbatim.
 
 Your `build` list is NOT applied on this track: every token in it is dropped, `-I`/`-l`
 included. The baseline flags above are the whole build, identical for every submission.

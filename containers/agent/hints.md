@@ -28,8 +28,8 @@ FP reassociation is allowed as long as the result stays inside the graded tolera
 - Hand-written intrinsics after a clean `simd` loop usually regress -- measure before keeping.
 - Math-function loops (`exp`/`log`/`sin`) CAN vectorize here: libmvec is linked, no
   fast-math needed.
-- Verify it worked, never assume: `-fopt-info-vec-missed` on a local compile, or `objdump -d`
-  the object and look for ymm/zmm registers.
+- Verify it worked, never assume: read the vectorizer report from a local compile (the flag
+  spellings are in the main prompt), or `objdump -d` and look for ymm/zmm registers.
 
 **Threading**
 

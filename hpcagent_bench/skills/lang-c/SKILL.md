@@ -26,8 +26,7 @@ token rather than re-deriving it.
 
 ## What you are allowed to reach for
 
-- **`restrict`** -- the ABI already spells it on the kernel's pointers; use it on every
-  non-aliasing pointer you declare yourself. It is the single biggest vectorization enabler.
+- **`restrict`** -- the single biggest vectorization enabler; rules below.
 - **C23 is the dialect** (`-std=c23`): `constexpr` for compile-time constants, `typeof`,
   `nullptr`, bare `bool`/`true`/`false` all compile. Compile-time extents the ABI does not pass
   arrive at the top of your stub as `constexpr int64_t` -- use them as loop bounds directly, the
@@ -52,11 +51,10 @@ token rather than re-deriving it.
 
 - Compile locally with the judge's own build line (printed in the main prompt) and READ every
   error and warning -- a dropped omp clause or an unused accumulator shows up there and nowhere
-  else. Iterate until clean before spending a judge call. `-fopt-info-vec-missed` names the
-  loops that did not vectorize and why; fix the named reason. `syntax_check` is the free
-  in-turn parse.
+  else. Iterate until clean before spending a judge call. `syntax_check` is the free in-turn
+  parse.
+- The default family is gcc; LLVM 22 via the submission's `compiler` field. The two vectorize
+  differently -- when a loop refuses to speed up, score BOTH variants before redesigning.
 - Iterate with `score`; `submit` every correct improvement.
-- Profiling is its own tool (`profile`, see its page): reach for it when a correct version stops
-  improving, not before.
 - Your context is finite and the kernel is under 100 lines: do NOT re-read the file after an edit
   that reported success.
