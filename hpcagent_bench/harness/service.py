@@ -465,7 +465,13 @@ class JudgeHandler(BaseHTTPRequestHandler):
             return None
         kernel = body.get("kernel")
         language = body.get("language", "c")
-        preset = body.get("preset", self.cfg.preset)
+        # /score and /profile may be asked for another size -- an agent probing how a change scales
+        # is legitimate. /submit (and its /oracle alias) WRITES THE RECORD, so it grades the run's
+        # configured size and ignores a preset in the body: a client-chosen size in a recorded row
+        # measures a different problem than every other row, and the analysis has to discard it.
+        # This was documented in the skill pages as "remember to delete the preset key", which is a
+        # rule the harness can simply enforce.
+        preset = body.get("preset", self.cfg.preset) if route in ("score", "profile") else self.cfg.preset
         # A non-str kernel is a body-shape fault: the registry lookup below would raise TypeError on it.
         if not isinstance(kernel, str) or not kernel:
             return self._send(400, {"error": "body must include 'kernel' (a benchmark name)"})
@@ -508,6 +514,9 @@ class JudgeHandler(BaseHTTPRequestHandler):
             payload = dataclasses.asdict(result)
             payload["kernel"] = kernel
             payload["language"] = language
+            # The size that was actually graded. /submit may have overridden the one the body asked
+            # for, and an agent comparing a submit against its own scores needs to see that.
+            payload["preset"] = preset
             if hidden and config.get("record.enabled", False):
                 payload["recorded"] = self._record(result, submission, task, body, preset)
         return self._send(200, payload)

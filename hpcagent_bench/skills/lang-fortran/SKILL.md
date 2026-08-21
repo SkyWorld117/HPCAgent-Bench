@@ -89,23 +89,20 @@ compiler runs them in any order -- here, on threads. The harness adds the flag i
 ## Judge realities
 
 - `syntax_check` before every `score` / `submit`; iterate with `score`.
-- **Leave `preset` UNSET.** It changes the problem size and `submit` HONORS it, so the recorded
-  grade measures the wrong size and the analysis discards it. Copying a `score` payload into
-  `submit`? DELETE the preset key.
-- **What is recorded is your LAST graded version, not your best**, and 60% of prior runs ended below
-  their own peak. The moment a `score` comes back below your best, restore the best text and
-  re-score it BEFORE the next idea. Budget can end at any time.
+- **`score` records nothing -- only `submit` earns a grade**, and 71% of the kernels the
+  strongest prior arm REACHED were scored and never submitted. Submit the moment a `score`
+  comes back correct, then keep improving and submit again: every verified submission is kept
+  and the best one counts.
 - Graded file must be named exactly `<kernel>.<ext>`; `_v2` names are a 400.
 - `submit` re-checks a SECOND seed: near-tolerance reciprocal/reassociation tricks fail there. An
   HTTP 500 `score failed ... 'fuzzed'` is a judge fault, not your code -- retry once, then stop with
   the good version in place.
 - Sub-microsecond kernels jitter 20-50%: under ~1.15x is not a result. No compiled reference on
   disk; `search` is not provisioned.
-- **Read the reference for what it COMPUTES, not how.** Some kernels ship deliberately silly
-  structure; deleting it for the plain loop beats every directive (largest recorded wins, 24x).
-  Keep its TRIP COUNT though: a hand-unrolled `do i = 1, n - 3, 4` writing `i..i+3` stops at the
-  last whole group and leaves the tail alone on purpose, so `do i = 1, n` writes elements the
-  reference never touches -- wrong whenever `mod(n, 4) /= 0`, which fuzzed sizes usually are.
+- **Rewriting a loop must not change WHICH elements it writes.** A hand-unrolled
+  `do i = 1, n - 3, 4` body writing `i..i+3` stops at the last whole group, so the tail is untouched
+  by construction; `do i = 1, n` writes elements the reference does not. Sizes are fuzzed, so
+  `mod(n, 4) /= 0` is the normal case.
 
 ## Writing good Fortran
 

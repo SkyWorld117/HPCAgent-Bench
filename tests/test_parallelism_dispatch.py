@@ -601,7 +601,7 @@ SKILL_TAUGHT = (
     TaughtConstruct("openmp", "c", "omp-parallel-for", "openmp", C_OMP_PARALLEL_FOR),
     TaughtConstruct("vectorization", "c", "omp-simd", None, C_OMP_SIMD),
     TaughtConstruct("openmp", "cpp", "omp-parallel-for", "openmp", CPP_OMP_PARALLEL_FOR),
-    TaughtConstruct("stdpar-cpp", "cpp", "execution-par-unseq", "stdpar", CPP_ISOPAR),
+    TaughtConstruct("lang-cpp", "cpp", "execution-par-unseq", "stdpar", CPP_ISOPAR),
 )
 
 TAUGHT_IDS = [f"{case.page}:{case.lang}:{case.name}" for case in SKILL_TAUGHT]

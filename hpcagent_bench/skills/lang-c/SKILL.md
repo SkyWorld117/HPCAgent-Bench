@@ -24,7 +24,7 @@ the outer loop scale.
   Symbols are `int64_t`. `workspace` may be null and `workspace_size` zero unless you asked via
   `workspace_bytes` -- check both. It is the only over-aligned (256B) buffer you get.
 
-## The four expensive mistakes
+## The three expensive mistakes
 
 1. **Dropping the stub's include block.** The file opens with `<stdint.h> <stddef.h> <stdbool.h>
    <stdlib.h> <string.h> <math.h> <omp.h>` and the signature is spelled in `int64_t` and
@@ -32,18 +32,16 @@ the outer loop scale.
    signature itself -- `unknown type name 'int64_t'` -- before one line of your work is parsed.
    LARGEST build failure on record (168 of 185 across two C arms). **Edit in place. Never replace
    the whole file.**
-2. **Ending on a worse experiment.** What gets recorded is your LAST graded version, not your best,
-   and 60% of prior runs ended below their own peak. The moment a `score` comes back below your
-   best, restore the best text and re-score it BEFORE trying the next idea. Budget can end at any
-   time; the last graded thing must never be an experiment.
+2. **Not submitting.** `score` records nothing. Only `submit` earns a grade, and 71% of the
+   kernels the strongest prior arm REACHED were scored and never submitted -- worked on, then lost.
+   Submit the moment a `score` comes back correct, then keep improving and submit again: every
+   verified submission is kept and the best one counts, so an early submit costs you nothing and a
+   missing one costs the whole kernel.
 3. **Claiming alignment on an ABI pointer.** `__builtin_assume_aligned` or an OpenMP
    `aligned(p:32|64)` clause on a judge input pointer is UB and SIGSEGVs at vector width -- the #1
    crash on record, a full round trip lost, reported as `correct: false`. Input buffers carry
    NATURAL alignment only. On storage you own -- the workspace, your own `aligned_alloc` -- it is
    fine.
-4. **Passing `preset`.** It changes the problem size, and `submit` HONORS it, so the recorded grade
-   measures the wrong size and the analysis discards it. Leave it unset; when copying a `score`
-   payload into `submit`, DELETE the preset key.
 
 ## Judge realities
 
@@ -58,12 +56,10 @@ the outer loop scale.
   passing is the proof. Retry once, then stop with the good version in place.
 - No compiled reference on disk: `/shared/tasks/<kernel>/` holds the NumPy file only and `task`
   already returned its text. `search` is not provisioned.
-- **Read the reference for what it COMPUTES, not how.** Some kernels ship deliberately silly
-  structure (4-level tiling on a 3-point stencil, dead intermediates); deleting it and writing the
-  plain loop beats every pragma -- the largest wins on record (24x) are that. What you copy exactly
-  is the TRIP COUNT: a hand-unrolled `for (i = 0; i < n - 3; i += 4)` writing `i..i+3` leaves the
-  tail untouched on purpose, so rerolling to `i < n` is wrong whenever `n % 4 != 0` -- and fuzzed
-  sizes usually are not multiples of four.
+- **Rewriting a loop must not change WHICH elements it writes.** A hand-unrolled
+  `for (i = 0; i < n - 3; i += 4)` body writing `i..i+3` stops at the last whole group, so the tail
+  is untouched by construction; rerolling it to `i < n` writes elements the reference does not.
+  Sizes are fuzzed, so `n % 4 != 0` is the normal case.
 
 ## Writing good C
 

@@ -463,7 +463,6 @@ def language_skills_for(task) -> FrozenSet[str]:
 #: absent from this table applies to every language, which is every other skill.
 MODEL_SKILL_LANGUAGES: Dict[str, FrozenSet[str]] = {
     "openmp": frozenset({"c", "cpp", "fortran"}),
-    "stdpar-cpp": frozenset({"cpp"}),
     "openacc": frozenset({"c", "cpp", "fortran"}),
 }
 
