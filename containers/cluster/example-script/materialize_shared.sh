@@ -67,5 +67,10 @@ fi
 if [[ -f "${repo}/containers/agent/hints.md" ]]; then
     cp -f "${repo}/containers/agent/hints.md" "${shared}/hints.md"
 fi
+# The skill-usage directives a skills arm injects instead: the hints CONTENT rides in the task
+# packet as the optimization-hints page, so {{HINTS}} carries the rules for USING the pages.
+if [[ -f "${repo}/containers/agent/skill-triggers.md" ]]; then
+    cp -f "${repo}/containers/agent/skill-triggers.md" "${shared}/skill-triggers.md"
+fi
 
 printf 'materialize_shared: %s kernel folders under %s/tasks\n' "${copied}" "${shared}"

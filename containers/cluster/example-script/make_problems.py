@@ -62,15 +62,26 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
             raise SystemExit(f"--extra-skill-root {extra_root} adds no page for language {language}")
         wanted += [s.name for s in extra]
         by_name.update({s.name: s for s in extra})
-    pages = "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
-    # A light touch on purpose: an enforced classify-and-cite protocol can cost a small
-    # model more than the pages gain it. The one hook that pays for itself is tying the
-    # pages to the FAILURE loop -- that is the moment the matching pattern is the answer.
+    # The general hints ride in the packet as a page of their own, single-sourced from the file
+    # the hints ablation injects into {{HINTS}} -- two copies of that text would drift.
+    hints_body = (REPO / "containers" / "agent" / "hints.md").read_text(encoding="utf-8").strip()
+    pages = f"## Skill: optimization-hints\n\n{hints_body}\n\n" + \
+        "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
+    # Named triggers, not "the pages below": the packet is only worth its per-turn rent when the
+    # agent actually opens the right page at the right moment, so the preamble binds each page to
+    # the decision it settles. The failure-loop hook stays -- that is the moment the matching
+    # pattern is the answer.
+    lang_page = wanted[0]
+    model_pages = ", ".join(wanted[1:]) if len(wanted) > 1 else "the parallelism pages"
     preamble = ("# Skills\n\n"
-                "The pages below describe patterns that decide what is safe in this kernel. Skim them\n"
-                "before your first rewrite. Whenever a score returns correct: false, re-read the page\n"
-                "section matching the failure before editing -- wrong answers here are usually one of\n"
-                "the listed patterns applied unsafely.\n")
+                f"Skill pages for this task: optimization-hints, {', '.join(wanted)}. Skim all of them\n"
+                "before your first rewrite, then:\n\n"
+                "- Before parallelizing ANY loop, re-read optimization-hints (the order of attack) and\n"
+                f"  {model_pages} -- which loops are safe to thread, and the exact directive spelling.\n"
+                f"- While writing code, follow {lang_page}: signature, headers, dialect and its listed\n"
+                "  expensive mistakes are graded exactly as written there.\n"
+                "- On every score with correct: false, find the matching failure pattern in these pages\n"
+                "  BEFORE editing -- wrong answers here are usually a listed pattern applied unsafely.\n")
     return preamble + "\n" + pages
 
 
@@ -139,7 +150,13 @@ def main() -> int:
         if args.note:
             task = f"{task} {args.note}"
         if args.skills:
-            task = f"{task}\n\n{skills_text}"
+            # Packet FIRST, kernel-specific text second: skills_text is byte-identical across
+            # every kernel in this run, so putting it ahead of the part that diverges makes it a
+            # real shared prefix. vLLM's automatic prefix caching hashes prompts front-to-back and
+            # stops crediting a request the instant it diverges from a cached one -- appending the
+            # packet AFTER the kernel name (the old order) put it past every request's divergence
+            # point, so it was hashed fresh on every single agent despite being identical text.
+            task = f"{skills_text}\n\n{task}"
         for _ in range(max(1, args.repeat)):
             problem = {
                 "id": written,
