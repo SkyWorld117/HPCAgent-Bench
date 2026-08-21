@@ -284,10 +284,9 @@ def calculate_micro_xs_unionized(
 
     f = (float(high[ENERGY]) - p_energy) / (float(high[ENERGY]) - float(low[ENERGY]))
 
-    xs_vector = np.zeros(NUM_XS_CHANNELS, dtype=np.float64)
-    for k in range(NUM_XS_CHANNELS):
-        channel = k + 1
-        xs_vector[k] = float(high[channel]) - f * (float(high[channel]) - float(low[channel]))
+    high_xs = high[1:1 + NUM_XS_CHANNELS]
+    low_xs = low[1:1 + NUM_XS_CHANNELS]
+    xs_vector = high_xs - f * (high_xs - low_xs)
 
     _ = n_isotopes
     return xs_vector
@@ -326,8 +325,7 @@ def calculate_macro_xs_unionized(
             idx,
         )
 
-        for k in range(NUM_XS_CHANNELS):
-            macro_xs_vector[k] += xs_vector[k] * conc
+        macro_xs_vector += xs_vector * conc
 
     return macro_xs_vector
 

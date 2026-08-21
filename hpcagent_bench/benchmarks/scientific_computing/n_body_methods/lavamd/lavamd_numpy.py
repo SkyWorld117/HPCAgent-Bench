@@ -222,9 +222,13 @@ def lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv):
     par_per_box = rv.shape[0] // n_boxes
     a2 = 2.0 * alpha * alpha
 
-    # Rodinia kernel order: home box first, then listed neighbor boxes.
+    # Rodinia kernel order: home box first, then listed neighbor boxes. The
+    # i-particle axis is batched into array ops over the whole home box; the
+    # j loop stays so each fv[ai] accumulates its j-terms in the original
+    # order (bit-identical, no reduction reassociation).
     for l in range(n_boxes):
         first_i = int(box_offsets[l])
+        last_i = first_i + par_per_box
 
         for k in range(1 + int(neighbor_counts[l])):
             if k == 0:
@@ -234,31 +238,28 @@ def lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv):
 
             first_j = int(box_offsets[pointer])
 
-            for i in range(par_per_box):
-                ai = first_i + i
+            for j in range(par_per_box):
+                bj = first_j + j
 
-                for j in range(par_per_box):
-                    bj = first_j + j
-
-                    r2 = (
-                        rv[ai, 0]
-                        + rv[bj, 0]
-                        - (
-                            rv[ai, 1] * rv[bj, 1]
-                            + rv[ai, 2] * rv[bj, 2]
-                            + rv[ai, 3] * rv[bj, 3]
-                        )
+                r2 = (
+                    rv[first_i:last_i, 0]
+                    + rv[bj, 0]
+                    - (
+                        rv[first_i:last_i, 1] * rv[bj, 1]
+                        + rv[first_i:last_i, 2] * rv[bj, 2]
+                        + rv[first_i:last_i, 3] * rv[bj, 3]
                     )
+                )
 
-                    u2 = a2 * r2
-                    vij = np.exp(-u2)
-                    fs = 2.0 * vij
+                u2 = a2 * r2
+                vij = np.exp(-u2)
+                fs = 2.0 * vij
 
-                    dx = rv[ai, 1] - rv[bj, 1]
-                    dy = rv[ai, 2] - rv[bj, 2]
-                    dz = rv[ai, 3] - rv[bj, 3]
+                dx = rv[first_i:last_i, 1] - rv[bj, 1]
+                dy = rv[first_i:last_i, 2] - rv[bj, 2]
+                dz = rv[first_i:last_i, 3] - rv[bj, 3]
 
-                    fv[ai, 0] += qv[bj] * vij
-                    fv[ai, 1] += qv[bj] * fs * dx
-                    fv[ai, 2] += qv[bj] * fs * dy
-                    fv[ai, 3] += qv[bj] * fs * dz
+                fv[first_i:last_i, 0] += qv[bj] * vij
+                fv[first_i:last_i, 1] += qv[bj] * fs * dx
+                fv[first_i:last_i, 2] += qv[bj] * fs * dy
+                fv[first_i:last_i, 3] += qv[bj] * fs * dz

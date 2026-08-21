@@ -239,15 +239,18 @@ def _hermitianize(hc, sc, nbase, nb1=1):
     :489-506): strictly-real diagonal, lower triangle mirrored into the upper one
     by conjugation.  ``nb1`` (1-based) is the first freshly-computed row.  This is
     the step ``cegterg_reference.cpp`` reproduces."""
-    for nf in range(1, nbase + 1):                          # Fortran n (1-based)
-        n = nf - 1
-        if nf >= nb1:
-            hc[n, n] = complex(hc[n, n].real, 0.0)
-            sc[n, n] = complex(sc[n, n].real, 0.0)
-        for mf in range(max(nf + 1, nb1), nbase + 1):       # Fortran m = MAX(n+1, nb1)..nbase
-            m = mf - 1
-            hc[n, m] = np.conj(hc[m, n])
-            sc[n, m] = np.conj(sc[m, n])
+    nb1_0 = nb1 - 1                                         # 0-based first fresh row
+    diag = np.arange(nb1_0, nbase)
+    hc[diag, diag] = hc[diag, diag].real
+    sc[diag, diag] = sc[diag, diag].real
+    # mirror: hc[n, m] = conj(hc[m, n]) for m > n restricted to columns m >= nb1_0
+    # (reads come only from the lower triangle, writes only touch the upper one
+    # plus the diagonal above, so the row/column visit order never matters).
+    sub_h, sub_s = hc[:nbase, :nbase], sc[:nbase, :nbase]
+    mask = np.triu(np.ones((nbase, nbase), dtype=bool), k=1)
+    mask[:, :nb1_0] = False
+    sub_h[mask] = np.conj(sub_h.T)[mask]
+    sub_s[mask] = np.conj(sub_s.T)[mask]
     return hc, sc
 
 
@@ -384,9 +387,9 @@ def cegterg(g2kin, vrs, nlk, vkb, deeq, qq, h_diag, s_diag, evc, e, btype, ethr,
 
     if lrot:
         vc[:nbase, :nbase] = 0.0
-        for n in range(nbase):
-            e[n] = hc[n, n].real
-            vc[n, n] = 1.0
+        diag = np.arange(nbase)
+        e[:nbase] = hc[diag, diag].real
+        vc[diag, diag] = 1.0
     else:
         ew[:nvec], vc[:nbase, :nvec] = _diaghg(hc, sc, nbase, nvec)
         e[:nvec] = ew[:nvec]
@@ -395,13 +398,10 @@ def cegterg(g2kin, vrs, nlk, vkb, deeq, qq, h_diag, s_diag, evc, e, btype, ethr,
     for kter in range(1, _MAXTER + 1):
         dav_iter = kter
 
-        np_ = 0
-        for n in range(nvec):
-            if not conv[n]:
-                np_ += 1
-                if np_ != n + 1:
-                    vc[:nvecx, np_ - 1] = vc[:nvecx, n]
-                ew[nbase + np_ - 1] = e[n]
+        unconv = np.nonzero(~conv[:nvec])[0]                # indices to pack left, in order
+        np_ = unconv.size
+        vc[:nvecx, :np_] = vc[:nvecx, unconv]
+        ew[nbase:nbase + np_] = e[unconv]
 
         nb1 = nbase
 
@@ -452,10 +452,10 @@ def cegterg(g2kin, vrs, nlk, vkb, deeq, qq, h_diag, s_diag, evc, e, btype, ethr,
             hc[:nbase, :nbase] = 0.0
             sc[:nbase, :nbase] = 0.0
             vc[:nbase, :nbase] = 0.0
-            for n in range(nbase):
-                hc[n, n] = complex(e[n], 0.0)
-                sc[n, n] = 1.0
-                vc[n, n] = 1.0
+            diag = np.arange(nbase)
+            hc[diag, diag] = e[:nbase]
+            sc[diag, diag] = 1.0
+            vc[diag, diag] = 1.0
 
     return e, evc, notcnv, dav_iter, nhpsi
 

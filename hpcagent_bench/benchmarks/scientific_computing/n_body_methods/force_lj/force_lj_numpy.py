@@ -23,8 +23,8 @@ def force_lj(pos, cutoff, force, epsilon=1.0, sigma=1.0):
 
     # Interact only within the cutoff and never with self (rsq == 0).
     in_range = (rsq < cutoffsq) & (rsq > 0.0)
-    r2inv = np.zeros_like(rsq)
-    r2inv[in_range] = 1.0 / rsq[in_range]
+    safe_rsq = np.where(in_range, rsq, 1.0)  # dodge the self-pair 0.0 divide, masked out below anyway
+    r2inv = np.where(in_range, 1.0 / safe_rsq, 0.0)
     r6inv = r2inv * r2inv * r2inv
 
     # Prefactor/offset from epsilon, sigma; at the epsilon = sigma = 1.0

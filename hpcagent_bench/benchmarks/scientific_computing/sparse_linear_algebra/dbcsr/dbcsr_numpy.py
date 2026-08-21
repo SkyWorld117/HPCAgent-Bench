@@ -63,15 +63,10 @@ def dbcsr(
     _ = multrec_limit
     C[:, :] = 0.0
 
-    # Explicit prefix-sum loops (not np.cumsum with a partial-slice target):
-    # this keeps the kernel lowerable by the stock translator without any
-    # slice-fusion / shape-inference patch.
     row_offsets = np.zeros(m_sizes.shape[0] + 1, dtype=np.int32)
     col_offsets = np.zeros(n_sizes.shape[0] + 1, dtype=np.int32)
-    for row in range(m_sizes.shape[0]):
-        row_offsets[row + 1] = row_offsets[row] + m_sizes[row]
-    for col in range(n_sizes.shape[0]):
-        col_offsets[col + 1] = col_offsets[col] + n_sizes[col]
+    row_offsets[1:] = np.cumsum(m_sizes)
+    col_offsets[1:] = np.cumsum(n_sizes)
 
     for a_pos in range(a_index.shape[0]):
         a_row = int(a_index[a_pos, 0])

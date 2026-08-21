@@ -2763,6 +2763,18 @@ def _refuse_scalarising_a_contraction(value: ast.expr) -> None:
                                       f"compute an elementwise product")
 
 
+def _strided_trip_count(start: ast.expr, stop: ast.expr, step: int) -> ast.expr:
+    """Element count of ``start:stop:step`` for a POSITIVE step: ``ceil((stop - start) / step)``.
+
+    Folded to a literal when both bounds are constants, so the common ``a[0:2 * n:2]`` shape keeps a
+    plain loop bound instead of pushing a division into every backend.
+    """
+    if isinstance(start, ast.Constant) and isinstance(stop, ast.Constant):
+        return _const(max(0, -(-(stop.value - start.value) // step)))
+    span = stop if (isinstance(start, ast.Constant) and start.value == 0) else _binop(stop, ast.Sub(), start)
+    return _binop(_binop(span, ast.Add(), _const(step - 1)), ast.FloorDiv(), _const(step))
+
+
 class SliceFusion(ast.NodeTransformer):
     """Rewrite slice-bearing assignments into a single fused loop.
 
@@ -2776,9 +2788,16 @@ class SliceFusion(ast.NodeTransformer):
     slice with a scalar subscript indexed by the iter var (plus the
     offset between the slice's start and the LHS slice's start).
 
+    A POSITIVE ``step`` on the assignment target is supported: the axis
+    iterates its LOGICAL position ``k`` in ``range(0, count)`` and the
+    target is written at ``start + k * step``, so the RHS mapping (which
+    reads ``k`` as the position) needs no division.
+
     Limitations -- raised as :class:`NotImplementedError`:
 
-    * ``step != 1`` on any slice,
+    * a NEGATIVE ``step`` on the assignment target -- numpy seeds the
+      reverse start at ``axis_len - 1`` when the bound is omitted, which
+      needs the axis length the local-array case does not always carry,
     * slices whose ``stop`` is omitted on an array whose shape we
       cannot resolve (the IR only carries shape symbols for declared
       parameters; for local arrays declared via ``np.zeros`` we have
@@ -2819,21 +2838,32 @@ class SliceFusion(ast.NodeTransformer):
         # Negative-index slice bounds ``A[1:-1]`` (or any int < 0) are
         # numpy-style ``axis_length + K``; resolve here so downstream
         # passes see fully concrete bounds.
-        ranges: List[Tuple[ast.AST, ast.AST]] = []
+        # Each entry is ``(loop_lo, loop_hi, step, slice_start)``. For a unit step the iter var IS
+        # the destination coordinate, so ``loop_lo == slice_start``; for a strided target the iter
+        # var is the logical position and ``loop_lo`` is 0 -- consumers reading ``rng[0]`` as "what
+        # to subtract from the iter var to get the position" stay correct in both cases.
+        ranges: List[Tuple[ast.AST, ast.AST, int, ast.AST]] = []
         for axis, d in enumerate(lhs_dims):
             if not isinstance(d, ast.Slice):
-                ranges.append((d, d))
+                ranges.append((d, d, 1, d))
                 continue
-            if d.step is not None:
-                raise NotImplementedError("slice step != 1 not supported")
+            step = 1 if d.step is None else _slice_step_const(d)
+            if step is None:
+                raise NotImplementedError(f"slice step {ast.unparse(d.step)!r} on an assignment target must be "
+                                          f"a compile-time integer")
             start = self._resolve_bound(d.lower, lhs_name, axis, default=_const(0))
             stop = self._resolve_bound(d.upper, lhs_name, axis, default=lambda: self._axis_length(lhs_name, axis))
-            ranges.append((start, stop))
+            if step == 1:
+                ranges.append((start, stop, 1, start))
+                continue
+            if step < 0:
+                raise NotImplementedError(f"negative slice step {step} on an assignment target is not supported")
+            ranges.append((_const(0), _strided_trip_count(start, stop, step), step, start))
         # Build the per-axis scalarisation: iter var ``i_axis`` ranging
         # ``[start, stop)``; every RHS subscript gets the iter var
         # offset by the LHS slice's start.
         iter_vars: List[ast.Name] = []
-        for axis, (lo, hi) in enumerate(ranges):
+        for axis in range(len(ranges)):
             if not isinstance(lhs_dims[axis], ast.Slice):
                 iter_vars.append(None)  # type: ignore[arg-type]
                 continue
@@ -2863,7 +2893,7 @@ class SliceFusion(ast.NodeTransformer):
         for axis in reversed(range(len(lhs_dims))):
             if not isinstance(lhs_dims[axis], ast.Slice):
                 continue
-            lo, hi = ranges[axis]
+            lo, hi = ranges[axis][0], ranges[axis][1]
             ivar = iter_vars[axis]
             body = [
                 ast.For(
@@ -2912,7 +2942,14 @@ class SliceFusion(ast.NodeTransformer):
         idx_nodes: List[ast.AST] = []
         for axis, d in enumerate(lhs_dims):
             if isinstance(d, ast.Slice):
-                idx_nodes.append(ast.Name(id=iter_vars[axis].id, ctx=ast.Load()))
+                ivar = ast.Name(id=iter_vars[axis].id, ctx=ast.Load())
+                step, slice_start = ranges[axis][2], ranges[axis][3]
+                if step == 1:
+                    idx_nodes.append(ivar)
+                    continue
+                scaled = _binop(ivar, ast.Mult(), _const(step))
+                idx_nodes.append(scaled if (isinstance(slice_start, ast.Constant) and slice_start.value == 0
+                                            ) else _binop(slice_start, ast.Add(), scaled))
             else:
                 idx_nodes.append(self._resolve_scalar_index(d, name, axis))
         if len(idx_nodes) == 1:

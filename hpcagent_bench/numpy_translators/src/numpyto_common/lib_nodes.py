@@ -17,7 +17,7 @@ Registry keys are the POST-``_MathRewriter`` call shape: ``np.sum`` is still
 import ast
 import copy
 import re
-from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 
@@ -3150,6 +3150,49 @@ def expand_flip(target: ast.expr,
     return _wrap_for_loops(iters, shape, body)
 
 
+def expand_diff(target: ast.expr,
+                args: List[ast.expr],
+                shape_table: Dict[str, Tuple[str, ...]],
+                kwargs=None) -> List[ast.stmt]:
+    """``out = np.diff(A[, n][, axis])`` -> ``A[..., 1:, ...] - A[..., :-1, ...]`` along ``axis``.
+
+    First difference only. ``n > 1`` is this applied again and needs a temporary per stage;
+    ``prepend=``/``append=`` are a concatenate, which the caller can spell directly."""
+    if not args_one_name(args):
+        raise NotImplementedError("np.diff needs Name arg")
+    a = args[0]
+    shape = shape_table.get(a.id)
+    if not shape:
+        raise NotImplementedError("np.diff: source shape unknown")
+    if {k.arg for k in (kwargs or [])} & {"prepend", "append"}:
+        raise NotImplementedError("np.diff prepend=/append= is a concatenate; write the concatenate")
+    rank = len(shape)
+    n_node = _kwarg_or_pos(args, kwargs, 1, "n")
+    if n_node is not None and _const_int(n_node) != 1:
+        raise NotImplementedError("np.diff: only the first difference (n=1) is supported")
+    ax_node = _kwarg_or_pos(args, kwargs, 2, "axis")
+    ax = rank - 1 if ax_node is None else _const_axis(ax_node, rank)
+    if ax is None:
+        raise NotImplementedError("np.diff: axis must be a constant int in range")
+    iters = [f"__df{d}" for d in range(rank)]
+    bounds: List[Any] = list(shape)
+    bounds[ax] = ast.BinOp(left=_const_or_name(shape[ax]), op=ast.Sub(), right=_const(1))
+
+    def slot(offset: int) -> ast.expr:
+        elts: List[ast.expr] = [_name(v) for v in iters]
+        if offset:
+            elts[ax] = ast.BinOp(left=_name(iters[ax]), op=ast.Add(), right=_const(offset))
+        return elts[0] if rank == 1 else ast.Tuple(elts=elts, ctx=ast.Load())
+
+    body = [
+        ast.Assign(targets=[ast.Subscript(value=_name(target.id), slice=slot(0), ctx=ast.Store())],
+                   value=ast.BinOp(left=ast.Subscript(value=_name(a.id), slice=slot(1), ctx=ast.Load()),
+                                   op=ast.Sub(),
+                                   right=ast.Subscript(value=_name(a.id), slice=slot(0), ctx=ast.Load())))
+    ]
+    return _wrap_for_loops(iters, bounds, body)
+
+
 def expand_std(target, args, shape_table, kwargs=None):
     """``s = np.std(A [, axis=k, keepdims=...])`` -- mean + sum of squared
     deviations + sqrt, over the unified axis-aware reduction scaffold (axis=None
@@ -5892,6 +5935,8 @@ NP_CALL_EXPANDERS: Dict[Tuple[str, str], Callable] = {
     expand_concatenate,
     ("np", "stack"):
     expand_stack,
+    ("np", "diff"):
+    expand_diff,
     ("np", "flip"):
     expand_flip,
     ("np", "linspace"):
@@ -7394,6 +7439,22 @@ class _CallHoister(ast.NodeTransformer):
                 widths = "+".join(s[1] for s in shapes)
                 return (shapes[0][0], widths)
             return None
+        if op == "diff" and args and isinstance(args[0], ast.Name):
+            shape = self.shape_table.get(args[0].id)
+            if not shape:
+                return None
+            rank = len(shape)
+            n_node = _kwarg_or_pos(args, keywords, 1, "n")
+            if n_node is not None and _const_int(n_node) != 1:
+                return None
+            ax_node = _kwarg_or_pos(args, keywords, 2, "axis")
+            ax = rank - 1 if ax_node is None else _const_axis(ax_node, rank)
+            if ax is None:
+                return None
+            out = list(shape)
+            ext = out[ax]
+            out[ax] = str(int(ext) - 1) if ext.strip().isdigit() else f"({ext}) - 1"
+            return tuple(out)
         if op in {"transpose", "triu", "flip"} and args and isinstance(args[0], ast.Name):
             shape = self.shape_table.get(args[0].id)
             if not shape:
@@ -7521,7 +7582,7 @@ def _call_expander(expander, target, args, keywords, shape_table, local_dtypes=N
 #: fail, it silently DECLINES to hoist and leaves a bare ``np.square(...)`` for the emitter.
 NON_ELEMENTWISE_SHAPE_OPS: Set[str] = set(_REDUCTION_NAMES) | {
     "reshape", "repeat", "transpose", "flip", "roll", "triu", "tril", "concatenate", "stack", "pad", "diag", "diagonal",
-    "trace", "einsum", "tensordot", "inner", "outer", "dot", "vdot", "matmul", "cumsum", "cumprod", "linspace",
+    "diff", "trace", "einsum", "tensordot", "inner", "outer", "dot", "vdot", "matmul", "cumsum", "cumprod", "linspace",
     "arange", "zeros", "ones", "empty", "full", "eye", "identity", "fromfunction", "meshgrid", "mgrid", "sort",
     "argsort", "histogram", "unique", "take", "interp", "searchsorted", "nonzero", "kron", "cross", "split",
     "expand_dims", "squeeze", "swapaxes", "moveaxis", "ravel", "flatten", "tile", "broadcast_to", "atleast_1d",
