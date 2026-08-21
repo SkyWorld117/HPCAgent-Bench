@@ -150,9 +150,7 @@ def compile_one(lang: str, src: str, tag: str):
 def main() -> int:
     total = ok = skipped = 0
     failures = []
-    PACKET = {
-        "openmp", "lang-c", "lang-cpp", "lang-fortran", "stdpar-cpp", "doconcurrent-fortran", "openacc", "general"
-    }
+    PACKET = {"openmp", "lang-c", "lang-cpp", "lang-fortran", "stdpar-cpp", "openacc", "general"}
     for page in sorted(SKILLS.glob("*/SKILL.md")):
         if page.parent.name not in PACKET:
             continue

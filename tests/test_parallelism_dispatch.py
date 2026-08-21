@@ -560,7 +560,7 @@ def test_autopar_thread_count_matches_the_grading_slot():
 # A skill page is an instruction to an agent, so each construct it spells out is a PROMISE about
 # the graded build line. The failure mode is not slowness: a promise the build rejects costs the
 # agent every turn it spends discovering that, and can leave no correct submission at all -- a
-# SOLVE-rate loss, invisible in any speedup number. Measured 2026-08-13: the doconcurrent-fortran
+# SOLVE-rate loss, invisible in any speedup number. Measured 2026-08-13: the do-concurrent
 # page teaches `reduce(+:s)` for accumulators, that locality spec is F2023, the graded gfortran
 # line pins -std=f2018, and gfortran hard-errors on it. Nothing in the tree said so.
 #
@@ -594,8 +594,8 @@ SKILL_TAUGHT = (
     # gfortran line pins -std=f2018, and gfortran rejects it. The page was corrected to teach
     # `!$omp parallel do reduction` instead (2026-08-13); re-add the case here the day the
     # harness moves to -std=f2023.
-    TaughtConstruct("doconcurrent-fortran", "fortran", "do-concurrent", "openmp", FORTRAN_DC_PLAIN),
-    TaughtConstruct("doconcurrent-fortran", "fortran", "do-concurrent-locality", "openmp", FORTRAN_DC_LOCALITY),
+    TaughtConstruct("lang-fortran", "fortran", "do-concurrent", "openmp", FORTRAN_DC_PLAIN),
+    TaughtConstruct("lang-fortran", "fortran", "do-concurrent-locality", "openmp", FORTRAN_DC_LOCALITY),
     TaughtConstruct("openmp", "fortran", "omp-parallel-do-reduction", "openmp", FORTRAN_OMP_REDUCTION),
     TaughtConstruct("vectorization", "fortran", "omp-simd", None, FORTRAN_OMP_SIMD),
     TaughtConstruct("openmp", "c", "omp-parallel-for", "openmp", C_OMP_PARALLEL_FOR),
@@ -742,7 +742,7 @@ def test_gcc_autopar_thread_count_has_no_ceiling(tmp_path):
 
     assert observed == {n: n for n in ladder}, \
         (f"gfortran did not honour the baked thread count on this {cores}-core host -- asked -> got: {observed}. "
-         f"A rung above 32 that comes back 32 is exactly the ceiling doconcurrent-fortran/SKILL.md tells agents "
+         f"A rung above 32 that comes back 32 is exactly the ceiling lang-fortran/SKILL.md tells agents "
          f"does not exist, and would mean every Fortran grade above 32 cores runs narrower than it was sized for.")
 
 
@@ -765,4 +765,4 @@ def test_omp_num_threads_cannot_widen_a_baked_autopar_count(tmp_path):
 
     assert autopar_pool_size(exe, graded, narrow, tmp_path, omp_num_threads=wide) == narrow, \
         (f"OMP_NUM_THREADS={wide} widened a build baked at {narrow} threads. If the environment can move the count "
-         f"after all, doconcurrent-fortran/SKILL.md is wrong to tell agents not to try it.")
+         f"after all, lang-fortran/SKILL.md is wrong to tell agents not to try it.")

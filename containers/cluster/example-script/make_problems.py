@@ -20,22 +20,33 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
-from hpcagent_bench.harness.prompts import LANGUAGE_SKILL, MODEL_SKILL_LANGUAGES, load_skills  # noqa: E402
+from hpcagent_bench.harness.prompts import LANGUAGE_SKILL, MODEL_SKILL_LANGUAGES, load_skills, \
+    model_skill_applies  # noqa: E402
+from hpcagent_bench.harness.task import Task  # noqa: E402
 from hpcagent_bench.spec import KERNELS, BenchSpec  # noqa: E402
 
 
-def skills_section(language: str, extra_root: str = "") -> str:
+def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> str:
     """The shipped ``lang-<language>`` skill body plus the parallelism-model pages the language
-    can spell (MODEL_SKILL_LANGUAGES), rendered plainly.
+    can spell (MODEL_SKILL_LANGUAGES) on ``image``, rendered plainly.
 
     The treatment variable for the skills-on/off ablation is this packet -- writing good
     <language> and parallelizing it -- not the whole skill library. Fails loudly (naming the
     missing skill) rather than silently shipping an empty section.
+
+    The page selection runs through :func:`model_skill_applies`, the same gate ``build_prompt``
+    uses, so a packet written here and a prompt built there agree by construction -- the two
+    diverged once already, and a packet that ships a page the harness would have dropped is an
+    ablation measuring a treatment nothing else applies.
     """
     lang_name = LANGUAGE_SKILL.get(language)
     if not lang_name:
         raise SystemExit(f"missing shipped skill: lang-{language}")
-    wanted = [lang_name] + [name for name in sorted(MODEL_SKILL_LANGUAGES) if language in MODEL_SKILL_LANGUAGES[name]]
+    task = Task("gemm",
+                "any" if language == "any" else "restricted",
+                "c" if language == "any" else language,
+                image=image)
+    wanted = [lang_name] + [name for name in sorted(MODEL_SKILL_LANGUAGES) if model_skill_applies(name, task)]
     _, other_skills = load_skills(())
     by_name = {skill.name: skill for skill in other_skills}
     missing = [name for name in wanted if name not in by_name]
@@ -82,6 +93,10 @@ def main() -> int:
     parser.add_argument("--skills",
                         action="store_true",
                         help="append the shipped lang-<language> skill page to every task text")
+    parser.add_argument("--image",
+                        default="cpu",
+                        choices=("cpu", "nvidia", "amd"),
+                        help="hardware image the run targets; drops the pages that only teach device offload")
     parser.add_argument("--extra-skill-root",
                         default="",
                         help="experiment track: also inline skills/*/SKILL.md pages from this root "
@@ -90,7 +105,7 @@ def main() -> int:
 
     # Language is fixed for the whole run (every kept kernel supports it), so the section is the
     # same for every problem -- computed once rather than once per kernel.
-    skills_text = skills_section(args.language or "any", args.extra_skill_root) if args.skills else ""
+    skills_text = skills_section(args.language or "any", args.extra_skill_root, args.image) if args.skills else ""
     if args.extra_skill_root and not args.skills:
         raise SystemExit("--extra-skill-root requires --skills (track 3 = skills + extra pages)")
 

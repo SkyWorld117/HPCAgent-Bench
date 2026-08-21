@@ -676,8 +676,10 @@ F2023_IN_FORTRAN = (
     (r"\bc_f_strpointer\b|\bf_c_string\b", "c_f_strpointer/f_c_string are F2023"),
 )
 
-#: Pages whose Fortran the graded build actually compiles.
-FORTRAN_PAGES = ("lang-fortran", "doconcurrent-fortran")
+#: Pages whose Fortran the graded build actually compiles. The do-concurrent page was merged into
+#: lang-fortran on 2026-08-21: it taught one construct, shipped only alongside its language page,
+#: and the packet is charged once per agent TURN, so a separate page was per-turn rent for a header.
+FORTRAN_PAGES = ("lang-fortran", )
 
 
 def test_no_fortran_page_teaches_a_2023_spelling() -> None:
@@ -702,3 +704,39 @@ def test_no_fortran_page_teaches_a_2023_spelling() -> None:
                 if re.search(pattern, bullet, re.I) and not forbids.search(bullet):
                     raise AssertionError(f"{page} teaches a Fortran 2023 spelling ({why}) without "
                                          f"marking it rejected: {' '.join(bullet.split())[:160]}")
+
+
+#: Ceiling on the skills packet, in characters, for ONE language on a cpu image -- the exact text
+#: `make_problems.py --skills` inlines into every prompt of a skills arm.
+#:
+#: This is a hard budget rather than a style note because the packet is re-read on EVERY agent turn,
+#: so a page is charged once per turn, not once per task. Measured on the llr4 gpt-oss-120b C arms
+#: (2026-08-21): the skills arm spent 2.28M tokens per kernel against 1.86M without, and the 418k
+#: difference is ~72x the packet's own token count -- the packet is paid ~72 times per kernel. At a
+#: fixed budget that arm reached 130 of 242 kernels where its pair reached 192, which read as a
+#: capability regression until the matched subset showed skills AHEAD by 10.5pp on kernels both
+#: reached. Prompt length is therefore a first-order term in the score, and an unbudgeted page is
+#: how the regression came back.
+SKILL_PACKET_BUDGET_CHARS = 18_000
+
+
+@pytest.mark.parametrize("language", ["c", "cpp", "fortran"])
+def test_the_skills_packet_for_one_language_stays_inside_its_budget(language: str) -> None:
+    """The packet a skills arm ships must stay under SKILL_PACKET_BUDGET_CHARS.
+
+    Selected through ``model_skill_applies`` -- the gate ``build_prompt`` and ``make_problems.py``
+    both use -- so this measures the text that really ships, not a hand-kept list of pages.
+    """
+    from hpcagent_bench.harness.prompts import LANGUAGE_SKILL, MODEL_SKILL_LANGUAGES, model_skill_applies
+    from hpcagent_bench.harness.task import Task
+
+    task = Task("gemm", "restricted", language, image="cpu")
+    _general, others = load_skills(())
+    by_name = {skill.name: skill for skill in others}
+    wanted = [LANGUAGE_SKILL[language]] + [n for n in sorted(MODEL_SKILL_LANGUAGES) if model_skill_applies(n, task)]
+    sizes = {name: len(by_name[name].body) for name in wanted if name in by_name}
+    total = sum(sizes.values())
+    assert total <= SKILL_PACKET_BUDGET_CHARS, (f"the {language} skills packet is {total} chars, over the "
+                                                f"{SKILL_PACKET_BUDGET_CHARS} budget: {sizes}. The packet is charged "
+                                                f"once per agent TURN (~72x per kernel, measured), so this is score, "
+                                                f"not style -- cut a page or shorten one rather than raising this.")

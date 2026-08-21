@@ -464,17 +464,27 @@ def language_skills_for(task) -> FrozenSet[str]:
 MODEL_SKILL_LANGUAGES: Dict[str, FrozenSet[str]] = {
     "openmp": frozenset({"c", "cpp", "fortran"}),
     "stdpar-cpp": frozenset({"cpp"}),
-    "doconcurrent-fortran": frozenset({"fortran"}),
     "openacc": frozenset({"c", "cpp", "fortran"}),
 }
 
+#: Pages whose ONLY subject is directive offload to a device. On a ``cpu`` image there is no device
+#: to offload to and no build on the scoring path passes an offload flag, so the page can only tell
+#: the reader that its own subject does not work here -- measured cost, no possible benefit. The
+#: packet is re-read on every agent turn, so a page is charged once per turn, not once per task:
+#: the ~2.1 kB openacc page cost the gpt-oss C arm on the order of 40k tokens per kernel to say
+#: nothing. Gated on the IMAGE rather than the language because it is the hardware that decides.
+OFFLOAD_ONLY_SKILLS: FrozenSet[str] = frozenset({"openacc"})
+
 
 def model_skill_applies(name: str, task) -> bool:
-    """Whether a parallelism-model page is usable in ``task``'s language.
+    """Whether a parallelism-model page is usable in ``task``'s language and image.
 
     ``any`` mode lets the agent deliver a ``.so`` built from any language, so every model is still
-    reachable and nothing is dropped -- the same rule :func:`language_skills_for` follows.
+    reachable and nothing is dropped -- the same rule :func:`language_skills_for` follows. The
+    IMAGE gate is not relaxed that way: no source language makes a CPU box grow a device.
     """
+    if name in OFFLOAD_ONLY_SKILLS and task.image == "cpu":
+        return False
     languages_for_page = MODEL_SKILL_LANGUAGES.get(name)
     if languages_for_page is None:
         return True
