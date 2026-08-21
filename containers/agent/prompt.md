@@ -6,7 +6,10 @@ benchmark tools for every external interaction:
 - `task` -- the spec the judge grades against. Read it first.
 - `profile` -- where the time goes. Never scored.
 - `score` -- grade on the PUBLIC inputs. The iteration loop.
-- `submit` -- the terminal grade (public + a hidden seed) and the only recorded one. Call it once.
+- `submit` -- the terminal grade (public + a hidden seed) and the ONLY recorded one. `score`
+  records nothing. Submit the moment a score comes back correct, then keep improving and submit
+  again: every verified submission is kept and your best one counts, so an early submit costs
+  nothing and a missing one costs the whole kernel.
 - `search` -- web/API research.
 - `syntax_check` -- parse a file with the local compiler. Free, instant, never graded.
 
@@ -32,10 +35,9 @@ So the local check is:
 zero warnings is the cheapest test you will ever run; do not spend a judge call to learn what it
 would have told you.
 
-Your `build` list is appended AFTER that baseline, so you can add flags the judge does not set:
-`-funroll-loops`, `-ffp-contract=fast`, even `-ffast-math` -- the judge does not filter them.
-The correctness gate still applies unchanged: a flag that reorders your math past rtol/atol
-fails the grade, so test locally and score before you submit with one.
+Your `build` list is FILTERED: only `-I`, `-D`, `-l` and `-L` tokens survive; every other flag
+(`-funroll-loops`, `-Ofast`, `-ffast-math`, ...) is silently dropped, never applied. The baseline
+flags above are the whole build. Optimize in the source, not in the flag list.
 
 ## When something fails, read the error and fix it -- never move on, never resend unchanged
 
@@ -141,21 +143,28 @@ everything server-side, so python3 is for generating or checking your own code, 
 2. Write the fortran to `/shared/agent-7/argmax_value.f90` -- basename exact, folder is YOURS.
 3. `score` {"kernel": "loop_level_reasoning/argmax_value/argmax_value",
             "source_file": "/shared/agent-7/argmax_value.f90"} -> correct / speedup.
-4. Iterate on step 3. Then `submit` once, with the same body, on your best version.
+4. Iterate on step 3. `submit` (same body) every time a score comes back correct and better.
 
 Score early and often -- after every meaningful change, never sit on an untested rewrite.
 You have plenty of attempts (~1000 score calls is fine). Do not stop early. The ceiling
 differs per kernel: some allow 10x, some barely 1.2x -- so never settle for your first
 working speedup. Keep trying genuinely different approaches; declare a plateau only after
-several distinct ideas scored no better. Then `submit` your best correct version. If time
-or attempts run out before you submit, your last correct scored version counts as the
-submission -- so always keep the best version as the last one you scored.
+several distinct ideas scored no better. `score` records NOTHING: a kernel you scored but
+never submitted earns nothing, however well it scored, so SUBMIT every correct improvement
+as you go -- the best verified submission is what counts.
+
+Two measurement facts: sub-microsecond kernels jitter 20-50% between identical calls, so under
+~1.15x re-score once before believing it. `submit` re-checks on a SECOND held-out seed, so a
+near-tolerance reassociation trick that passes `score` can still fail there; an HTTP 500
+`score failed ... 'fuzzed'` from the judge is a judge fault, not your code -- retry once.
 
 The same call without the tools:
 
     curl -sX POST "$JUDGE_URL/submit" -H 'Content-Type: application/json' \
       -d '{"kernel":"loop_level_reasoning/argmax_value/argmax_value","language":"fortran",
            "rank":0,"build":[],"source_file":"/shared/agent-7/argmax_value.f90"}'
+
+{{HINTS}}
 
 Task:
 

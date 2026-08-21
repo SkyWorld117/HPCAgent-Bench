@@ -63,5 +63,9 @@ done < <(kernel_names)
 if [[ -f "${repo}/containers/agent/prompt.md" ]]; then
     cp -f "${repo}/containers/agent/prompt.md" "${shared}/prompt.md"
 fi
+# The optimization-hints block a hints arm injects into {{HINTS}} (AGENT_HINTS_FILE points here).
+if [[ -f "${repo}/containers/agent/hints.md" ]]; then
+    cp -f "${repo}/containers/agent/hints.md" "${shared}/hints.md"
+fi
 
 printf 'materialize_shared: %s kernel folders under %s/tasks\n' "${copied}" "${shared}"

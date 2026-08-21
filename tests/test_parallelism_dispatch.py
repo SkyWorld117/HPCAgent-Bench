@@ -596,11 +596,11 @@ SKILL_TAUGHT = (
     # harness moves to -std=f2023.
     TaughtConstruct("lang-fortran", "fortran", "do-concurrent", "openmp", FORTRAN_DC_PLAIN),
     TaughtConstruct("lang-fortran", "fortran", "do-concurrent-locality", "openmp", FORTRAN_DC_LOCALITY),
-    TaughtConstruct("openmp", "fortran", "omp-parallel-do-reduction", "openmp", FORTRAN_OMP_REDUCTION),
-    TaughtConstruct("vectorization", "fortran", "omp-simd", None, FORTRAN_OMP_SIMD),
-    TaughtConstruct("openmp", "c", "omp-parallel-for", "openmp", C_OMP_PARALLEL_FOR),
-    TaughtConstruct("vectorization", "c", "omp-simd", None, C_OMP_SIMD),
-    TaughtConstruct("openmp", "cpp", "omp-parallel-for", "openmp", CPP_OMP_PARALLEL_FOR),
+    TaughtConstruct("openmp-fortran", "fortran", "omp-parallel-do-reduction", "openmp", FORTRAN_OMP_REDUCTION),
+    TaughtConstruct("openmp-fortran", "fortran", "omp-simd", None, FORTRAN_OMP_SIMD),
+    TaughtConstruct("openmp-c", "c", "omp-parallel-for", "openmp", C_OMP_PARALLEL_FOR),
+    TaughtConstruct("openmp-c", "c", "omp-simd", None, C_OMP_SIMD),
+    TaughtConstruct("openmp-cpp", "cpp", "omp-parallel-for", "openmp", CPP_OMP_PARALLEL_FOR),
     TaughtConstruct("lang-cpp", "cpp", "execution-par-unseq", "stdpar", CPP_ISOPAR),
 )
 

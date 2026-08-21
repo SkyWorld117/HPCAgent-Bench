@@ -679,7 +679,8 @@ F2023_IN_FORTRAN = (
 #: Pages whose Fortran the graded build actually compiles. The do-concurrent page was merged into
 #: lang-fortran on 2026-08-21: it taught one construct, shipped only alongside its language page,
 #: and the packet is charged once per agent TURN, so a separate page was per-turn rent for a header.
-FORTRAN_PAGES = ("lang-fortran", )
+#: openmp-fortran joined on 2026-08-21 when the generic openmp page split per language.
+FORTRAN_PAGES = ("lang-fortran", "openmp-fortran")
 
 
 def test_no_fortran_page_teaches_a_2023_spelling() -> None:

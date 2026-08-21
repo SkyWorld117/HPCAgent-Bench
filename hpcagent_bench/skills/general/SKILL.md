@@ -16,8 +16,8 @@ within tolerance of the oracle. For example:
 - **Vectorization & parallelism** -- SIMD, multithreading/OpenMP, GPU offload
   (within the target's toolchain). Legal ONLY on loops whose iterations are
   independent: classify first (parallel / reduction / recurrence / scatter -- the
-  openmp page's bins); a recurrence or colliding scatter parallelized anyway returns
-  a WRONG answer, not a slow one.
+  openmp-<language> page's bins); a recurrence or colliding scatter parallelized
+  anyway returns a WRONG answer, not a slow one.
 - **Algebraic / numerical rewrites** -- reassociation, strength reduction,
   precomputation, exploiting symmetry/sparsity -- provided the result still
   matches the oracle within rtol/atol.

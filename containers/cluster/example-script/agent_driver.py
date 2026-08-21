@@ -528,6 +528,28 @@ def problem_text(problem: dict[str, Any]) -> str:
     return json.dumps(problem, indent=2, sort_keys=True)
 
 
+def hints_text() -> str:
+    """The optimization-hints block for the {{HINTS}} slot in the prompt template.
+
+    ``AGENT_HINTS_FILE`` names a markdown file (the arm's .env sets it, e.g. to the materialized
+    ``hints.md``); unset or empty means the arm runs WITHOUT hints -- the treatment knob of the
+    hints ablation, so a missing file is a hard error rather than a silent no-hints arm.
+    """
+    path = os.environ.get("AGENT_HINTS_FILE", "").strip()
+    if not path:
+        return ""
+    return resolve_shared_file(path).read_text(encoding="utf-8").strip()
+
+
+def resolve_shared_file(path: str) -> pathlib.Path:
+    """A relative path resolves under the shared mount (where materialize_shared.sh put the
+    campaign's prompt/hints copies), so an .env can name `hints.md` without knowing RUN_DIR."""
+    candidate = pathlib.Path(path)
+    if candidate.is_absolute():
+        return candidate
+    return pathlib.Path(os.environ.get("HPCAGENT_BENCH_SHARED_DIR", "/shared")) / path
+
+
 def node_rank() -> int:
     """This agent node's index in the run: what run_cluster.sh exported, else the Slurm rank."""
     return int(os.environ.get("AGENT_NODE_RANK", os.environ.get("SLURM_PROCID", "0")))
@@ -847,7 +869,11 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
 
     workdir = node_dir / f"problem-{problem['id']}-worker-{worker_index}"
     workdir.mkdir(parents=True, exist_ok=True)
-    prompt_template = (runtime / "prompt.md").read_text(encoding="utf-8")
+    # AGENT_PROMPT_FILE pins the template (e.g. the materialized <shared>/prompt.md, fresh from
+    # the repo at launch); without it a baked /opt/optarena-agent image shadows repo edits.
+    prompt_path = os.environ.get("AGENT_PROMPT_FILE", "").strip()
+    prompt_template = (resolve_shared_file(prompt_path) if prompt_path else runtime /
+                       "prompt.md").read_text(encoding="utf-8")
     # Keyed by the GLOBAL problem index, not the worker slot, which repeats across nodes. Without a
     # folder each, agents on ONE kernel all write the same <kernel>.<ext> in the flat shared root and
     # clobber each other; the judge resolves any path inside the shared folder and name-checks only
@@ -860,7 +886,7 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     # The budget the driver ENFORCES is the budget the agent is told about, composed from the same
     # env vars run_agent enforces below -- a note baked into the problem file cannot go stale here.
     task_block = "\n".join(part for part in (task, shared_note, budget_note(timeout_s, max_tokens, task)) if part)
-    prompt = prompt_template.replace("{{TASK}}", task_block)
+    prompt = prompt_template.replace("{{HINTS}}", hints_text()).replace("{{TASK}}", task_block)
     prompt_file = workdir / "prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
 

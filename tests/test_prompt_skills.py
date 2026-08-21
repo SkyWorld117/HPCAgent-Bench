@@ -216,7 +216,7 @@ def test_debug_marks_the_skills_too():
     """Skills arrive as context, not as templates, so the loader cannot annotate them."""
     prompt = build_prompt(TASK, prompt_config=PromptConfig.from_config(debug=True))
     assert f"# Generated from: hpcagent_bench/skills/{GENERAL_SKILL}/SKILL.md" in prompt
-    assert "# Generated from: hpcagent_bench/skills/vectorization/SKILL.md" in prompt
+    assert "# Generated from: hpcagent_bench/skills/openmp-c/SKILL.md" in prompt
 
 
 def test_debug_reports_the_overriding_file_not_the_builtin(tmp_path):
@@ -493,13 +493,14 @@ def test_every_manual_sized_page_is_gated():
     The invariant the gate actually protects is TOKEN COST: these bodies are injected verbatim into
     every prompt, and before the gate existed four instrument manuals were 1081 of 1169 prompt
     lines. So derive the check from size. A page big enough to be a manual must be gated; the short
-    strategy skills (general, loopnest, memory, parallelism, vectorization -- all ~22 lines) are the
-    ones that always ride along, and they are cheap enough to.
+    strategy skills (general and the per-language model pages) are the ones that ride along where
+    they apply, and they are cheap enough to.
 
     A draft graduates by one ``mv``, so drafts are checked too: this must fail BEFORE the page
     lands in every prompt, not after.
     """
-    from hpcagent_bench.harness.prompts import (ALWAYS_INLINE_MANUALS, INSTRUMENT_SKILLS, LANGUAGE_SKILLS, parse_skill)
+    from hpcagent_bench.harness.prompts import (ALWAYS_INLINE_MANUALS, INSTRUMENT_SKILLS, LANGUAGE_SKILLS,
+                                                MODEL_SKILL_LANGUAGES, parse_skill)
 
     #: Between the strategy skills (~22 lines) and the manuals (~180-480). Nothing sits near it.
     MANUAL_LINES = 100
@@ -507,9 +508,10 @@ def test_every_manual_sized_page_is_gated():
     root = paths.ROOT
     pages = sorted((root / "hpcagent_bench" / "skills").glob("*/SKILL.md"))
     pages += sorted((root / "docs" / "skills_draft").glob("*/SKILL.md"))
-    # LANGUAGE_SKILLS is a third gated category: gated on the submission language, not on the
-    # profiling knob. Still gated, so it satisfies this size check.
-    classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS | LANGUAGE_SKILLS
+    # LANGUAGE_SKILLS and MODEL_SKILL_LANGUAGES are further gated categories: gated on the
+    # submission language (and image), not on the profiling knob. Still gated, so they satisfy
+    # this size check -- a model page ships to exactly one language's prompts.
+    classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS | LANGUAGE_SKILLS | set(MODEL_SKILL_LANGUAGES)
     ungated = []
     on_disk = set()
     for path in pages:
@@ -608,8 +610,8 @@ def test_an_any_language_task_gets_every_language_page() -> None:
     assert not missing, f"any-language task is missing language pages: {missing}"
 
 
-@pytest.mark.parametrize("language,wanted", [("c", {"openmp", "openacc"}), ("cpp", {"openmp", "openacc"}),
-                                             ("fortran", {"openmp", "openacc"}), ("cuda", set())])
+@pytest.mark.parametrize("language,wanted", [("c", {"openmp-c", "openacc"}), ("cpp", {"openmp-cpp", "openacc"}),
+                                             ("fortran", {"openmp-fortran", "openacc"}), ("cuda", set())])
 def test_a_parallelism_model_page_ships_only_where_the_language_can_spell_it(language: str, wanted: set) -> None:
     """`std::execution` is not a thing a Fortran submission can write, and `!$acc` is not a thing a
     C++ one can. A model page in the wrong prompt is guidance the agent is unable to act on, so it

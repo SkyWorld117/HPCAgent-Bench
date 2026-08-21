@@ -393,22 +393,16 @@ LANGUAGE_SKILLS = frozenset({"lang-c", "lang-cpp", "lang-cuda", "lang-fortran", 
 #: :func:`tests.test_prompt_skills.test_every_manual_sized_page_is_gated` requires each one to be in
 #: this set or in :data:`INSTRUMENT_SKILLS`, and refuses to let a new one drift in unclassified.
 ALWAYS_INLINE_MANUALS = frozenset({
-    # NOT an instrument: it is the ORDER of operations -- what to try, when, and what each step
-    # costs the next. Gating it behind a profiling knob would hide the sequencing from every agent
-    # that did not ask to profile, which is exactly the agent most likely to apply transforms in
-    # the wrong order. Its worst measured failure was routing a reader to a ZERO SCORE, and that
-    # had nothing to do with any tool.
+    # DRAFT (docs/skills_draft): the ORDER of operations -- what to try, when, and what each step
+    # costs the next. If it ships it rides along whole, because gating it behind a profiling knob
+    # would hide the sequencing from exactly the agent most likely to transform in the wrong order.
+    # The SHIPPED short form of this content is containers/agent/hints.md, injected into the
+    # campaign's main prompt ({{HINTS}}), not a skill page at all.
     "optimization-hints",
     # PARKED, and a PORTING skill rather than an optimization one. It should not reach an
     # optimizing agent's prompt at all; listed here so the size gate does not silently absorb it
     # into the instrument set while that decision is still open.
     "pytorch-to-numpy",
-    # Crossed the manual threshold on 2026-08-19 (166 lines) and belongs here rather than behind a
-    # gate: it carries the multi-core grading regime, the classify-then-thread rule and the four
-    # bins, which decide whether a submission is CORRECT, not merely fast. Every language page
-    # routes to it, and the campaign's skills packet inlines it for all three languages, so gating
-    # it would remove the page exactly where it is being measured.
-    "openmp",
 })
 
 #: Submission language -> the page that governs writing it.
@@ -462,7 +456,12 @@ def language_skills_for(task) -> FrozenSet[str]:
 #: rather than in LANGUAGE_SKILL: a C++ page in a Fortran prompt is text nobody can act on. A page
 #: absent from this table applies to every language, which is every other skill.
 MODEL_SKILL_LANGUAGES: Dict[str, FrozenSet[str]] = {
-    "openmp": frozenset({"c", "cpp", "fortran"}),
+    # One OpenMP page per language: the packet a task ships carries only the spelling and the
+    # build errors of the language it is graded in -- the generic page cost every Fortran arm a
+    # third of a page of C examples it could not paste.
+    "openmp-c": frozenset({"c"}),
+    "openmp-cpp": frozenset({"cpp"}),
+    "openmp-fortran": frozenset({"fortran"}),
     "openacc": frozenset({"c", "cpp", "fortran"}),
 }
 
