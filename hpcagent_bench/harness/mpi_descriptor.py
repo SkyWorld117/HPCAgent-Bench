@@ -383,30 +383,36 @@ class Descriptor:
         return gather(tiles, self.dist_for(name, global_shape), self.grid, global_shape, dtype)
 
     def local_size_scalars(self, global_scalars: Dict[str, int], rank: int) -> Dict[str, int]:
-        """Each size symbol -> value at rank: local extent if distributed, global otherwise; raises if ambiguous."""
+        """Each size symbol -> value at rank: the local extent only when EVERY axis it sizes is decomposed
+        the same way, the global value otherwise; raises when the decompositions themselves conflict.
+
+        A symbol that sizes a decomposed axis AND a replicated one -- the N-on-an-NxN-field row/column
+        coupling -- stays GLOBAL. It is the global extent the kernel derives its own slab from, and
+        localizing it would under-size every replicated axis N also sizes.
+        """
         coords = self.grid.coords_of(rank)
         out = dict(global_scalars)
         for sym, candidates in self.symbol_axes.items():
             if sym not in global_scalars:
                 continue
-            # key each sized axis by what sets its per-coord count; >1 distinct class => ambiguous (see raise below)
-            signatures = set()
+            # key each decomposed axis by what sets its per-coord count; >1 distinct key => no single value
+            schemes = set()
+            sizes_replicated_axis = False
             local_val: Optional[int] = None
             for arr, axis in candidates:
                 ad = self.arrays.get(arr)
                 if ad is None or ad.replicated or axis >= len(ad.axes) or ad.axes[axis].grid_dim is None:
-                    signatures.add(("global", ))
+                    sizes_replicated_axis = True
                     continue
                 axdist = ad.axes[axis]
-                signatures.add((axdist.grid_dim, _effective_block_size(axdist)))
+                schemes.add((axdist.grid_dim, _effective_block_size(axdist)))
                 if local_val is None:
                     local_val = int(len(owned_indices(int(global_scalars[sym]), axdist, self.grid, coords)))
-            if len(signatures) > 1:
-                raise ValueError(f"size symbol {sym!r} sizes axes with conflicting distributions (a decomposed axis "
-                                 f"AND a replicated / differently-decomposed one), so its per-rank value is ambiguous "
-                                 f"-- the N-on-an-NxN-field row/column coupling. Decompose with DISTINCT symbols "
-                                 f"(e.g. a LOCAL row extent and a GLOBAL column extent), one well-defined size each")
-            if local_val is not None:
+            if len(schemes) > 1:
+                raise ValueError(f"size symbol {sym!r} sizes axes with CONFLICTING decompositions "
+                                 f"{sorted(schemes)} (different grid dimension or per-rank block count), so its "
+                                 f"per-rank value is ambiguous. Decompose with DISTINCT symbols, one per extent")
+            if local_val is not None and not sizes_replicated_axis:
                 out[sym] = local_val
         return out
 
