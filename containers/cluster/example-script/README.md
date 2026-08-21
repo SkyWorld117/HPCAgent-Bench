@@ -319,14 +319,14 @@ python3 monitor_report.py <RUN_ROOT>/<jobid>/monitor
 
 ### Smoke test (debug the loop before a campaign arm)
 
-`.env.smoke` is a 5-node, 45-minute variant: 10 agents on one node all optimizing the
+`.env.smoke-llr4-cpp` is a 5-node, 45-minute variant: 10 agents on one node all optimizing the
 SAME kernel once, striped 5-and-5 over 2 judge ranks, 2 inference replicas. The task
 text carries a soft ~35-minute deadline (agents cannot see a clock otherwise), and
 `AGENT_TIMEOUT_SECONDS` is the hard per-agent kill so one wedged agent cannot hold the
 step. Every node writes a 5-second utilization CSV under `<RUN_DIR>/monitor/`.
 
 ```bash
-PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh smoke --account=<account> --partition=mi300
+PYTHON=$SCRATCH/venv-optarena/bin/python ./run_campaign.sh smoke-llr4-cpp --account=<account> --partition=mi300
 ```
 
 `make_problems.py` is a generator rather than a checked-in list on purpose: the

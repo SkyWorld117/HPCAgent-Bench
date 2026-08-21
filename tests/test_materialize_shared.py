@@ -174,7 +174,7 @@ def test_every_campaign_variant_declares_its_own_arm():
     """A mislabelled arm is worse than an unlabelled one. The variant file is COPIED to .env, so a
     stale copy would file this arm's rows under the previous one and nothing in the DB would show
     it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to."""
-    for path in sorted(EXAMPLE.glob(".env.llr-*")) + [EXAMPLE / ".env.smoke"]:
+    for path in sorted(EXAMPLE.glob(".env.llr-*")) + [EXAMPLE / ".env.smoke-llr4-cpp"]:
         arm = path.name[len(".env."):]
         assert f"\nCAMPAIGN_ARM={arm}\n" in path.read_text(), path
     assert '"${CAMPAIGN_ARM:-}" != "${VARIANT}"' in (EXAMPLE / "run_campaign.sh").read_text()

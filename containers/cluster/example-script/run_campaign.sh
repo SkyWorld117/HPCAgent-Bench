@@ -3,9 +3,9 @@
 # allocation from it, and submit. Everything after the variant name is passed to sbatch verbatim
 # (account, partition, a --time override).
 #
-#   ./run_campaign.sh smoke       --account=<a> --partition=mi300
-#   ./run_campaign.sh llr-cpp     --account=<a> --partition=mi300
-#   ./run_campaign.sh llr-fortran --account=<a> --partition=mi300
+#   ./run_campaign.sh smoke-llr4-cpp --account=<a> --partition=mi300
+#   ./run_campaign.sh llr-cpp        --account=<a> --partition=mi300
+#   ./run_campaign.sh llr-fortran  --account=<a> --partition=mi300
 #
 # After the job: merge the per-rank judge DBs and read the balance report --
 #   python3 merge_results.py  <RUN_ROOT>/<jobid>
@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 
-VARIANT="${1:?usage: run_campaign.sh <smoke|llr-c|llr-cpp|llr-fortran|llr-any> [sbatch args...]}"
+VARIANT="${1:?usage: run_campaign.sh <smoke-llr4-cpp|llr-c|llr-cpp|llr-fortran|llr-any> [sbatch args...]}"
 shift
 ENV_FILE="${SCRIPT_DIR}/.env.${VARIANT}"
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -44,7 +44,7 @@ fi
 nodes=$(( ${INFERENCE_NODES:-2} + ${AGENT_NODES:-1} + ${JUDGE_NODES:-1} ))
 
 case "${VARIANT}" in
-    smoke)
+    smoke-llr4-cpp)
         time_limit="01:00:00"
         # 10 copies of one kernel: every agent optimizes the same task once, striped over the
         # judge ranks. The note is the SOFT deadline; AGENT_TIMEOUT_SECONDS in the env is the hard one.
