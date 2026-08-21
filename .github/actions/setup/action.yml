@@ -77,6 +77,16 @@ runs:
         for driver in gcc g++ gfortran; do
           sudo ln -sf "/usr/bin/${driver}-${GCC_MAJOR}" "/usr/local/bin/${driver}"
         done
+        # cc and c++ are part of that family and have no -<major> spelling to loop over, so they
+        # need naming. Not cosmetic: dace resolves its host compiler as
+        # `Config(compiler.cpu.executable) or $CXX or 'c++'` (dace/codegen/compiler_family.py), the
+        # harness pins neither, and CMake's own default is `c++` as well -- so with only g++ linked,
+        # every dace-compiled kernel built with the runner's /usr/bin/c++ while every other column
+        # used the pinned major. That was GCC 13 against GCC 16, and 13 is the major dace itself
+        # warns mislowers a masked select to silent zeros (_MISCOMPILING_GCC_MAJORS), so the dace
+        # baseline the agent is graded against was the one build nobody had pinned.
+        sudo ln -sf "/usr/bin/gcc-${GCC_MAJOR}" /usr/local/bin/cc
+        sudo ln -sf "/usr/bin/g++-${GCC_MAJOR}" /usr/local/bin/c++
         gcc --version | head -1
         gfortran --version | head -1
 
