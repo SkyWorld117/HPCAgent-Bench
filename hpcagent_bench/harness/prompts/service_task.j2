@@ -58,7 +58,7 @@ Python via `hpcagent_bench.harness.tools.JudgeClient`:
 {{ "\n" }}
 {% endfor %}
 {% include "optimizations.j2" %}
-{% if shared_dir %}
+{% if shared_dir and build_list_applied %}
 ## Extra libraries -- the shared folder ({{ shared_dir }})
 Need a library that is not installed? Install it + its headers into `{{ shared_dir }}`
 (e.g. `./configure --prefix={{ shared_dir }} && make install`). It is shared with the

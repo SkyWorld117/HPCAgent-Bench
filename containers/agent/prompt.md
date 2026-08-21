@@ -35,9 +35,9 @@ So the local check is:
 zero warnings is the cheapest test you will ever run; do not spend a judge call to learn what it
 would have told you.
 
-Your `build` list is FILTERED: only `-I`, `-D`, `-l` and `-L` tokens survive; every other flag
-(`-funroll-loops`, `-Ofast`, `-ffast-math`, ...) is silently dropped, never applied. The baseline
-flags above are the whole build. Optimize in the source, not in the flag list.
+Your `build` list is NOT applied on this track: every token in it is dropped, `-I`/`-l`
+included. The baseline flags above are the whole build, identical for every submission.
+Optimize in the source, not in the flag list.
 
 ## When something fails, read the error and fix it -- never move on, never resend unchanged
 
@@ -80,13 +80,14 @@ Base URL: `$JUDGE_URL`, else `$OPTARENA_AGENT_API_URL`, else `http://127.0.0.1:8
 
 `/score`, `/submit` and `/profile` take the SAME body:
 
-    {"kernel": "<key verbatim>", "language": "c", "build": ["-lm"], "rank": 0,
+    {"kernel": "<key verbatim>", "language": "c", "build": [], "rank": 0,
      "source": "<full text>" | "source_file": "<path>" | "library": "<path>",
      "workspace_bytes": "8*NI*NJ", "preset": "S"}
 
 Exactly one of `source` / `source_file` / `library`; two is a 400. `rank` is added from
 `$JUDGE_RANK` on every call and `language` from `$LANGUAGE` where the track pins one, so neither is
-yours to send. `build`, `workspace_bytes` and `preset` are optional. `/profile` adds `tool`,
+yours to send. `build` is accepted but ignored on this track (see above); `workspace_bytes` and
+`preset` are optional. `/profile` adds `tool`,
 `threads`, `reps`, `min_percent`, `counters`, `counter_group`, `residency`.
 
 ## Every file the judge needs goes in the shared folder
@@ -100,9 +101,7 @@ judge cannot see them.
   other agents share it. Reference implementations sit read-only in `/shared/tasks/<kernel>/`.
 - Put sources, prebuilt `.so` files, headers and inputs in your write folder. Subdirectories are fine.
 - A symlink out of `shared.dir` is refused: the path is resolved before the containment check.
-- `shared.dir/include` and `shared.dir/lib` are added to every judge build, so a dependency
-  installed there links with a bare `-l<name>` in `build`. `task` -> `shared.libraries` lists what
-  is already installed.
+- `task` -> `shared.libraries` lists what is already installed on the judge's build line.
 - Inline `source` needs no file at all. Prefer it unless the code is large or already built.
 
 ## Submission names

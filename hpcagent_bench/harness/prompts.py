@@ -1052,6 +1052,10 @@ def build_context(task: Task,
         # and judge containers where the agent installs extra libs/headers; the
         # judge auto-adds its include/lib dirs to every build (sandbox.shared_dir).
         "shared_dir": shared_dir(),
+        # Whether a submission's ``build`` list is applied at all (grading.allow_agent_build_tokens,
+        # sandbox.split_build). Off, the extra-libraries workflow cannot link, so the prompt must
+        # not offer it -- read from the same key the grader acts on, so the two cannot drift.
+        "build_list_applied": bool(config.get("grading.allow_agent_build_tokens", True)),
         # Per-tool prompt fragments (hpcagent_bench/tools/<tool>.md), collected so the
         # judge-facing prompt documents each agent tool from its own file.
         "tool_fragments": tool_fragments(prompt_config.search_dirs()),

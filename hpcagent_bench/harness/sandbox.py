@@ -206,7 +206,14 @@ def split_build(tokens: List[str], *, allow_flags: bool = False) -> Tuple[List[s
     language dialect, which is what keeps their speedups comparable to each other and to the
     baseline. The knob is a DEPLOYMENT choice -- an arm that turns it on must say so, because its
     numbers are then answering a different question from an arm that did not.
+
+    ``grading.allow_agent_build_tokens`` (ON by default) is the outer switch: OFF makes the whole
+    ``build`` list inert, ``-I``/``-D``/``-l``/``-L`` included, so every submission builds on
+    exactly the matrix flags. A track whose kernels are self-contained (loop_level_reasoning)
+    runs with it off; the campaign env sets it identically for every arm.
     """
+    if not bool(config.get("grading.allow_agent_build_tokens", True)):
+        return [], []
     compile_tokens = [t for t in tokens if t.startswith(_COMPILE_PREFIXES)]
     if allow_flags:
         compile_tokens += [t for t in tokens if not t.startswith(_COMPILE_PREFIXES) and _opt_in_compile(t)]
