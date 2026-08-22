@@ -3,17 +3,14 @@
 Order of attack: loop shape, then memory traffic, then vectorize, then thread. FP reassociation
 is fine inside the graded tolerance. Verify with a score, never by eye.
 
-**Before any directive, three lines**
+**Dependences, before any directive**
 
-Write them as a comment above it, every time, for the loop you are about to thread:
-`carried by:` the axis whose index appears at -1/+1 in a read of what the loop writes;
-`unit stride:` the axis that is the last subscript in C/C++, the first in Fortran;
-`threading:` the axis the directive goes on. Then two mechanical rules:
-
-- **threading == carried by** is a RACE -- wrong, not slow. Thread another axis, fission the
-  statement out, or leave it serial.
-- **unit stride is not the innermost loop** is ~1.00x however many cores you use. Interchange
-  first, then thread.
+For the array a loop WRITES, is it also read at another iteration's index (`i-1`, `j+1`, `idx[i]`)?
+A directive asserts the answer is no; asserting it wrongly is a race -- a wrong answer, not a slow
+one. Having named the dependence there are three cases: another axis is free, so thread that one;
+the recurrence can be fissioned away from the independent work; or every axis carries one -- which
+still is not serial, because anti-diagonal iterations are independent and a skew makes them
+parallel. That last case is the one usually abandoned as sequential.
 
 **Loop nests**
 

@@ -1,6 +1,7 @@
 ---
 name: openmp-cpp
-description: "OpenMP in C++: the four loop bins, the sharing clauses, and the build errors that cost a turn."
+description: "OpenMP in C++: the four loop bins, the sharing clauses, and the build errors that
+cost a turn."
 ---
 
 # openmp-cpp
@@ -12,27 +13,27 @@ the grading machine presets `OMP_NUM_THREADS`, so read `omp_get_max_threads()` (
 (`<execution>` policies are the other threading spelling -- the lang-cpp page; one spelling per
 loop.)
 
-## Before every directive: three lines, written down
+## A dependence is a question, not a stop sign
 
-A pragma is a claim about dependences. Write the claim as a comment ABOVE the directive, every
-time, using the loop you are about to thread:
+Before threading anything, answer one thing in words: for the array this loop WRITES, is it also
+read at another iteration's index -- `i-1`, `j+1`, `idx[i]`? A directive asserts the answer is no.
+Assert it wrongly and you get a race: a wrong answer, not a slow one, and the most expensive
+mistake available here.
 
-```cpp
-// carried by: j      -- axis whose index appears at -1/+1 in a read of what this loop writes
-// unit stride: i     -- axis that is the LAST term of the subscript (C++ is row-major)
-// threading: i       -- must differ from "carried by", and should be the loop outside "unit stride"
-#pragma omp parallel for simd
-```
+Having named the dependence, you are in one of three cases:
 
-Two rules decide the outcome, and both are mechanical:
+- **Another axis is free.** Thread that one instead. `a[j*N+i] = a[(j-1)*N+i]` carries its
+  dependence on `j`, so the directive belongs on `i` -- not on whichever loop is outermost.
+- **The statement can be separated.** A body mixing a recurrence with independent work fissions:
+  the chain keeps a serial loop, everything else becomes a loop you can thread.
+- **Every axis carries one -- which still does not mean serial.** Where `a[i][j]` reads
+  `a[i-1][j]` and `a[i][j-1]`, both reads advance `i+j` by one, so no two points sharing `i+j`
+  can depend on each other: skew, and the anti-diagonal runs in parallel. This is the case that
+  gets abandoned as sequential. `loop-transformations-cpp` has the rewrite and its legality test.
 
-- **threading == carried by** is a RACE. Not slow -- wrong. Thread another axis, fission the
-  statement out, or leave it serial.
-- **unit stride is not the innermost loop** means ~1.00x however many cores you use. Interchange
-  first (`loop-transformations-cpp` has the legality test), then thread.
-
-`a[i*N + j] = a[i*N + (j-1)]` is carried by `j`, unit stride `j`: the only free axis is `i`.
-`a[j*N + i] = a[(j-1)*N + i]` is carried by `j`, unit stride `i`: thread `i`, and put it innermost.
+Legality settles whether you MAY thread; profit is separate. If the innermost loop is not the one
+walking unit stride -- the last subscript, since C++ is row-major -- the nest is bandwidth-bound
+and threading returns ~1.00x however many cores you use. Interchange first, then thread.
 
 **A directive on a recurrence, with the comment saying so.** A pragma is an assertion,
 not a request: `simd` on a carried dependence claims lanes are independent while the line above
