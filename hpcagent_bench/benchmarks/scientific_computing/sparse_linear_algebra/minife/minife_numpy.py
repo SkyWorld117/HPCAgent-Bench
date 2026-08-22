@@ -259,14 +259,9 @@ def _matvec_std_arrays(
 ) -> np.ndarray:
     nrows = row_offsets.shape[0] - 1
     for row in range(nrows):
-        row_start = int(row_offsets[row])
-        row_end = int(row_offsets[row + 1])
-        total = 0.0
-
-        for idx in range(row_start, row_end):
-            total += values[idx] * x[int(cols[idx])]
-
-        y[row] = total
+        row_start = row_offsets[row]
+        row_end = row_offsets[row + 1]
+        y[row] = values[row_start:row_end] @ x[cols[row_start:row_end]]
 
     return y
 

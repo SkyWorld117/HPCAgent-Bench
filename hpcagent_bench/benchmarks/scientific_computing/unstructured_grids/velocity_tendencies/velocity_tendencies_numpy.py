@@ -251,26 +251,26 @@ def velocity_tendencies(
     for jk in range(nf, nlev):
         z_w_con_c[:, jk, :] -= w_concorr_c[:, jk, :]
 
-    # CFL clipping band (jk=MAX(3,nrdmax-2)..nlev-3): clips |z_w_con_c| > 0.85*CFL, tracks max_vcfl_dyn/cfl_clip/levmask.
+    # CFL clipping band (jk=MAX(3,nrdmax-2)..nlev-3): clips |z_w_con_c| > 0.85*CFL, tracks max_vcfl_dyn/cfl_clip/levelmask.
     vcflmax = np.zeros(nblks_c)
     cfl_clip = np.zeros((nproma, nlevp1, nblks_c), dtype=np.bool_)
-    levmask = np.zeros((nblks_c, nlev), dtype=np.bool_)
-    for jk1 in range(max(3, nrdmax_jg - 2), nlev - 3 + 1):  # 1-based inclusive
-        jk0 = jk1 - 1
-        for jb in range(nblks_c):
-            for jc in range(nproma):
-                h = ddqz_half[jc, jk0, jb]
-                zc = z_w_con_c[jc, jk0, jb]
-                if abs(zc) > cfl_w_limit * h:  # clip <=> |vcfl| > 0.85
-                    cfl_clip[jc, jk0, jb] = True
-                    levmask[jb, jk0] = True
-                    vcfl = zc * dtime / h
-                    if abs(vcfl) > vcflmax[jb]:
-                        vcflmax[jb] = abs(vcfl)
-                    if vcfl < -0.85:
-                        z_w_con_c[jc, jk0, jb] = -0.85 * h / dtime
-                    elif vcfl > 0.85:
-                        z_w_con_c[jc, jk0, jb] = 0.85 * h / dtime
+    jk0_lo = max(3, nrdmax_jg - 2) - 1  # 0-based; jk1 range was 1-based inclusive
+    jk0_hi = nlev - 4  # inclusive upper (jk1 upper nlev-3, jk0 = jk1-1)
+    if jk0_hi >= jk0_lo:
+        h = ddqz_half[:, jk0_lo:jk0_hi + 1, :]
+        zc = z_w_con_c[:, jk0_lo:jk0_hi + 1, :]
+        clip = np.abs(zc) > cfl_w_limit * h  # clip <=> |vcfl| > 0.85
+        vcfl = zc * dtime / h
+        cfl_clip[:, jk0_lo:jk0_hi + 1, :] = clip
+        # abs(vcfl) masked to -inf outside the clip: an unclipped cell must never
+        # move vcflmax (the Fortran only updates it inside the clip branch), and
+        # plain max is reassociation-safe (order never changes a max's result).
+        abs_vcfl_masked = np.where(clip, np.abs(vcfl), -np.inf)
+        vcflmax = np.maximum(vcflmax, abs_vcfl_masked.max(axis=(0, 1)))
+        lo_clip = clip & (vcfl < -0.85)
+        hi_clip = clip & (vcfl > 0.85)
+        z_w_con_c[:, jk0_lo:jk0_hi + 1, :] = np.where(lo_clip, -0.85 * h / dtime,
+                                                      np.where(hi_clip, 0.85 * h / dtime, zc))
 
     z_w_con_c_full = np.zeros((nproma, nlev, nblks_c), order='F')
     for jk in range(nlev):
@@ -305,8 +305,10 @@ def velocity_tendencies(
                        gat(w, nbi, nbb, 1, jk0) * geofac_n2s[:, 2, :] + gat(w, nbi, nbb, 2, jk0) * geofac_n2s[:, 3, :])
                 ddt_w_adv[:, jk0, :, t] += np.where(mask, difcoef_c * area_c * lap, 0.0)
 
-    # levelmask(jk) = ANY over the cell blocks (full refinement range).
-    levelmask = levmask.any(axis=0)  # (nlev,)
+    # levelmask(jk) = ANY over the cell blocks AND cells (full refinement range).
+    # Read straight off cfl_clip (already correctly populated, band or not) --
+    # no separate (nblks_c, nlev) accumulator needed.
+    levelmask = cfl_clip[:, :nlev, :].any(axis=(0, 2))  # (nlev,)
 
     # ===== edge block: ddt_vn_apc_pc / ddt_vn_cor_pc =======================
     cgk = p_metrics_coeff_gradekin  # (nproma, 2, nblks_e)

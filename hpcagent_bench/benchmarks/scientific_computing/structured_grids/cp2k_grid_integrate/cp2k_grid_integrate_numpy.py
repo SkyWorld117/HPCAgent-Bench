@@ -137,10 +137,17 @@ def cp2k_grid_integrate(
             for relative_index in range(-span, span + 1):
                 displacement = float(center + relative_index) * dr - product_center
                 gaussian = np.exp(-zetp * displacement * displacement)
-                power = gaussian
-                for icoef in range(lp + 1):
-                    pol[idir, icoef, relative_index + MAX_CUBE_RADIUS] = power
-                    power *= displacement
+                # power_icoef = gaussian * displacement**icoef, built by the same
+                # repeated multiply as the scalar loop (np.cumprod is a strict
+                # left-to-right Mult scan, not a reassociated reduction, so this
+                # is bit-identical -- not the closed-form ``**`` power, which is
+                # not). Operand is a bare Name with a known shape: the translator's
+                # cumulative-scan lowering needs that, not a Call expression.
+                seed = np.empty(lp + 1, dtype=zeta.dtype)
+                seed[0] = gaussian
+                seed[1:] = displacement
+                powers = np.cumprod(seed)
+                pol[idir, : lp + 1, relative_index + MAX_CUBE_RADIUS] = powers
 
         radius2 = radius[task] * radius[task]
         for krel in range(-span2, span2 + 1):

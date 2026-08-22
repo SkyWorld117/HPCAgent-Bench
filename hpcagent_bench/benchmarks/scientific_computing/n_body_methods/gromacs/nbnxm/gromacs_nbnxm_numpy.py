@@ -397,9 +397,11 @@ def nbnxm_4x4_qstab_lj_force(
     tab_coul_scale,
     min_distance_squared,
 ):
-    """Run the 4x4 electrostatics/LJ NBNXM force kernel."""
-
-    return _nbnxm_4x4_qstab_lj_force_arrays(
+    """Run the 4x4 electrostatics/LJ NBNXM force kernel (allocates fresh output arrays)."""
+    n_atoms = x.shape[0]
+    f = np.zeros((n_atoms, 3), dtype=np.float64)
+    fshift = np.zeros_like(shift_vec, dtype=np.float64)
+    _nbnxm_4x4_qstab_lj_force_arrays(
         x,
         q,
         atom_type,
@@ -417,7 +419,10 @@ def nbnxm_4x4_qstab_lj_force(
         rcut,
         tab_coul_scale,
         min_distance_squared,
+        f,
+        fshift,
     )
+    return f, fshift
 
 
 def gromacs(
@@ -443,7 +448,7 @@ def gromacs(
 ):
     """Manifest-compatible entry point: writes per-atom forces (f) and per-shift virial (fshift) in place."""
 
-    f_res, fshift_res = _nbnxm_4x4_qstab_lj_force_arrays(
+    _nbnxm_4x4_qstab_lj_force_arrays(
         x,
         q,
         atom_type,
@@ -461,9 +466,9 @@ def gromacs(
         rcut,
         tab_coul_scale,
         min_distance_squared,
+        f,
+        fshift,
     )
-    f[:] = f_res
-    fshift[:] = fshift_res
 
 
 def _nbnxm_4x4_qstab_lj_force_arrays(
@@ -484,11 +489,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
     rcut,
     tab_coul_scale,
     min_distance_squared,
+    f,
+    fshift,
 ):
-    n_atoms = x.shape[0]
-    f = np.zeros((n_atoms, 3), dtype=np.float64)
-    fshift = np.zeros_like(shift_vec, dtype=np.float64)
-
     rcut2 = rcut * rcut
 
     for ci_entry in range(ci_cluster.shape[0]):
@@ -503,15 +506,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
         do_coul = (flags & CI_DO_COUL) != 0
         half_lj = ((flags & CI_HALF_LJ) != 0 or not do_lj) and do_coul
 
-        xi = np.zeros((UNROLLI, 3), dtype=np.float64)
+        xi = x[ci * UNROLLI:(ci + 1) * UNROLLI, :] + shift_vec[ish, :]
+        qi = epsfac * q[ci * UNROLLI:(ci + 1) * UNROLLI]
         fi = np.zeros((UNROLLI, 3), dtype=np.float64)
-        qi = np.zeros(UNROLLI, dtype=np.float64)
-
-        for i in range(UNROLLI):
-            ai = ci * UNROLLI + i
-            for d in range(3):
-                xi[i, d] = x[ai, d] + shift_vec[ish, d]
-            qi[i] = epsfac * q[ai]
 
         cjind = cjind0
 
@@ -565,13 +562,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
             )
             cjind += 1
 
+        f[ci * UNROLLI:(ci + 1) * UNROLLI, :] += fi
         for i in range(UNROLLI):
-            ai = ci * UNROLLI + i
-            for d in range(3):
-                f[ai, d] += fi[i, d]
-                fshift[ish, d] += fi[i, d]
-
-    return f, fshift
+            fshift[ish, :] += fi[i, :]
 
 
 def _inner_4x4(
@@ -596,6 +589,11 @@ def _inner_4x4(
     rcut2,
     min_distance_squared,
 ):
+    # NOTE: a fully vectorized (UNROLLI, UNROLLJ) rewrite of this tap was built and verified
+    # bit-identical (c/c++/fortran/numba/jax/dace all ok), but pythran's compile time exploded
+    # past 5+ minutes on the branchy (do_lj/do_coul/half_lj/check_exclusions) array-temporary
+    # version, against a few seconds for this scalar form -- reverted to keep pythran's existing
+    # native support intact rather than trade one backend for another.
     for i in range(UNROLLI):
         ai = ci * UNROLLI + i
         type_i = int(atom_type[ai])
