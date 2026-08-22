@@ -164,22 +164,29 @@ runs:
         # stream.h), so a plain shallow clone builds an SDFG straight into
         # "fatal error: ... blockingconcurrentqueue.h: No such file or directory".
         #
-        # PINNED TO A SHA, not to the branch tip. tests/test_dace_numeric_agreement.py ratchets
-        # NUMERIC_BAD in BOTH directions, and a ratchet over a dependency that moves under it is a
-        # coin flip: `extended` advancing between two runs attributes dace's changes to whichever
-        # optarena commit was in flight, and a "healed" kernel forces a deletion that the next dace
-        # commit undoes. This tree has already lost a gate that way -- a shared dace moving mid-run
-        # faked ~40 failures. Bump DACE_SHA in its own commit and expect NUMERIC_BAD to move with it.
+        # TRACKS THE extended BRANCH TIP, deliberately unpinned: this suite grades kernels through
+        # dace, and the emitters target what extended actually supports today (np.where and
+        # np.broadcast_to reach the Merge/Broadcast library nodes there, so the emitter does not
+        # desugar them). A pin froze that capability set and made the emitter work around gaps the
+        # branch had already closed.
         #
-        # A --depth 1 clone cannot check out an arbitrary SHA, hence init + fetch of that one commit.
+        # The cost is real: tests/test_dace_numeric_agreement.py ratchets NUMERIC_BAD in BOTH
+        # directions, so a dace commit landing between two runs is attributed to whichever optarena
+        # commit was in flight, and a "healed" kernel forces a deletion the next dace commit may
+        # undo. A shared dace moving mid-run has faked ~40 failures here before. When a red is not
+        # explained by the optarena diff, compare the resolved sha echoed below across the two runs
+        # BEFORE touching a ratchet list.
+        #
+        # To pin for a bisect, set DACE_SHA to a commit: it is fetched in place of the branch.
+        # A --depth 1 fetch takes a branch name or a SHA, hence init + fetch of that one ref.
         # --recurse-submodules stays MANDATORY either way: dace vendors its runtime headers as
         # submodules (external/moodycamel/blockingconcurrentqueue.h is included by
         # dace/runtime/include/dace/stream.h), so without them every SDFG build dies on a missing header.
-        DACE_SHA="${DACE_SHA:-ae8cb308488f1257fe6be172677627b2e450cbd6}"
+        DACE_REF="${DACE_SHA:-extended}"
         mkdir -p "$RUNNER_TEMP/dace"
         git -C "$RUNNER_TEMP/dace" init -q
         git -C "$RUNNER_TEMP/dace" remote add origin https://github.com/spcl/dace.git
-        git -C "$RUNNER_TEMP/dace" fetch -q --depth 1 origin "$DACE_SHA"
+        git -C "$RUNNER_TEMP/dace" fetch -q --depth 1 origin "$DACE_REF"
         git -C "$RUNNER_TEMP/dace" checkout -q FETCH_HEAD
         git -C "$RUNNER_TEMP/dace" submodule update --init --recursive --depth 1
         pip_retry -e "$RUNNER_TEMP/dace"
