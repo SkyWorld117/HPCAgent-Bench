@@ -143,6 +143,59 @@ def patch_pp_collectives() -> None:
 
 SPLIT_PP_COLLECTIVES = os.environ.get("VLLM_PP_COLLECTIVE_SPLIT", "1") == "1"
 
+# Async scheduling's sampled-token broadcast, moved off the P2P communicator.
+#
+# It is the ONLY collective vLLM's V1 runner puts on pp.device_group, and that group otherwise
+# carries just the inter-stage P2P, which torch serves from per-pair 2-rank communicators. Under
+# lazy init the first decode therefore bootstraps a 4-rank and a 2-rank communicator at once and
+# rccl bootstrap.cc reports "Message truncated : received 1024 bytes instead of 512" (nranks x
+# 256). Upstream's V2 runner already avoids this with a sibling group of its own
+# (v1/worker/gpu/pp_utils.PPHandler); this gives the V1 path the same treatment.
+#
+# The sibling is the one patch_pp_collectives already builds inside GroupCoordinator.__init__, so
+# nothing is created after startup -- which is the whole point, a communicator minted during
+# serving is what collides. Same membership, so the global src ranks still address the same
+# processes.
+#
+# OFF by default: --no-async-scheduling removes the broadcast entirely and is the proven baseline.
+# Turn this on to run WITH async scheduling, which spares PP a scheduler round trip per decode
+# step (v1/core/sched/scheduler.py sends sampled tokens back when async is off).
+PP_TOKEN_BROADCAST_SIBLING = os.environ.get("VLLM_PP_TOKEN_BROADCAST_SIBLING", "0") == "1"
+
+
+def patch_pp_token_broadcast() -> None:
+    """Run the two async-scheduling token-broadcast methods against the pp sibling communicator."""
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    def on_sibling(method):
+        # Both methods read `pp.device_group` inline, so the attribute is the only seam -- the
+        # same one on_collective_group uses. Single-threaded per rank on this path.
+        def wrapper(self, *args, **kwargs):
+            pp = get_pp_group()
+            # Sentinel-valued on every coordinator by group_init, and None on a group that got no
+            # sibling -- a pp world_size of 1, where there is no broadcast to move anyway.
+            sibling = pp.collective_group
+            if sibling is None:
+                return method(self, *args, **kwargs)
+            main_group = pp.device_group
+            pp.device_group = sibling
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                pp.device_group = main_group
+
+        return wrapper
+
+    GPUModelRunner._pp_broadcast_prev_sampled_token_ids = on_sibling(
+        GPUModelRunner._pp_broadcast_prev_sampled_token_ids)
+    GPUModelRunner._pp_receive_prev_sampled_token_ids_to_input_batch = on_sibling(
+        GPUModelRunner._pp_receive_prev_sampled_token_ids_to_input_batch)
+    print("[external-eager-pg] pp sampled-token broadcast routed onto the sibling communicator",
+          file=sys.stderr,
+          flush=True)
+
+
 # The MLA chunked-prefill context path transposes its log-sum-exp on ROCm.
 #
 # `mask_empty_context` (defined in v1/attention/ops/triton_merge_attn_states.py) unpacks lse as
@@ -256,6 +309,13 @@ def eager_init_and_split(*args, **kwargs):
     if FIX_MLA_LSE_LAYOUT and "mla_lse_layout" not in INSTALLED:
         patch_mla_empty_context_mask()
         INSTALLED.add("mla_lse_layout")
+    if PP_TOKEN_BROADCAST_SIBLING and "pp_token_broadcast" not in INSTALLED:
+        # The sibling it routes onto is built by patch_pp_collectives. Without that there is no
+        # second communicator and this would silently leave the broadcast where it was.
+        if not SPLIT_PP_COLLECTIVES:
+            raise RuntimeError("VLLM_PP_TOKEN_BROADCAST_SIBLING=1 needs VLLM_PP_COLLECTIVE_SPLIT=1")
+        patch_pp_token_broadcast()
+        INSTALLED.add("pp_token_broadcast")
     if METADATA_ON_DEVICE and "metadata_on_device" not in INSTALLED:
         patch_object_transfer_onto_device()
         INSTALLED.add("metadata_on_device")
