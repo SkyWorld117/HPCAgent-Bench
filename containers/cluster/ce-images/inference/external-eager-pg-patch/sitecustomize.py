@@ -154,12 +154,72 @@ def patch_pp_collectives() -> None:
 
 SPLIT_PP_COLLECTIVES = os.environ.get("VLLM_PP_COLLECTIVE_SPLIT", "1") == "1"
 
+# The MLA chunked-prefill context path transposes its log-sum-exp on ROCm.
+#
+# `mask_empty_context` (v1/attention/ops/triton_merge_attn_states.py) documents and unpacks
+# `lse` as [num_heads, num_tokens], then sizes its mask from that second dimension:
+#
+#     num_heads, num_tokens = lse.shape
+#     is_empty = torch.zeros(num_tokens, ...)
+#     output.masked_fill_(is_empty[:, None, None], 0.0)   # output is [num_tokens, num_heads, d]
+#
+# That holds for vllm-flash-attn. ROCm takes the other branch of
+# `_flash_attn_varlen_diff_headdims` -- upstream flash_attn via `return_attn_probs` -- which
+# hands back [num_tokens, num_heads]. The unpack is then reversed, `is_empty` comes out sized
+# num_heads, and the fill raises:
+#
+#     RuntimeError: The expanded size of the tensor (3591) must match the existing size (16)
+#     Target sizes: [3591, 16, 192].  Tensor sizes: [16, 1, 1]
+#
+# 603980 died there ~58 min in, taking all 121 agents with it. The branch is only entered when
+# `chunked_context.has_empty_context[i]` -- a chunk in which some prefill has run out of context
+# while others have not -- so it needs concurrent prefills of UNEQUAL context length spread over
+# more than one chunk. `chunked_prefill_workspace_size` is capped at 64k tokens in code (no CLI
+# knob) and split `// num_prefills_with_context`, so a busy server chunks small and hits this
+# constantly. There is no config escape: on ROCm the prefill backend priority is
+# [ROCM_AITER_FA, FLASH_ATTN], and aiter is off because its master switch breaks MLA prefill on
+# gfx942, so FLASH_ATTN is the only reachable backend.
+#
+# The wrapper transposes ONLY the view handed to this helper. The caller keeps its own reference
+# for `merge_attn_states` further down, which already handles the ROCm layout -- runs survive an
+# hour of all-non-empty chunks before reaching this branch, so that path is not in question.
+# Transposing a view costs nothing: the helper passes lse.stride(0)/stride(1) straight to the
+# triton kernel, and a transposed view carries exactly the strides that indexing wants.
+#
+# Fail-safe by construction: the swap only fires on the unambiguous transposed shape, and if the
+# layout were ever something else the original raises exactly as it does today.
+FIX_MLA_LSE_LAYOUT = os.environ.get("VLLM_FIX_MLA_LSE_LAYOUT", "1") == "1"
+
+
+def patch_mla_empty_context_mask() -> None:
+    """Point mla_attention's `mask_empty_context` name at a layout-tolerant wrapper.
+
+    mla_attention does `from ... import mask_empty_context`, so the name has to be rebound in
+    THAT module -- patching the defining module would leave the existing binding untouched.
+    """
+    from vllm.model_executor.layers.attention import mla_attention
+
+    original = mla_attention.mask_empty_context
+
+    def mask_empty_context(lse, output, query_start_loc, context_start_loc):
+        # [num_tokens, num_heads] against an output of [num_tokens, num_heads, head_dim]. The
+        # square case is genuinely ambiguous, so leave it to the original rather than guess.
+        if (lse.ndim == 2 and output.ndim == 3 and lse.shape[0] == output.shape[0] and lse.shape[1] == output.shape[1]
+                and output.shape[0] != output.shape[1]):
+            lse = lse.transpose(0, 1)
+        return original(lse, output, query_start_loc, context_start_loc)
+
+    mla_attention.mask_empty_context = mask_empty_context
+    print("[external-eager-pg] mla mask_empty_context: ROCm lse layout tolerated", file=sys.stderr, flush=True)
+
 
 def eager_init_and_split(*args, **kwargs):
     """`init_process_group`, then install the pp collective split on top of the fresh world."""
     result = eager_init_process_group(*args, **kwargs)
     if SPLIT_PP_COLLECTIVES:
         patch_pp_collectives()
+    if FIX_MLA_LSE_LAYOUT:
+        patch_mla_empty_context_mask()
     return result
 
 
