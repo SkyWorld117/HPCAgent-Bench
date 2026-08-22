@@ -154,28 +154,22 @@ def yppm(q, courant, dya, yflux, al, nhalo, ni, nj, nk, jord, grid_type):
 # fvtp2d helper stencils (pyfv3/stencils/fvtp2d.py)
 def q_i_stencil(q, area, y_area_flux, q_advected_along_y, q_i, nhalo, ni, nj, nk):
     """FV3 eq 4.18: q_i = f(q) from the y-advected mean (interior + 3-halo j)."""
-    nx = nhalo + ni + nhalo
     ny = nhalo + nj + nhalo
-    for i in range(0, nx):
-        for j in range(3, ny - 3):
-            for k in range(0, nk):
-                fyy_j = y_area_flux[i, j, k] * q_advected_along_y[i, j, k]
-                fyy_jp1 = y_area_flux[i, j + 1, k] * q_advected_along_y[i, j + 1, k]
-                denom = area[i, j, k] + y_area_flux[i, j, k] - y_area_flux[i, j + 1, k]
-                q_i[i, j, k] = (q[i, j, k] * area[i, j, k] + fyy_j - fyy_jp1) / denom
+    j0, j1 = 3, ny - 3
+    fyy_j = y_area_flux[:, j0:j1, :nk] * q_advected_along_y[:, j0:j1, :nk]
+    fyy_jp1 = y_area_flux[:, j0 + 1:j1 + 1, :nk] * q_advected_along_y[:, j0 + 1:j1 + 1, :nk]
+    denom = area[:, j0:j1, :nk] + y_area_flux[:, j0:j1, :nk] - y_area_flux[:, j0 + 1:j1 + 1, :nk]
+    q_i[:, j0:j1, :nk] = (q[:, j0:j1, :nk] * area[:, j0:j1, :nk] + fyy_j - fyy_jp1) / denom
 
 
 def q_j_stencil(q, area, x_area_flux, fx2, q_j, nhalo, ni, nj, nk):
     """FV3 eq 4.18 (x): q_j = f(q) from the x-advected mean (i in [3, nx-3))."""
     nx = nhalo + ni + nhalo
-    ny = nhalo + nj + nhalo
-    for i in range(3, nx - 3):
-        for j in range(0, ny):
-            for k in range(0, nk):
-                fx1_i = x_area_flux[i, j, k] * fx2[i, j, k]
-                fx1_ip1 = x_area_flux[i + 1, j, k] * fx2[i + 1, j, k]
-                area_with_x_flux = area[i, j, k] + x_area_flux[i, j, k] - x_area_flux[i + 1, j, k]
-                q_j[i, j, k] = (q[i, j, k] * area[i, j, k] + fx1_i - fx1_ip1) / area_with_x_flux
+    i0, i1 = 3, nx - 3
+    fx1_i = x_area_flux[i0:i1, :, :nk] * fx2[i0:i1, :, :nk]
+    fx1_ip1 = x_area_flux[i0 + 1:i1 + 1, :, :nk] * fx2[i0 + 1:i1 + 1, :, :nk]
+    area_with_x_flux = area[i0:i1, :, :nk] + x_area_flux[i0:i1, :, :nk] - x_area_flux[i0 + 1:i1 + 1, :, :nk]
+    q_j[i0:i1, :, :nk] = (q[i0:i1, :, :nk] * area[i0:i1, :, :nk] + fx1_i - fx1_ip1) / area_with_x_flux
 
 
 def final_fluxes(q_ayxa, q_xa, q_axya, q_ya, x_unit_flux, y_unit_flux, x_flux, y_flux, nhalo, ni, nj, nk):
@@ -184,13 +178,12 @@ def final_fluxes(q_ayxa, q_xa, q_axya, q_ya, x_unit_flux, y_unit_flux, x_flux, y
     i_end = nhalo + ni - 1
     j_start = nhalo
     j_end = nhalo + nj - 1
-    for i in range(i_start, i_end + 2):
-        for j in range(j_start, j_end + 2):
-            for k in range(0, nk):
-                if j <= j_end:
-                    x_flux[i, j, k] = 0.5 * (q_ayxa[i, j, k] + q_xa[i, j, k]) * x_unit_flux[i, j, k]
-                if i <= i_end:
-                    y_flux[i, j, k] = 0.5 * (q_axya[i, j, k] + q_ya[i, j, k]) * y_unit_flux[i, j, k]
+    x_flux[i_start:i_end + 2, j_start:j_end + 1, :nk] = (
+        0.5 * (q_ayxa[i_start:i_end + 2, j_start:j_end + 1, :nk] + q_xa[i_start:i_end + 2, j_start:j_end + 1, :nk]) *
+        x_unit_flux[i_start:i_end + 2, j_start:j_end + 1, :nk])
+    y_flux[i_start:i_end + 1, j_start:j_end + 2, :nk] = (
+        0.5 * (q_axya[i_start:i_end + 1, j_start:j_end + 2, :nk] + q_ya[i_start:i_end + 1, j_start:j_end + 2, :nk]) *
+        y_unit_flux[i_start:i_end + 1, j_start:j_end + 2, :nk])
 
 
 # copy_corners (pyfv3/stencils/copy_corners.py) -- cubed-sphere corner halo
@@ -283,10 +276,8 @@ def d2_damp(q, d2, damp, nhalo, ni, nj, nk):
     i_end = nhalo + ni - 1
     j_start = nhalo
     j_end = nhalo + nj - 1
-    for i in range(i_start - 1, i_end + 2):
-        for j in range(j_start - 1, j_end + 2):
-            for k in range(0, nk):
-                d2[i, j, k] = damp[k] * q[i, j, k]
+    d2[i_start - 1:i_end + 2, j_start - 1:j_end + 2, :nk] = (
+        damp[:nk] * q[i_start - 1:i_end + 2, j_start - 1:j_end + 2, :nk])
 
 
 def fx_calc(d2, del6_v, fx, nhalo, ni, nj, nk):
@@ -295,10 +286,9 @@ def fx_calc(d2, del6_v, fx, nhalo, ni, nj, nk):
     i_end = nhalo + ni - 1
     j_start = nhalo
     j_end = nhalo + nj - 1
-    for i in range(i_start, i_end + 2):
-        for j in range(j_start, j_end + 1):
-            for k in range(0, nk):
-                fx[i, j, k] = del6_v[i, j, k] * (d2[i - 1, j, k] - d2[i, j, k])
+    fx[i_start:i_end + 2, j_start:j_end + 1, :nk] = (
+        del6_v[i_start:i_end + 2, j_start:j_end + 1, :nk] *
+        (d2[i_start - 1:i_end + 1, j_start:j_end + 1, :nk] - d2[i_start:i_end + 2, j_start:j_end + 1, :nk]))
 
 
 def fy_calc(d2, del6_u, fy, nhalo, ni, nj, nk):
@@ -307,10 +297,9 @@ def fy_calc(d2, del6_u, fy, nhalo, ni, nj, nk):
     i_end = nhalo + ni - 1
     j_start = nhalo
     j_end = nhalo + nj - 1
-    for i in range(i_start, i_end + 1):
-        for j in range(j_start, j_end + 2):
-            for k in range(0, nk):
-                fy[i, j, k] = del6_u[i, j, k] * (d2[i, j - 1, k] - d2[i, j, k])
+    fy[i_start:i_end + 1, j_start:j_end + 2, :nk] = (
+        del6_u[i_start:i_end + 1, j_start:j_end + 2, :nk] *
+        (d2[i_start:i_end + 1, j_start - 1:j_end + 1, :nk] - d2[i_start:i_end + 1, j_start:j_end + 2, :nk]))
 
 
 def add_diffusive(fx, fx2, fy, fy2, nhalo, ni, nj, nk):
@@ -319,45 +308,35 @@ def add_diffusive(fx, fx2, fy, fy2, nhalo, ni, nj, nk):
     i_end = nhalo + ni - 1
     j_start = nhalo
     j_end = nhalo + nj - 1
-    for i in range(i_start, i_end + 2):
-        for j in range(j_start, j_end + 2):
-            for k in range(0, nk):
-                fx[i, j, k] = fx[i, j, k] + fx2[i, j, k]
-                fy[i, j, k] = fy[i, j, k] + fy2[i, j, k]
+    fx[i_start:i_end + 2, j_start:j_end + 2, :nk] += fx2[i_start:i_end + 2, j_start:j_end + 2, :nk]
+    fy[i_start:i_end + 2, j_start:j_end + 2, :nk] += fy2[i_start:i_end + 2, j_start:j_end + 2, :nk]
 
 
 def d2_damp_full(q, d2, damp, i0, j0, di, dj, nk):
     """``d2_damp_interval`` (nord!=0): d2 = damp*q over a rectangular block; damp is a per-k column scalar."""
-    for i in range(i0, i0 + di):
-        for j in range(j0, j0 + dj):
-            for k in range(0, nk):
-                d2[i, j, k] = damp[k] * q[i, j, k]
+    d2[i0:i0 + di, j0:j0 + dj, :nk] = damp[:nk] * q[i0:i0 + di, j0:j0 + dj, :nk]
 
 
 def fx_calc_full(d2, del6_v, fx, i0, j0, di, dj, nk, neg):
     """``fx_calculation``/``fx_calculation_neg`` over [i0,i0+di) x [j0,j0+dj)."""
     s = -1.0 if neg else 1.0
-    for i in range(i0, i0 + di):
-        for j in range(j0, j0 + dj):
-            for k in range(0, nk):
-                fx[i, j, k] = s * del6_v[i, j, k] * (d2[i - 1, j, k] - d2[i, j, k])
+    fx[i0:i0 + di, j0:j0 + dj, :nk] = (s * del6_v[i0:i0 + di, j0:j0 + dj, :nk] *
+                                       (d2[i0 - 1:i0 + di - 1, j0:j0 + dj, :nk] - d2[i0:i0 + di, j0:j0 + dj, :nk]))
 
 
 def fy_calc_full(d2, del6_u, fy, i0, j0, di, dj, nk, neg):
     """``fy_calculation``/``fy_calculation_neg`` over [i0,i0+di) x [j0,j0+dj)."""
     s = -1.0 if neg else 1.0
-    for i in range(i0, i0 + di):
-        for j in range(j0, j0 + dj):
-            for k in range(0, nk):
-                fy[i, j, k] = s * del6_u[i, j, k] * (d2[i, j - 1, k] - d2[i, j, k])
+    fy[i0:i0 + di, j0:j0 + dj, :nk] = (s * del6_u[i0:i0 + di, j0:j0 + dj, :nk] *
+                                       (d2[i0:i0 + di, j0 - 1:j0 + dj - 1, :nk] - d2[i0:i0 + di, j0:j0 + dj, :nk]))
 
 
 def d2_highorder(fx, fy, rarea, d2, i0, j0, di, dj, nk):
     """``d2_highorder_stencil``: d2 = (fx-fx[1,0,0]+fy-fy[0,1,0])*rarea over the block."""
-    for i in range(i0, i0 + di):
-        for j in range(j0, j0 + dj):
-            for k in range(0, nk):
-                d2[i, j, k] = (fx[i, j, k] - fx[i + 1, j, k] + fy[i, j, k] - fy[i, j + 1, k]) * rarea[i, j, k]
+    d2[i0:i0 + di, j0:j0 + dj, :nk] = (
+        (fx[i0:i0 + di, j0:j0 + dj, :nk] - fx[i0 + 1:i0 + di + 1, j0:j0 + dj, :nk] +
+         fy[i0:i0 + di, j0:j0 + dj, :nk] - fy[i0:i0 + di, j0 + 1:j0 + dj + 1, :nk]) *
+        rarea[i0:i0 + di, j0:j0 + dj, :nk])
 
 
 def delnflux_higher_order(q, fx, fy, del6_v, del6_u, rarea, damp, fx2, fy2, d2, nord, nhalo, ni, nj, nk):
@@ -412,46 +391,37 @@ def delnflux_nord0(q, fx, fy, del6_v, del6_u, damp, fx2, fy2, d2, nhalo, ni, nj,
 # don't need d2a2c_vect winds or corner-fill; grid_type<3 edge-region blocks are NOT ported.
 def geoadjust_ut(ut, dy, sin_sg3, sin_sg1, dt2, nhalo, ni, nj, nk):
     """``geoadjust_ut``: c-grid contravariant u*dx -> upwind volume flux."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                u = ut[i, j, k]
-                if u > 0.0:
-                    ut[i, j, k] = dt2 * u * dy[i, j, k] * sin_sg3[i - 1, j, k]
-                else:
-                    ut[i, j, k] = dt2 * u * dy[i, j, k] * sin_sg1[i, j, k]
+    # i-1 wraps at i=0 (doubly-periodic C-grid), matching the scalar loop's negative-index read.
+    u = ut[:, :, :nk]
+    sin_sg3_im1 = np.roll(sin_sg3[:, :, :nk], 1, axis=0)
+    ut[:, :, :nk] = np.where(u > 0.0, dt2 * u * dy[:, :, :nk] * sin_sg3_im1,
+                             dt2 * u * dy[:, :, :nk] * sin_sg1[:, :, :nk])
 
 
 def geoadjust_vt(vt, dx, sin_sg4, sin_sg2, dt2, nhalo, ni, nj, nk):
     """``geoadjust_vt``: y-direction mirror of geoadjust_ut. In place."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                v = vt[i, j, k]
-                if v > 0.0:
-                    vt[i, j, k] = dt2 * v * dx[i, j, k] * sin_sg4[i, j - 1, k]
-                else:
-                    vt[i, j, k] = dt2 * v * dx[i, j, k] * sin_sg2[i, j, k]
+    # j-1 wraps at j=0 (doubly-periodic C-grid), matching the scalar loop's negative-index read.
+    v = vt[:, :, :nk]
+    sin_sg4_jm1 = np.roll(sin_sg4[:, :, :nk], 1, axis=1)
+    vt[:, :, :nk] = np.where(v > 0.0, dt2 * v * dx[:, :, :nk] * sin_sg4_jm1,
+                             dt2 * v * dx[:, :, :nk] * sin_sg2[:, :, :nk])
 
 
 def compute_nonhydro_fluxes_x(delp, pt, utc, w, fx, fx1, fx2, nhalo, ni, nj, nk):
     """``compute_nonhydrostatic_fluxes_x``: first-order upwind x-fluxes of delp, pt and w."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                c = utc[i, j, k]
-                if c > 0.0:
-                    f1 = delp[i - 1, j, k]
-                    f = pt[i - 1, j, k]
-                    f2 = w[i - 1, j, k]
-                else:
-                    f1 = delp[i, j, k]
-                    f = pt[i, j, k]
-                    f2 = w[i, j, k]
-                f1 = c * f1
-                fx1[i, j, k] = f1
-                fx[i, j, k] = f1 * f
-                fx2[i, j, k] = f1 * f2
+    # i-1 wraps at i=0 (doubly-periodic C-grid), matching the scalar loop's negative-index read.
+    c = utc[:, :, :nk]
+    up = c > 0.0
+    delp_im1 = np.roll(delp[:, :, :nk], 1, axis=0)
+    pt_im1 = np.roll(pt[:, :, :nk], 1, axis=0)
+    w_im1 = np.roll(w[:, :, :nk], 1, axis=0)
+    f1_src = np.where(up, delp_im1, delp[:, :, :nk])
+    f_src = np.where(up, pt_im1, pt[:, :, :nk])
+    f2_src = np.where(up, w_im1, w[:, :, :nk])
+    f1 = c * f1_src
+    fx1[:, :, :nk] = f1
+    fx[:, :, :nk] = f1 * f_src
+    fx2[:, :, :nk] = f1 * f2_src
 
 
 def transportdelp(delp, pt, vtc, w, rarea, fx, fx1, fx2, delpc, ptc, wc, nhalo, ni, nj, nk):
@@ -494,13 +464,14 @@ def transportdelp(delp, pt, vtc, w, rarea, fx, fx1, fx2, delpc, ptc, wc, nhalo, 
 
 def kinetic_energy_vorticity_interior(uc, vc, ua, va, ke, vort, dt2, nhalo, ni, nj, nk):
     """Interior of the second ``transportdelp_...kineticenergy`` block: upwind-biased kinetic energy/vorticity."""
-    for i in range(0, nhalo + ni + nhalo - 1):
-        for j in range(0, nhalo + nj + nhalo - 1):
-            for k in range(0, nk):
-                kk = uc[i, j, k] if ua[i, j, k] > 0.0 else uc[i + 1, j, k]
-                vv = vc[i, j, k] if va[i, j, k] > 0.0 else vc[i, j + 1, k]
-                ke[i, j, k] = 0.5 * dt2 * (ua[i, j, k] * kk + va[i, j, k] * vv)
-                vort[i, j, k] = vv
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    ua_b = ua[:nx - 1, :ny - 1, :nk]
+    va_b = va[:nx - 1, :ny - 1, :nk]
+    kk = np.where(ua_b > 0.0, uc[:nx - 1, :ny - 1, :nk], uc[1:nx, :ny - 1, :nk])
+    vv = np.where(va_b > 0.0, vc[:nx - 1, :ny - 1, :nk], vc[:nx - 1, 1:ny, :nk])
+    ke[:nx - 1, :ny - 1, :nk] = 0.5 * dt2 * (ua_b * kk + va_b * vv)
+    vort[:nx - 1, :ny - 1, :nk] = vv
 
 
 def circulation_cgrid_interior(uc, vc, dxc, dyc, vort_c, nhalo, ni, nj, nk):
@@ -517,32 +488,35 @@ def circulation_cgrid_interior(uc, vc, dxc, dyc, vort_c, nhalo, ni, nj, nk):
 
 def absolute_vorticity(vort, fC, rarea_c, nhalo, ni, nj, nk):
     """``absolute_vorticity``: vort = fC + rarea_c*vort. In place."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                vort[i, j, k] = fC[i, j, k] + rarea_c[i, j, k] * vort[i, j, k]
+    vort[:, :, :nk] = fC[:, :, :nk] + rarea_c[:, :, :nk] * vort[:, :, :nk]
 
 
 def update_x_velocity_interior(vorticity, ke, velocity, velocity_c, cosa, sina, rdxc, dt2, nhalo, ni, nj, nk):
     """Interior of ``update_x_velocity`` (grid_type>=3): updates velocity_c from vorticity flux + ke gradient."""
-    for i in range(1, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo - 1):
-            for k in range(0, nk):
-                tmp_flux = dt2 * (velocity[i, j, k] - velocity_c[i, j, k] * cosa[i, j, k]) / sina[i, j, k]
-                flux = vorticity[i, j, k] if tmp_flux > 0.0 else vorticity[i, j + 1, k]
-                velocity_c[i, j, k] = (velocity_c[i, j, k] + tmp_flux * flux + rdxc[i, j, k] *
-                                       (ke[i - 1, j, k] - ke[i, j, k]))
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    i0, i1 = 1, nx
+    j0, j1 = 0, ny - 1
+    vel = velocity[i0:i1, j0:j1, :nk]
+    vel_c = velocity_c[i0:i1, j0:j1, :nk]
+    tmp_flux = dt2 * (vel - vel_c * cosa[i0:i1, j0:j1, :nk]) / sina[i0:i1, j0:j1, :nk]
+    flux = np.where(tmp_flux > 0.0, vorticity[i0:i1, j0:j1, :nk], vorticity[i0:i1, j0 + 1:j1 + 1, :nk])
+    velocity_c[i0:i1, j0:j1, :nk] = (vel_c + tmp_flux * flux + rdxc[i0:i1, j0:j1, :nk] *
+                                     (ke[i0 - 1:i1 - 1, j0:j1, :nk] - ke[i0:i1, j0:j1, :nk]))
 
 
 def update_y_velocity_interior(vorticity, ke, velocity, velocity_c, cosa, sina, rdyc, dt2, nhalo, ni, nj, nk):
     """Interior of ``update_y_velocity`` (grid_type>=3): y-direction mirror of update_x_velocity_interior."""
-    for i in range(0, nhalo + ni + nhalo - 1):
-        for j in range(1, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                tmp_flux = dt2 * (velocity[i, j, k] - velocity_c[i, j, k] * cosa[i, j, k]) / sina[i, j, k]
-                flux = vorticity[i, j, k] if tmp_flux > 0.0 else vorticity[i + 1, j, k]
-                velocity_c[i, j, k] = (velocity_c[i, j, k] - tmp_flux * flux + rdyc[i, j, k] *
-                                       (ke[i, j - 1, k] - ke[i, j, k]))
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    i0, i1 = 0, nx - 1
+    j0, j1 = 1, ny
+    vel = velocity[i0:i1, j0:j1, :nk]
+    vel_c = velocity_c[i0:i1, j0:j1, :nk]
+    tmp_flux = dt2 * (vel - vel_c * cosa[i0:i1, j0:j1, :nk]) / sina[i0:i1, j0:j1, :nk]
+    flux = np.where(tmp_flux > 0.0, vorticity[i0:i1, j0:j1, :nk], vorticity[i0 + 1:i1 + 1, j0:j1, :nk])
+    velocity_c[i0:i1, j0:j1, :nk] = (vel_c - tmp_flux * flux + rdyc[i0:i1, j0:j1, :nk] *
+                                     (ke[i0:i1, j0 - 1:j1 - 1, :nk] - ke[i0:i1, j0:j1, :nk]))
 
 
 def divergence_corner_gt4(u, v, dxc, dyc, rarea_c, divg_d, nhalo, ni, nj, nk):
@@ -697,29 +671,24 @@ def c_sw_gt4(delp, pt, u, v, w, uc, vc, ua, va, ut, vt, divgd, omga, cosa_s, cos
 # don't need fxadv or divergence_damping; the full d_sw(...) composition is NOT ported.
 def flux_capacitor(cx, cy, xflux, yflux, crx_adv, cry_adv, fx, fy, nhalo, ni, nj, nk):
     """``flux_capacitor``: accumulates cx/cy courant and xflux/yflux mass flux in place."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                cx[i, j, k] = cx[i, j, k] + crx_adv[i, j, k]
-                cy[i, j, k] = cy[i, j, k] + cry_adv[i, j, k]
-                xflux[i, j, k] = xflux[i, j, k] + fx[i, j, k]
-                yflux[i, j, k] = yflux[i, j, k] + fy[i, j, k]
+    cx[:, :, :nk] += crx_adv[:, :, :nk]
+    cy[:, :, :nk] += cry_adv[:, :, :nk]
+    xflux[:, :, :nk] += fx[:, :, :nk]
+    yflux[:, :, :nk] += fy[:, :, :nk]
 
 
 def heat_diss(fx2, fy2, w, rarea, heat_source, diss_est, dw, damp_w, ke_bg, dt, nhalo, ni, nj, nk):
     """``heat_diss``: heat generation from damping of vertical wind (per-k column scalars damp_w/ke_bg)."""
-    for i in range(0, nhalo + ni + nhalo - 1):
-        for j in range(0, nhalo + nj + nhalo - 1):
-            for k in range(0, nk):
-                heat_source[i, j, k] = 0.0
-                diss_est[i, j, k] = 0.0
-                if damp_w[k] > 1e-5:
-                    dd8 = ke_bg[k] * abs(dt)
-                    d = (fx2[i, j, k] - fx2[i + 1, j, k] + fy2[i, j, k] - fy2[i, j + 1, k]) * rarea[i, j, k]
-                    dw[i, j, k] = d
-                    hs = dd8 - d * (w[i, j, k] + 0.5 * d)
-                    heat_source[i, j, k] = hs
-                    diss_est[i, j, k] = hs
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    mask = damp_w[:nk] > 1e-5
+    dd8 = ke_bg[:nk] * abs(dt)
+    d = ((fx2[:nx - 1, :ny - 1, :nk] - fx2[1:nx, :ny - 1, :nk] + fy2[:nx - 1, :ny - 1, :nk] -
+          fy2[:nx - 1, 1:ny, :nk]) * rarea[:nx - 1, :ny - 1, :nk])
+    hs = dd8 - d * (w[:nx - 1, :ny - 1, :nk] + 0.5 * d)
+    heat_source[:nx - 1, :ny - 1, :nk] = np.where(mask, hs, 0.0)
+    diss_est[:nx - 1, :ny - 1, :nk] = np.where(mask, hs, 0.0)
+    dw[:nx - 1, :ny - 1, :nk] = np.where(mask, d, dw[:nx - 1, :ny - 1, :nk])
 
 
 def apply_fluxes(q, delp, gx, gy, rarea, nhalo, ni, nj, nk):
@@ -749,14 +718,10 @@ def apply_pt_delp_fluxes_interior(pt_x_flux, pt_y_flux, rarea, delp_x_flux, delp
 
 def adjust_w_and_qcon(w, delp, dw, q_con, damp_w, nhalo, ni, nj, nk):
     """``adjust_w_and_qcon``: w /= delp (+= dw if damp_w>1e-5); q_con /= delp. In place."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                wv = w[i, j, k] / delp[i, j, k]
-                if damp_w[k] > 1e-5:
-                    wv = wv + dw[i, j, k]
-                w[i, j, k] = wv
-                q_con[i, j, k] = q_con[i, j, k] / delp[i, j, k]
+    mask = damp_w[:nk] > 1e-5
+    wv = w[:, :, :nk] / delp[:, :, :nk]
+    w[:, :, :nk] = np.where(mask, wv + dw[:, :, :nk], wv)
+    q_con[:, :, :nk] = q_con[:, :, :nk] / delp[:, :, :nk]
 
 
 def compute_vorticity(u, v, dx, dy, rarea, vorticity, nhalo, ni, nj, nk):
@@ -772,10 +737,7 @@ def compute_vorticity(u, v, dx, dy, rarea, vorticity, nhalo, ni, nj, nk):
 
 def rel_vorticity_to_abs(relative_vorticity, f0, absolute_vorticity, nhalo, ni, nj, nk):
     """``rel_vorticity_to_abs``: absolute = relative + f0 (full domain)."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                absolute_vorticity[i, j, k] = relative_vorticity[i, j, k] + f0[i, j, k]
+    absolute_vorticity[:, :, :nk] = relative_vorticity[:, :, :nk] + f0[:, :, :nk]
 
 
 def u_and_v_from_ke_interior(ke, fx, fy, u, v, dx, dy, nhalo, ni, nj, nk):
@@ -1157,21 +1119,21 @@ def diffusive_damp(fx, fx2, fy, fy2, mass, damp, nhalo, ni, nj, nk):
     """``diffusive_damp``: mass-weighted addition of the diffusive flux onto the advective flux fx/fy."""
     i_start, i_end = nhalo, nhalo + ni - 1
     j_start, j_end = nhalo, nhalo + nj - 1
-    for i in range(i_start, i_end + 2):
-        for j in range(j_start, j_end + 2):
-            for k in range(0, nk):
-                fx[i, j, k] = fx[i, j, k] + 0.5 * damp[k] * (mass[i - 1, j, k] + mass[i, j, k]) * fx2[i, j, k]
-                fy[i, j, k] = fy[i, j, k] + 0.5 * damp[k] * (mass[i, j - 1, k] + mass[i, j, k]) * fy2[i, j, k]
+    fx[i_start:i_end + 2, j_start:j_end + 2, :nk] += (
+        0.5 * damp[:nk] *
+        (mass[i_start - 1:i_end + 1, j_start:j_end + 2, :nk] + mass[i_start:i_end + 2, j_start:j_end + 2, :nk]) *
+        fx2[i_start:i_end + 2, j_start:j_end + 2, :nk])
+    fy[i_start:i_end + 2, j_start:j_end + 2, :nk] += (
+        0.5 * damp[:nk] *
+        (mass[i_start:i_end + 2, j_start - 1:j_end + 1, :nk] + mass[i_start:i_end + 2, j_start:j_end + 2, :nk]) *
+        fy2[i_start:i_end + 2, j_start:j_end + 2, :nk])
 
 
 def copy_stencil_interval(q_in, q_out, nhalo, ni, nj, nk):
     """``copy_stencil_interval`` (nord==0): q_out = q_in (the DelnFluxNoSG mass!=None preamble)."""
     i_start, i_end = nhalo, nhalo + ni - 1
     j_start, j_end = nhalo, nhalo + nj - 1
-    for i in range(i_start - 1, i_end + 2):
-        for j in range(j_start - 1, j_end + 2):
-            for k in range(0, nk):
-                q_out[i, j, k] = q_in[i, j, k]
+    q_out[i_start - 1:i_end + 2, j_start - 1:j_end + 2, :nk] = q_in[i_start - 1:i_end + 2, j_start - 1:j_end + 2, :nk]
 
 
 def delnflux_nord0_mass(q, fx, fy, del6_v, del6_u, damp, fx2, fy2, d2, mass, nhalo, ni, nj, nk):
@@ -1455,10 +1417,7 @@ def interface_pressure_from_toa(delp, pem, ptop, nhalo, ni, nj, nk):
 
 def compute_geopotential(zh, gz, nhalo, ni, nj, nk):
     """``compute_geopotential``: gz = zh*GRAV (k-interface field, kz=nk+1)."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk + 1):
-                gz[i, j, k] = zh[i, j, k] * GRAV
+    gz[:, :, :nk + 1] = zh[:, :, :nk + 1] * GRAV
 
 
 # --- updatedzc (UpdateGeopotentialHeightOnCGrid), grid_type>=3 ---
@@ -2036,12 +1995,7 @@ def zero_data(mfxd, mfyd, cxd, cyd, heat_source, diss_estd, first_timestep, nhal
 
 def copy_field(src, dst, nhalo, ni, nj, nk_levels):
     """``basic.copy`` over the full domain for an nk_levels-deep field."""
-    nx = nhalo + ni + nhalo
-    ny = nhalo + nj + nhalo
-    for i in range(0, nx):
-        for j in range(0, ny):
-            for k in range(0, nk_levels):
-                dst[i, j, k] = src[i, j, k]
+    dst[:, :, :nk_levels] = src[:, :, :nk_levels]
 
 
 def dyn_core_gt4(st, g, dt_acoustic, n_split, ptop, akap, p_fac, nord, nord_v, nord_w, dddmp, d4_bg, d_con, da_min_c,
@@ -2223,11 +2177,8 @@ def fix_tracer(q, dp, nhalo, ni, nj, nk):
 
 def map_single_set_dp(dp1, pe1, lev, nhalo, ni, nj, nk):
     """``map_single.set_dp``: dp1 = pe1[k+1]-pe1[k] (Lagrangian layer thickness); lev[i,j] = 0."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                dp1[i, j, k] = pe1[i, j, k + 1] - pe1[i, j, k]
-            lev[i, j] = 0
+    dp1[:, :, :nk] = pe1[:, :, 1:nk + 1] - pe1[:, :, :nk]
+    lev[:, :] = 0
 
 
 def lagrangian_contributions(q, pe1, pe2, q4_1, q4_2, q4_3, q4_4, dp1, lev, nhalo, ni, nj, nk):
@@ -2471,55 +2422,55 @@ def tracer_flux_compute(cx, cy, dxa, dya, dx, dy, sin_sg1, sin_sg2, sin_sg3, sin
     """``flux_compute``: x/y area fluxes from accumulated courant numbers; upwind picks the upstream dxa/sin_sg."""
     i_start, i_end = nhalo, nhalo + ni - 1
     j_start, j_end = nhalo, nhalo + nj - 1
-    for i in range(i_start, i_end + 2):
-        for j in range(j_start - 3, j_end + 4):
-            for k in range(0, nk):
-                c = cx[i, j, k]
-                if c > 0.0:
-                    xfx[i, j, k] = c * dxa[i - 1, j, k] * dy[i, j, k] * sin_sg3[i - 1, j, k]
-                else:
-                    xfx[i, j, k] = c * dxa[i, j, k] * dy[i, j, k] * sin_sg1[i, j, k]
-    for i in range(i_start - 3, i_end + 4):
-        for j in range(j_start, j_end + 2):
-            for k in range(0, nk):
-                c = cy[i, j, k]
-                if c > 0.0:
-                    yfx[i, j, k] = c * dya[i, j - 1, k] * dx[i, j, k] * sin_sg4[i, j - 1, k]
-                else:
-                    yfx[i, j, k] = c * dya[i, j, k] * dx[i, j, k] * sin_sg2[i, j, k]
+
+    # i_start >= nhalo >= 1, so i-1 stays >= 0 -- a fixed-offset slice, no wraparound needed.
+    ib0, ib1 = i_start, i_end + 2
+    jb0, jb1 = j_start - 3, j_end + 4
+    c = cx[ib0:ib1, jb0:jb1, :nk]
+    up = c > 0.0
+    xfx[ib0:ib1, jb0:jb1, :nk] = np.where(
+        up, c * dxa[ib0 - 1:ib1 - 1, jb0:jb1, :nk] * dy[ib0:ib1, jb0:jb1, :nk] * sin_sg3[ib0 - 1:ib1 - 1, jb0:jb1, :nk],
+        c * dxa[ib0:ib1, jb0:jb1, :nk] * dy[ib0:ib1, jb0:jb1, :nk] * sin_sg1[ib0:ib1, jb0:jb1, :nk])
+
+    # i_start - 3 == nhalo - 3 == 0 for the fixed nhalo=3 halo, so this stays in bounds too.
+    ib0, ib1 = i_start - 3, i_end + 4
+    jb0, jb1 = j_start, j_end + 2
+    c = cy[ib0:ib1, jb0:jb1, :nk]
+    up = c > 0.0
+    yfx[ib0:ib1, jb0:jb1, :nk] = np.where(
+        up, c * dya[ib0:ib1, jb0 - 1:jb1 - 1, :nk] * dx[ib0:ib1, jb0:jb1, :nk] * sin_sg4[ib0:ib1, jb0 - 1:jb1 - 1, :nk],
+        c * dya[ib0:ib1, jb0:jb1, :nk] * dx[ib0:ib1, jb0:jb1, :nk] * sin_sg2[ib0:ib1, jb0:jb1, :nk])
 
 
 def divide_fluxes_by_n_substeps(cxd, xfx, mfxd, cyd, yfx, mfyd, n_split, nhalo, ni, nj, nk):
     """``divide_fluxes_by_n_substeps``: scales cxd/xfx/mfxd/cyd/yfx/mfyd by 1/n_split, in place."""
     frac = 1.0 / n_split
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            for k in range(0, nk):
-                cxd[i, j, k] = cxd[i, j, k] * frac
-                xfx[i, j, k] = xfx[i, j, k] * frac
-                mfxd[i, j, k] = mfxd[i, j, k] * frac
-                cyd[i, j, k] = cyd[i, j, k] * frac
-                yfx[i, j, k] = yfx[i, j, k] * frac
-                mfyd[i, j, k] = mfyd[i, j, k] * frac
+    cxd[:, :, :nk] *= frac
+    xfx[:, :, :nk] *= frac
+    mfxd[:, :, :nk] *= frac
+    cyd[:, :, :nk] *= frac
+    yfx[:, :, :nk] *= frac
+    mfyd[:, :, :nk] *= frac
 
 
 def apply_mass_flux(dp1, x_mass_flux, y_mass_flux, rarea, dp2, nhalo, ni, nj, nk):
     """``apply_mass_flux``: dp2 = dp1 + (mfx-mfx[1,0,0]+mfy-mfy[0,1,0])*rarea."""
-    for i in range(0, nhalo + ni + nhalo - 1):
-        for j in range(0, nhalo + nj + nhalo - 1):
-            for k in range(0, nk):
-                dp2[i, j, k] = (dp1[i, j, k] + (x_mass_flux[i, j, k] - x_mass_flux[i + 1, j, k] + y_mass_flux[i, j, k] -
-                                                y_mass_flux[i, j + 1, k]) * rarea[i, j])
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    dp2[:nx - 1, :ny - 1, :nk] = (
+        dp1[:nx - 1, :ny - 1, :nk] +
+        (x_mass_flux[:nx - 1, :ny - 1, :nk] - x_mass_flux[1:nx, :ny - 1, :nk] + y_mass_flux[:nx - 1, :ny - 1, :nk] -
+         y_mass_flux[:nx - 1, 1:ny, :nk]) * rarea[:nx - 1, :ny - 1, None])
 
 
 def apply_tracer_flux(q, dp1, fx, fy, rarea, dp2, nhalo, ni, nj, nk):
     """``apply_tracer_flux``: q = (q*dp1 + (fx-fx[1,0,0]+fy-fy[0,1,0])*rarea)/dp2, in place."""
-    for i in range(0, nhalo + ni + nhalo - 1):
-        for j in range(0, nhalo + nj + nhalo - 1):
-            for k in range(0, nk):
-                q[i, j,
-                  k] = ((q[i, j, k] * dp1[i, j, k] +
-                         (fx[i, j, k] - fx[i + 1, j, k] + fy[i, j, k] - fy[i, j + 1, k]) * rarea[i, j]) / dp2[i, j, k])
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    q[:nx - 1, :ny - 1, :nk] = (
+        (q[:nx - 1, :ny - 1, :nk] * dp1[:nx - 1, :ny - 1, :nk] +
+         (fx[:nx - 1, :ny - 1, :nk] - fx[1:nx, :ny - 1, :nk] + fy[:nx - 1, :ny - 1, :nk] -
+          fy[:nx - 1, 1:ny, :nk]) * rarea[:nx - 1, :ny - 1, None]) / dp2[:nx - 1, :ny - 1, :nk])
 
 
 # Composition: TracerAdvection (tracer_2d_1l), grid_type==4

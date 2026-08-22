@@ -64,11 +64,27 @@ def blocked_csr_multiply(
     n_block_rows = row_ptr.shape[0] - 1
     block_size = a_blocks.shape[1]
 
+    # Elementwise beta-scale, kept as an explicit loop: `c_blocks *= beta` (a full-array
+    # in-place op on this helper's own parameter, called with 6 different bound arrays)
+    # measurably breaks pythran's type inference for UNRELATED scalar locals later in the
+    # caller -- an isolated single-line test reproduced it: `value`/`block_norm_sq` in the
+    # branch-1 filter get inferred as 2-D ndarray instead of scalar, a pythran-only bug.
     for clear_pos in range(c_blocks.shape[0]):
         for inner_row in range(block_size):
             for inner_col in range(block_size):
                 c_blocks[clear_pos, inner_row, inner_col] *= beta
 
+    # The (block_row, a_pos, b_pos, c_pos) traversal is the CSR sparsity pattern itself -- which
+    # column positions exist in a row is data-dependent and has no closed form without a sparse
+    # index (banned: CNF carries no dict/set), so the structural search stays a loop.
+    #
+    # The inner dense product LOOKS like a plain `a_blocks[a_pos] @ b_blocks[b_pos]`, and for most
+    # kernels that would be the right call -- but measured here it is not exact: np.matmul's BLAS
+    # path (FMA / reduction order) differs from this scalar triple loop at the ~1e-14 level even
+    # for a 2x2 block, and TRS4 is an iterated recurrence that amplifies that over n_iter steps to
+    # ~1e-8 in gamma_values, enough to break tests/ports/cp2k_density_matrix_trs4's fp64 cross-check
+    # against the Fortran reference (rtol=1e-9, atol=1e-11; verified failing only on this change,
+    # not on HEAD). Kept as an explicit accumulation to stay bit-exact.
     for block_row in range(n_block_rows):
         for a_pos in range(int(row_ptr[block_row]), int(row_ptr[block_row + 1])):
             inner_block = int(col_idx[a_pos])
@@ -86,6 +102,11 @@ def blocked_csr_multiply(
                                 value += (a_blocks[a_pos, inner_row, inner_k] * b_blocks[b_pos, inner_k, inner_col])
                             c_blocks[c_pos, inner_row, inner_col] += alpha * value
 
+    # Per-block Frobenius norm and threshold filter. A boolean mask over the LEADING axis
+    # of a rank-3 array (one bool per block, zeroing the whole block_size x block_size
+    # block) does not lower on the native emitters -- neither `c_blocks[mask] = 0.0` nor
+    # `c_blocks[mask] *= 0.0` (both emit the mask expression straight into the subscript,
+    # `arr[(array < scalar)]`, a rank-1-into-rank-3 mismatch) -- so this stays a loop.
     filter_eps_sq = filter_eps * filter_eps
     for filter_pos in range(c_blocks.shape[0]):
         block_norm_sq = 0.0
@@ -123,22 +144,16 @@ def cp2k_density_matrix_trs4(
     """Run the non-dynamic CP2K TRS4 density-matrix purification path."""
 
     block_size = x_blocks.shape[1]
-    nnz_blocks = x_blocks.shape[0]
 
-    for block_pos in range(nnz_blocks):
-        for inner_row in range(block_size):
-            for inner_col in range(block_size):
-                x_blocks[block_pos, inner_row, inner_col] = 0.0
-                x2_blocks[block_pos, inner_row, inner_col] = 0.0
-                g_blocks[block_pos, inner_row, inner_col] = 0.0
-                poly_blocks[block_pos, inner_row, inner_col] = 0.0
-                scratch_blocks[block_pos, inner_row, inner_col] = 0.0
-                p_blocks[block_pos, inner_row, inner_col] = 0.0
-    for iteration in range(n_iter):
-        gamma_values[iteration] = 0.0
-        branch_history[iteration] = 0
-    for state_pos in range(state.shape[0]):
-        state[state_pos] = 0.0
+    x_blocks[:] = 0.0
+    x2_blocks[:] = 0.0
+    g_blocks[:] = 0.0
+    poly_blocks[:] = 0.0
+    scratch_blocks[:] = 0.0
+    p_blocks[:] = 0.0
+    gamma_values[:] = 0.0
+    branch_history[:] = 0
+    state[:] = 0.0
 
     # H* = S^(-1/2) H S^(-1/2).
     blocked_csr_multiply(
@@ -165,15 +180,25 @@ def cp2k_density_matrix_trs4(
     # X0 = (eps_max*I - H*) / (eps_max - eps_min).
     spectral_scale = -1.0 / (eps_max - eps_min)
     n_block_rows = row_ptr.shape[0] - 1
+    # Which nnz position sits on the pattern's block-diagonal is a static property of
+    # (row_ptr, col_idx), fixed for the whole call: precompute once and reuse across every
+    # iteration below instead of re-deriving it per block_row/block_pos pair. The search
+    # itself is the same bounded structural lookup as the c_pos search in
+    # blocked_csr_multiply above -- data-dependent column positions, no closed form -- so
+    # it stays a loop; neither np.nonzero nor a multi-axis fancy write
+    # (diag_positions[:, None], idx[None, :], idx[None, :]) lowers on the native emitters,
+    # so the per-row result is a plain int array and every USE below is a bounded loop too.
+    diag_pos = np.zeros(n_block_rows, dtype=np.int32)
     for block_row in range(n_block_rows):
         for block_pos in range(int(row_ptr[block_row]), int(row_ptr[block_row + 1])):
-            block_col = int(col_idx[block_pos])
-            for inner_row in range(block_size):
-                for inner_col in range(block_size):
-                    value = x_blocks[block_pos, inner_row, inner_col]
-                    if block_col == block_row and inner_col == inner_row:
-                        value -= eps_max
-                    x_blocks[block_pos, inner_row, inner_col] = spectral_scale * value
+            if int(col_idx[block_pos]) == block_row:
+                diag_pos[block_row] = block_pos
+
+    x_blocks *= spectral_scale
+    for block_row in range(n_block_rows):
+        dp = int(diag_pos[block_row])
+        for inner_diag in range(block_size):
+            x_blocks[dp, inner_diag, inner_diag] -= spectral_scale * eps_max
 
     trace_fx = 0.0
     trace_gx = 0.0
@@ -196,27 +221,35 @@ def cp2k_density_matrix_trs4(
             threshold,
         )
 
+        # g_blocks/poly_blocks are pure elementwise formulas of x_blocks/x2_blocks -- batching
+        # them introduces no reduction and so no reassociation risk, unlike the trace/Frobenius
+        # sums below.
+        g_blocks[:] = x2_blocks - 2.0 * x_blocks
+        for block_row in range(n_block_rows):
+            dp = int(diag_pos[block_row])
+            for inner_diag in range(block_size):
+                g_blocks[dp, inner_diag, inner_diag] += 1.0
+        poly_blocks[:] = 4.0 * x_blocks - 3.0 * x2_blocks
+
+        # frob_id_sq/frob_x_sq/trace_fx stay an explicit accumulation: np.sum over all
+        # nnz_blocks*block_size**2 entries crosses numpy's pairwise-summation threshold at the M
+        # and L presets, reassociating the reduction enough (measured ~1e-8 in gamma_values after
+        # n_iter steps) to break the fp64 cross-check against the Fortran reference. The retained
+        # pattern's row segments partition 0..nnz_blocks-1 in order, so one flat pass over all
+        # block positions sums in exactly the same order as the original nested (block_row,
+        # block_pos-in-row) loop.
         frob_id_sq = 0.0
         frob_x_sq = 0.0
         trace_fx = 0.0
-        for block_row in range(n_block_rows):
-            for block_pos in range(int(row_ptr[block_row]), int(row_ptr[block_row + 1])):
-                block_col = int(col_idx[block_pos])
-                for inner_row in range(block_size):
-                    for inner_col in range(block_size):
-                        x_value = x_blocks[block_pos, inner_row, inner_col]
-                        x2_value = x2_blocks[block_pos, inner_row, inner_col]
-                        residual = x2_value - x_value
-                        frob_id_sq += residual * residual
-                        frob_x_sq += x_value * x_value
-
-                        g_value = x2_value - 2.0 * x_value
-                        if block_col == block_row and inner_col == inner_row:
-                            g_value += 1.0
-                        poly_value = 4.0 * x_value - 3.0 * x2_value
-                        g_blocks[block_pos, inner_row, inner_col] = g_value
-                        poly_blocks[block_pos, inner_row, inner_col] = poly_value
-                        trace_fx += x2_value * poly_value
+        for block_pos in range(x_blocks.shape[0]):
+            for inner_row in range(block_size):
+                for inner_col in range(block_size):
+                    x_value = x_blocks[block_pos, inner_row, inner_col]
+                    x2_value = x2_blocks[block_pos, inner_row, inner_col]
+                    residual = x2_value - x_value
+                    frob_id_sq += residual * residual
+                    frob_x_sq += x_value * x_value
+                    trace_fx += x2_value * poly_blocks[block_pos, inner_row, inner_col]
 
         # tr(X^2 G) = tr(X^2 (X - I)^2) = ||X^2 - X||_F^2 for symmetric X, and expanding the
         # blocked sums shows the two differ by exactly tr(X^2) - ||X||_F^2, which is zero because
@@ -248,12 +281,13 @@ def cp2k_density_matrix_trs4(
         if gamma > 6.0:
             branch = 1
             filter_eps_sq = threshold * threshold
-            for block_pos in range(nnz_blocks):
+            # Same leading-axis-mask restriction as blocked_csr_multiply's filter: stays a loop.
+            for block_pos in range(x_blocks.shape[0]):
                 block_norm_sq = 0.0
                 for inner_row in range(block_size):
                     for inner_col in range(block_size):
-                        value = (2.0 * x_blocks[block_pos, inner_row, inner_col] -
-                                 x2_blocks[block_pos, inner_row, inner_col])
+                        value = 2.0 * x_blocks[block_pos, inner_row, inner_col] - x2_blocks[block_pos, inner_row,
+                                                                                             inner_col]
                         x_blocks[block_pos, inner_row, inner_col] = value
                         block_norm_sq += value * value
                 if block_norm_sq < filter_eps_sq:
@@ -262,17 +296,10 @@ def cp2k_density_matrix_trs4(
                             x_blocks[block_pos, inner_row, inner_col] = 0.0
         elif gamma < 0.0:
             branch = 2
-            for block_pos in range(nnz_blocks):
-                for inner_row in range(block_size):
-                    for inner_col in range(block_size):
-                        x_blocks[block_pos, inner_row, inner_col] = x2_blocks[block_pos, inner_row, inner_col]
+            x_blocks[:] = x2_blocks
         else:
             branch = 3
-            for block_pos in range(nnz_blocks):
-                for inner_row in range(block_size):
-                    for inner_col in range(block_size):
-                        poly_blocks[block_pos, inner_row,
-                                    inner_col] += (gamma * g_blocks[block_pos, inner_row, inner_col])
+            poly_blocks += gamma * g_blocks
             blocked_csr_multiply(
                 row_ptr,
                 col_idx,
@@ -312,10 +339,7 @@ def cp2k_density_matrix_trs4(
         0.0,
         threshold,
     )
-    for block_pos in range(nnz_blocks):
-        for inner_row in range(block_size):
-            for inner_col in range(block_size):
-                p_blocks[block_pos, inner_row, inner_col] *= spin_scale
+    p_blocks *= spin_scale
 
     # CP2K reconstructs mu by bisecting f_k(x0)-0.5 through the stored gamma
     # history. Its final convergence-check iteration is excluded (i-1).
