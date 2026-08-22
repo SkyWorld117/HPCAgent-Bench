@@ -449,6 +449,13 @@ def _produces_logical(rhs: ast.AST) -> bool:
     """True when an RHS expression evaluates to a boolean (LOGICAL) array: comparisons, and/or/not, & | ^ / ~mask on logicals."""
     if isinstance(rhs, (ast.Compare, ast.BoolOp)):
         return True
+    # A folded bool literal: `mask = (a >= b) | (nssopt == 0)` reaches here as `Compare | False`
+    # once the scalar compare is constant-folded. Without this the `&`/`|` recursion below scores
+    # the folded side False, the whole RHS non-logical, and the name is DECLARED real while the
+    # body still emits `.OR.` and `if (name(i))` -- the declaration/body drift this pass prevents.
+    # bool before int: bool is a subclass of int, and a plain integer literal is NOT logical.
+    if isinstance(rhs, ast.Constant) and isinstance(rhs.value, bool):
+        return True
     if isinstance(rhs, ast.UnaryOp):
         if isinstance(rhs.op, ast.Not):
             return True
