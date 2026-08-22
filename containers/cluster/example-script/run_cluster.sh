@@ -137,6 +137,18 @@ run_vllm_node() {
     # and 592283 re-ran 3 h 13 m of Inductor codegen. Graph capture stays uncached regardless.
     export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
 
+    # Triton's cache is SEPARATE from VLLM_CACHE_ROOT and defaults to ~/.triton, i.e. the same
+    # unmounted home -- so every job re-JITs every kernel, and it does so DURING INFERENCE rather
+    # than at startup. On 604721 that meant eight kernels (attn_fwd, fused_moe_kernel_gptq_awq,
+    # _fwd_kernel_stage2, the sampler...) compiling once per PP rank while 64 agent requests sat
+    # resident: generation arrived in bursts between total stalls, the CLI timed out and retried,
+    # and the arm produced 15 assistant turns in half an hour. Keyed by source+signature+arch, so
+    # one directory is safely shared across models and runs -- and the SECOND run is the one that
+    # pays nothing. Graph capture is a different thing again and genuinely cannot be cached: HIP
+    # graphs hold device pointers and do not survive the process.
+    export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${FAST_SCRATCH}/triton-cache}"
+    mkdir -p "${TRITON_CACHE_DIR}" 2>/dev/null || true
+
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
     : "${VLLM_MODEL:?VLLM_MODEL must be set}"
