@@ -310,7 +310,7 @@ jobs:
         # thread method reports the hanging test instead of losing the phase to the step cap.
         timeout-minutes: 85
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 --timeout-method=thread --durations=25 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 --timeout-method=thread --durations=25 \
             -m integration tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: ccache statistics
@@ -476,13 +476,15 @@ jobs:
       - name: Phase 2a -- numpy-translator op suite
         # ~640 tests: per-op faithfulness plus feature-fix and corpus kernels, each emitted to
         # C/C++/Fortran (+ numba/pythran/jax where the test opts in), compiled, validated vs
-        # numpy. A couple of full-kernel cases (cloudsc, velocity_tendencies) run ~5 min, hence
-        # --timeout=900. xdist balances the files across the runner's cores at runtime, which no
-        # static split can beat on a set whose per-file cost spans three orders of magnitude.
+        # numpy. A couple of full-kernel cases (cloudsc, velocity_tendencies) run ~5 min, and the
+        # corpus-wide ABI agreement test walks every kernel in one test -- measured at 1294 s on a
+        # loaded 16-core box after the shape-compare cache, hence --timeout=1500. xdist balances
+        # the files across the runner's cores at runtime, which no static split can beat on a set
+        # whose per-file cost spans three orders of magnitude.
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
-          python -m pytest -q -p no:cacheprovider -rfsxX -n auto --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfsxX -n auto --timeout=1500 \
             hpcagent_bench/numpy_translators/tests/
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
@@ -640,7 +642,7 @@ jobs:
           HPCAGENT_BENCH_TVM_NOTUNE: "1"
           HPCAGENT_BENCH_TVM_METASCHEDULE_TRIALS: "2"
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_frameworks.py \
             tests/test_fp16.py \
             tests/test_default_datatype_tolerance.py
@@ -981,7 +983,7 @@ jobs:
             done ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          python -m pytest -v -p no:cacheprovider -rfEs --timeout=900 tests/test_container_launch.py
+          python -m pytest -v -p no:cacheprovider -rfEs --timeout=1500 tests/test_container_launch.py
 
   # ===========================================================================================
   # mpi -- the whole MPI / distributed-residency track on its own runner (the "5th runner"): the
@@ -1113,7 +1115,7 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 30
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_mpi_call.py \
             tests/test_mpi_drivers_launch.py \
             tests/test_mpi_correctness_oracle.py \
@@ -1184,7 +1186,7 @@ jobs:
           python -c "from tests.test_dace_frontend_validity import generated_programs; \
             print(len(generated_programs()), 'dace programs ready')"
           python -m pytest -q -p no:cacheprovider -rfEs -n 4 -m dace_numeric \
-            --maxfail=20 --timeout=900 tests/test_dace_numeric_agreement.py
+            --maxfail=20 --timeout=1500 tests/test_dace_numeric_agreement.py
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       # One combined step now: it reports the mpi phases' + dace-numeric's compiles together, same
@@ -1270,7 +1272,7 @@ jobs:
         run: python -m pip install apache-tvm==0.25.0rc0 apache-tvm-ffi==0.1.12 triton
       - name: GPU frameworks + fp16 (tvm-gpu / triton targets)
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_frameworks.py tests/test_fp16.py
 
       # if: always() -- a job that went red still covered lines on the way, and the total is more
