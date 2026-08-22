@@ -25,10 +25,11 @@ def backend_from_call(args, kwargs, positional_index):
     return backend
 
 
-# Eager init (device_id set) serializes unbatched P2P against the group's other traffic, and
-# `received 1024 instead of 256` on isend_tensor_dict -- a receiver matching the WRONG message --
-# killed 3 of 4 four-node probes in warmup (603524/603714/603718). 0 drops device_id everywhere,
-# returning to lazy init while KEEPING the collective/P2P split below. Default 1 = today.
+# Eager init (device_id set) serializes unbatched P2P against the group's other traffic. 0 drops
+# device_id everywhere, returning to lazy init while KEEPING the collective/P2P split below.
+# Neither setting decides the `received 1024 instead of 256` bootstrap collision that killed the
+# four-node probes: 603524/603714/603718 ran with 1, 604479 with 0, and all four died the same
+# way. That one is the async-scheduling broadcast on pp.device_group -- see run_cluster.sh.
 EAGER_DEVICE_ID = os.environ.get("VLLM_EAGER_PG_DEVICE_ID", "1") == "1"
 
 
@@ -194,9 +195,9 @@ INSTALLED: set[str] = set()
 # MPI is not reachable without patching vLLM either. This moves send_object/recv_object onto the
 # device group so a PP step touches no CPU transport at all.
 #
-# OFF by default and deliberately so: the supported fix for the deaths at 2x gloo's 1800 s default
-# is --cpu-distributed-timeout-seconds, and changing the transport in the same run would make the
-# two indistinguishable. Turn this on only to test the transport itself.
+# OFF by default: it addresses TCP latency, not the four-node deaths. Those were a communicator
+# bootstrap collision (--no-async-scheduling in run_cluster.sh); the 1800 s gloo "pair closure"
+# reported afterwards was a surviving rank waiting on a peer that had already died.
 #
 # The size handshake exists because the receiver must size its buffer before receiving; that stays,
 # it just travels as a device tensor. `.item()` on the received size forces a sync, which is the

@@ -176,15 +176,27 @@ PY
             --master-addr "${VLLM_MASTER_HOST}"
             --master-port "${VLLM_MASTER_PORT}"
             --distributed-timeout-seconds "${VLLM_DISTRIBUTED_TIMEOUT_SECONDS:-3600}"
-            # ...and the CPU group, which is a SEPARATE timeout defaulting to gloo's 1800 s.
-            # PP moves activations over the device group (RCCL) but the tensor-dict METADATA
-            # over cpu_group (gloo/TCP, parallel_state.send_object), so an engine that idles
-            # longer than 30 min loses the gloo pair while the RCCL side is still inside its
-            # 7200 s. That is how 604463 and 604479 died: "Application timeout caused pair
-            # closure" in irecv_tensor_dict, after 25+ min at running=2 and 0.0 tok/s.
+            # The gloo cpu_group carrying tensor-dict metadata has its OWN timeout, defaulting
+            # to 1800 s while the line above covers only the device group. Hardening, not a fix:
+            # the "pair closure" at 2x1800 s in 604463/604479 was a surviving rank still waiting
+            # on a peer that had already died -- see --no-async-scheduling below for the cause.
             --cpu-distributed-timeout-seconds \
                 "${VLLM_CPU_DISTRIBUTED_TIMEOUT_SECONDS:-${VLLM_DISTRIBUTED_TIMEOUT_SECONDS:-3600}}"
         )
+        # Async scheduling is ON by default (config/vllm.py: async_scheduling=None -> True) and
+        # it is the only thing that ever runs a COLLECTIVE on pp.device_group: the last rank
+        # broadcasts sampled token ids there (gpu_model_runner._pp_broadcast_prev_sampled_token_ids,
+        # a direct torch.distributed.broadcast, which is why the sibling split in the eager-pg
+        # patch does not cover it). Everything else on that group is P2P, which torch serves from
+        # per-pair 2-rank communicators. So the first decode bootstraps a 4-rank and a 2-rank
+        # communicator CONCURRENTLY on two threads of one process, their bootstrap exchanges
+        # collide, and rccl bootstrap.cc reports "Message truncated : received 1024 bytes instead
+        # of 512" -- nranks x 256, i.e. the 4-rank payload landing in the 2-rank recv. Killed
+        # 600262, 604463 and 604479 within a minute of the first request, and only ever the kimi
+        # arms: a 1-node endpoint has no pp group and no per-pair P2P.
+        if [[ "${VLLM_ASYNC_SCHEDULING:-0}" != "1" ]]; then
+            command+=(--no-async-scheduling)
+        fi
         if (( node_rank > 0 )); then
             command+=(--headless)
         else
