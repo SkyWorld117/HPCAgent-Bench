@@ -276,9 +276,16 @@ AGGREGATE_MIN_INTERVAL_SECONDS = 1.0
 #: concurrency. Relative to that peak rather than to an absolute request count because the probe
 #: Seconds of delay per worker index before an agent starts, so the per-agent MCP servers do not
 #: all initialize at once. 0 disables the stagger.
-AGENT_START_STAGGER_SECONDS = float(os.environ.get("AGENT_START_STAGGER_SECONDS", "0.5"))
+#:
+#: 604487 measured why this has to be generous. At 0.5 s the 121 agents of one node started inside
+#: a minute and their MCP failures came out as a BAND, not a trend: 0/20 for workers 0-19, 16/20
+#: for 40-59, 20/20 for 60-79, then back to 1/20 for 100-119. Nothing is wrong with the middle
+#: workers -- they are simply the ones that spawn python3 while every earlier agent's node process
+#: is still starting up. Flattening the ramp is what removes the peak; the cap has to be wide
+#: enough that the last worker is still inside it, or the tail all lands at once.
+AGENT_START_STAGGER_SECONDS = float(os.environ.get("AGENT_START_STAGGER_SECONDS", "2.0"))
 #: Cap on that delay, so a wide node does not push its last agent minutes past the first.
-AGENT_START_STAGGER_MAX_SECONDS = float(os.environ.get("AGENT_START_STAGGER_MAX_SECONDS", "90"))
+AGENT_START_STAGGER_MAX_SECONDS = float(os.environ.get("AGENT_START_STAGGER_MAX_SECONDS", "300"))
 
 #: cannot know how many agents the arm launched; the peak itself is printed beside every figure, so
 #: a run that never had more than two requests in flight reads as one instead of hiding behind a
@@ -1008,6 +1015,11 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     # a tool that reads the other name grades somewhere else. JUDGE_RANK must be present AND must be
     # this judge's own index: every judge route validates the rank the request names and answers 421
     # rather than grading a mismatch, so a wrong one is not a hint -- it is a refusal per call.
+    # Claude Code's MCP startup budget, in MILLISECONDS. The default is tight enough that a
+    # python3 stdio server losing a CPU race to 120 sibling agents misses it, and an agent whose
+    # server reports "failed" has no submit tool at all -- it burns its whole budget and records
+    # nothing. The stagger above is what stops the race; this is what survives losing it.
+    environment.setdefault("MCP_TIMEOUT", "120000")
     environment["JUDGE_URL"] = judge_url
     environment["OPTARENA_AGENT_API_URL"] = judge_url
     environment["JUDGE_RANK"] = str(judge_rank)
