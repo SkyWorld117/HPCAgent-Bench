@@ -22,7 +22,9 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # serve log, no agent_driver output, only the per-role logs under RUN_DIR.
 mkdir -p results
 
-ACCOUNT="${ACCOUNT:-a-g200}"
+# No --account on beverin: root, a-g200 and a-g34 are scheduling-identical there, so -A is
+# passed only when a site that needs it sets ACCOUNT explicitly.
+ACCOUNT="${ACCOUNT:-}"
 MODELS="${MODELS:-oss120b qwen30b}"
 LANGS="${LANGS:-c cpp fortran}"
 
@@ -43,7 +45,7 @@ for model in ${MODELS}; do
         inf="$(sed -n 's/^INFERENCE_NODES=\([0-9]*\).*/\1/p' "${env_file}")"
         judge="$(sed -n 's/^JUDGE_NODES=\([0-9]*\).*/\1/p' "${env_file}")"
         nodes=$((inf + 1 + judge))
-        sbatch --nodes="${nodes}" --time=04:00:00 -A "${ACCOUNT}" "$@" \
+        sbatch --nodes="${nodes}" --time=04:00:00 ${ACCOUNT:+-A "${ACCOUNT}"} "$@" \
             --job-name="regress-${model}-${lang}" \
             --export=ALL,CLUSTER_ENV_FILE="${env_file}" beverin.sbatch
         echo "submitted regress-${model}-${lang}-skills on ${nodes} nodes"

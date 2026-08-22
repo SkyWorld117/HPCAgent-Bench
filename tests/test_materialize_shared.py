@@ -173,11 +173,32 @@ def test_the_arm_falls_back_to_the_problems_file_stem_but_never_to_a_blank(monke
 def test_every_campaign_variant_declares_its_own_arm():
     """A mislabelled arm is worse than an unlabelled one. The variant file is COPIED to .env, so a
     stale copy would file this arm's rows under the previous one and nothing in the DB would show
-    it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to."""
-    for path in sorted(EXAMPLE.glob(".env.llr-*")) + [EXAMPLE / ".env.smoke-llr4-cpp"]:
+    it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to.
+
+    EVERY .env here, not a hand-listed few: the pair drifted apart four times while only two
+    files were checked, and each drift is a run whose rows land under the wrong name. .env.example
+    is the template and carries a deliberately blank arm for the reader to fill in."""
+    for path in sorted(EXAMPLE.glob(".env.*")):
+        if path.name == ".env.example" or path.suffix in (".bak", ".v2bak"):
+            continue
         arm = path.name[len(".env."):]
-        assert f"\nCAMPAIGN_ARM={arm}\n" in path.read_text(), path
+        assert f"\nCAMPAIGN_ARM={arm}\n" in path.read_text(), (
+            f"{path.name} must carry CAMPAIGN_ARM={arm}; rename the file to the arm label rather "
+            "than relabelling the arm, because the label is what the judge DB already records")
+    assert "\nCAMPAIGN_ARM=\n" in (EXAMPLE / ".env.example").read_text()
     assert '"${CAMPAIGN_ARM:-}" != "${VARIANT}"' in (EXAMPLE / "run_campaign.sh").read_text()
+
+
+def test_no_submitter_defaults_an_account():
+    """beverin schedules root, a-g200 and a-g34 identically, and a defaulted -A is how a job ends
+    up billed to an account the submitter never chose. ACCOUNT stays empty unless a site sets it,
+    and -A is only ever passed conditionally on that."""
+    for path in sorted(EXAMPLE.glob("submit*.sh")):
+        body = path.read_text()
+        if "ACCOUNT" not in body:
+            continue
+        assert 'ACCOUNT="${ACCOUNT:-}"' in body, f"{path.name} defaults ACCOUNT to a real account"
+        assert '${ACCOUNT:+-A "${ACCOUNT}"}' in body, f"{path.name} passes -A unconditionally"
 
 
 def test_the_driver_hands_each_agent_its_identity_in_the_environment(tmp_path, monkeypatch):
