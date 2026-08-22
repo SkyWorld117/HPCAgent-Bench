@@ -547,6 +547,33 @@ def hints_text() -> str:
     return resolve_shared_file(path).read_text(encoding="utf-8").strip()
 
 
+def submission_policy_text() -> tuple[str, str]:
+    """The two {{SUBMISSION_POLICY_*}} halves: the tool bullet, then the closing instruction.
+
+    ``AGENT_SUBMISSION_POLICY_FILE`` names one file holding both, split on a ``@@SPLIT@@`` line.
+    It defaults to submission-multi.md, whose text is what the prompt carried inline before the
+    slots existed, so an arm that does not set it renders a byte-identical prompt. The
+    single-submission arm points it at submission-single.md and sets AGENT_SINGLE_SUBMISSION=1,
+    which is what actually enforces the limit -- the prompt only explains it.
+    """
+    name = os.environ.get("AGENT_SUBMISSION_POLICY_FILE", "").strip()
+    if name:
+        path = resolve_shared_file(name)
+    else:
+        # Same fallback as the prompt template: the baked runtime, else this checkout. The default
+        # policy is the text the prompt used to carry inline, so it must resolve even where nothing
+        # was materialized.
+        runtime = pathlib.Path("/opt/optarena-agent")
+        if not runtime.is_dir():
+            runtime = pathlib.Path(__file__).resolve().parents[2] / "agent"
+        path = runtime / "submission-multi.md"
+    body = path.read_text(encoding="utf-8")
+    head, _, tail = body.partition("@@SPLIT@@")
+    if not tail:
+        raise SystemExit(f"{name} has no @@SPLIT@@ line separating the tool bullet from the closing")
+    return head.strip("\n"), tail.strip("\n")
+
+
 def resolve_shared_file(path: str) -> pathlib.Path:
     """A relative path resolves under the shared mount (where materialize_shared.sh put the
     campaign's prompt/hints copies), so an .env can name `hints.md` without knowing RUN_DIR."""
@@ -900,7 +927,9 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     # The budget the driver ENFORCES is the budget the agent is told about, composed from the same
     # env vars run_agent enforces below -- a note baked into the problem file cannot go stale here.
     task_block = "\n".join(part for part in (task, shared_note, budget_note(timeout_s, max_tokens, task)) if part)
-    prompt = prompt_template.replace("{{HINTS}}", hints_text()).replace("{{TASK}}", task_block)
+    policy_tool, policy_closing = submission_policy_text()
+    prompt = (prompt_template.replace("{{HINTS}}", hints_text()).replace("{{TASK}}", task_block).replace(
+        "{{SUBMISSION_POLICY_TOOL}}", policy_tool).replace("{{SUBMISSION_POLICY_CLOSING}}", policy_closing))
     prompt_file = workdir / "prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
 

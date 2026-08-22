@@ -68,6 +68,12 @@ fi
 if [[ -f "${repo}/containers/agent/hints.md" ]]; then
     cp -f "${repo}/containers/agent/hints.md" "${shared}/hints.md"
 fi
+# Both submission policies: the prompt has a slot, and the arm picks which text fills it.
+for policy in submission-multi.md submission-single.md; do
+    if [[ -f "${repo}/containers/agent/${policy}" ]]; then
+        cp -f "${repo}/containers/agent/${policy}" "${shared}/${policy}"
+    fi
+done
 # The skill-usage directives, for an arm that ships the packet.
 if [[ -f "${repo}/containers/agent/skill-triggers.md" ]]; then
     cp -f "${repo}/containers/agent/skill-triggers.md" "${shared}/skill-triggers.md"

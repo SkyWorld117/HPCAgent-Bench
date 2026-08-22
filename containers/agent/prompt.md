@@ -11,10 +11,7 @@ benchmark tools for every external interaction:
   `counter_group: "flops"` A/Bs vectorization: the real thing drops `instructions` at the same
   `fp_ops`.
 - `score` -- grade on the PUBLIC inputs. The iteration loop.
-- `submit` -- the terminal grade (public + a hidden seed) and the ONLY recorded one. `score`
-  records nothing. Submit the moment a score comes back correct, then keep improving and submit
-  again: every verified submission is kept and your best one counts, so an early submit costs
-  nothing and a missing one costs the whole kernel.
+{{SUBMISSION_POLICY_TOOL}}
 - `search` -- web/API research. If it errors it is not provisioned in this run: move on,
   never retry it.
 - `syntax_check` -- parse a file with the local compiler. Free, instant, never graded.
@@ -159,15 +156,7 @@ answer.
 2. Write the fortran to `/shared/agent-7/example_kernel.f90` -- basename exact, folder is YOURS.
 3. `score` {"kernel": "loop_level_reasoning/example_kernel/example_kernel",
             "source_file": "/shared/agent-7/example_kernel.f90"} -> correct / speedup.
-4. Iterate on step 3. `submit` (same body) every time a score comes back correct and better.
-
-Score early and often -- after every meaningful change, never sit on an untested rewrite.
-You have plenty of attempts (~1000 score calls is fine). Do not stop early. The ceiling
-differs per kernel: some allow 10x, some barely 1.2x -- so never settle for your first
-working speedup. Keep trying genuinely different approaches; declare a plateau only after
-several distinct ideas scored no better. `score` records NOTHING: a kernel you scored but
-never submitted earns nothing, however well it scored, so SUBMIT every correct improvement
-as you go -- the best verified submission is what counts.
+{{SUBMISSION_POLICY_CLOSING}}
 
 Two measurement facts: sub-microsecond kernels jitter 20-50% between identical calls, so under
 ~1.15x re-score once before believing it. `submit` re-checks on a SECOND held-out seed, so a
