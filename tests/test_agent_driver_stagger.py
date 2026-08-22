@@ -44,28 +44,27 @@ def test_the_stagger_can_be_turned_off(monkeypatch):
     assert driver.AGENT_START_STAGGER_SECONDS == 0
 
 
-def test_the_stagger_is_wide_enough_for_a_full_node(monkeypatch):
-    """604487: at 0.5 s the failures were a band -- 0/20 for workers 0-19, 20/20 for 60-79, 1/20 for
-    100-119. The middle workers spawn python3 while every earlier agent is still starting, so the
-    ramp has to be flat enough that the peak never forms."""
-    for key in ("AGENT_START_STAGGER_SECONDS", "AGENT_START_STAGGER_MAX_SECONDS"):
+def test_the_startup_gate_is_the_real_limit(monkeypatch):
+    """A fixed delay cannot know how long a startup takes; the semaphore drains at whatever rate
+    they actually complete. It has to be well under a node's agent count to mean anything."""
+    for key in ("AGENT_START_CONCURRENCY", "AGENT_START_STAGGER_SECONDS"):
         monkeypatch.delenv(key, raising=False)
     driver = load_driver(monkeypatch)
-    last_worker = 120  # AGENTS_PER_NODE=121 on the kimi arms
-    ramp = min(last_worker * driver.AGENT_START_STAGGER_SECONDS, driver.AGENT_START_STAGGER_MAX_SECONDS)
-    assert ramp >= 180, "121 agents still land inside three minutes; the contention peak survives"
+    assert 0 < driver.AGENT_START_CONCURRENCY <= 16
+    assert driver.START_GATE._value == driver.AGENT_START_CONCURRENCY
 
 
-def test_the_cap_does_not_truncate_a_full_node(monkeypatch):
-    """A cap below worker_index * stagger drops the whole tail onto one instant -- the herd again."""
-    for key in ("AGENT_START_STAGGER_SECONDS", "AGENT_START_STAGGER_MAX_SECONDS"):
-        monkeypatch.delenv(key, raising=False)
+def test_a_failed_mcp_server_is_retried(monkeypatch):
+    """One process to relaunch against a whole agent budget recorded as nothing."""
+    monkeypatch.delenv("AGENT_MCP_ATTEMPTS", raising=False)
     driver = load_driver(monkeypatch)
-    assert driver.AGENT_START_STAGGER_MAX_SECONDS >= 120 * driver.AGENT_START_STAGGER_SECONDS
+    assert driver.AGENT_MCP_ATTEMPTS >= 2
 
 
-def test_the_mcp_startup_budget_is_raised():
-    """An agent whose MCP server reports "failed" has no submit tool and records nothing, so the
-    default startup budget is not something to lose a CPU race against."""
+def test_both_mcp_budgets_are_raised():
+    """An agent whose MCP server reports "failed" has no submit tool and records nothing. Claude
+    Code has TWO budgets and the connect one defaults to 5 s -- raising only the 30 s startup
+    budget leaves the tighter of the pair in place."""
     source = (EXAMPLE / "agent_driver.py").read_text()
     assert 'environment.setdefault("MCP_TIMEOUT"' in source
+    assert 'environment.setdefault("MCP_CONNECT_TIMEOUT_MS"' in source
