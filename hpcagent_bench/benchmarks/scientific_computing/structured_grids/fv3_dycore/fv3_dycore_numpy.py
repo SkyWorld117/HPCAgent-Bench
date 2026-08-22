@@ -1398,21 +1398,26 @@ DZ_MIN = 6.0
 
 
 def gz_from_surface_height(zs, delz, gz, nhalo, ni, nj, nk):
-    """``gz_from_surface_height_and_thicknesses``: gz[.,k]=gz[.,k+1]-delz[.,k], BACKWARD sweep from gz[.,nk]=zs."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            gz[i, j, nk] = zs[i, j]
-            for k in range(nk - 1, -1, -1):
-                gz[i, j, k] = gz[i, j, k + 1] - delz[i, j, k]
+    """``gz_from_surface_height_and_thicknesses``: gz[.,k]=gz[.,k+1]-delz[.,k], BACKWARD sweep from gz[.,nk]=zs.
+    A backward cumulative sum: zs is the scan's seed term, -delz[k] each later term, so the running
+    add lands in the same left-to-right order as the loop (a-b == a+(-b) exactly in IEEE754)."""
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    terms = np.empty((nx, ny, nk + 1), dtype=gz.dtype)
+    terms[:, :, 0] = zs
+    terms[:, :, 1:nk + 1] = -delz[:, :, :nk][:, :, ::-1]
+    gz[:, :, :] = np.cumsum(terms, axis=2)[:, :, ::-1]
 
 
 def interface_pressure_from_toa(delp, pem, ptop, nhalo, ni, nj, nk):
-    """``interface_pressure_from_toa_pressure_and_thickness``: pem[.,k]=pem[.,k-1]+delp[.,k], FORWARD from ptop."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            pem[i, j, 0] = ptop
-            for k in range(1, nk + 1):
-                pem[i, j, k] = pem[i, j, k - 1] + delp[i, j, k]
+    """``interface_pressure_from_toa_pressure_and_thickness``: pem[.,k]=pem[.,k-1]+delp[.,k], FORWARD from ptop.
+    A forward cumulative sum: ptop is the scan's seed term, delp[k] each later term."""
+    nx = nhalo + ni + nhalo
+    ny = nhalo + nj + nhalo
+    terms = np.empty((nx, ny, nk + 1), dtype=pem.dtype)
+    terms[:, :, 0] = ptop
+    terms[:, :, 1:nk + 1] = delp[:, :, 1:nk + 1]
+    pem[:, :, :] = np.cumsum(terms, axis=2)
 
 
 def compute_geopotential(zh, gz, nhalo, ni, nj, nk):
@@ -1467,15 +1472,13 @@ def update_dz_c(dp_ref, zs, area, ut, vt, gz, gz_x, gz_y, ws, dt, nhalo, ni, nj,
                 gz[i, j, k] = (gz[i, j, k] * area[i, j] + (fx - fx_ip1) +
                                (fy - fy_jp1)) / (area[i, j] + (xfx[i, j, k] - xfx[i + 1, j, k]) +
                                                  (yfx[i, j, k] - yfx[i, j + 1, k]))
-    # ws from lowest-level gz change; monotone gz BACKWARD.
+    # ws from lowest-level gz change; monotone gz BACKWARD (sequential in k, horizontal batched).
     rdt = 1.0 / dt
-    for i in range(i_lo, i_hi):
-        for j in range(j_lo, j_hi):
-            ws[i, j] = (zs[i, j] - gz[i, j, nk]) * rdt
-            for k in range(nk - 1, -1, -1):
-                gz_kp1 = gz[i, j, k + 1] + DZ_MIN
-                if gz[i, j, k] <= gz_kp1:
-                    gz[i, j, k] = gz_kp1
+    ws[i_lo:i_hi, j_lo:j_hi] = (zs[i_lo:i_hi, j_lo:j_hi] - gz[i_lo:i_hi, j_lo:j_hi, nk]) * rdt
+    for k in range(nk - 1, -1, -1):
+        gz_kp1 = gz[i_lo:i_hi, j_lo:j_hi, k + 1] + DZ_MIN
+        gz_k = gz[i_lo:i_hi, j_lo:j_hi, k]
+        gz[i_lo:i_hi, j_lo:j_hi, k] = np.where(gz_k <= gz_kp1, gz_kp1, gz_k)
 
 
 def update_dz_c_gt4(zs, ut, vt, gz, ws, dp_ref, area, dt, nhalo, ni, nj, nk):
@@ -1568,37 +1571,38 @@ def sim1_solver(w, dm, gm, dz, ptr, pm, pe, pem, ws, cp3, dt, t1g, rdt, p_fac, n
 
 # --- riem_solver_c (NonhydrostaticVerticalSolverCGrid), grid_type>=3 ---
 def riem_c_precompute(delpc, cappa, w3, w, gz, dm, q_con, pem, dz, gm, pm, ptop, nhalo, ni, nj, nk):
-    """``precompute`` of riem_solver_c: dm/w/pem/peg/dz/gm/pm setup over the [-1,+1] block."""
-    for i in range(nhalo - 1, nhalo + ni + 1):
-        for j in range(nhalo - 1, nhalo + nj + 1):
-            for k in range(0, nk):
-                dm[i, j, k] = delpc[i, j, k]
-                w[i, j, k] = w3[i, j, k]
-            peg = [0.0] * (nk + 1)
-            pem[i, j, 0] = ptop
-            peg[0] = ptop
-            for k in range(1, nk + 1):
-                pem[i, j, k] = pem[i, j, k - 1] + dm[i, j, k - 1]
-                peg[k] = peg[k - 1] + dm[i, j, k - 1] * (1.0 - q_con[i, j, k - 1])
-            for k in range(0, nk):
-                dz[i, j, k] = gz[i, j, k + 1] - gz[i, j, k]
-            for k in range(0, nk):
-                gm[i, j, k] = 1.0 / (1.0 - cappa[i, j, k])
-                dm[i, j, k] = dm[i, j, k] / GRAV
-            for k in range(0, nk):
-                pm[i, j, k] = (peg[k + 1] - peg[k]) / np.log(peg[k + 1] / peg[k])
+    """``precompute`` of riem_solver_c: dm/w/pem/peg/dz/gm/pm setup over the [-1,+1] block.
+    pem/peg are forward cumulative sums, ptop as the scan seed (same add order as the loop)."""
+    i0, i1 = nhalo - 1, nhalo + ni + 1
+    j0, j1 = nhalo - 1, nhalo + nj + 1
+    w[i0:i1, j0:j1, :nk] = w3[i0:i1, j0:j1, :nk]
+    delpc_block = delpc[i0:i1, j0:j1, :nk]
+    pem_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=pem.dtype)
+    pem_terms[:, :, 0] = ptop
+    pem_terms[:, :, 1:nk + 1] = delpc_block
+    pem[i0:i1, j0:j1, :] = np.cumsum(pem_terms, axis=2)
+    peg_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=pem.dtype)
+    peg_terms[:, :, 0] = ptop
+    peg_terms[:, :, 1:nk + 1] = delpc_block * (1.0 - q_con[i0:i1, j0:j1, :nk])
+    peg = np.cumsum(peg_terms, axis=2)
+    dz[i0:i1, j0:j1, :nk] = gz[i0:i1, j0:j1, 1:nk + 1] - gz[i0:i1, j0:j1, :nk]
+    gm[i0:i1, j0:j1, :nk] = 1.0 / (1.0 - cappa[i0:i1, j0:j1, :nk])
+    dm[i0:i1, j0:j1, :nk] = delpc_block / GRAV
+    pm[i0:i1, j0:j1, :nk] = (peg[:, :, 1:nk + 1] - peg[:, :, :nk]) / np.log(peg[:, :, 1:nk + 1] / peg[:, :, :nk])
 
 
 def riem_c_finalize(pe2, pem, hs, dz, pef, gz, ptop, nhalo, ni, nj, nk):
-    """``finalize`` of riem_solver_c: pef from pe2+pem (FORWARD), gz from hs and dz (BACKWARD)."""
-    for i in range(nhalo - 1, nhalo + ni + 1):
-        for j in range(nhalo - 1, nhalo + nj + 1):
-            pef[i, j, 0] = ptop
-            for k in range(1, nk + 1):
-                pef[i, j, k] = pe2[i, j, k] + pem[i, j, k]
-            gz[i, j, nk] = hs[i, j]
-            for k in range(nk - 1, -1, -1):
-                gz[i, j, k] = gz[i, j, k + 1] - dz[i, j, k] * GRAV
+    """``finalize`` of riem_solver_c: pef from pe2+pem (elementwise, no recurrence), gz from hs and dz
+    (BACKWARD cumulative sum: hs is the scan seed, -dz[k]*GRAV each later term, same add order as the loop)."""
+    i0, i1 = nhalo - 1, nhalo + ni + 1
+    j0, j1 = nhalo - 1, nhalo + nj + 1
+    pef[i0:i1, j0:j1, 0] = ptop
+    pef[i0:i1, j0:j1, 1:nk + 1] = pe2[i0:i1, j0:j1, 1:nk + 1] + pem[i0:i1, j0:j1, 1:nk + 1]
+    dz_rev = dz[i0:i1, j0:j1, :nk][:, :, ::-1] * GRAV
+    gz_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=gz.dtype)
+    gz_terms[:, :, 0] = hs[i0:i1, j0:j1]
+    gz_terms[:, :, 1:nk + 1] = -dz_rev
+    gz[i0:i1, j0:j1, :] = np.cumsum(gz_terms, axis=2)[:, :, ::-1]
 
 
 def riem_solver_c_gt4(dt2, cappa, ptop, hs, ws, ptc, q_con, delpc, gz, pef, w3, p_fac, nhalo, ni, nj, nk):
@@ -1649,59 +1653,57 @@ RGRAV = 1.0 / GRAV
 # --- riem_solver3 (NonhydrostaticVerticalSolver, D-grid) ---
 def riem3_precompute(delp, cappa, pe, pe_init, dm, zh, q_con, p_int, log_p_int, pk3, gm, dz, p_gas, ptop, peln1, ptk,
                      nhalo, ni, nj, nk):
-    """``precompute`` of riem_solver3 (D-grid): p_interface/log/pk3/gamma/dz/p_gas setup."""
-    i_start, i_end = nhalo, nhalo + ni - 1
-    j_start, j_end = nhalo, nhalo + nj - 1
-    for i in range(i_start, i_end + 1):
-        for j in range(j_start, j_end + 1):
-            for k in range(0, nk):
-                dm[i, j, k] = delp[i, j, k]
-            for k in range(0, nk + 1):
-                pe_init[i, j, k] = pe[i, j, k]
-            peg = [0.0] * (nk + 1)
-            lpeg = [0.0] * (nk + 1)
-            p_int[i, j, 0] = ptop
-            log_p_int[i, j, 0] = peln1
-            pk3[i, j, 0] = ptk
-            peg[0] = ptop
-            lpeg[0] = peln1
-            for k in range(1, nk + 1):
-                p_int[i, j, k] = p_int[i, j, k - 1] + dm[i, j, k - 1]
-                log_p_int[i, j, k] = np.log(p_int[i, j, k])
-                peg[k] = peg[k - 1] + dm[i, j, k - 1] * (1.0 - q_con[i, j, k - 1])
-                lpeg[k] = np.log(peg[k])
-                pk3[i, j, k] = np.exp(KAPPA * log_p_int[i, j, k])
-            for k in range(0, nk):
-                gm[i, j, k] = 1.0 / (1.0 - cappa[i, j, k])
-                dm[i, j, k] = dm[i, j, k] * RGRAV
-            for k in range(0, nk):
-                p_gas[i, j, k] = (peg[k + 1] - peg[k]) / (lpeg[k + 1] - lpeg[k])
-                dz[i, j, k] = zh[i, j, k + 1] - zh[i, j, k]
+    """``precompute`` of riem_solver3 (D-grid): p_interface/log/pk3/gamma/dz/p_gas setup.
+    p_int/peg are forward cumulative sums, ptop as the scan seed (same add order as the loop)."""
+    i0, i1 = nhalo, nhalo + ni
+    j0, j1 = nhalo, nhalo + nj
+    pe_init[i0:i1, j0:j1, :] = pe[i0:i1, j0:j1, :]
+    delp_block = delp[i0:i1, j0:j1, :nk]
+    p_int_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=p_int.dtype)
+    p_int_terms[:, :, 0] = ptop
+    p_int_terms[:, :, 1:nk + 1] = delp_block
+    p_int[i0:i1, j0:j1, :] = np.cumsum(p_int_terms, axis=2)
+    log_p_int[i0:i1, j0:j1, 0] = peln1
+    log_p_int[i0:i1, j0:j1, 1:nk + 1] = np.log(p_int[i0:i1, j0:j1, 1:nk + 1])
+    pk3[i0:i1, j0:j1, 0] = ptk
+    pk3[i0:i1, j0:j1, 1:nk + 1] = np.exp(KAPPA * log_p_int[i0:i1, j0:j1, 1:nk + 1])
+    peg_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=p_int.dtype)
+    peg_terms[:, :, 0] = ptop
+    peg_terms[:, :, 1:nk + 1] = delp_block * (1.0 - q_con[i0:i1, j0:j1, :nk])
+    peg = np.cumsum(peg_terms, axis=2)
+    lpeg = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=p_int.dtype)
+    lpeg[:, :, 0] = peln1
+    lpeg[:, :, 1:nk + 1] = np.log(peg[:, :, 1:nk + 1])
+    gm[i0:i1, j0:j1, :nk] = 1.0 / (1.0 - cappa[i0:i1, j0:j1, :nk])
+    dm[i0:i1, j0:j1, :nk] = delp_block * RGRAV
+    p_gas[i0:i1, j0:j1, :nk] = (peg[:, :, 1:nk + 1] - peg[:, :, :nk]) / (lpeg[:, :, 1:nk + 1] - lpeg[:, :, :nk])
+    dz[i0:i1, j0:j1, :nk] = zh[i0:i1, j0:j1, 1:nk + 1] - zh[i0:i1, j0:j1, :nk]
 
 
 def riem3_finalize(zs, dz, zh, log_p_int_internal, log_p_int_out, pk3, pk, p_int, pe, ppe, pe_init, last_call, beta,
                    use_logp, nhalo, ni, nj, nk):
-    """``finalize`` of riem_solver3: pk/pe/ppe/log_p updates, zh from zs and dz (BACKWARD)."""
-    i_start, i_end = nhalo, nhalo + ni - 1
-    j_start, j_end = nhalo, nhalo + nj - 1
-    for i in range(i_start, i_end + 1):
-        for j in range(j_start, j_end + 1):
-            for k in range(0, nk + 1):
-                if use_logp:
-                    pk3[i, j, k] = log_p_int_internal[i, j, k]
-                if beta < -0.1:
-                    ppe[i, j, k] = pe[i, j, k] + p_int[i, j, k]
-                else:
-                    ppe[i, j, k] = pe[i, j, k]
-                if last_call:
-                    log_p_int_out[i, j, k] = log_p_int_internal[i, j, k]
-                    pk[i, j, k] = pk3[i, j, k]
-                    pe[i, j, k] = p_int[i, j, k]
-                else:
-                    pe[i, j, k] = pe_init[i, j, k]
-            zh[i, j, nk] = zs[i, j]
-            for k in range(nk - 1, -1, -1):
-                zh[i, j, k] = zh[i, j, k + 1] - dz[i, j, k]
+    """``finalize`` of riem_solver3: pk/pe/ppe/log_p updates (flags are uniform per substep, not per-element),
+    zh from zs and dz (BACKWARD cumulative sum: zs is the scan seed, -dz[k] each later term, same add order
+    as the loop)."""
+    i0, i1 = nhalo, nhalo + ni
+    j0, j1 = nhalo, nhalo + nj
+    if use_logp:
+        pk3[i0:i1, j0:j1, :] = log_p_int_internal[i0:i1, j0:j1, :]
+    if beta < -0.1:
+        ppe[i0:i1, j0:j1, :] = pe[i0:i1, j0:j1, :] + p_int[i0:i1, j0:j1, :]
+    else:
+        ppe[i0:i1, j0:j1, :] = pe[i0:i1, j0:j1, :]
+    if last_call:
+        log_p_int_out[i0:i1, j0:j1, :] = log_p_int_internal[i0:i1, j0:j1, :]
+        pk[i0:i1, j0:j1, :] = pk3[i0:i1, j0:j1, :]
+        pe[i0:i1, j0:j1, :] = p_int[i0:i1, j0:j1, :]
+    else:
+        pe[i0:i1, j0:j1, :] = pe_init[i0:i1, j0:j1, :]
+    dz_rev = dz[i0:i1, j0:j1, :nk][:, :, ::-1]
+    zh_terms = np.empty((i1 - i0, j1 - j0, nk + 1), dtype=zh.dtype)
+    zh_terms[:, :, 0] = zs[i0:i1, j0:j1]
+    zh_terms[:, :, 1:nk + 1] = -dz_rev
+    zh[i0:i1, j0:j1, :] = np.cumsum(zh_terms, axis=2)[:, :, ::-1]
 
 
 def riem_solver3_gt4(last_call, dt, cappa, ptop, zs, ws, delz, q_con, delp, pt, zh, p, ppe, pk3, pk, log_p_interface, w,
@@ -1820,28 +1822,28 @@ def cubic_spline_constants(dp0, nk):
 
 
 def cubic_spline_interp_to_interfaces(q_center, q_interface, gk, beta, gamma, nhalo, ni, nj, nk):
-    """``cubic_spline_interpolation_from_layer_center_to_interfaces``: layer -> interface cubic spline (FWD/BWD)."""
-    for i in range(0, nhalo + ni + nhalo):
-        for j in range(0, nhalo + nj + nhalo):
-            # FORWARD
-            xt1 = 2.0 * gk[0] * (gk[0] + 1.0)
-            q_interface[i, j, 0] = (xt1 * q_center[i, j, 0] + q_center[i, j, 1]) / beta[0]
-            for k in range(1, nk):
-                q_interface[i, j, k] = (3.0 * (q_center[i, j, k - 1] + gk[k] * q_center[i, j, k]) -
-                                        q_interface[i, j, k - 1]) / beta[k]
-            a_bot = 1.0 + gk[nk - 1] * (gk[nk - 1] + 1.5)
-            xt1b = 2.0 * gk[nk - 1] * (gk[nk - 1] + 1.0)
-            xt2 = gk[nk - 1] * (gk[nk - 1] + 0.5) - a_bot * gamma[nk - 1]
-            q_interface[i, j, nk] = (xt1b * q_center[i, j, nk - 1] + q_center[i, j, nk - 2] -
-                                     a_bot * q_interface[i, j, nk - 1]) / xt2
-            # BACKWARD over 0..nk-1
-            for k in range(nk - 1, -1, -1):
-                q_interface[i, j, k] = q_interface[i, j, k] - gamma[k] * q_interface[i, j, k + 1]
+    """``cubic_spline_interpolation_from_layer_center_to_interfaces``: layer -> interface cubic spline (FWD/BWD).
+    Sequential in k (each step divides by beta[k]); horizontal batched."""
+    # FORWARD
+    xt1 = 2.0 * gk[0] * (gk[0] + 1.0)
+    q_interface[:, :, 0] = (xt1 * q_center[:, :, 0] + q_center[:, :, 1]) / beta[0]
+    for k in range(1, nk):
+        q_interface[:, :, k] = (3.0 * (q_center[:, :, k - 1] + gk[k] * q_center[:, :, k]) -
+                                q_interface[:, :, k - 1]) / beta[k]
+    a_bot = 1.0 + gk[nk - 1] * (gk[nk - 1] + 1.5)
+    xt1b = 2.0 * gk[nk - 1] * (gk[nk - 1] + 1.0)
+    xt2 = gk[nk - 1] * (gk[nk - 1] + 0.5) - a_bot * gamma[nk - 1]
+    q_interface[:, :, nk] = (xt1b * q_center[:, :, nk - 1] + q_center[:, :, nk - 2] -
+                             a_bot * q_interface[:, :, nk - 1]) / xt2
+    # BACKWARD over 0..nk-1
+    for k in range(nk - 1, -1, -1):
+        q_interface[:, :, k] = q_interface[:, :, k] - gamma[k] * q_interface[:, :, k + 1]
 
 
 def apply_height_fluxes(area, height, fx, fy, x_area_flux, y_area_flux, gz_x_diff, gz_y_diff, surface_height, ws, dt,
                         nhalo, ni, nj, nk):
-    """``apply_height_fluxes``: advective + diffusive height update, then ws and monotone-thickness (BACKWARD)."""
+    """``apply_height_fluxes``: advective + diffusive height update, then ws and monotone-thickness
+    (BACKWARD, sequential in k; horizontal batched)."""
     i_start, i_end = nhalo, nhalo + ni - 1
     j_start, j_end = nhalo, nhalo + nj - 1
     for i in range(i_start, i_end + 1):
@@ -1853,11 +1855,13 @@ def apply_height_fluxes(area, height, fx, fy, x_area_flux, y_area_flux, gz_x_dif
                        (fy[i, j, k] - fy[i, j + 1, k])) / area_after
                 height[i, j, k] = adv + ((gz_x_diff[i, j, k] - gz_x_diff[i + 1, j, k]) +
                                          (gz_y_diff[i, j, k] - gz_y_diff[i, j + 1, k])) / area[i, j]
-            ws[i, j] = (surface_height[i, j] - height[i, j, nk]) / dt
-            for k in range(nk - 1, -1, -1):
-                other = height[i, j, k + 1] + DZ_MIN
-                if height[i, j, k] <= other:
-                    height[i, j, k] = other
+    ws[i_start:i_end + 1,
+       j_start:j_end + 1] = (surface_height[i_start:i_end + 1, j_start:j_end + 1] -
+                             height[i_start:i_end + 1, j_start:j_end + 1, nk]) / dt
+    for k in range(nk - 1, -1, -1):
+        other = height[i_start:i_end + 1, j_start:j_end + 1, k + 1] + DZ_MIN
+        h_k = height[i_start:i_end + 1, j_start:j_end + 1, k]
+        height[i_start:i_end + 1, j_start:j_end + 1, k] = np.where(h_k <= other, other, h_k)
 
 
 def update_dz_d_gt4(surface_height, height, crx, cry, x_area_flux, y_area_flux, ws, dp_ref, area, rarea, del6_v, del6_u,
@@ -2580,20 +2584,17 @@ def _lagrangian_to_eulerian_dry(st, g, nhalo, ni, nj, nk, kord_tr, last_step):
     pe2 = np.zeros((nx, ny, nk + 1), dtype=st["delp"].dtype)
     ak = g["ak"]
     bk = g["bk"]
-    for i in range(i0, i1 + 1):
-        for j in range(j0, j1 + 1):
-            pe1[i, j, 0] = g["ptop"]
-            for k in range(1, nk + 1):
-                pe1[i, j, k] = pe1[i, j, k - 1] + st["delp"][i, j, k - 1]
-            ps = pe1[i, j, nk]
-            for k in range(0, nk + 1):
-                pe2[i, j, k] = ak[k] + bk[k] * ps
+    # pe1 is a forward cumulative sum, ptop as the scan seed (same add order as the loop).
+    delp_block = st["delp"][i0:i1 + 1, j0:j1 + 1, :nk]
+    pe1_terms = np.empty((i1 - i0 + 1, j1 - j0 + 1, nk + 1), dtype=st["delp"].dtype)
+    pe1_terms[:, :, 0] = g["ptop"]
+    pe1_terms[:, :, 1:nk + 1] = delp_block
+    pe1[i0:i1 + 1, j0:j1 + 1, :] = np.cumsum(pe1_terms, axis=2)
+    ps = pe1[i0:i1 + 1, j0:j1 + 1, nk]
+    pe2[i0:i1 + 1, j0:j1 + 1, :] = ak[np.newaxis, np.newaxis, :] + bk[np.newaxis, np.newaxis, :] * ps[:, :, np.newaxis]
     # dp2 (Eulerian layer thickness) for the tracer remap weighting.
     dp2 = np.zeros((nx, ny, nk), dtype=st["delp"].dtype)
-    for i in range(i0, i1 + 1):
-        for j in range(j0, j1 + 1):
-            for k in range(0, nk):
-                dp2[i, j, k] = pe2[i, j, k + 1] - pe2[i, j, k]
+    dp2[i0:i1 + 1, j0:j1 + 1, :] = (pe2[i0:i1 + 1, j0:j1 + 1, 1:nk + 1] - pe2[i0:i1 + 1, j0:j1 + 1, :nk])
     dp1_lag = st["delp"]
     # remap scalars (pt, w, delz) and tracers from pe1 -> pe2 (map_single iv1).
     map_single_iv1_kordsmall(st["pt"], pe1, pe2, dp1_lag, nhalo, ni, nj, nk)
@@ -2602,7 +2603,4 @@ def _lagrangian_to_eulerian_dry(st, g, nhalo, ni, nj, nk, kord_tr, last_step):
     for q in st["tracers"]:
         map_single_iv1_kordsmall(q, pe1, pe2, dp1_lag, nhalo, ni, nj, nk)
     # delp becomes the Eulerian thickness.
-    for i in range(i0, i1 + 1):
-        for j in range(j0, j1 + 1):
-            for k in range(0, nk):
-                st["delp"][i, j, k] = dp2[i, j, k]
+    st["delp"][i0:i1 + 1, j0:j1 + 1, :nk] = dp2[i0:i1 + 1, j0:j1 + 1, :]
