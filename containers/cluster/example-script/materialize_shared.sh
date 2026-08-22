@@ -67,10 +67,18 @@ fi
 if [[ -f "${repo}/containers/agent/hints.md" ]]; then
     cp -f "${repo}/containers/agent/hints.md" "${shared}/hints.md"
 fi
-# The skill-usage directives a skills arm injects instead: the hints CONTENT rides in the task
-# packet as the optimization-hints page, so {{HINTS}} carries the rules for USING the pages.
+# The skill-usage directives, for an arm that ships the packet.
 if [[ -f "${repo}/containers/agent/skill-triggers.md" ]]; then
     cp -f "${repo}/containers/agent/skill-triggers.md" "${shared}/skill-triggers.md"
+fi
+# The hints+skills leg puts BOTH in the main prompt ({{HINTS}} <- this file): the optimization
+# hints themselves, then the rules for using the packet's pages. One concatenation rather than two
+# knobs, because {{HINTS}} substitutes exactly one file, and one file is also one cacheable block.
+# The base leg leaves AGENT_HINTS_FILE empty and therefore carries neither.
+if [[ -f "${shared}/hints.md" && -f "${shared}/skill-triggers.md" ]]; then
+    cat "${shared}/hints.md" > "${shared}/hints-and-triggers.md"
+    printf '\n' >>"${shared}/hints-and-triggers.md"
+    cat "${shared}/skill-triggers.md" >>"${shared}/hints-and-triggers.md"
 fi
 
 printf 'materialize_shared: %s kernel folders under %s/tasks\n' "${copied}" "${shared}"

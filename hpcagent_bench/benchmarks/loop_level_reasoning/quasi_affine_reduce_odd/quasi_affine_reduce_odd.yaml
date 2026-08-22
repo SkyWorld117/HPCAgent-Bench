@@ -22,6 +22,5 @@ taxonomy:
   domain: classical compiler optimizations
   tags:
   - llr-focus40
-  - par-regression
 loop_level_reasoning:
   source: tsvc_2_5

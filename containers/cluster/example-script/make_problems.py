@@ -62,11 +62,10 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
             raise SystemExit(f"--extra-skill-root {extra_root} adds no page for language {language}")
         wanted += [s.name for s in extra]
         by_name.update({s.name: s for s in extra})
-    # The general hints ride in the packet as a page of their own, single-sourced from the file
-    # the hints ablation injects into {{HINTS}} -- two copies of that text would drift.
-    hints_body = (REPO / "containers" / "agent" / "hints.md").read_text(encoding="utf-8").strip()
-    pages = f"## Skill: optimization-hints\n\n{hints_body}\n\n" + \
-        "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
+    # The general hints do NOT ride in the packet: the hints+skills leg puts them in the MAIN
+    # prompt ({{HINTS}} <- hints-and-triggers.md, built by materialize_shared.sh). Carrying them
+    # here as well would charge the same text a second time on every turn.
+    pages = "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
     # Named triggers, not "the pages below": the packet is only worth its per-turn rent when the
     # agent actually opens the right page at the right moment, so the preamble binds each page to
     # the decision it settles. The failure-loop hook stays -- that is the moment the matching
@@ -76,10 +75,10 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
     trans_page = next((n for n in wanted if n.startswith("loop-transformations")), "the transformations page")
     model_pages = ", ".join(n for n in wanted[1:] if n != trans_page) or "the parallelism pages"
     preamble = ("# Skills\n\n"
-                f"Skill pages for this task: optimization-hints, {', '.join(wanted)}. Skim all of them\n"
-                "before your first rewrite, then:\n\n"
-                "- Before parallelizing ANY loop, re-read optimization-hints (the order of attack) and\n"
-                f"  {model_pages} -- which loops are safe to thread, and the exact directive spelling.\n"
+                f"Skill pages for this task: {', '.join(wanted)}. Skim all of them before your first\n"
+                "rewrite, then:\n\n"
+                "- Before parallelizing ANY loop, re-read the optimization hints in the main prompt\n"
+                f"  and {model_pages} -- which loops are safe to thread, and the exact spelling.\n"
                 f"- While writing code, follow {lang_page}: signature, headers and dialect are graded\n"
                 "  exactly as written there, as are the mistakes it lists.\n"
                 "- Before you write a directive, say which axis carries the dependence and which axis is\n"

@@ -23,7 +23,6 @@ taxonomy:
   domain: classical compiler optimizations
   tags:
   - llr-focus40
-  - interchange
 loop_level_reasoning:
   source: tsvc_2
   category: control flow

@@ -40,9 +40,9 @@ def test_skills_flag_adds_only_the_lang_page():
     # appending it after the kernel name put it past every request's divergence point.
     assert task.startswith("# Skills\n")
     assert task.endswith(f"Optimize benchmark kernel {KERNEL}. Target language: c.")
-    # hints ride in the packet as a page of their own, ahead of the language page
-    assert task.index("## Skill: optimization-hints") < task.index("## Skill: lang-c") \
-        < task.index("Optimize benchmark kernel")
+    # hints live in the MAIN prompt for the hints+skills leg, so the packet must NOT repeat them
+    assert "## Skill: optimization-hints" not in task
+    assert task.index("## Skill: lang-c") < task.index("Optimize benchmark kernel")
     # the treatment is the single lang-<language> page, not the rest of the skill library
     for absent in ("## Skill: general", "## Skill: loopnest", "## Skill: memory", "## Skill: parallelism",
                    "## Skill: vectorization", "## Skill: profiling", "## Skill: nsys", "## Skill: rocprof",
