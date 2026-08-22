@@ -3,6 +3,18 @@
 Order of attack: loop shape, then memory traffic, then vectorize, then thread. FP reassociation
 is fine inside the graded tolerance. Verify with a score, never by eye.
 
+**Before any directive, three lines**
+
+Write them as a comment above it, every time, for the loop you are about to thread:
+`carried by:` the axis whose index appears at -1/+1 in a read of what the loop writes;
+`unit stride:` the axis that is the last subscript in C/C++, the first in Fortran;
+`threading:` the axis the directive goes on. Then two mechanical rules:
+
+- **threading == carried by** is a RACE -- wrong, not slow. Thread another axis, fission the
+  statement out, or leave it serial.
+- **unit stride is not the innermost loop** is ~1.00x however many cores you use. Interchange
+  first, then thread.
+
 **Loop nests**
 
 Reshape before reaching for a directive. Two questions pick the rewrite: which axes carry a

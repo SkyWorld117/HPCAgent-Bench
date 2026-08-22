@@ -6,31 +6,35 @@ description: "OpenMP in C++: the four loop bins, the sharing clauses, and the bu
 # openmp-cpp
 
 Grading is MULTI-CORE, baseline SERIAL, `-fopenmp` always on. Never hardcode a thread count --
-the grading machine presets `OMP_NUM_THREADS`, so read
-`omp_get_max_threads()` (needs `#include <omp.h>`). Classify the loop first, then thread it:
-misfiling returns `correct: false` and costs a round trip.
+the grading machine presets `OMP_NUM_THREADS`, so read `omp_get_max_threads()` (needs
+`#include <omp.h>`). Classify the loop first, then thread it: misfiling returns
+`correct: false` and costs a round trip.
 (`<execution>` policies are the other threading spelling -- the lang-cpp page; one spelling per
 loop.)
 
-Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel for` whose inner
-loop strides by a row is memory-bound in every lane. Unit-stride axis innermost FIRST, then thread
-the loop outside it. Both of the following return `correct: true` and waste the speedup.
+## Before every directive: three lines, written down
 
-**Wrong 1 -- threaded the outer loop, left the inner one striding.** The dependence runs along
-`j`, so `i` is free AND unit stride. Threading `i` from outside puts the strided walk inside;
-every lane misses cache:
+A pragma is a claim about dependences. Write the claim as a comment ABOVE the directive, every
+time, using the loop you are about to thread:
 
 ```cpp
-#pragma omp parallel for                       // correct, and pointless
-for (std::int64_t i = 0; i < n; i++)
-    for (std::int64_t j = 1; j < n; j++)       // strides by n
-        aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
+// carried by: j      -- axis whose index appears at -1/+1 in a read of what this loop writes
+// unit stride: i     -- axis that is the LAST term of the subscript (C++ is row-major)
+// threading: i       -- must differ from "carried by", and should be the loop outside "unit stride"
+#pragma omp parallel for simd
 ```
 
-The repair is a permutation, then a directive on the axis that carries nothing: see
-`loop-transformations-cpp`, which has this nest worked through with its legality test.
+Two rules decide the outcome, and both are mechanical:
 
-**Wrong 2 -- directive on a recurrence, and the comment says so.** A pragma is an assertion,
+- **threading == carried by** is a RACE. Not slow -- wrong. Thread another axis, fission the
+  statement out, or leave it serial.
+- **unit stride is not the innermost loop** means ~1.00x however many cores you use. Interchange
+  first (`loop-transformations-cpp` has the legality test), then thread.
+
+`a[i*N + j] = a[i*N + (j-1)]` is carried by `j`, unit stride `j`: the only free axis is `i`.
+`a[j*N + i] = a[(j-1)*N + i]` is carried by `j`, unit stride `i`: thread `i`, and put it innermost.
+
+**A directive on a recurrence, with the comment saying so.** A pragma is an assertion,
 not a request: `simd` on a carried dependence claims lanes are independent while the line above
 proves they are not:
 
