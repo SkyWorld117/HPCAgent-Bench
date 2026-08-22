@@ -176,6 +176,14 @@ PY
             --master-addr "${VLLM_MASTER_HOST}"
             --master-port "${VLLM_MASTER_PORT}"
             --distributed-timeout-seconds "${VLLM_DISTRIBUTED_TIMEOUT_SECONDS:-3600}"
+            # ...and the CPU group, which is a SEPARATE timeout defaulting to gloo's 1800 s.
+            # PP moves activations over the device group (RCCL) but the tensor-dict METADATA
+            # over cpu_group (gloo/TCP, parallel_state.send_object), so an engine that idles
+            # longer than 30 min loses the gloo pair while the RCCL side is still inside its
+            # 7200 s. That is how 604463 and 604479 died: "Application timeout caused pair
+            # closure" in irecv_tensor_dict, after 25+ min at running=2 and 0.0 tok/s.
+            --cpu-distributed-timeout-seconds \
+                "${VLLM_CPU_DISTRIBUTED_TIMEOUT_SECONDS:-${VLLM_DISTRIBUTED_TIMEOUT_SECONDS:-3600}}"
         )
         if (( node_rank > 0 )); then
             command+=(--headless)
