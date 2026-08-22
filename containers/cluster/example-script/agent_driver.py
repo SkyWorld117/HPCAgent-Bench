@@ -1164,8 +1164,17 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     environment["CLAUDE_LOG_PATH"] = str(log_path)
     state: dict[str, Any] = {"tokens": 0, "exceeded": False}
     mcp_attempts = crash_attempts = 1
+    # The budget is the PROBLEM's, not the attempt's. A relaunch that started its own full clock
+    # made a crash cost another AGENT_TIMEOUT_SECONDS, so three of them held one worker for three
+    # times the wall clock the arm was sized against -- and only ever for agents already in
+    # trouble. An agent that does not crash never reaches this arithmetic.
+    deadline = time.monotonic() + timeout_s if timeout_s else 0.0
     while True:
         state = {"tokens": 0, "exceeded": False}
+        # Still "w": every reader of this file assumes ONE run in it -- mcp_failed() returns the
+        # FIRST init event and start_agent truncates on an MCP retry -- so appending would hand
+        # attempt 2 attempt 1's init verdict. The previous attempt is preserved by moving it aside
+        # below instead, which keeps the evidence without breaking that assumption.
         with log_path.open("w", encoding="utf-8") as log:
             process, mcp_attempts = start_agent(command, workdir, environment, log, log_path)
             watcher: threading.Thread | None = None
@@ -1174,8 +1183,9 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
                                            args=(process, log_path, max_tokens, state),
                                            daemon=True)
                 watcher.start()
+            remaining = max(1.0, deadline - time.monotonic()) if deadline else None
             try:
-                returncode = process.wait(timeout=timeout_s or None)
+                returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 terminate(process)
                 log.write(f"\nagent_driver: killed after AGENT_TIMEOUT_SECONDS={timeout_s}\n")
@@ -1187,11 +1197,19 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
                 log.write(f"\nagent_driver: killed after AGENT_MAX_TOKENS={max_tokens} "
                           f"(total tokens counted={state['tokens']})\n")
                 returncode = RC_TOKEN_BUDGET
-            if not crashed(returncode, log_path) or crash_attempts >= AGENT_CRASH_ATTEMPTS:
+            spent = deadline and time.monotonic() >= deadline
+            if not crashed(returncode, log_path) or crash_attempts >= AGENT_CRASH_ATTEMPTS or spent:
+                if spent and crashed(returncode, log_path):
+                    log.write("\nagent_driver: crashed with no wall clock left to relaunch in\n")
                 break
             crash_attempts += 1
             log.write(f"\nagent_driver: agent crashed (rc={returncode}); "
                       f"relaunching (attempt {crash_attempts} of {AGENT_CRASH_ATTEMPTS})\n")
+        # Reached only when the loop did NOT break, i.e. this attempt crashed and another follows.
+        # Without this the next iteration's "w" deleted the transcript of the crash -- and the note
+        # just written saying it happened -- leaving crash_attempts= on the summary line as the only
+        # trace that anything went wrong, with nothing anywhere saying why.
+        log_path.replace(workdir / f"claude.attempt{crash_attempts - 1}.log")
     # Only over a 0: a run the driver killed has the cap it hit already recorded, and the transcript
     # of a killed run has no closing event to read anyway.
     if returncode == 0 and context_overflow(log_path):
