@@ -704,7 +704,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             _pw17b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw17 = np.empty(kfdia - kidia + 1, dtype=np_float)
             for _pwi17 in range(kfdia - kidia + 1):
-                _pw17[_pwi17] = _pw17b[_pwi17] ** 3.0
+                _pw17[_pwi17] = _pw17b[_pwi17] ** 3
             zaplusb = yrecldp_rcl_apb1 * zvpice - yrecldp_rcl_apb2 * zvpice * ztp1[jk - 1, kidia - 1:kfdia] + pap[jk - 1, kidia - 1:kfdia] * yrecldp_rcl_apb3 * _pw17
             _pw18b = 1.0 / zrho[kidia - 1:kfdia]
             _pw18 = np.empty(kfdia - kidia + 1, dtype=np_float)
@@ -720,7 +720,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             _pw20b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw20 = np.empty(kfdia - kidia + 1, dtype=np_float)
             for _pwi20 in range(kfdia - kidia + 1):
-                _pw20[_pwi20] = _pw20b[_pwi20] ** 2.0
+                _pw20[_pwi20] = _pw20b[_pwi20] ** 2
             zterm1 = (zvpliq - zvpice) * _pw20 * zvpice * zcorrfac2 * ztcg * yrecldp_rcl_const2i * zfacx1i / (zrho[kidia - 1:kfdia] * zaplusb * zvpice)
             _pw21b = zpr02
             _pw21 = np.empty(kfdia - kidia + 1, dtype=np_float)
@@ -766,7 +766,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
                 if yrecldp_laericesed and jm == ncldqi:
                     for jl in range(kidia, kfdia + 1):
                         zre_ice = pre_ice[jk - 1, jl - 1]
-                        zvqx[ncldqi - 1] = 0.002 * zre_ice ** 1.0
+                        zvqx[ncldqi - 1] = 0.002 * zre_ice
                 zfall = zvqx[jm - 1] * zrho[kidia - 1:kfdia]
                 zfallsink[jm - 1, kidia - 1:kfdia] = zdtgdp[kidia - 1:kfdia] * zfall
         zqpretot_active = zqpretot[kidia - 1:kfdia] > zepsec
@@ -988,7 +988,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             _pw41b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw41 = np.empty(kfdia - kidia + 1, dtype=np_float)
             for _pwi41 in range(kfdia - kidia + 1):
-                _pw41[_pwi41] = _pw41b[_pwi41] ** 3.0
+                _pw41[_pwi41] = _pw41b[_pwi41] ** 3
             zevap_denom = yrecldp_rcl_cdenom1 * zesatliq - yrecldp_rcl_cdenom2 * ztp1[jk - 1, kidia - 1:kfdia] * zesatliq + yrecldp_rcl_cdenom3 * _pw41 * pap[jk - 1, kidia - 1:kfdia]
             _pw42b = ztp1[jk - 1, kidia - 1:kfdia] / 273.0
             _pw42 = np.empty(kfdia - kidia + 1, dtype=np_float)
@@ -1018,7 +1018,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             _pw47b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw47 = np.empty(kfdia - kidia + 1, dtype=np_float)
             for _pwi47 in range(kfdia - kidia + 1):
-                _pw47[_pwi47] = _pw47b[_pwi47] ** 2.0
+                _pw47[_pwi47] = _pw47b[_pwi47] ** 2
             zbeta2 = 0.5 / zqsliq_safe * _pw47 * zesatliq * yrecldp_rcl_const1r * (zcorr2 / zevap_denom_safe) * (0.78 / _pw43 + yrecldp_rcl_const2r * _pw44 / (_pw45 * _pw46))
             zdenom2 = 1.0 + zbeta2 * ptsphy
             zdpevap2 = zcovpclr[kidia - 1:kfdia] * zbeta2 * ptsphy * zsubsat2 / zdenom2
