@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Submit the llr6 two-leg experiment for ONE model, on the llr-focus40 tag only.
+# 40 kernels x --repeat 3 = 120 agents per arm: the repeats are what give a 40-kernel
+# set the power a 242-kernel single-sample run did not have.
+#
+#   leg 1: base prompt only -- no optimization hints, no skills packet.
+#   leg 2: general-optimization hints injected into the main prompt ({{HINTS}} <- hints.md)
+#          plus the per-language skills packet (lang-<L> + openmp-<L>) in the task text.
+#          C submits first; Fortran is chained with --dependency=afterany on the C job.
+#
+#   MODEL=oss120b ./submit-llr6.sh              # both legs, c + fortran
+#   MODEL=qwen30b LEGS=2 ./submit-llr6.sh       # hints+skills leg only
+#   MODEL=oss120b LANGS=c ./submit-llr6.sh
+#
+# Extra args go to sbatch verbatim. No --account on beverin.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+# beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
+# directory. Slurm drops the file when the folder is missing and the job runs blind: no vLLM
+# serve log, no agent_driver output, only the per-role logs under RUN_DIR.
+mkdir -p results
+. ./arm_nodes.sh
+
+MODEL="${MODEL:-}"
+[[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=oss120b $0" >&2; exit 2; }
+ACCOUNT="${ACCOUNT:-}"
+LANGS="${LANGS:-c fortran}"
+LEGS="${LEGS:-1 2}"
+case "${MODEL}" in
+    kimi*) TIME="${TIME:-24:00:00}" ;;
+    *) TIME="${TIME:-20:00:00}" ;;
+esac
+
+for lang in ${LANGS}; do
+    for f in "problems-llr6-${lang}.jsonl" "problems-llr6-${lang}-skills.jsonl"; do
+        [[ -s "$f" ]] || { echo "missing problems file: $f -- regenerate with make_problems.py" >&2; exit 2; }
+    done
+done
+
+submit_arm() {  # submit_arm <arm> [extra sbatch args...] -> prints the job id
+    local arm="$1"; shift
+    [[ -f ".env.${arm}" ]] || { echo "no env file for ${arm} -- check MODEL=${MODEL}" >&2; exit 2; }
+    sbatch --parsable --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" ${ACCOUNT:+-A "${ACCOUNT}"} \
+        --job-name="${arm}" "$@" \
+        --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
+}
+
+for leg in ${LEGS}; do
+    if [[ "${leg}" == "1" ]]; then
+        for lang in ${LANGS}; do
+            jid="$(submit_arm "llr6-${MODEL}-${lang}" "$@")"
+            echo "submitted llr6-${MODEL}-${lang} (job ${jid})"
+        done
+    else
+        # Leg 2 is sequenced: C first, then each remaining language after the previous finished,
+        # so one inference allocation's worth of leg-2 load runs at a time.
+        prev=""
+        for lang in ${LANGS}; do
+            if [[ -n "${prev}" ]]; then
+                jid="$(submit_arm "llr6-${MODEL}-${lang}-skills" --dependency="afterany:${prev}" "$@")"
+                echo "submitted llr6-${MODEL}-${lang}-skills (job ${jid}, after ${prev})"
+            else
+                jid="$(submit_arm "llr6-${MODEL}-${lang}-skills" "$@")"
+                echo "submitted llr6-${MODEL}-${lang}-skills (job ${jid})"
+            fi
+            prev="${jid}"
+        done
+    fi
+done
