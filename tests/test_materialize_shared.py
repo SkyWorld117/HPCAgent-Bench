@@ -189,16 +189,17 @@ def test_every_campaign_variant_declares_its_own_arm():
     assert '"${CAMPAIGN_ARM:-}" != "${VARIANT}"' in (EXAMPLE / "run_campaign.sh").read_text()
 
 
-def test_no_submitter_defaults_an_account():
-    """beverin schedules root, a-g200 and a-g34 identically, and a defaulted -A is how a job ends
-    up billed to an account the submitter never chose. ACCOUNT stays empty unless a site sets it,
-    and -A is only ever passed conditionally on that."""
+def test_no_submitter_can_pass_an_account():
+    """beverin schedules root, a-g200 and a-g34 identically, so -A only ever picks a billing line
+    nobody chose -- and every submitter here targets beverin.sbatch and nothing else.
+
+    Absent, not defaulted: an empty default is still a knob, and one of these defaulted to a real
+    account for months while reading as if it did not. Comments may still explain the rule; code
+    may not mention ACCOUNT or pass -A at all."""
     for path in sorted(EXAMPLE.glob("submit*.sh")):
-        body = path.read_text()
-        if "ACCOUNT" not in body:
-            continue
-        assert 'ACCOUNT="${ACCOUNT:-}"' in body, f"{path.name} defaults ACCOUNT to a real account"
-        assert '${ACCOUNT:+-A "${ACCOUNT}"}' in body, f"{path.name} passes -A unconditionally"
+        code = "\n".join(ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#"))
+        assert "ACCOUNT" not in code, f"{path.name} still carries an ACCOUNT knob"
+        assert "-A " not in code, f"{path.name} still passes -A"
 
 
 def test_the_driver_hands_each_agent_its_identity_in_the_environment(tmp_path, monkeypatch):

@@ -23,7 +23,10 @@ mkdir -p results
 
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=oss120b $0" >&2; exit 2; }
-ACCOUNT="${ACCOUNT:-}"
+# No --account, ever: these submit beverin.sbatch and nothing else, and on beverin root,
+# a-g200 and a-g34 are scheduling-identical, so -A only ever picks a billing line nobody
+# chose. The knob is absent rather than empty -- an empty default is still a knob, and it
+# defaulted to a real account here once already.
 LANGS="${LANGS:-c fortran}"
 LEGS="${LEGS:-1 2}"
 case "${MODEL}" in
@@ -40,7 +43,7 @@ done
 submit_arm() {  # submit_arm <arm> [extra sbatch args...] -> prints the job id
     local arm="$1"; shift
     [[ -f ".env.${arm}" ]] || { echo "no env file for ${arm} -- check MODEL=${MODEL}" >&2; exit 2; }
-    sbatch --parsable --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" ${ACCOUNT:+-A "${ACCOUNT}"} \
+    sbatch --parsable --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" \
         --job-name="${arm}" "$@" \
         --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
 }

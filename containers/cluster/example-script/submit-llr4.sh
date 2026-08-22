@@ -3,9 +3,7 @@
 # MODEL names the arm family, so it also names the env files: .env.llr4-<MODEL>-<lang>[-skills].
 #   MODEL=qwen30b ./submit-llr4.sh                 # all 6
 #   MODEL=kimi27code LANGS=c ARMS=off ./submit-llr4.sh
-# Extra args go to sbatch verbatim (e.g. --partition). No --account on beverin: root,
-# a-g200 and a-g34 are scheduling-identical there, so ACCOUNT is unset by default and
-# -A is passed only when you set it (other sites need it).
+# Extra args go to sbatch verbatim (e.g. --partition). No --account -- see below.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
@@ -17,7 +15,10 @@ mkdir -p results
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=qwen30b $0" >&2; exit 2; }
 
-ACCOUNT="${ACCOUNT:-}"
+# No --account, ever: these submit beverin.sbatch and nothing else, and on beverin root,
+# a-g200 and a-g34 are scheduling-identical, so -A only ever picks a billing line nobody
+# chose. The knob is absent rather than empty -- an empty default is still a knob, and it
+# defaulted to a real account here once already.
 LANGS="${LANGS:-c cpp fortran}"
 # Which side of the skills-on/off pair to submit, so re-running ONE side does not need a
 # hand-rolled sbatch:  ARMS="off" ...  or  ARMS="skills" ...  (default: both).
@@ -45,7 +46,7 @@ for lang in ${LANGS}; do
         arm="llr4-${MODEL}-${lang}${suffix}"
         # A mistyped MODEL otherwise surfaces as an arm_nodes failure on a path nobody recognises.
         [[ -f ".env.${arm}" ]] || { echo "no env file for ${arm} -- check MODEL=${MODEL}" >&2; exit 2; }
-        sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" ${ACCOUNT:+-A "${ACCOUNT}"} \
+        sbatch --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" \
             --job-name="${arm}" "$@" \
             --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
         echo "submitted ${arm}"
