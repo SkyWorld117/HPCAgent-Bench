@@ -73,10 +73,12 @@ def eager_new_group(*args, **kwargs):
 
 # Move the pipeline group's collectives to their own communicator.
 #
-# vLLM puts inter-stage activation transfer (isend/irecv_tensor_dict) and ordinary collectives on
-# ONE device_group, which eager init above makes fatal: torch serializes unbatched P2P against
-# everything else on the group. 600262/600263 both died there, a 4-element broadcast stuck at
-# SeqNum=1 for the full 600 s watchdog while P2P was in flight; neither decoded a token.
+# vLLM puts inter-stage activation transfer (isend/irecv_tensor_dict, v1/worker/gpu_worker.py)
+# and ordinary collectives on ONE device_group, which eager init above makes fatal -- torch says
+# so itself: "unbatched P2P ops are treated as independent collective ops, and are thus
+# serialized with all other ops on this ProcessGroup". Grep a hanging log for that sentence.
+# 600262/600263 both died there: a 4-element broadcast on the pp group (PG 5, ranks [0,4,8,12]
+# and siblings) stuck at SeqNum=1 for the full 600 s watchdog; neither decoded a token.
 #
 # Upstream ships this remedy for exactly one broadcast (make_sibling_device_group in
 # v1/worker/gpu/pp_utils.py); this extends it to every collective, leaving device_group carrying
@@ -142,15 +144,17 @@ SPLIT_PP_COLLECTIVES = os.environ.get("VLLM_PP_COLLECTIVE_SPLIT", "1") == "1"
 
 # The MLA chunked-prefill context path transposes its log-sum-exp on ROCm.
 #
-# `mask_empty_context` unpacks lse as [num_heads, num_tokens] and sizes its mask from the second
-# dimension. That holds for vllm-flash-attn; ROCm takes the upstream-flash_attn branch of
+# `mask_empty_context` (defined in v1/attention/ops/triton_merge_attn_states.py) unpacks lse as
+# [num_heads, num_tokens] and sizes its mask from the second dimension. That holds for
+# vllm-flash-attn; ROCm takes the upstream-flash_attn branch of
 # `_flash_attn_varlen_diff_headdims`, which returns [num_tokens, num_heads], so the mask comes out
 # sized num_heads and the fill raises "expanded size (3591) must match the existing size (16)".
 # 603980 died there ~58 min in, taking all 121 agents with it.
 #
 # Reached only when some prefill in a chunk has run out of context and others have not, so it
 # needs concurrent prefills of UNEQUAL length across chunks -- and `chunked_prefill_workspace_size`
-# is capped at 64k in code with no CLI knob, so a busy server chunks small and hits it constantly.
+# is capped at 64k in code (no CLI knob) then split `// num_prefills_with_context`, so a busy
+# server chunks small and hits it constantly.
 # No config escape either: ROCm's prefill priority is [ROCM_AITER_FA, FLASH_ATTN] and aiter's
 # master switch breaks MLA prefill on gfx942.
 #
@@ -183,13 +187,24 @@ def patch_mla_empty_context_mask() -> None:
     print("[external-eager-pg] mla mask_empty_context: ROCm lse layout tolerated", file=sys.stderr, flush=True)
 
 
+INSTALLED: set[str] = set()
+
+
 def eager_init_and_split(*args, **kwargs):
-    """`init_process_group`, then install the pp collective split on top of the fresh world."""
+    """`init_process_group`, then install the pp collective split on top of the fresh world.
+
+    Once per patch, however often the world is rebuilt: both wrap a name around whatever is
+    already bound to it, so a second init would nest GroupCoordinator.__init__ inside its own
+    wrapper -- a duplicate sibling communicator per pp group per rank -- and stack another
+    mask_empty_context wrapper on every call.
+    """
     result = eager_init_process_group(*args, **kwargs)
-    if SPLIT_PP_COLLECTIVES:
+    if SPLIT_PP_COLLECTIVES and "pp_collectives" not in INSTALLED:
         patch_pp_collectives()
-    if FIX_MLA_LSE_LAYOUT:
+        INSTALLED.add("pp_collectives")
+    if FIX_MLA_LSE_LAYOUT and "mla_lse_layout" not in INSTALLED:
         patch_mla_empty_context_mask()
+        INSTALLED.add("mla_lse_layout")
     return result
 
 

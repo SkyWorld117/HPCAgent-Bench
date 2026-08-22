@@ -193,7 +193,8 @@ def test_no_submitter_can_pass_an_account():
     nobody chose, and every submitter here targets beverin.sbatch alone.
 
     Absent, not defaulted: an empty default is still a knob, and one of these held a real account
-    while reading as if it did not. Comments may explain the rule; code may not mention it."""
+    while reading as if it did not. Comments may explain the rule; non-comment lines may not
+    mention ACCOUNT or pass -A."""
     for path in sorted(EXAMPLE.glob("submit*.sh")):
         code = "\n".join(ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#"))
         assert "ACCOUNT" not in code, f"{path.name} still carries an ACCOUNT knob"

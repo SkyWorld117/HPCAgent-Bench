@@ -62,8 +62,9 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
             raise SystemExit(f"--extra-skill-root {extra_root} adds no page for language {language}")
         wanted += [s.name for s in extra]
         by_name.update({s.name: s for s in extra})
-    # Hints do NOT ride in the packet: the hints+skills leg puts them in the main prompt, and
-    # carrying them here too would charge the same text twice on every turn.
+    # The built-in packet carries no hints page: the hints+skills leg puts them in the main
+    # prompt, and carrying them here too charges the same text twice per turn. An extra root
+    # at language 'any' skips the suffix filter above and can still inline one.
     pages = "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
     # Named triggers, not "the pages below": the packet only earns its per-turn rent if the agent
     # opens the right page at the right moment, so each bullet binds a page to a decision.

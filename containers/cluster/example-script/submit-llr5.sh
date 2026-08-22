@@ -2,8 +2,10 @@
 # Submit the llr5 two-leg experiment for ONE model.
 #
 #   leg 1: base prompt only -- no optimization hints, no skills packet.
-#   leg 2: general-optimization hints injected into the main prompt ({{HINTS}} <- hints.md)
-#          plus the per-language skills packet (lang-<L> + openmp-<L>) in the task text.
+#   leg 2: skill-usage triggers in the main prompt ({{HINTS}} <- skill-triggers.md; the two cpp
+#          arms predate that and still point at hints.md) plus the per-language packet
+#          (optimization-hints + lang-<L> + loop-transformations-<L> + openmp-<L>).
+#          llr6 is the successor and puts hints in the main prompt instead -- see it first.
 #          C submits first; Fortran is chained with --dependency=afterany on the C job.
 #
 #   MODEL=oss120b ./submit-llr5.sh              # both legs, c + fortran

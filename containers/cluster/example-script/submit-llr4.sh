@@ -25,8 +25,9 @@ case "${MODEL}" in
     kimi*) TIME="${TIME:-24:00:00}" ;;
     *) TIME="${TIME:-20:00:00}" ;;
 esac
-# Skills arms read the llr4 packet; off arms reuse the unchanged llr2 task text. Refuse a stale
-# or missing list rather than grading against one.
+# Existence check only -- it cannot see staleness, and the checked-in llr4 skills lists ARE
+# stale: packet appended after the kernel line (the prefix-cache anti-pattern make_problems
+# now avoids) and pages named openmp/openacc, which no longer exist. Regenerate before use.
 for lang in ${LANGS}; do
     for f in "problems-llr4-${lang}-skills.jsonl" "problems-llr2-${lang}.jsonl"; do
         [[ -s "$f" ]] || { echo "missing problems file: $f -- regenerate with make_problems.py" >&2; exit 2; }

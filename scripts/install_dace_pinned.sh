@@ -6,8 +6,8 @@
 #
 #   scripts/install_dace_pinned.sh [target-dir]
 #
-# Without dace the two dace test files do not skip -- ~40 of them fail inside probe subprocesses,
-# which reads as a red suite rather than a missing dependency.
+# Without dace, test_dace_numeric_agreement.py and test_dace_frontend_validity.py do not skip --
+# ~40 of them fail inside probe subprocesses, reading as a red suite, not a missing dependency.
 set -euo pipefail
 
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +26,8 @@ git -C "${target}" remote get-url origin >/dev/null 2>&1 ||
     git -C "${target}" remote add origin https://github.com/spcl/dace.git
 git -C "${target}" fetch -q --depth 1 origin "${sha}"
 git -C "${target}" checkout -q FETCH_HEAD
-# Submodules carry the vendored runtime headers dace/runtime/include/dace/stream.h includes.
+# REQUIRED, not tidiness: dace/runtime/include/dace/stream.h includes vendored submodule headers
+# (external/moodycamel/...), and without them every SDFG build stops on a missing header.
 git -C "${target}" submodule update --init --recursive --depth 1 -q
 
 python -m pip install -q -e "${target}"
