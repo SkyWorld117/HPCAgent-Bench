@@ -265,19 +265,12 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
     imelt[ncldqr - 1] = ncldqs
     imelt[ncldqi - 1] = ncldqr
     imelt[ncldqs - 1] = ncldqr
-    for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            tendency_loc_t[jk - 1, jl - 1] = 0.0
-            tendency_loc_q[jk - 1, jl - 1] = 0.0
-            tendency_loc_a[jk - 1, jl - 1] = 0.0
-    for jm in range(1, nclv - 1 + 1):
-        for jk in range(1, nlev + 1):
-            for jl in range(kidia, kfdia + 1):
-                tendency_loc_cld[jm - 1, jk - 1, jl - 1] = 0.0
-    for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            pcovptot[jk - 1, jl - 1] = 0.0
-            tendency_loc_cld[nclv - 1, jk - 1, jl - 1] = 0.0
+    tendency_loc_t[:, kidia - 1:kfdia] = 0.0
+    tendency_loc_q[:, kidia - 1:kfdia] = 0.0
+    tendency_loc_a[:, kidia - 1:kfdia] = 0.0
+    tendency_loc_cld[0:nclv - 1, :, kidia - 1:kfdia] = 0.0
+    pcovptot[:, kidia - 1:kfdia] = 0.0
+    tendency_loc_cld[nclv - 1, :, kidia - 1:kfdia] = 0.0
     zvqx[ncldqv - 1] = 0.0
     zvqx[ncldql - 1] = 0.0
     zvqx[ncldqi - 1] = yrecldp_rvice
@@ -288,31 +281,17 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         if zvqx[jm - 1] > 0.0:
             llfall[jm - 1] = True
     llfall[ncldqi - 1] = False
-    for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            ztp1[jk - 1, jl - 1] = pt[jk - 1, jl - 1] + ptsphy * tendency_tmp_t[jk - 1, jl - 1]
-            zqx[ncldqv - 1, jk - 1, jl - 1] = pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
-            zqx0[ncldqv - 1, jk - 1, jl - 1] = pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
-            za[jk - 1, jl - 1] = pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
-            zaorig[jk - 1, jl - 1] = pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
-    for jm in range(1, nclv - 1 + 1):
-        for jk in range(1, nlev + 1):
-            for jl in range(kidia, kfdia + 1):
-                zqx[jm - 1, jk - 1,
-                    jl - 1] = pclv[jm - 1, jk - 1, jl - 1] + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
-                zqx0[jm - 1, jk - 1,
-                     jl - 1] = pclv[jm - 1, jk - 1, jl - 1] + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
-    for jm in range(1, nclv + 1):
-        for jk in range(1, nlev + 1 + 1):
-            for jl in range(kidia, kfdia + 1):
-                zpfplsx[jm - 1, jk - 1, jl - 1] = 0.0
-    for jm in range(1, nclv + 1):
-        for jk in range(1, nlev + 1):
-            for jl in range(kidia, kfdia + 1):
-                zqxn2d[jm - 1, jk - 1, jl - 1] = 0.0
-                zlneg[jm - 1, jk - 1, jl - 1] = 0.0
-    for jl in range(kidia, kfdia + 1):
-        prainfrac_toprfz[jl - 1] = 0.0
+    ztp1[:, kidia - 1:kfdia] = pt[:, kidia - 1:kfdia] + ptsphy * tendency_tmp_t[:, kidia - 1:kfdia]
+    zqx[ncldqv - 1, :, kidia - 1:kfdia] = pq[:, kidia - 1:kfdia] + ptsphy * tendency_tmp_q[:, kidia - 1:kfdia]
+    zqx0[ncldqv - 1, :, kidia - 1:kfdia] = pq[:, kidia - 1:kfdia] + ptsphy * tendency_tmp_q[:, kidia - 1:kfdia]
+    za[:, kidia - 1:kfdia] = pa[:, kidia - 1:kfdia] + ptsphy * tendency_tmp_a[:, kidia - 1:kfdia]
+    zaorig[:, kidia - 1:kfdia] = pa[:, kidia - 1:kfdia] + ptsphy * tendency_tmp_a[:, kidia - 1:kfdia]
+    zqx[0:nclv - 1, :, kidia - 1:kfdia] = pclv[0:nclv - 1, :, kidia - 1:kfdia] + ptsphy * tendency_tmp_cld[0:nclv - 1, :, kidia - 1:kfdia]
+    zqx0[0:nclv - 1, :, kidia - 1:kfdia] = pclv[0:nclv - 1, :, kidia - 1:kfdia] + ptsphy * tendency_tmp_cld[0:nclv - 1, :, kidia - 1:kfdia]
+    zpfplsx[:, :, kidia - 1:kfdia] = 0.0
+    zqxn2d[:, :, kidia - 1:kfdia] = 0.0
+    zlneg[:, :, kidia - 1:kfdia] = 0.0
+    prainfrac_toprfz[kidia - 1:kfdia] = 0.0
     llrainliq[:] = True
     for jk in range(1, nlev + 1):
         for jl in range(kidia, kfdia + 1):
@@ -344,132 +323,98 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
                         tendency_loc_t[jk - 1, jl - 1] = tendency_loc_t[jk - 1, jl - 1] - ydthf_ralsdcp * zqadj
                     zqx[ncldqv - 1, jk - 1, jl - 1] = zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[jm - 1, jk - 1, jl - 1]
                     zqx[jm - 1, jk - 1, jl - 1] = 0.0
-    for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            zfoealfa[jk - 1, jl - 1] = min(1.0,
-                                           ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) *
-                                            ydthf_rtwat_rtice_r)**2)
-            zfoeewmt[jk - 1, jl - 1] = min(
-                ydthf_r2es *
-                (min(1.0,
-                     ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)**
-                     2) * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) /
-                                 (ztp1[jk - 1, jl - 1] - ydthf_r4les)) +
-                 (1.0 - min(1.0, ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) *
-                                  ydthf_rtwat_rtice_r)**2)) * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) /
-                                                                     (ztp1[jk - 1, jl - 1] - ydthf_r4ies))) /
-                pap[jk - 1, jl - 1], 0.5)
-            zqsmix[jk - 1, jl - 1] = zfoeewmt[jk - 1, jl - 1]
-            zqsmix[jk - 1, jl - 1] = zqsmix[jk - 1, jl - 1] / (1.0 - ydcst_retv * zqsmix[jk - 1, jl - 1])
-            zalfa = max(0.0, 1.0 * np.sign(ztp1[jk - 1, jl - 1] - ydcst_rtt))
-            zfoeew[jk - 1, jl - 1] = min(
-                (zalfa * (ydthf_r2es * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) /
-                                              (ztp1[jk - 1, jl - 1] - ydthf_r4les))) + (1.0 - zalfa) *
-                 (ydthf_r2es * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) /
-                                      (ztp1[jk - 1, jl - 1] - ydthf_r4ies)))) / pap[jk - 1, jl - 1], 0.5)
-            zfoeew[jk - 1, jl - 1] = min(0.5, zfoeew[jk - 1, jl - 1])
-            zqsice[jk - 1, jl - 1] = zfoeew[jk - 1, jl - 1] / (1.0 - ydcst_retv * zfoeew[jk - 1, jl - 1])
-            zfoeeliqt[jk - 1, jl - 1] = min(
-                ydthf_r2es * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) /
-                                    (ztp1[jk - 1, jl - 1] - ydthf_r4les)) / pap[jk - 1, jl - 1], 0.5)
-            zqsliq[jk - 1, jl - 1] = zfoeeliqt[jk - 1, jl - 1]
-            zqsliq[jk - 1, jl - 1] = zqsliq[jk - 1, jl - 1] / (1.0 - ydcst_retv * zqsliq[jk - 1, jl - 1])
-    for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            za[jk - 1, jl - 1] = max(0.0, min(1.0, za[jk - 1, jl - 1]))
-            zli[jk - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
-            if zli[jk - 1, jl - 1] > yrecldp_rlmin:
-                zliqfrac[jk - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] / zli[jk - 1, jl - 1]
-                zicefrac[jk - 1, jl - 1] = 1.0 - zliqfrac[jk - 1, jl - 1]
-            else:
-                zliqfrac[jk - 1, jl - 1] = 0.0
-                zicefrac[jk - 1, jl - 1] = 0.0
-    for jl in range(kidia, kfdia + 1):
-        ztrpaus[jl - 1] = 0.1
-        zpaphd[jl - 1] = 1.0 / paph[nlev + 1 - 1, jl - 1]
+    zt = ztp1[:, kidia - 1:kfdia]
+    zfoealfa[0:nlev, kidia - 1:kfdia] = np.minimum(
+        1.0, ((np.maximum(ydthf_rtice, np.minimum(ydthf_rtwat, zt)) - ydthf_rtice) * ydthf_rtwat_rtice_r)**2)
+    zfoeewmt[:, kidia - 1:kfdia] = np.minimum(
+        ydthf_r2es * (zfoealfa[0:nlev, kidia - 1:kfdia] * np.exp(ydthf_r3les * (zt - ydcst_rtt) / (zt - ydthf_r4les)) +
+                      (1.0 - zfoealfa[0:nlev, kidia - 1:kfdia]) * np.exp(ydthf_r3ies * (zt - ydcst_rtt) / (zt - ydthf_r4ies))) /
+        pap[:, kidia - 1:kfdia], 0.5)
+    zqsmix[:, kidia - 1:kfdia] = zfoeewmt[:, kidia - 1:kfdia]
+    zqsmix[:, kidia - 1:kfdia] = zqsmix[:, kidia - 1:kfdia] / (1.0 - ydcst_retv * zqsmix[:, kidia - 1:kfdia])
+    zalfa = np.maximum(0.0, 1.0 * np.sign(zt - ydcst_rtt))
+    zfoeew[:, kidia - 1:kfdia] = np.minimum(
+        (zalfa * (ydthf_r2es * np.exp(ydthf_r3les * (zt - ydcst_rtt) / (zt - ydthf_r4les))) + (1.0 - zalfa) *
+         (ydthf_r2es * np.exp(ydthf_r3ies * (zt - ydcst_rtt) / (zt - ydthf_r4ies)))) / pap[:, kidia - 1:kfdia], 0.5)
+    zfoeew[:, kidia - 1:kfdia] = np.minimum(0.5, zfoeew[:, kidia - 1:kfdia])
+    zqsice[:, kidia - 1:kfdia] = zfoeew[:, kidia - 1:kfdia] / (1.0 - ydcst_retv * zfoeew[:, kidia - 1:kfdia])
+    zfoeeliqt[:, kidia - 1:kfdia] = np.minimum(
+        ydthf_r2es * np.exp(ydthf_r3les * (zt - ydcst_rtt) / (zt - ydthf_r4les)) / pap[:, kidia - 1:kfdia], 0.5)
+    zqsliq[:, kidia - 1:kfdia] = zfoeeliqt[:, kidia - 1:kfdia]
+    zqsliq[:, kidia - 1:kfdia] = zqsliq[:, kidia - 1:kfdia] / (1.0 - ydcst_retv * zqsliq[:, kidia - 1:kfdia])
+    za[:, kidia - 1:kfdia] = np.maximum(0.0, np.minimum(1.0, za[:, kidia - 1:kfdia]))
+    zli[:, kidia - 1:kfdia] = zqx[ncldql - 1, :, kidia - 1:kfdia] + zqx[ncldqi - 1, :, kidia - 1:kfdia]
+    zli_mask = zli[:, kidia - 1:kfdia] > yrecldp_rlmin
+    zli_safe = np.where(zli_mask, zli[:, kidia - 1:kfdia], 1.0)
+    zliqfrac[:, kidia - 1:kfdia] = np.where(zli_mask, zqx[ncldql - 1, :, kidia - 1:kfdia] / zli_safe, 0.0)
+    zicefrac[:, kidia - 1:kfdia] = np.where(zli_mask, 1.0 - zliqfrac[:, kidia - 1:kfdia], 0.0)
+    ztrpaus[kidia - 1:kfdia] = 0.1
+    zpaphd[kidia - 1:kfdia] = 1.0 / paph[nlev + 1 - 1, kidia - 1:kfdia]
     for jk in range(1, nlev - 1 + 1):
-        for jl in range(kidia, kfdia + 1):
-            zsig = pap[jk - 1, jl - 1] * zpaphd[jl - 1]
-            if zsig > 0.1 and zsig < 0.4 and (ztp1[jk - 1, jl - 1] > ztp1[jk + 1 - 1, jl - 1]):
-                ztrpaus[jl - 1] = zsig
-    for jl in range(kidia, kfdia + 1):
-        zanewm1[jl - 1] = 0.0
-        zda[jl - 1] = 0.0
-        zcovpclr[jl - 1] = 0.0
-        zcovpmax[jl - 1] = 0.0
-        zcovptot[jl - 1] = 0.0
-        zcldtopdist[jl - 1] = 0.0
+        zsig = pap[jk - 1, kidia - 1:kfdia] * zpaphd[kidia - 1:kfdia]
+        ztrpaus_cond = (zsig > 0.1) & (zsig < 0.4) & (ztp1[jk - 1, kidia - 1:kfdia] > ztp1[jk, kidia - 1:kfdia])
+        ztrpaus[kidia - 1:kfdia] = np.where(ztrpaus_cond, zsig, ztrpaus[kidia - 1:kfdia])
+    zanewm1[kidia - 1:kfdia] = 0.0
+    zda[kidia - 1:kfdia] = 0.0
+    zcovpclr[kidia - 1:kfdia] = 0.0
+    zcovpmax[kidia - 1:kfdia] = 0.0
+    zcovptot[kidia - 1:kfdia] = 0.0
+    zcldtopdist[kidia - 1:kfdia] = 0.0
     for jk in range(yrecldp_ncldtop, nlev + 1):
-        for jm in range(1, nclv + 1):
-            for jl in range(kidia, kfdia + 1):
-                zqxfg[jm - 1, jl - 1] = zqx[jm - 1, jk - 1, jl - 1]
-        for jl in range(kidia, kfdia + 1):
-            zlicld[jl - 1] = 0.0
-            zrainaut[jl - 1] = 0.0
-            zrainacc[jl - 1] = 0.0
-            zsnowaut[jl - 1] = 0.0
-            zldefr[jl - 1] = 0.0
-            zacust[jl - 1] = 0.0
-            zqpretot[jl - 1] = 0.0
-            zlfinalsum[jl - 1] = 0.0
-            zlcond1[jl - 1] = 0.0
-            zlcond2[jl - 1] = 0.0
-            zsupsat[jl - 1] = 0.0
-            zlevapl[jl - 1] = 0.0
-            zlevapi[jl - 1] = 0.0
-            zsolab[jl - 1] = 0.0
-            zsolac[jl - 1] = 0.0
-            zicetot[jl - 1] = 0.0
-        for jm in range(1, nclv + 1):
-            for jn in range(1, nclv + 1):
-                for jl in range(kidia, kfdia + 1):
-                    zsolqb[jm - 1, jn - 1, jl - 1] = 0.0
-                    zsolqa[jm - 1, jn - 1, jl - 1] = 0.0
-        for jm in range(1, nclv + 1):
-            for jl in range(kidia, kfdia + 1):
-                zfallsrce[jm - 1, jl - 1] = 0.0
-                zfallsink[jm - 1, jl - 1] = 0.0
-                zconvsrce[jm - 1, jl - 1] = 0.0
-                zconvsink[jm - 1, jl - 1] = 0.0
-                zpsupsatsrce[jm - 1, jl - 1] = 0.0
-                zratio[jm - 1, jl - 1] = 0.0
-        for jl in range(kidia, kfdia + 1):
-            zdp[jl - 1] = paph[jk + 1 - 1, jl - 1] - paph[jk - 1, jl - 1]
-            zgdp[jl - 1] = ydcst_rg / zdp[jl - 1]
-            zrho[jl - 1] = pap[jk - 1, jl - 1] / (ydcst_rd * ztp1[jk - 1, jl - 1])
-            zdtgdp[jl - 1] = ptsphy * zgdp[jl - 1]
-            zrdtgdp[jl - 1] = zdp[jl - 1] * (1.0 / (ptsphy * ydcst_rg))
-            if jk > 1:
-                zdtgdpf[jl - 1] = ptsphy * ydcst_rg / (pap[jk - 1, jl - 1] - pap[jk - 1 - 1, jl - 1])
-            zfacw = ydthf_r5les / (ztp1[jk - 1, jl - 1] - ydthf_r4les)**2
-            zcor = 1.0 / (1.0 - ydcst_retv * zfoeeliqt[jk - 1, jl - 1])
-            zdqsliqdt[jl - 1] = zfacw * zcor * zqsliq[jk - 1, jl - 1]
-            zcorqsliq[jl - 1] = 1.0 + ydthf_ralvdcp * zdqsliqdt[jl - 1]
-            zfaci = ydthf_r5ies / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)**2
-            zcor = 1.0 / (1.0 - ydcst_retv * zfoeew[jk - 1, jl - 1])
-            zdqsicedt[jl - 1] = zfaci * zcor * zqsice[jk - 1, jl - 1]
-            zcorqsice[jl - 1] = 1.0 + ydthf_ralsdcp * zdqsicedt[jl - 1]
-            zalfaw = zfoealfa[jk - 1, jl - 1]
-            zalfawm[jl - 1] = zalfaw
-            zfac = zalfaw * zfacw + (1.0 - zalfaw) * zfaci
-            zcor = 1.0 / (1.0 - ydcst_retv * zfoeewmt[jk - 1, jl - 1])
-            zdqsmixdt[jl - 1] = zfac * zcor * zqsmix[jk - 1, jl - 1]
-            zcorqsmix[jl -
-                      1] = 1.0 + (min(1.0, ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) *
-                                            ydthf_rtwat_rtice_r)**2) * ydthf_ralvdcp +
-                                  (1.0 - min(1.0,
-                                             ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) *
-                                              ydthf_rtwat_rtice_r)**2)) * ydthf_ralsdcp) * zdqsmixdt[jl - 1]
-            zevaplimmix[jl - 1] = max((zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsmix[jl - 1],
-                                      0.0)
-            zevaplimliq[jl - 1] = max((zqsliq[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsliq[jl - 1],
-                                      0.0)
-            zevaplimice[jl - 1] = max((zqsice[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsice[jl - 1],
-                                      0.0)
-            ztmpa = 1.0 / max(za[jk - 1, jl - 1], zepsec)
-            zliqcld[jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] * ztmpa
-            zicecld[jl - 1] = zqx[ncldqi - 1, jk - 1, jl - 1] * ztmpa
-            zlicld[jl - 1] = zliqcld[jl - 1] + zicecld[jl - 1]
+        zqxfg[:, kidia - 1:kfdia] = zqx[:, jk - 1, kidia - 1:kfdia]
+        zlicld[kidia - 1:kfdia] = 0.0
+        zrainaut[kidia - 1:kfdia] = 0.0
+        zrainacc[kidia - 1:kfdia] = 0.0
+        zsnowaut[kidia - 1:kfdia] = 0.0
+        zldefr[kidia - 1:kfdia] = 0.0
+        zacust[kidia - 1:kfdia] = 0.0
+        zqpretot[kidia - 1:kfdia] = 0.0
+        zlfinalsum[kidia - 1:kfdia] = 0.0
+        zlcond1[kidia - 1:kfdia] = 0.0
+        zlcond2[kidia - 1:kfdia] = 0.0
+        zsupsat[kidia - 1:kfdia] = 0.0
+        zlevapl[kidia - 1:kfdia] = 0.0
+        zlevapi[kidia - 1:kfdia] = 0.0
+        zsolab[kidia - 1:kfdia] = 0.0
+        zsolac[kidia - 1:kfdia] = 0.0
+        zicetot[kidia - 1:kfdia] = 0.0
+        zsolqb[:, :, kidia - 1:kfdia] = 0.0
+        zsolqa[:, :, kidia - 1:kfdia] = 0.0
+        zfallsrce[:, kidia - 1:kfdia] = 0.0
+        zfallsink[:, kidia - 1:kfdia] = 0.0
+        zconvsrce[:, kidia - 1:kfdia] = 0.0
+        zconvsink[:, kidia - 1:kfdia] = 0.0
+        zpsupsatsrce[:, kidia - 1:kfdia] = 0.0
+        zratio[:, kidia - 1:kfdia] = 0.0
+        zdp[kidia - 1:kfdia] = paph[jk, kidia - 1:kfdia] - paph[jk - 1, kidia - 1:kfdia]
+        zgdp[kidia - 1:kfdia] = ydcst_rg / zdp[kidia - 1:kfdia]
+        zrho[kidia - 1:kfdia] = pap[jk - 1, kidia - 1:kfdia] / (ydcst_rd * ztp1[jk - 1, kidia - 1:kfdia])
+        zdtgdp[kidia - 1:kfdia] = ptsphy * zgdp[kidia - 1:kfdia]
+        zrdtgdp[kidia - 1:kfdia] = zdp[kidia - 1:kfdia] * (1.0 / (ptsphy * ydcst_rg))
+        if jk > 1:
+            zdtgdpf[kidia - 1:kfdia] = ptsphy * ydcst_rg / (pap[jk - 1, kidia - 1:kfdia] - pap[jk - 2, kidia - 1:kfdia])
+        zfacw_v = ydthf_r5les / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les)**2
+        zcor_v = 1.0 / (1.0 - ydcst_retv * zfoeeliqt[jk - 1, kidia - 1:kfdia])
+        zdqsliqdt[kidia - 1:kfdia] = zfacw_v * zcor_v * zqsliq[jk - 1, kidia - 1:kfdia]
+        zcorqsliq[kidia - 1:kfdia] = 1.0 + ydthf_ralvdcp * zdqsliqdt[kidia - 1:kfdia]
+        zfaci_v = ydthf_r5ies / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies)**2
+        zcor_v = 1.0 / (1.0 - ydcst_retv * zfoeew[jk - 1, kidia - 1:kfdia])
+        zdqsicedt[kidia - 1:kfdia] = zfaci_v * zcor_v * zqsice[jk - 1, kidia - 1:kfdia]
+        zcorqsice[kidia - 1:kfdia] = 1.0 + ydthf_ralsdcp * zdqsicedt[kidia - 1:kfdia]
+        zalfaw_v = zfoealfa[jk - 1, kidia - 1:kfdia]
+        zalfawm[kidia - 1:kfdia] = zalfaw_v
+        zfac_v = zalfaw_v * zfacw_v + (1.0 - zalfaw_v) * zfaci_v
+        zcor_v = 1.0 / (1.0 - ydcst_retv * zfoeewmt[jk - 1, kidia - 1:kfdia])
+        zdqsmixdt[kidia - 1:kfdia] = zfac_v * zcor_v * zqsmix[jk - 1, kidia - 1:kfdia]
+        zcorqsmix[kidia - 1:kfdia] = 1.0 + (zfoealfa[jk - 1, kidia - 1:kfdia] * ydthf_ralvdcp +
+                               (1.0 - zfoealfa[jk - 1, kidia - 1:kfdia]) * ydthf_ralsdcp) * zdqsmixdt[kidia - 1:kfdia]
+        zevaplimmix[kidia - 1:kfdia] = np.maximum((zqsmix[jk - 1, kidia - 1:kfdia] - zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia]) / zcorqsmix[kidia - 1:kfdia], 0.0)
+        zevaplimliq[kidia - 1:kfdia] = np.maximum((zqsliq[jk - 1, kidia - 1:kfdia] - zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia]) / zcorqsliq[kidia - 1:kfdia], 0.0)
+        zevaplimice[kidia - 1:kfdia] = np.maximum((zqsice[jk - 1, kidia - 1:kfdia] - zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia]) / zcorqsice[kidia - 1:kfdia], 0.0)
+        ztmpa_v = 1.0 / np.maximum(za[jk - 1, kidia - 1:kfdia], zepsec)
+        zliqcld[kidia - 1:kfdia] = zqx[ncldql - 1, jk - 1, kidia - 1:kfdia] * ztmpa_v
+        zicecld[kidia - 1:kfdia] = zqx[ncldqi - 1, jk - 1, kidia - 1:kfdia] * ztmpa_v
+        zlicld[kidia - 1:kfdia] = zliqcld[kidia - 1:kfdia] + zicecld[kidia - 1:kfdia]
         for jl in range(kidia, kfdia + 1):
             if zqx[ncldql - 1, jk - 1, jl - 1] < yrecldp_rlmin:
                 zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1]
@@ -1264,56 +1209,50 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             tendency_loc_a[jk - 1, jl - 1] = tendency_loc_a[jk - 1, jl - 1] + zda[jl - 1] * zqtmst
         for jl in range(kidia, kfdia + 1):
             pcovptot[jk - 1, jl - 1] = zcovptot[jl - 1]
-    for jk in range(1, nlev + 1 + 1):
-        for jl in range(kidia, kfdia + 1):
-            pfplsl[jk - 1, jl - 1] = zpfplsx[ncldqr - 1, jk - 1, jl - 1] + zpfplsx[ncldql - 1, jk - 1, jl - 1]
-            pfplsn[jk - 1, jl - 1] = zpfplsx[ncldqs - 1, jk - 1, jl - 1] + zpfplsx[ncldqi - 1, jk - 1, jl - 1]
-    for jl in range(kidia, kfdia + 1):
-        pfsqlf[1 - 1, jl - 1] = 0.0
-        pfsqif[1 - 1, jl - 1] = 0.0
-        pfsqrf[1 - 1, jl - 1] = 0.0
-        pfsqsf[1 - 1, jl - 1] = 0.0
-        pfcqlng[1 - 1, jl - 1] = 0.0
-        pfcqnng[1 - 1, jl - 1] = 0.0
-        pfcqrng[1 - 1, jl - 1] = 0.0
-        pfcqsng[1 - 1, jl - 1] = 0.0
-        pfsqltur[1 - 1, jl - 1] = 0.0
-        pfsqitur[1 - 1, jl - 1] = 0.0
+    pfplsl[:, kidia - 1:kfdia] = zpfplsx[ncldqr - 1, :, kidia - 1:kfdia] + zpfplsx[ncldql - 1, :, kidia - 1:kfdia]
+    pfplsn[:, kidia - 1:kfdia] = zpfplsx[ncldqs - 1, :, kidia - 1:kfdia] + zpfplsx[ncldqi - 1, :, kidia - 1:kfdia]
+    pfsqlf[0, kidia - 1:kfdia] = 0.0
+    pfsqif[0, kidia - 1:kfdia] = 0.0
+    pfsqrf[0, kidia - 1:kfdia] = 0.0
+    pfsqsf[0, kidia - 1:kfdia] = 0.0
+    pfcqlng[0, kidia - 1:kfdia] = 0.0
+    pfcqnng[0, kidia - 1:kfdia] = 0.0
+    pfcqrng[0, kidia - 1:kfdia] = 0.0
+    pfcqsng[0, kidia - 1:kfdia] = 0.0
+    pfsqltur[0, kidia - 1:kfdia] = 0.0
+    pfsqitur[0, kidia - 1:kfdia] = 0.0
     for jk in range(1, nlev + 1):
-        for jl in range(kidia, kfdia + 1):
-            zgdph_r = -zrg_r * (paph[jk + 1 - 1, jl - 1] - paph[jk - 1, jl - 1]) * zqtmst
-            pfsqlf[jk + 1 - 1, jl - 1] = pfsqlf[jk - 1, jl - 1]
-            pfsqif[jk + 1 - 1, jl - 1] = pfsqif[jk - 1, jl - 1]
-            pfsqrf[jk + 1 - 1, jl - 1] = pfsqlf[jk - 1, jl - 1]
-            pfsqsf[jk + 1 - 1, jl - 1] = pfsqif[jk - 1, jl - 1]
-            pfcqlng[jk + 1 - 1, jl - 1] = pfcqlng[jk - 1, jl - 1]
-            pfcqnng[jk + 1 - 1, jl - 1] = pfcqnng[jk - 1, jl - 1]
-            pfcqrng[jk + 1 - 1, jl - 1] = pfcqlng[jk - 1, jl - 1]
-            pfcqsng[jk + 1 - 1, jl - 1] = pfcqnng[jk - 1, jl - 1]
-            pfsqltur[jk + 1 - 1, jl - 1] = pfsqltur[jk - 1, jl - 1]
-            pfsqitur[jk + 1 - 1, jl - 1] = pfsqitur[jk - 1, jl - 1]
-            zalfaw = zfoealfa[jk - 1, jl - 1]
-            pfsqlf[jk + 1 - 1,
-                   jl - 1] = pfsqlf[jk + 1 - 1,
-                                    jl - 1] + (zqxn2d[ncldql - 1, jk - 1, jl - 1] - zqx0[ncldql - 1, jk - 1, jl - 1] +
-                                               pvfl[jk - 1, jl - 1] * ptsphy - zalfaw * plude[jk - 1, jl - 1]) * zgdph_r
-            pfcqlng[jk + 1 - 1, jl - 1] = pfcqlng[jk + 1 - 1, jl - 1] + zlneg[ncldql - 1, jk - 1, jl - 1] * zgdph_r
-            pfsqltur[jk + 1 - 1, jl - 1] = pfsqltur[jk + 1 - 1, jl - 1] + pvfl[jk - 1, jl - 1] * ptsphy * zgdph_r
-            pfsqrf[jk + 1 - 1, jl -
-                   1] = pfsqrf[jk + 1 - 1, jl -
-                               1] + (zqxn2d[ncldqr - 1, jk - 1, jl - 1] - zqx0[ncldqr - 1, jk - 1, jl - 1]) * zgdph_r
-            pfcqrng[jk + 1 - 1, jl - 1] = pfcqrng[jk + 1 - 1, jl - 1] + zlneg[ncldqr - 1, jk - 1, jl - 1] * zgdph_r
-            pfsqif[jk + 1 - 1, jl -
-                   1] = pfsqif[jk + 1 - 1, jl - 1] + (zqxn2d[ncldqi - 1, jk - 1, jl - 1] -
-                                                      zqx0[ncldqi - 1, jk - 1, jl - 1] + pvfi[jk - 1, jl - 1] * ptsphy -
-                                                      (1.0 - zalfaw) * plude[jk - 1, jl - 1]) * zgdph_r
-            pfcqnng[jk + 1 - 1, jl - 1] = pfcqnng[jk + 1 - 1, jl - 1] + zlneg[ncldqi - 1, jk - 1, jl - 1] * zgdph_r
-            pfsqitur[jk + 1 - 1, jl - 1] = pfsqitur[jk + 1 - 1, jl - 1] + pvfi[jk - 1, jl - 1] * ptsphy * zgdph_r
-            pfsqsf[jk + 1 - 1, jl -
-                   1] = pfsqsf[jk + 1 - 1, jl -
-                               1] + (zqxn2d[ncldqs - 1, jk - 1, jl - 1] - zqx0[ncldqs - 1, jk - 1, jl - 1]) * zgdph_r
-            pfcqsng[jk + 1 - 1, jl - 1] = pfcqsng[jk + 1 - 1, jl - 1] + zlneg[ncldqs - 1, jk - 1, jl - 1] * zgdph_r
-    for jk in range(1, nlev + 1 + 1):
-        for jl in range(kidia, kfdia + 1):
-            pfhpsl[jk - 1, jl - 1] = -ydcst_rlvtt * pfplsl[jk - 1, jl - 1]
-            pfhpsn[jk - 1, jl - 1] = -ydcst_rlstt * pfplsn[jk - 1, jl - 1]
+        zgdph_r = -zrg_r * (paph[jk, kidia - 1:kfdia] - paph[jk - 1, kidia - 1:kfdia]) * zqtmst
+        pfsqlf[jk, kidia - 1:kfdia] = pfsqlf[jk - 1, kidia - 1:kfdia]
+        pfsqif[jk, kidia - 1:kfdia] = pfsqif[jk - 1, kidia - 1:kfdia]
+        pfsqrf[jk, kidia - 1:kfdia] = pfsqlf[jk - 1, kidia - 1:kfdia]
+        pfsqsf[jk, kidia - 1:kfdia] = pfsqif[jk - 1, kidia - 1:kfdia]
+        pfcqlng[jk, kidia - 1:kfdia] = pfcqlng[jk - 1, kidia - 1:kfdia]
+        pfcqnng[jk, kidia - 1:kfdia] = pfcqnng[jk - 1, kidia - 1:kfdia]
+        pfcqrng[jk, kidia - 1:kfdia] = pfcqlng[jk - 1, kidia - 1:kfdia]
+        pfcqsng[jk, kidia - 1:kfdia] = pfcqnng[jk - 1, kidia - 1:kfdia]
+        pfsqltur[jk, kidia - 1:kfdia] = pfsqltur[jk - 1, kidia - 1:kfdia]
+        pfsqitur[jk, kidia - 1:kfdia] = pfsqitur[jk - 1, kidia - 1:kfdia]
+        zalfaw_tail = zfoealfa[jk - 1, kidia - 1:kfdia]
+        pfsqlf[jk, kidia - 1:kfdia] = pfsqlf[jk, kidia - 1:kfdia] + (
+            zqxn2d[ncldql - 1, jk - 1, kidia - 1:kfdia] - zqx0[ncldql - 1, jk - 1, kidia - 1:kfdia] +
+            pvfl[jk - 1, kidia - 1:kfdia] * ptsphy - zalfaw_tail * plude[jk - 1, kidia - 1:kfdia]) * zgdph_r
+        pfcqlng[jk, kidia - 1:kfdia] = pfcqlng[jk, kidia - 1:kfdia] + zlneg[ncldql - 1, jk - 1,
+                                                                             kidia - 1:kfdia] * zgdph_r
+        pfsqltur[jk, kidia - 1:kfdia] = pfsqltur[jk, kidia - 1:kfdia] + pvfl[jk - 1, kidia - 1:kfdia] * ptsphy * zgdph_r
+        pfsqrf[jk, kidia - 1:kfdia] = pfsqrf[jk, kidia - 1:kfdia] + (
+            zqxn2d[ncldqr - 1, jk - 1, kidia - 1:kfdia] - zqx0[ncldqr - 1, jk - 1, kidia - 1:kfdia]) * zgdph_r
+        pfcqrng[jk, kidia - 1:kfdia] = pfcqrng[jk, kidia - 1:kfdia] + zlneg[ncldqr - 1, jk - 1,
+                                                                             kidia - 1:kfdia] * zgdph_r
+        pfsqif[jk, kidia - 1:kfdia] = pfsqif[jk, kidia - 1:kfdia] + (
+            zqxn2d[ncldqi - 1, jk - 1, kidia - 1:kfdia] - zqx0[ncldqi - 1, jk - 1, kidia - 1:kfdia] +
+            pvfi[jk - 1, kidia - 1:kfdia] * ptsphy - (1.0 - zalfaw_tail) * plude[jk - 1, kidia - 1:kfdia]) * zgdph_r
+        pfcqnng[jk, kidia - 1:kfdia] = pfcqnng[jk, kidia - 1:kfdia] + zlneg[ncldqi - 1, jk - 1,
+                                                                             kidia - 1:kfdia] * zgdph_r
+        pfsqitur[jk, kidia - 1:kfdia] = pfsqitur[jk, kidia - 1:kfdia] + pvfi[jk - 1, kidia - 1:kfdia] * ptsphy * zgdph_r
+        pfsqsf[jk, kidia - 1:kfdia] = pfsqsf[jk, kidia - 1:kfdia] + (
+            zqxn2d[ncldqs - 1, jk - 1, kidia - 1:kfdia] - zqx0[ncldqs - 1, jk - 1, kidia - 1:kfdia]) * zgdph_r
+        pfcqsng[jk, kidia - 1:kfdia] = pfcqsng[jk, kidia - 1:kfdia] + zlneg[ncldqs - 1, jk - 1,
+                                                                             kidia - 1:kfdia] * zgdph_r
+    pfhpsl[:, kidia - 1:kfdia] = -ydcst_rlvtt * pfplsl[:, kidia - 1:kfdia]
+    pfhpsn[:, kidia - 1:kfdia] = -ydcst_rlstt * pfplsn[:, kidia - 1:kfdia]
