@@ -177,12 +177,15 @@ runs:
         # explained by the optarena diff, compare the resolved sha echoed below across the two runs
         # BEFORE touching a ratchet list.
         #
-        # To pin for a bisect, set DACE_SHA to a commit: it is fetched in place of the branch.
-        # A --depth 1 fetch takes a branch name or a SHA, hence init + fetch of that one ref.
-        # --recurse-submodules stays MANDATORY either way: dace vendors its runtime headers as
-        # submodules (external/moodycamel/blockingconcurrentqueue.h is included by
+        # There is NO override. A DACE_SHA escape hatch used to sit here "for a bisect", and it is
+        # how run 32571640992 came to grade the corpus against a dace a week old and report four
+        # symbol-propagation failures that the tip had already fixed -- a whole triage spent on
+        # dead bugs. Bisect by checking out the dace commit locally, not by teaching CI to freeze.
+        # A --depth 1 fetch takes a branch name, hence init + fetch of that one ref.
+        # --recurse-submodules stays MANDATORY: dace vendors its runtime headers as submodules
+        # (external/moodycamel/blockingconcurrentqueue.h is included by
         # dace/runtime/include/dace/stream.h), so without them every SDFG build dies on a missing header.
-        DACE_REF="${DACE_SHA:-extended}"
+        DACE_REF=extended
         mkdir -p "$RUNNER_TEMP/dace"
         git -C "$RUNNER_TEMP/dace" init -q
         git -C "$RUNNER_TEMP/dace" remote add origin https://github.com/spcl/dace.git
@@ -193,7 +196,7 @@ runs:
         # Echo the RESOLVED sha: a job that grades against dace must say which dace, or a triage
         # reader has to guess from the run date.
         echo "dace @ $(git -C "$RUNNER_TEMP/dace" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-        # pythran is PINNED for the same reason DACE_SHA is: it is a compiler this suite GRADES
+        # pythran IS pinned, unlike dace: it is a third-party compiler this suite GRADES
         # kernels through, and it moved under the gate. 0.19.0 landed between run 31842426040
         # (08-14) and 32065774711 (08-17) and turned subset_sum from green into a >600 s hang,
         # then a SIG11 -- the kernel itself unchanged and still green here on 0.18.1. Bump this in

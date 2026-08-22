@@ -57,10 +57,10 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: consulted (``dace_numeric_probe``). Neither was DaCe's: ``floyd_warshall`` agrees and never needed
 #: an entry, three ``unbound_symbols`` entries are gone, and the fourth turned out to be a real
 #: ``mismatch`` the harness defect had been standing in front of.
-#: Remeasured 2026-08-17 against the pin's new SHA: the four gemv ``out``-connector kernels (atax,
-#: covariance2, gesummv, k3mm) and ``fragment_patch_density``'s einsum row-dot MatMul dispatch all
-#: agree upstream now, so their entries are gone. This is the bump the dace-canary exists to
-#: demand -- it went red on exactly these five before the pin moved.
+#: Remeasured 2026-08-17: the four gemv ``out``-connector kernels (atax, covariance2, gesummv,
+#: k3mm) and ``fragment_patch_density``'s einsum row-dot MatMul dispatch all agree upstream now, so
+#: their entries are gone. That remeasure was forced by a dace SHA bump, back when CI pinned one;
+#: it now tracks the extended tip, so this list moves with the branch instead of with a bump.
 #: ``raman_fitting`` left the list the same day, in the GENERATOR: its Levenberg-Marquardt step
 #: emits ``np.linalg.solve(atad, rhs)`` with a VECTOR rhs, and DaCe's ``Solve`` library node reads
 #: ``shape_out[1]`` unconditionally, so the expansion raised ``IndexError: list index out of range``.
