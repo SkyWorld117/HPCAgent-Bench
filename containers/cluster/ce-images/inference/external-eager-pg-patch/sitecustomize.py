@@ -189,6 +189,56 @@ def patch_mla_empty_context_mask() -> None:
 
 INSTALLED: set[str] = set()
 
+# vLLM sends PP activations over the device group (RCCL) but the tensor-dict METADATA over
+# cpu_group, which it hardcodes to gloo in both construction paths -- there is no backend knob, so
+# MPI is not reachable without patching vLLM either. This moves send_object/recv_object onto the
+# device group so a PP step touches no CPU transport at all.
+#
+# OFF by default and deliberately so: the supported fix for the deaths at 2x gloo's 1800 s default
+# is --cpu-distributed-timeout-seconds, and changing the transport in the same run would make the
+# two indistinguishable. Turn this on only to test the transport itself.
+#
+# The size handshake exists because the receiver must size its buffer before receiving; that stays,
+# it just travels as a device tensor. `.item()` on the received size forces a sync, which is the
+# real cost of this patch -- one per PP handoff, against a TCP round trip saved.
+METADATA_ON_DEVICE = os.environ.get("VLLM_PP_METADATA_ON_DEVICE", "0") == "1"
+
+
+def patch_object_transfer_onto_device() -> None:
+    """Route GroupCoordinator.send_object/recv_object through device_group instead of cpu_group."""
+    import pickle
+
+    import torch
+    from vllm.distributed import parallel_state
+
+    coordinator = parallel_state.GroupCoordinator
+
+    def send_object(self, obj, dst: int) -> None:
+        device = getattr(self, "device", None)
+        if device is None or self.device_group is None:
+            return original_send(self, obj, dst)
+        payload = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).to(device)
+        size = torch.tensor([payload.numel()], dtype=torch.long, device=device)
+        torch.distributed.send(size, dst=self.ranks[dst], group=self.device_group)
+        torch.distributed.send(payload, dst=self.ranks[dst], group=self.device_group)
+
+    def recv_object(self, src: int):
+        device = getattr(self, "device", None)
+        if device is None or self.device_group is None:
+            return original_recv(self, src)
+        size = torch.empty(1, dtype=torch.long, device=device)
+        rank_size = torch.distributed.recv(size, src=self.ranks[src], group=self.device_group)
+        payload = torch.empty(int(size.item()), dtype=torch.uint8, device=device)
+        rank_payload = torch.distributed.recv(payload, src=self.ranks[src], group=self.device_group)
+        assert rank_payload == rank_size, "size and payload arrived from different senders"
+        return pickle.loads(payload.cpu().numpy().tobytes())
+
+    original_send = coordinator.send_object
+    original_recv = coordinator.recv_object
+    coordinator.send_object = send_object
+    coordinator.recv_object = recv_object
+    print("[external-eager-pg] send_object/recv_object routed onto the device group", file=sys.stderr, flush=True)
+
 
 def eager_init_and_split(*args, **kwargs):
     """`init_process_group`, then install the pp collective split on top of the fresh world.
@@ -205,6 +255,9 @@ def eager_init_and_split(*args, **kwargs):
     if FIX_MLA_LSE_LAYOUT and "mla_lse_layout" not in INSTALLED:
         patch_mla_empty_context_mask()
         INSTALLED.add("mla_lse_layout")
+    if METADATA_ON_DEVICE and "metadata_on_device" not in INSTALLED:
+        patch_object_transfer_onto_device()
+        INSTALLED.add("metadata_on_device")
     return result
 
 
