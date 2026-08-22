@@ -11,6 +11,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # folder is missing and the job then runs with no serve log at all.
 mkdir -p results
 . ./arm_nodes.sh
+. ./check_problems.sh
 
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=qwen30b $0" >&2; exit 2; }
@@ -25,12 +26,12 @@ case "${MODEL}" in
     kimi*) TIME="${TIME:-24:00:00}" ;;
     *) TIME="${TIME:-20:00:00}" ;;
 esac
-# Existence check only -- it cannot see staleness, and the checked-in llr4 skills lists ARE
-# stale: packet appended after the kernel line (the prefix-cache anti-pattern make_problems
-# now avoids) and pages named openmp/openacc, which no longer exist. Regenerate before use.
+# Skills arms read the llr4 packet; off arms reuse the llr2 task text. problems_fresh also
+# rejects a list that exists but no longer matches the treatment -- every llr4 list had
+# drifted that way under the old existence-only check.
 for lang in ${LANGS}; do
     for f in "problems-llr4-${lang}-skills.jsonl" "problems-llr2-${lang}.jsonl"; do
-        [[ -s "$f" ]] || { echo "missing problems file: $f -- regenerate with make_problems.py" >&2; exit 2; }
+        problems_fresh "$f" || exit 2
     done
 done
 

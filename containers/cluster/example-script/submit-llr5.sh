@@ -20,6 +20,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 # folder is missing and the job then runs with no serve log at all.
 mkdir -p results
 . ./arm_nodes.sh
+. ./check_problems.sh
 
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=oss120b $0" >&2; exit 2; }
@@ -32,7 +33,7 @@ esac
 
 for lang in ${LANGS}; do
     for f in "problems-llr5-${lang}.jsonl" "problems-llr5-${lang}-skills.jsonl"; do
-        [[ -s "$f" ]] || { echo "missing problems file: $f -- regenerate with make_problems.py" >&2; exit 2; }
+        problems_fresh "$f" || exit 2
     done
 done
 
