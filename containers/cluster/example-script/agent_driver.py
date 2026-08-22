@@ -274,6 +274,12 @@ AGGREGATE_MIN_INTERVAL_SECONDS = 1.0
 
 #: An interval counts as saturated when both its ends saw at least this share of the run's OWN peak
 #: concurrency. Relative to that peak rather than to an absolute request count because the probe
+#: Seconds of delay per worker index before an agent starts, so the per-agent MCP servers do not
+#: all initialize at once. 0 disables the stagger.
+AGENT_START_STAGGER_SECONDS = float(os.environ.get("AGENT_START_STAGGER_SECONDS", "0.5"))
+#: Cap on that delay, so a wide node does not push its last agent minutes past the first.
+AGENT_START_STAGGER_MAX_SECONDS = float(os.environ.get("AGENT_START_STAGGER_MAX_SECONDS", "90"))
+
 #: cannot know how many agents the arm launched; the peak itself is printed beside every figure, so
 #: a run that never had more than two requests in flight reads as one instead of hiding behind a
 #: threshold it technically passed.
@@ -863,6 +869,14 @@ def watch_token_budget(process: subprocess.Popen[bytes], log_path: pathlib.Path,
 
 def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path, judges: list[str],
               problem_index: int) -> int:
+    # Every agent spawns its own stdio MCP server (python3 tools/mcp_server.py), and the pool
+    # submits all AGENTS_PER_NODE of them at once, so ~120 interpreters start within milliseconds
+    # and the client's init handshake times out on the losers. Measured on 604479: 72 of 121 agents
+    # came up with mcp_servers status "failed", and a failed server means the agent has no submit
+    # tool and burns its whole budget in api_retry. Spread the starts instead.
+    if AGENT_START_STAGGER_SECONDS > 0:
+        time.sleep(min(worker_index * AGENT_START_STAGGER_SECONDS, AGENT_START_STAGGER_MAX_SECONDS))
+
     runtime = pathlib.Path("/opt/optarena-agent")
     if not runtime.is_dir():
         runtime = pathlib.Path(__file__).resolve().parents[2] / "agent"
