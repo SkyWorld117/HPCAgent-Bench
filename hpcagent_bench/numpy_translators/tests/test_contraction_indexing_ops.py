@@ -12,7 +12,8 @@ import pytest
 from numpyto_common.lib_nodes import (NP_CALL_EXPANDERS, _matmul_result_shape, _parse_einsum_subscripts, dims_agree,
                                       expand_cumprod, expand_cumsum, expand_diagonal, expand_einsum, expand_inner,
                                       expand_linalg_norm, expand_median, expand_reshape, expand_roll, expand_tensordot,
-                                      expand_trace, expand_tril, expand_triu, expand_vdot, substitute_dim_aliases)
+                                      expand_trace, expand_tril, expand_triu, expand_vdot, shape_exprs_equal,
+                                      shape_exprs_differ_numerically, substitute_dim_aliases, sympify_shape)
 from numpyto_common.lowering import (_EllipsisExpander, _FullCallHoister, _MatmulCallRewriter, _ReshapeMethodRewriter)
 
 
@@ -95,6 +96,74 @@ def test_dims_agree_resolves_a_shape_read_against_the_table():
     table = {"__inl8_y": ("b", "h", "w", "embed_dim")}
     assert dims_agree("__inl91_c", "embed_dim", aliases, table)
     assert not dims_agree("__inl91_c", "h", aliases, table)
+
+
+def _no_simplify(monkeypatch):
+    """Make ``sympy.simplify`` fatal, so a test can pin which rung settled a pair."""
+    import sympy
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("sympy.simplify was reached")
+
+    monkeypatch.setattr(sympy, "simplify", explode)
+    shape_exprs_equal.cache_clear()
+
+
+def test_a_polynomial_difference_never_reaches_simplify(monkeypatch):
+    # An expanded polynomial is canonical, so a non-zero expansion is already the answer. simplify
+    # was measured at 785 ms on one of these pairs.
+    _no_simplify(monkeypatch)
+    assert dims_agree("(c + 6 * g) * h * w", "c * h * w + 6 * g * h * w", {"zz": "1"})
+    assert not dims_agree("4 * c", "15 * embed_dim", {"c": "4 * embed_dim"})
+
+
+def test_a_conv_extent_is_refuted_numerically_not_symbolically(monkeypatch):
+    # The dominant shape in the ML track: a floor makes the difference non-polynomial, so only the
+    # numeric point settles it short of simplify.
+    _no_simplify(monkeypatch)
+    assert not dims_agree("n * ((h - 2) // 1 + 1) * ((w - 2) // 1 + 1)", "n * oh * ow", {"zz": "1"})
+
+
+def test_the_numeric_probe_refutes_a_pair_that_agrees_at_the_first_point():
+    # ``2 * a`` and ``a + 7`` both give 14 at a = 7, which is why one point is not enough.
+    import sympy
+    assert shape_exprs_differ_numerically(sympy.sympify("2 * a"), sympy.sympify("a + 7"))
+
+
+def test_the_numeric_probe_never_refutes_an_equal_pair():
+    # The refutation may only ever answer False faster -- never claim a difference that is not there.
+    import sympy
+    assert not shape_exprs_differ_numerically(sympy.sympify("4 * (4 * e)"), sympy.sympify("16 * e"))
+    # A floor on both sides is where a careless probe would round its way to a false refutation.
+    assert not shape_exprs_differ_numerically(sympy.sympify("2 * (c // g)"), sympy.sympify("(c // g) + (c // g)"))
+
+
+def test_the_symbolic_rung_is_asked_about_each_pair_once():
+    # The symbolic compare is 61% of a densenet lowering uncached, and reshape_axis_groups asks
+    # about the same pair once per axis of every reshape.
+    shape_exprs_equal.cache_clear()
+    aliases = {"c": "4 * embed_dim"}
+    assert dims_agree("4 * c", "16 * embed_dim", aliases)
+    assert dims_agree("4 * c", "16 * embed_dim", aliases)
+    assert dims_agree("4 * c", "16 * embed_dim", aliases)
+    info = shape_exprs_equal.cache_info()
+    assert (info.misses, info.hits) == (1, 2)
+
+
+def test_the_symbolic_key_does_not_depend_on_argument_order():
+    # A zero difference is symmetric, so the mirrored pair must not take a second entry.
+    shape_exprs_equal.cache_clear()
+    aliases = {"c": "4 * embed_dim"}
+    assert dims_agree("4 * c", "16 * embed_dim", aliases)
+    assert dims_agree("16 * embed_dim", "4 * c", aliases)
+    info = shape_exprs_equal.cache_info()
+    assert (info.misses, info.hits) == (1, 1)
+
+
+def test_sympify_shape_declines_a_token_that_does_not_parse():
+    # None is what makes dims_agree answer False instead of raising out of the expander.
+    assert sympify_shape("a b c") is None
+    assert str(sympify_shape("4 * embed_dim")) == "4*embed_dim"
 
 
 def test_dims_agree_is_false_on_an_unparseable_token():

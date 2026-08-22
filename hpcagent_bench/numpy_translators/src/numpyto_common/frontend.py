@@ -30,6 +30,7 @@ import json
 import os
 import pathlib
 import re
+from functools import lru_cache
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
@@ -2136,6 +2137,7 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
     return ast.copy_location(ast.fix_missing_locations(out), node)
 
 
+@lru_cache(maxsize=None, typed=True)
 def fold_shape_expr(text: str) -> str:
     """Simplify a shape-token expression; returns ``text`` unchanged if it does not parse.
 
@@ -2144,6 +2146,11 @@ def fold_shape_expr(text: str) -> str:
     single extent hundreds of characters long -- repeated at every loop bound and every allocation.
     densenet121's Fortran came out at 10k lines and did not finish compiling. The arithmetic is
     almost entirely ``+ 0`` / ``- 1 + 1`` / ``// 1`` that the identities above erase.
+
+    Cached: a parse and an unparse per call, asked once per extent per pass over the same handful
+    of distinct tokens -- 33% of a mobilenet lowering once the symbolic compare stopped dominating.
+    Pure in ``text`` (the folder rebuilds its tree from the string every call), so the entry can
+    never go stale.
     """
     if not isinstance(text, str) or not any(c in text for c in "+-*/"):
         return text

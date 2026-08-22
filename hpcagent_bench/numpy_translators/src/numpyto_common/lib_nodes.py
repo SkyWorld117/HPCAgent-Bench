@@ -17,6 +17,7 @@ Registry keys are the POST-``_MathRewriter`` call shape: ``np.sum`` is still
 import ast
 import copy
 import re
+from functools import lru_cache
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
@@ -6365,6 +6366,86 @@ def substitute_dim_aliases(token: str,
     return text
 
 
+@lru_cache(maxsize=None, typed=True)
+def sympify_shape(text: str):
+    """``text`` as a sympy expression, or ``None`` when it does not parse.
+
+    One shape token is compared against many others, so without this the same string is re-parsed
+    once per PAIR. Keyed on the string and never on a sympy object: sympy equality is structural
+    and would collapse distinct tokens onto one entry.
+    """
+    import sympy  # Deferred: sympy costs ~100s of ms to import and most kernels never reach here.
+    try:
+        return sympy.sympify(text)
+    except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
+        return None
+
+
+#: Integer points the numeric refutation evaluates at. Two of them, because a single point lets a
+#: pair coincide by accident (``2 * a`` and ``a + 7`` both give 14 at ``a = 7``), and fixed rather
+#: than random so a verdict never depends on the run.
+DIM_PROBE_POINTS: Tuple[Tuple[int, ...], ...] = ((7, 11, 13, 17, 19, 23, 29, 31), (3, 41, 5, 37, 2, 43, 11, 47))
+
+
+def shape_exprs_differ_numerically(ea, eb) -> bool:
+    """``True`` when the two expressions disagree at one integer point, which REFUTES equality.
+
+    Shape tokens agree when they agree as FUNCTIONS of their symbols, so one disagreeing
+    assignment settles the question -- in microseconds, against the hundreds of milliseconds
+    ``simplify`` spends reaching the same verdict on a conv extent like ``(h - k) // s + 1``.
+    Agreement at a point proves nothing and falls through to the symbolic rung, so this can only
+    ever answer False faster, never answer True.
+    """
+    symbols = sorted(ea.free_symbols | eb.free_symbols, key=str)
+    if not symbols or len(symbols) > len(DIM_PROBE_POINTS[0]):
+        return False
+    for values in DIM_PROBE_POINTS:
+        point = dict(zip(symbols, values))
+        try:
+            va, vb = ea.subs(point), eb.subs(point)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return False
+        if not (va.is_number and vb.is_number):
+            return False
+        if va != vb:
+            return True
+    return False
+
+
+@lru_cache(maxsize=None, typed=True)
+def shape_exprs_equal(sa: str, sb: str) -> bool:
+    """``True`` when two already alias-substituted shape expressions denote the same extent.
+
+    Split out of :func:`dims_agree` so the symbolic work is memoized. :func:`reshape_axis_groups`
+    asks about the same pair once per axis of every reshape, and a densenet-sized model reaches
+    this rung thousands of times over a vocabulary of a few dozen tokens -- profiled at 61% of the
+    whole lowering before the cache. Pure in its arguments: the alias table that produced the two
+    strings is already folded into them.
+
+    Four rungs, and ``simplify`` -- measured at 784 ms on one conv-extent pair -- is the last.
+    ``expand`` PROVES the linear cases (swin's ``4 * (4 * embed_dim)`` against ``16 * embed_dim``);
+    a non-zero expansion of a POLYNOMIAL difference is already conclusive, so those need nothing
+    further; and :func:`shape_exprs_differ_numerically` refutes the rest in microseconds. Every
+    rung answers exactly what ``simplify`` alone answered -- this is a cost cut, not a semantic
+    change.
+    """
+    import sympy  # Deferred, as in sympify_shape.
+    ea, eb = sympify_shape(sa), sympify_shape(sb)
+    if ea is None or eb is None:
+        return False
+    try:
+        diff = ea - eb
+        if sympy.expand(diff) == 0:
+            return True
+        if diff.is_polynomial():
+            return False  # An expanded polynomial is canonical: non-zero here means non-zero.
+        if shape_exprs_differ_numerically(ea, eb):
+            return False
+        return bool(sympy.simplify(diff) == 0)
+    except (TypeError, AttributeError, ValueError):
+        return False
+
+
 def dims_agree(a: str,
                b: str,
                aliases: Optional[Dict[str, str]] = None,
@@ -6387,12 +6468,9 @@ def dims_agree(a: str,
     sb = substitute_dim_aliases(b, aliases or {}, shape_table)
     if sa == sb:
         return True
-    # Deferred: sympy costs ~100s of ms to import and the two rungs above settle the common case.
-    import sympy
-    try:
-        return bool(sympy.simplify(sympy.sympify(sa) - sympy.sympify(sb)) == 0)
-    except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
-        return False
+    # Order-insensitive key: both rungs above are symmetric and so is a zero difference, so
+    # ``(a, b)`` and ``(b, a)`` must not occupy two cache entries.
+    return shape_exprs_equal(sa, sb) if sa <= sb else shape_exprs_equal(sb, sa)
 
 
 def _matmul_result_shape(a_shape: Tuple[str, ...],
