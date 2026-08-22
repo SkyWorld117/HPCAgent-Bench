@@ -331,18 +331,38 @@ for i in $(seq 1 "${PROBE_STREAMS}"); do
     PROBE_PIDS+=($!)
 done
 : >"${RUN_DIR}/probe-conc.txt"
-( while :; do metric num_requests_running >>"${RUN_DIR}/probe-conc.txt"; sleep 5; done ) &
+# Three columns per sample -- elapsed, cumulative generated tokens, resident requests. The token
+# column is what makes a steady-state read possible: the aggregate below divides by the WHOLE
+# burst, ramp included, and on 604647 that ramp was ~170s of a 359s run, so the headline number
+# came out at half the rate the engine's own counter reported while saturated.
+( while :; do printf '%s %s %s\n' "${SECONDS}" "$(metric generation_tokens_total)" \
+    "$(metric num_requests_running)" >>"${RUN_DIR}/probe-conc.txt"; sleep 5; done ) &
 SAMPLER_PID=$!
 wait "${PROBE_PIDS[@]}" || true
 g1=$(metric generation_tokens_total); t1=$SECONDS
 kill "${SAMPLER_PID}" 2>/dev/null || true
-awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" '
-    $1 > 0 { s += $1; n += 1; if ($1 > peak) peak = $1 }
+awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v span="${STEADY_SPAN_S:-60}" '
+    { et[NR] = $1; tok[NR] = $2; run[NR] = $3 }
+    $3 > 0 { s += $3; n += 1; if ($3 > peak) peak = $3 }
     END {
         conc = n ? s / n : 0
         rate = dt > 0 ? (b - a) / dt : 0
         printf "SATURATED DECODE: %.1f tok/s aggregate over %ds (avg %.0f / peak %.0f concurrent)\n", rate, dt, conc, peak
         if (conc > 0) printf "                  %.1f tok/s per request\n", rate / conc
+        # Best sustained rate over any window of at least `span` seconds -- the same quantity the
+        # serving probe reports after excluding its ramp, and the only one comparable to it.
+        for (i = 1; i <= NR; i++)
+            for (j = i + 1; j <= NR; j++)
+                if (et[j] - et[i] >= span) {
+                    r = (tok[j] - tok[i]) / (et[j] - et[i])
+                    if (r > best) { best = r; bs = et[j] - et[i] }
+                    break
+                }
+        if (best > 0) {
+            printf "STEADY DECODE:    %.1f tok/s best sustained over %ds", best, bs
+            if (conc > 0) printf " (%.1f per request)", best / conc
+            printf "\n"
+        }
         if (rate <= 0) { print "FAIL: no decode progress under load"; exit 1 }
     }' "${RUN_DIR}/probe-conc.txt" || exit 1
 
