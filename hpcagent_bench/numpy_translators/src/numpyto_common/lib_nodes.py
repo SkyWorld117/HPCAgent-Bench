@@ -4369,16 +4369,118 @@ def expand_tril(target: ast.expr,
     return _expand_triangular(target, args, shape_table, kwargs, lower=True)
 
 
+def product_str(tokens: List[str]) -> str:
+    """``["a", "b"]`` -> ``"(a) * (b)"``; the empty group is the unit extent."""
+    return " * ".join(f"({t})" for t in tokens) if tokens else "1"
+
+
+def reshape_axis_groups(
+        src_shape: Tuple[str, ...], tgt_shape: Tuple[str, ...], aliases: Optional[Dict[str, str]],
+        shape_table: Optional[Dict[str, Tuple[str, ...]]]) -> Optional[List[Tuple[List[int], List[int]]]]:
+    """Pair the two shapes of a C-order reshape into contiguous axis groups, or None.
+
+    Axes that agree pairwise from the front and from the back are paired 1:1; whatever is left in
+    the middle is ONE group. Sound with no algebra over the extents -- a reshape keeps element
+    order and the two shapes multiply out to the same total by construction, so once the matched
+    axes are equal the unmatched middles span the same extent. Proving that directly means proving
+    ``num_groups * (c // num_groups) == c``, which sympy will not do, and every grouped-channel
+    reshape in the ML track has exactly that shape.
+
+    A middle that is N:M with both sides above one axis is a genuine re-layout and returns None.
+    """
+    ns, nt = len(src_shape), len(tgt_shape)
+    head = 0
+    while head < ns and head < nt and dims_agree(src_shape[head], tgt_shape[head], aliases, shape_table):
+        head += 1
+    tail = 0
+    while (tail < ns - head and tail < nt - head
+           and dims_agree(src_shape[ns - 1 - tail], tgt_shape[nt - 1 - tail], aliases, shape_table)):
+        tail += 1
+    groups: List[Tuple[List[int], List[int]]] = [([i], [i]) for i in range(head)]
+    mid_src, mid_tgt = list(range(head, ns - tail)), list(range(head, nt - tail))
+    if mid_src or mid_tgt:
+        if len(mid_src) > 1 and len(mid_tgt) > 1:
+            return None
+        groups.append((mid_src, mid_tgt))
+    groups.extend(([ns - 1 - k], [nt - 1 - k]) for k in reversed(range(tail)))
+    return groups
+
+
+def reshape_grouped_copy(tgt_name: str, src_name: str, src_shape: Tuple[str, ...], tgt_shape: Tuple[str, ...],
+                         groups: List[Tuple[List[int], List[int]]]) -> Optional[List[ast.stmt]]:
+    """The copy nest for a reshape whose axes pair up (:func:`reshape_axis_groups`), or None.
+
+    Iterates the finer side of every group, so each index on the coarser side is a linear
+    combination of those iterators and every subscript stays affine. A group that splits BOTH
+    sides is not expressible this way and declines.
+    """
+    if not src_shape or not tgt_shape:
+        return None
+    src_index: List[str] = [""] * len(src_shape)
+    tgt_index: List[str] = [""] * len(tgt_shape)
+    loops: List[Tuple[str, str]] = []
+    for src_idxs, tgt_idxs in groups:
+        if not src_idxs or not tgt_idxs:
+            # One side spans nothing, so the other side is a run of size-1 axes indexed at 0.
+            solo, index = (src_idxs, src_index) if tgt_idxs == [] else (tgt_idxs, tgt_index)
+            shape = src_shape if tgt_idxs == [] else tgt_shape
+            if any(str(shape[ax]) != "1" for ax in solo):
+                return None
+            for ax in solo:
+                index[ax] = "0"
+            continue
+        if len(src_idxs) == len(tgt_idxs):
+            for s_ax, t_ax in zip(src_idxs, tgt_idxs):
+                it = f"__rs{len(loops)}"
+                loops.append((it, src_shape[s_ax]))
+                src_index[s_ax] = tgt_index[t_ax] = it
+            continue
+        fine_is_src = len(src_idxs) > len(tgt_idxs)
+        fine_axes, fine_shape = (src_idxs, src_shape) if fine_is_src else (tgt_idxs, tgt_shape)
+        coarse_axes = tgt_idxs if fine_is_src else src_idxs
+        if len(coarse_axes) != 1:
+            return None
+        terms: List[str] = []
+        its: List[str] = []
+        for ax in fine_axes:
+            it = f"__rs{len(loops)}"
+            loops.append((it, fine_shape[ax]))
+            its.append(it)
+        for pos, (ax, it) in enumerate(zip(fine_axes, its)):
+            stride = product_str([fine_shape[a] for a in fine_axes[pos + 1:]])
+            terms.append(it if stride == "1" else f"({it}) * ({stride})")
+            (src_index if fine_is_src else tgt_index)[ax] = it
+        (tgt_index if fine_is_src else src_index)[coarse_axes[0]] = " + ".join(terms)
+    if not all(src_index) or not all(tgt_index):
+        return None
+
+    def subscript(name: str, parts: List[str], ctx: ast.expr_context) -> ast.expr:
+        elts = [ast.parse(t, mode="eval").body for t in parts]
+        sl = elts[0] if len(elts) == 1 else ast.Tuple(elts=elts, ctx=ast.Load())
+        return ast.Subscript(value=_name(name), slice=sl, ctx=ctx)
+
+    inner: ast.stmt = ast.Assign(targets=[subscript(tgt_name, tgt_index, ast.Store())],
+                                 value=subscript(src_name, src_index, ast.Load()))
+    for it, bound in reversed(loops):
+        inner = ast.For(target=_store(it),
+                        iter=ast.Call(func=_name("range"), args=[_const_or_name(bound)], keywords=[]),
+                        body=[inner],
+                        orelse=[])
+    return [inner]
+
+
 def expand_reshape(target: ast.expr,
                    args: List[ast.expr],
                    shape_table: Dict[str, Tuple[str, ...]],
-                   kwargs=None) -> List[ast.stmt]:
-    """``out = np.reshape(A, (m, n, ...))`` -> rank-aware loop-nest copy. Emits a
-    loop nest over the **target** shape and computes the matching source
-    multi-index via div/mod on a running flat index -- works for both C
-    (flat-indexes anyway) and Fortran (type-checks rank); when source and
-    target share rank, the nest degenerates to a per-axis copy with identical
-    indices.
+                   kwargs=None,
+                   dim_aliases: Optional[Dict[str, str]] = None) -> List[ast.stmt]:
+    """``out = np.reshape(A, (m, n, ...))`` -> rank-aware loop-nest copy.
+
+    Two lowerings. When the two shapes pair up into contiguous axis groups
+    (:func:`reshape_axis_groups`) the nest runs over the finer side of each group and every
+    subscript is affine. Otherwise it falls back to a nest over the **target** shape whose source
+    multi-index comes from div/mod on a running flat index -- correct for both C (flat-indexes
+    anyway) and Fortran (type-checks rank), but non-affine over a symbolic stride.
 
     ``order="F"`` (numpy column-major ravel/fill) is honoured: target flat
     index and source multi-index are both computed column-major, so a
@@ -4422,6 +4524,17 @@ def expand_reshape(target: ast.expr,
         if vars(kw).get("arg") == "order" and isinstance(kw.value, ast.Constant):
             order = str(kw.value.value).upper()
     fortran = order == "F"
+
+    # Affine fast path: when the two shapes pair up into contiguous axis groups, iterate the finer
+    # side and read the coarser index off a linear combination of its iterators. The flat-index
+    # form below is correct either way, but its ``/`` and ``%`` are non-affine over a symbolic
+    # stride, which drops the nest out of Pluto's model. ``order="F"`` keeps the flat form.
+    if not fortran:
+        groups = reshape_axis_groups(tuple(a_shape), tuple(tgt_shape), dim_aliases, shape_table)
+        if groups is not None:
+            grouped = reshape_grouped_copy(target.id, a.id, tuple(a_shape), tuple(tgt_shape), groups)
+            if grouped is not None:
+                return grouped
 
     def _mul(*toks: str) -> str:
         toks = [t for t in toks if t and t != "1"]
@@ -7549,7 +7662,14 @@ class _CallHoister(ast.NodeTransformer):
 import inspect
 
 
-def _call_expander(expander, target, args, keywords, shape_table, local_dtypes=None, fresh_local_allocs=None):
+def _call_expander(expander,
+                   target,
+                   args,
+                   keywords,
+                   shape_table,
+                   local_dtypes=None,
+                   fresh_local_allocs=None,
+                   dim_aliases=None):
     """Adapter: pass ``keywords``/``local_dtypes``/``fresh_local_allocs`` to
     expanders that accept them, else call with the legacy signature. The two
     extra tables let an expander register internal working buffers (shape +
@@ -7564,6 +7684,8 @@ def _call_expander(expander, target, args, keywords, shape_table, local_dtypes=N
         extras["local_dtypes"] = local_dtypes
     if "fresh_local_allocs" in params and fresh_local_allocs is not None:
         extras["fresh_local_allocs"] = fresh_local_allocs
+    if "dim_aliases" in params and dim_aliases is not None:
+        extras["dim_aliases"] = dim_aliases
     return expander(target, args, shape_table, **extras)
 
 
@@ -8009,7 +8131,8 @@ class LibNodeRewriter(ast.NodeTransformer):
                                                   node.value.keywords,
                                                   self.shape_table,
                                                   local_dtypes=self.local_dtypes,
-                                                  fresh_local_allocs=self.fresh_local_allocs)
+                                                  fresh_local_allocs=self.fresh_local_allocs,
+                                                  dim_aliases=self.dim_aliases)
                         # Linspace/arange/similar element-write expanders
                         # consume the original Assign, leaving the target
                         # dangling without a decl -- register a fresh-local
@@ -8085,7 +8208,8 @@ class LibNodeRewriter(ast.NodeTransformer):
                                            stmt.value.keywords,
                                            self.shape_table,
                                            local_dtypes=self.local_dtypes,
-                                           fresh_local_allocs=self.fresh_local_allocs))
+                                           fresh_local_allocs=self.fresh_local_allocs,
+                                           dim_aliases=self.dim_aliases))
                         # Integer-iota arange in the prelude (hoisted ``__cb =
                         # np.arange(1, 1025)``) keeps an int64 dtype so a derived
                         # gather index stays integer (fft_3d).
