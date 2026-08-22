@@ -5,18 +5,19 @@ description: "OpenMP in C: the four loop bins, the sharing clauses, and the buil
 
 # openmp-c
 
-Grading is MULTI-CORE: the timed run owns 24 physical cores (no SMT), `OMP_NUM_THREADS` preset,
-baseline SERIAL. `-fopenmp` is always on. Classify the loop first, then thread it. Misfiling
-returns `correct: false` and costs a round trip.
+Grading is MULTI-CORE: the timed run owns several physical cores, `OMP_NUM_THREADS` preset,
+baseline SERIAL. Never hardcode a thread count -- the grading machine decides it; read
+`omp_get_max_threads()` (needs `#include <omp.h>`) or size from the environment. `-fopenmp` is always
+on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round trip.
 
-Threading is the LAST step, not the first. Cores add arithmetic; they do not add bandwidth. A
-`parallel for` whose inner loop strides by a row is memory-bound in every lane, so more threads
-buy nothing -- get the unit-stride axis innermost, THEN thread the loop outside it. Both of the
-following compile, run, and return `correct: true`, and both waste the speedup available.
+Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel for` whose inner
+loop strides by a row is memory-bound in every lane. Unit-stride axis innermost FIRST, then
+thread the loop outside it. Both of the following compile, run and return `correct: true`, and
+both waste the speedup.
 
-**Wrong 1 -- threaded the outer loop and left the inner one striding.** The dependence runs along
-`j`, so `i` is the free axis AND the unit-stride one. Threading `i` from the outside puts the
-strided walk on the inside, and every lane misses cache:
+**Wrong 1 -- threaded the outer loop, left the inner one striding.** The dependence runs along
+`j`, so `i` is free AND unit stride. Threading `i` from outside puts the strided walk inside;
+every lane misses cache:
 
 ```c
 #pragma omp parallel for                       // correct, and pointless
@@ -25,8 +26,7 @@ for (int64_t i = 0; i < n; i++)
         aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
 ```
 
-Interchange so the unit-stride axis is innermost, THEN thread the loop that carries no dependence
--- here the inner one, because the outer one does carry it:
+Interchange, then thread the loop that carries no dependence -- here the inner one:
 
 ```c
 for (int64_t j = 1; j < n; j++)                // carries the dependence: stays serial
@@ -35,9 +35,9 @@ for (int64_t j = 1; j < n; j++)                // carries the dependence: stays 
         aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
 ```
 
-**Wrong 2 -- put a directive on a recurrence and said so in the comment.** A pragma is an
-assertion, not a request. `simd` on a carried dependence claims lanes are independent when the
-line above proves they are not:
+**Wrong 2 -- directive on a recurrence, and the comment says so.** A pragma is an assertion,
+not a request: `simd` on a carried dependence claims lanes are independent while the line above
+proves they are not:
 
 ```c
 // the recurrence relation requires sequential processing   <- correct diagnosis
@@ -46,9 +46,9 @@ for (int64_t i = 2; i < n; i++)
     a[i] = a[i-2] + x[i];
 ```
 
-That stride-2 chain is really two independent chains (even `i`, odd `i`). Split the index space
-along the axis the dependence does NOT cross, or use the scan form below. If the comment you are
-about to write names a dependence, the directive you are about to write is the wrong one.
+That stride-2 chain is two independent chains (even `i`, odd `i`). Split the index space along an
+axis the dependence does not cross, or use the scan form below. If the comment you are about to
+write names a dependence, the directive you are about to write is the wrong one.
 
 ## The four bins
 

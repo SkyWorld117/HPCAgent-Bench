@@ -273,7 +273,7 @@ SUBMISSION_PROPERTIES: dict[str, Any] = {
         "type":
         "string",
         "description":
-        "The benchmark key from your task, verbatim (e.g. 'argmax_value'). One judge serves "
+        "The benchmark key from your task, verbatim (e.g. 'example_kernel'). One judge serves "
         "many kernels, so every call names one; an unknown key is a 404.",
     },
     "source": {
@@ -290,7 +290,7 @@ SUBMISSION_PROPERTIES: dict[str, Any] = {
         "Path in the shared folder (task -> shared.dir) to a source file you wrote there. "
         "Its basename MUST be '<kernel>.<ext>': the kernel key verbatim plus the task "
         "language's one extension (c -> .c, cpp -> .cpp, fortran -> .f90, cuda -> .cu, "
-        "hip -> .hip, python -> .py), e.g. 'argmax_value.f90'. Any other basename, and "
+        "hip -> .hip, python -> .py), e.g. 'example_kernel.f90'. Any other basename, and "
         "alternates a compiler would accept anyway ('.F90', '.cc'), are a 400. A path outside "
         "the shared folder is refused too -- it means nothing in the judge's container.",
     },

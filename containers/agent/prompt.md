@@ -126,14 +126,14 @@ Kernel keys are paths; every name below uses the LAST segment of the key.
 
     c -> .c    cpp -> .cpp    fortran -> .f90    cuda -> .cu    hip -> .hip    python -> .py
 
-Kernel `loop_level_reasoning/argmax_value/argmax_value` in fortran -> `argmax_value.f90` in your
-write folder, e.g. `/shared/agent-7/argmax_value.f90`.
+Kernel `loop_level_reasoning/example_kernel/example_kernel` in fortran -> `example_kernel.f90` in your
+write folder, e.g. `/shared/agent-7/example_kernel.f90`.
 `.F90`, `.cc`, `.cxx` and any other basename are a 400, even though a compiler would take them.
 Park backups under other names and keep editing the canonical file.
 
 `library` is a plain C-ABI `.so` exporting the task's `symbol` (not a Python extension). The judge
 copies it under its own name, so only the location is fixed; name it `lib<kernel>.so` by convention,
-e.g. `/shared/libargmax_value.so`. Accepted only where `task` -> `input_mode` is `any` or `library`.
+e.g. `/shared/libexample_kernel.so`. Accepted only where `task` -> `input_mode` is `any` or `library`.
 
 ## What a violation costs
 
@@ -154,11 +154,11 @@ answer.
 
 ## End to end
 
-1. `task` {"kernel": "loop_level_reasoning/argmax_value/argmax_value"} -> signature, symbol,
+1. `task` {"kernel": "loop_level_reasoning/example_kernel/example_kernel"} -> signature, symbol,
    `shared.dir`, `input_mode`.
-2. Write the fortran to `/shared/agent-7/argmax_value.f90` -- basename exact, folder is YOURS.
-3. `score` {"kernel": "loop_level_reasoning/argmax_value/argmax_value",
-            "source_file": "/shared/agent-7/argmax_value.f90"} -> correct / speedup.
+2. Write the fortran to `/shared/agent-7/example_kernel.f90` -- basename exact, folder is YOURS.
+3. `score` {"kernel": "loop_level_reasoning/example_kernel/example_kernel",
+            "source_file": "/shared/agent-7/example_kernel.f90"} -> correct / speedup.
 4. Iterate on step 3. `submit` (same body) every time a score comes back correct and better.
 
 Score early and often -- after every meaningful change, never sit on an untested rewrite.
@@ -177,8 +177,8 @@ near-tolerance reassociation trick that passes `score` can still fail there; an 
 The same call without the tools:
 
     curl -sX POST "$JUDGE_URL/submit" -H 'Content-Type: application/json' \
-      -d '{"kernel":"loop_level_reasoning/argmax_value/argmax_value","language":"fortran",
-           "rank":0,"build":[],"source_file":"/shared/agent-7/argmax_value.f90"}'
+      -d '{"kernel":"loop_level_reasoning/example_kernel/example_kernel","language":"fortran",
+           "rank":0,"build":[],"source_file":"/shared/agent-7/example_kernel.f90"}'
 
 {{HINTS}}
 

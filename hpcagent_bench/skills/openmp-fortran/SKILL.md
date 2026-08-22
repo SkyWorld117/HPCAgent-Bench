@@ -5,20 +5,21 @@ description: "OpenMP in Fortran: the four loop bins, the sharing clauses, and th
 
 # openmp-fortran
 
-Grading is MULTI-CORE: the timed run owns 24 physical cores (no SMT), `OMP_NUM_THREADS` preset,
-baseline SERIAL. `-fopenmp` is always on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round
-trip. (`do concurrent` is the other threading spelling -- the lang-fortran page; one spelling per
-loop, `!$omp simd` cannot sit on a `do concurrent`.)
+Grading is MULTI-CORE: the timed run owns several physical cores, `OMP_NUM_THREADS` preset,
+baseline SERIAL. Never hardcode a thread count -- the grading machine decides it; read
+`omp_get_max_threads()` (needs `use omp_lib`) or size from the environment. `-fopenmp` is always
+on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round trip.
+(`do concurrent` is the other threading spelling -- the lang-fortran page; one spelling per loop,
+`!$omp simd` cannot sit on a `do concurrent`.)
 
-Threading is the LAST step, not the first. Cores add arithmetic; they do not add bandwidth. A
-`parallel do` whose inner loop strides by a column is memory-bound in every lane, so more threads
-buy nothing -- get the unit-stride axis innermost, THEN thread the loop outside it. Fortran is
-COLUMN-major, so the FIRST subscript is the one that must run innermost. Both of the following
-compile, run, and return `correct: true`, and both waste the speedup available.
+Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel do` whose inner
+loop strides by a column is memory-bound in every lane. Fortran is COLUMN-major, so the FIRST
+subscript must run innermost -- fix that, THEN thread the loop outside it. Both of the following
+compile, run and return `correct: true`, and both waste the speedup.
 
-**Wrong 1 -- threaded the outer loop and left the inner one striding.** The dependence runs along
-`j`, so `i` is the free axis AND the unit-stride one. Threading `i` from the outside puts the
-strided walk on the inside, and every lane misses cache:
+**Wrong 1 -- threaded the outer loop, left the inner one striding.** The dependence runs along
+`j`, so `i` is free AND unit stride. Threading `i` from outside puts the strided walk inside;
+every lane misses cache:
 
 ```fortran
 !$omp parallel do                        ! correct, and pointless
@@ -29,8 +30,7 @@ do i = 1, n
 end do
 ```
 
-Interchange so the unit-stride axis is innermost, THEN thread the loop that carries no dependence
--- here the inner one, because the outer one does carry it:
+Interchange, then thread the loop that carries no dependence -- here the inner one:
 
 ```fortran
 do j = 2, n                              ! carries the dependence: stays serial
@@ -41,9 +41,9 @@ do j = 2, n                              ! carries the dependence: stays serial
 end do
 ```
 
-**Wrong 2 -- put a directive on a recurrence and said so in the comment.** A directive is an
-assertion, not a request. `simd` on a carried dependence claims lanes are independent when the
-line above proves they are not:
+**Wrong 2 -- directive on a recurrence, and the comment says so.** A directive is an
+assertion, not a request: `simd` on a carried dependence claims lanes are independent while
+the line above proves they are not:
 
 ```fortran
 ! the recurrence relation requires sequential processing   <- correct diagnosis
@@ -53,9 +53,9 @@ do i = 3, n
 end do
 ```
 
-That stride-2 chain is really two independent chains (even `i`, odd `i`). Split the index space
-along the axis the dependence does NOT cross, or use the scan form below. If the comment you are
-about to write names a dependence, the directive you are about to write is the wrong one.
+That stride-2 chain is two independent chains (even `i`, odd `i`). Split the index space along an
+axis the dependence does not cross, or use the scan form below. If the comment you are about to
+write names a dependence, the directive you are about to write is the wrong one.
 
 ## The four bins
 

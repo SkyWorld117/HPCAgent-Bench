@@ -271,13 +271,14 @@ def test_the_profiling_skill_teaches_ratios_not_just_counts() -> None:
 
 
 def test_the_profiling_skill_carries_the_two_counter_traps() -> None:
-    """Both are measured facts about this hardware that a reader WILL hit, and both look like
-    bugs in the tool rather than properties of the CPU."""
+    """Both are facts a reader WILL hit, and both look like bugs in the tool rather than
+    properties of the CPU. Neither may name a specific CPU or vector width: the page ships to
+    agents graded on machines we do not pin, and a stated number is one they would trust."""
     body = skill_bodies()[PROFILING]
     # Matched across a line break: prose is free to reflow, the CLAIM is not free to disappear.
     assert "fma_instructions" in body and re.search(r"reads exactly 0|reads 0", body), (
-        "the skill must warn that PAPI_FMA_INS is a derived preset that reports 0 on Zen4")
-    assert re.search(r"1 instruction and 32\s+operations",
+        "the skill must warn that PAPI_FMA_INS is a derived preset that can report 0")
+    assert re.search(r"1 instruction and[\s\S]{0,60}?operations",
                      body), ("the skill must state that an instruction count is not an operation count")
 
 

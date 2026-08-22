@@ -1,33 +1,30 @@
 ## Skills in this task
 
-The Task section carries three skill pages: `optimization-hints`, the `lang-*` page for the
-target language, and its `openmp-*` page. They give the build line, the ABI, the directive
-spellings and the failure modes this judge grades. Treat them as the manual, not background.
+The Task section carries the skill pages for this language: a `lang-*` page, a
+`loop-transformations-*` page, and a parallelism page. They hold the build line, the ABI, the
+directive spellings, the legality tests and the failure modes this judge grades. The manual, not
+background.
 
-- Before your FIRST rewrite: skim all three pages.
-- Before parallelizing ANY loop: re-read `optimization-hints` (the order of attack) and the
-  `openmp-*` page -- it decides which loops are safe to thread and spells the directive.
-- While WRITING code: follow the `lang-*` page -- signature, headers, dialect and its listed
-  expensive mistakes are graded exactly as written there.
-- On every score with `correct: false`: find the matching failure pattern in the pages BEFORE
-  editing; wrong answers here are usually a listed pattern applied unsafely.
+- Before the FIRST rewrite: skim them.
+- Before parallelizing ANY loop: which axis carries the dependence, which axis is unit stride.
+  Both answers are in the transformations page; the spelling is in the parallelism page.
+- While WRITING code: follow the `lang-*` page. Signature, headers, dialect and its listed
+  mistakes are graded exactly as written.
+- On `correct: false`: find the matching failure pattern in the pages BEFORE editing.
 
-### When a score comes back correct but NOT faster
+### Correct but NOT faster
 
-A parallel rewrite that scores ~1.00x is a RESULT, not a neutral one: the cores were there and
-the work did not move. Do not answer it
-by adding another directive. Re-derive the loop first, in this order, and say the answer out
-loud before editing:
+~1.00x is a result, not a neutral one: the cores were there, the work did not move. Do not answer
+it with another directive. Re-derive, in order, and say each answer out loud before editing:
 
-1. **Which axis carries a dependence?** Write the subscript of the value being read against the
-   subscript being written. If a read reaches another iteration of the loop you threaded, the
-   threads are racing or serializing on it -- that loop was never parallel and the directive was
-   an assertion you could not make. Thread a different axis, or fission the statement out.
-2. **What is the stride of the INNERMOST loop?** If it walks by a row instead of by one element,
-   threading cannot help -- the loop is bandwidth-bound and every lane misses cache. Interchange
-   first, then thread the loop outside the unit-stride one.
-3. **Is the trip count big enough to pay for a thread team?** A short loop loses to spawn
-   overhead. Thread the outer level, or leave it serial and vectorize.
+1. **Which axis carries the dependence?** Write the read subscript against the write subscript. If
+   a read reaches another iteration of the loop you threaded, the threads race or serialize --
+   that loop was never parallel. Thread a different axis, or fission the statement out.
+2. **What is the innermost stride?** Walking by a row instead of an element is bandwidth-bound in
+   every lane; threading cannot help. Interchange first, then thread the loop outside the
+   unit-stride one.
+3. **Does the trip count pay for a thread team?** Short loop loses to spawn overhead. Thread an
+   outer level, or stay serial and vectorize.
 
-If all three come back clean and it is still 1.00x, the kernel is memory-bound: cut passes over
-the data or the size of what you move, and stop adding parallelism.
+All three clean and still 1.00x means memory-bound: cut passes over the data or the bytes moved,
+and stop adding parallelism.

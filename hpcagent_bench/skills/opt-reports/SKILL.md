@@ -235,7 +235,7 @@ only catch at some sizes, at some thread counts, or not at all.
   predict the other -- which is why both columns exist in this corpus.
 - It says nothing about how often the loop runs. A perfectly vectorized loop that owns 4% of the
   time is worth 4%. Get the call graph first (the `profiling` skill).
-- The disassembly is the ground truth. When a report claims a width, check for `%zmm`/`%ymm` in
-  `objdump -d`; that is what the `lowered_code` dump is for.
+- The disassembly is the ground truth. When a report claims a width, look for the target ISA's vector
+  registers in `objdump -d` (x86 `%zmm`/`%ymm`, aarch64 `z`/`v`); that is what the `lowered_code` dump is for.
 - Never submit on the strength of a report. Measure the change, and if the number did not move, the
   report was describing a loop that did not matter.
