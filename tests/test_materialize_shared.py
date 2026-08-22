@@ -175,9 +175,8 @@ def test_every_campaign_variant_declares_its_own_arm():
     stale copy would file this arm's rows under the previous one and nothing in the DB would show
     it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to.
 
-    EVERY .env here, not a hand-listed few: the pair drifted apart four times while only two
-    files were checked, and each drift is a run whose rows land under the wrong name. .env.example
-    is the template and carries a deliberately blank arm for the reader to fill in."""
+    EVERY .env, not a hand-listed few: the pair drifted apart four times while two were checked.
+    .env.example is the template and carries a deliberately blank arm."""
     for path in sorted(EXAMPLE.glob(".env.*")):
         if path.name == ".env.example" or path.suffix in (".bak", ".v2bak"):
             continue
@@ -190,12 +189,11 @@ def test_every_campaign_variant_declares_its_own_arm():
 
 
 def test_no_submitter_can_pass_an_account():
-    """beverin schedules root, a-g200 and a-g34 identically, so -A only ever picks a billing line
-    nobody chose -- and every submitter here targets beverin.sbatch and nothing else.
+    """beverin schedules root, a-g200 and a-g34 identically, so -A only picks a billing line
+    nobody chose, and every submitter here targets beverin.sbatch alone.
 
-    Absent, not defaulted: an empty default is still a knob, and one of these defaulted to a real
-    account for months while reading as if it did not. Comments may still explain the rule; code
-    may not mention ACCOUNT or pass -A at all."""
+    Absent, not defaulted: an empty default is still a knob, and one of these held a real account
+    while reading as if it did not. Comments may explain the rule; code may not mention it."""
     for path in sorted(EXAMPLE.glob("submit*.sh")):
         code = "\n".join(ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#"))
         assert "ACCOUNT" not in code, f"{path.name} still carries an ACCOUNT knob"

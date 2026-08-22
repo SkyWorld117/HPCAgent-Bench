@@ -25,12 +25,10 @@ def backend_from_call(args, kwargs, positional_index):
     return backend
 
 
-# Escape hatch for the truncation probe: eager init (device_id set) turns unbatched P2P into
-# independent collectives serialized on the group, and `received 1024 instead of 256` on
-# isend_tensor_dict -- a receiver matching the WRONG message -- killed 3 of 4 four-node probes
-# in warmup (603524/603714/603718). 0 skips the device_id everywhere, returning the world and
-# every subgroup to lazy init while KEEPING the collective/P2P split below, which may be what
-# the original lazy PG5 hang actually needed. Default 1 = today's behavior, byte-identical.
+# Eager init (device_id set) serializes unbatched P2P against the group's other traffic, and
+# `received 1024 instead of 256` on isend_tensor_dict -- a receiver matching the WRONG message --
+# killed 3 of 4 four-node probes in warmup (603524/603714/603718). 0 drops device_id everywhere,
+# returning to lazy init while KEEPING the collective/P2P split below. Default 1 = today.
 EAGER_DEVICE_ID = os.environ.get("VLLM_EAGER_PG_DEVICE_ID", "1") == "1"
 
 
@@ -73,28 +71,16 @@ def eager_new_group(*args, **kwargs):
     return _original_new_group(*args, **kwargs)
 
 
-# The pipeline group's collectives move to their own communicator.
+# Move the pipeline group's collectives to their own communicator.
 #
-# vLLM puts BOTH kinds of traffic on the pipeline group's `device_group`: the inter-stage
-# activation transfer (`isend_tensor_dict`/`irecv_tensor_dict`, v1/worker/gpu_worker.py) and
-# ordinary torch collectives. The eager init above is what makes that combination fatal -- torch
-# states the consequence itself:
+# vLLM puts inter-stage activation transfer (isend/irecv_tensor_dict) and ordinary collectives on
+# ONE device_group, which eager init above makes fatal: torch serializes unbatched P2P against
+# everything else on the group. 600262/600263 both died there, a 4-element broadcast stuck at
+# SeqNum=1 for the full 600 s watchdog while P2P was in flight; neither decoded a token.
 #
-#   "An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4. In eager
-#    initialization mode, unbatched P2P ops are treated as independent collective ops, and are
-#    thus serialized with all other ops on this ProcessGroup, including other P2P ops."
-#
-# 600262 and 600263 both died on it: a 4-element BROADCAST on the pp group (PG 5, ranks
-# [0,4,8,12] and its three siblings) sat at SeqNum=1 -- its FIRST collective -- for the full
-# 600 s watchdog while P2P was in flight, taking the engine and then the run with it. Neither
-# arm decoded a single token.
-#
-# Upstream already ships the remedy and already uses it, for exactly one broadcast:
-# v1/worker/gpu/pp_utils.py builds a `make_sibling_device_group` "so it does not serialize on the
-# wire with the inter-stage hidden-state p2p send/recv ops". This extends that to EVERY collective
-# on the group, so the pp `device_group` ends up carrying point-to-point traffic and nothing else.
-# The sibling has identical membership, so global rank ids (`self.ranks[src]`) still address the
-# same processes and no call site needs to change.
+# Upstream ships this remedy for exactly one broadcast (make_sibling_device_group in
+# v1/worker/gpu/pp_utils.py); this extends it to every collective, leaving device_group carrying
+# P2P alone. Membership is identical, so global rank ids still address the same processes.
 COLLECTIVE_SIBLING_GROUPS = ("pp", )
 
 
@@ -156,38 +142,22 @@ SPLIT_PP_COLLECTIVES = os.environ.get("VLLM_PP_COLLECTIVE_SPLIT", "1") == "1"
 
 # The MLA chunked-prefill context path transposes its log-sum-exp on ROCm.
 #
-# `mask_empty_context` (v1/attention/ops/triton_merge_attn_states.py) documents and unpacks
-# `lse` as [num_heads, num_tokens], then sizes its mask from that second dimension:
+# `mask_empty_context` unpacks lse as [num_heads, num_tokens] and sizes its mask from the second
+# dimension. That holds for vllm-flash-attn; ROCm takes the upstream-flash_attn branch of
+# `_flash_attn_varlen_diff_headdims`, which returns [num_tokens, num_heads], so the mask comes out
+# sized num_heads and the fill raises "expanded size (3591) must match the existing size (16)".
+# 603980 died there ~58 min in, taking all 121 agents with it.
 #
-#     num_heads, num_tokens = lse.shape
-#     is_empty = torch.zeros(num_tokens, ...)
-#     output.masked_fill_(is_empty[:, None, None], 0.0)   # output is [num_tokens, num_heads, d]
+# Reached only when some prefill in a chunk has run out of context and others have not, so it
+# needs concurrent prefills of UNEQUAL length across chunks -- and `chunked_prefill_workspace_size`
+# is capped at 64k in code with no CLI knob, so a busy server chunks small and hits it constantly.
+# No config escape either: ROCm's prefill priority is [ROCM_AITER_FA, FLASH_ATTN] and aiter's
+# master switch breaks MLA prefill on gfx942.
 #
-# That holds for vllm-flash-attn. ROCm takes the other branch of
-# `_flash_attn_varlen_diff_headdims` -- upstream flash_attn via `return_attn_probs` -- which
-# hands back [num_tokens, num_heads]. The unpack is then reversed, `is_empty` comes out sized
-# num_heads, and the fill raises:
-#
-#     RuntimeError: The expanded size of the tensor (3591) must match the existing size (16)
-#     Target sizes: [3591, 16, 192].  Tensor sizes: [16, 1, 1]
-#
-# 603980 died there ~58 min in, taking all 121 agents with it. The branch is only entered when
-# `chunked_context.has_empty_context[i]` -- a chunk in which some prefill has run out of context
-# while others have not -- so it needs concurrent prefills of UNEQUAL context length spread over
-# more than one chunk. `chunked_prefill_workspace_size` is capped at 64k tokens in code (no CLI
-# knob) and split `// num_prefills_with_context`, so a busy server chunks small and hits this
-# constantly. There is no config escape: on ROCm the prefill backend priority is
-# [ROCM_AITER_FA, FLASH_ATTN], and aiter is off because its master switch breaks MLA prefill on
-# gfx942, so FLASH_ATTN is the only reachable backend.
-#
-# The wrapper transposes ONLY the view handed to this helper. The caller keeps its own reference
-# for `merge_attn_states` further down, which already handles the ROCm layout -- runs survive an
-# hour of all-non-empty chunks before reaching this branch, so that path is not in question.
-# Transposing a view costs nothing: the helper passes lse.stride(0)/stride(1) straight to the
-# triton kernel, and a transposed view carries exactly the strides that indexing wants.
-#
-# Fail-safe by construction: the swap only fires on the unambiguous transposed shape, and if the
-# layout were ever something else the original raises exactly as it does today.
+# Transposes ONLY the view this helper gets; the caller's own reference feeds merge_attn_states,
+# which already handles the ROCm layout. A transposed view is free -- the helper passes
+# stride(0)/stride(1) to the triton kernel. The swap fires only on the unambiguous transposed
+# shape, so any other layout still raises exactly as today.
 FIX_MLA_LSE_LAYOUT = os.environ.get("VLLM_FIX_MLA_LSE_LAYOUT", "1") == "1"
 
 
@@ -226,11 +196,9 @@ def eager_init_and_split(*args, **kwargs):
 dist.init_process_group = eager_init_and_split
 dist.new_group = eager_new_group
 
-# Opt-in stack dumper. py-spy is not in this image, so the only way to see WHERE a worker is
-# blocked during the ~200s ramp (599301: prefill completes, then decode does not start) is to
-# ask the process itself. SIGUSR1 then dumps every thread's Python stack to stderr, which lands
-# in that rank's vllm log. Off unless DUMP_STACKS_ON_SIGUSR1 is set, so normal runs are
-# byte-identical.
+# Opt-in stack dumper: py-spy is not in this image, so asking the process itself is the only way
+# to see where a worker blocks during the ramp (599301: prefill completes, decode never starts).
+# SIGUSR1 dumps every thread's stack to that rank's vllm log.
 if os.environ.get("DUMP_STACKS_ON_SIGUSR1"):
     faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
     print("[external-eager-pg] SIGUSR1 stack dumper armed", file=sys.stderr, flush=True)

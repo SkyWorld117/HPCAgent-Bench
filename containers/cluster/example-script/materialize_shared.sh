@@ -63,7 +63,7 @@ done < <(kernel_names)
 if [[ -f "${repo}/containers/agent/prompt.md" ]]; then
     cp -f "${repo}/containers/agent/prompt.md" "${shared}/prompt.md"
 fi
-# The optimization-hints block a hints arm injects into {{HINTS}} (AGENT_HINTS_FILE points here).
+# The hints block a hints arm injects into {{HINTS}} (AGENT_HINTS_FILE points here).
 if [[ -f "${repo}/containers/agent/hints.md" ]]; then
     cp -f "${repo}/containers/agent/hints.md" "${shared}/hints.md"
 fi
@@ -71,10 +71,8 @@ fi
 if [[ -f "${repo}/containers/agent/skill-triggers.md" ]]; then
     cp -f "${repo}/containers/agent/skill-triggers.md" "${shared}/skill-triggers.md"
 fi
-# The hints+skills leg puts BOTH in the main prompt ({{HINTS}} <- this file): the optimization
-# hints themselves, then the rules for using the packet's pages. One concatenation rather than two
-# knobs, because {{HINTS}} substitutes exactly one file, and one file is also one cacheable block.
-# The base leg leaves AGENT_HINTS_FILE empty and therefore carries neither.
+# {{HINTS}} substitutes exactly one file, so the hints+skills leg gets both as one concatenation
+# -- also one cacheable block. The base leg leaves AGENT_HINTS_FILE empty and gets neither.
 if [[ -f "${shared}/hints.md" && -f "${shared}/skill-triggers.md" ]]; then
     cat "${shared}/hints.md" > "${shared}/hints-and-triggers.md"
     printf '\n' >>"${shared}/hints-and-triggers.md"

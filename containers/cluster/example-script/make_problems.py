@@ -62,14 +62,11 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
             raise SystemExit(f"--extra-skill-root {extra_root} adds no page for language {language}")
         wanted += [s.name for s in extra]
         by_name.update({s.name: s for s in extra})
-    # The general hints do NOT ride in the packet: the hints+skills leg puts them in the MAIN
-    # prompt ({{HINTS}} <- hints-and-triggers.md, built by materialize_shared.sh). Carrying them
-    # here as well would charge the same text a second time on every turn.
+    # Hints do NOT ride in the packet: the hints+skills leg puts them in the main prompt, and
+    # carrying them here too would charge the same text twice on every turn.
     pages = "\n\n".join(f"## Skill: {name}\n\n{by_name[name].body}" for name in wanted)
-    # Named triggers, not "the pages below": the packet is only worth its per-turn rent when the
-    # agent actually opens the right page at the right moment, so the preamble binds each page to
-    # the decision it settles. The failure-loop hook stays -- that is the moment the matching
-    # pattern is the answer.
+    # Named triggers, not "the pages below": the packet only earns its per-turn rent if the agent
+    # opens the right page at the right moment, so each bullet binds a page to a decision.
     lang_page = wanted[0]
     # Named so the bullets point at the page this language actually received, not a family name.
     trans_page = next((n for n in wanted if n.startswith("loop-transformations")), "the transformations page")
@@ -169,12 +166,9 @@ def main() -> int:
         if args.note:
             task = f"{task} {args.note}"
         if args.skills:
-            # Packet FIRST, kernel-specific text second: skills_text is byte-identical across
-            # every kernel in this run, so putting it ahead of the part that diverges makes it a
-            # real shared prefix. vLLM's automatic prefix caching hashes prompts front-to-back and
-            # stops crediting a request the instant it diverges from a cached one -- appending the
-            # packet AFTER the kernel name (the old order) put it past every request's divergence
-            # point, so it was hashed fresh on every single agent despite being identical text.
+            # Packet FIRST: it is byte-identical across every kernel here, and prefix caching
+            # hashes front-to-back and stops crediting at the first divergence. Appending it
+            # after the kernel name put it past that point on every request.
             task = f"{skills_text}\n\n{task}"
         for _ in range(max(1, args.repeat)):
             problem = {

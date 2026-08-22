@@ -10,21 +10,17 @@
 #   MODEL=qwen30b LEGS=2 ./submit-llr5.sh       # hints+skills leg only
 #   MODEL=oss120b LANGS=c ./submit-llr5.sh
 #
-# Extra args go to sbatch verbatim. No --account on beverin.
+# Extra args go to sbatch verbatim. No --account: beverin schedules root, a-g200 and a-g34
+# identically, so -A only picks a billing line nobody chose.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-# beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
-# directory. Slurm drops the file when the folder is missing and the job runs blind: no vLLM
-# serve log, no agent_driver output, only the per-role logs under RUN_DIR.
+# beverin.sbatch writes --output=results/... relative to here; slurm DROPS the file when the
+# folder is missing and the job then runs with no serve log at all.
 mkdir -p results
 . ./arm_nodes.sh
 
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=oss120b $0" >&2; exit 2; }
-# No --account, ever: these submit beverin.sbatch and nothing else, and on beverin root,
-# a-g200 and a-g34 are scheduling-identical, so -A only ever picks a billing line nobody
-# chose. The knob is absent rather than empty -- an empty default is still a knob, and it
-# defaulted to a real account here once already.
 LANGS="${LANGS:-c fortran}"
 LEGS="${LEGS:-1 2}"
 case "${MODEL}" in

@@ -1,31 +1,24 @@
 #!/usr/bin/env bash
 # Re-run ONLY the kernels the skills arms previously got wrong, on the v3 pages.
 #
-# The oss120b campaign graded the skills arms 2-3 points MORE incorrect than base, clustered on
-# dependence-carrying loops. Skills v3 rewrote the pages around that (classify-then-thread bins,
-# inscan, de-biased stdpar/do-concurrent, conflict-free scatter). This smoke asks the narrow
-# question those pages were changed to answer: on the 69 kernels that regressed, does v3 still
-# get them wrong?
+# The oss120b campaign graded skills arms 2-3 points MORE incorrect than base, clustered on
+# dependence-carrying loops; v3 rewrote the pages around that. This asks the narrow question
+# those pages were changed to answer: on the 69 kernels that regressed, does v3 still fail?
 #
-# The kernel lists come from the judge DBs of 598186-598191 -- rows with status='incorrect' in a
-# skills arm whose base arm was clean on the same kernel (regressed-kernels-<lang>.txt, and
-# skills_regressions.json in llr4-analysis for the provenance).
+# Kernel lists come from the judge DBs of 598186-598191: status='incorrect' in a skills arm
+# whose base arm was clean on the same kernel (provenance in llr4-analysis).
 #
-# Every env is byte-identical to the real arm it derives from except the packet, the arm name,
-# the wave width and JUDGE_NODES=4, so a difference here is the pages and not the harness.
-# One agent per kernel means a single wave; four judges keep the queue clear of the timeouts
-# that contaminated the campaign measurement (21.7% at 40 agents / 4 judge nodes).
+# Every env is byte-identical to the arm it derives from except the packet, arm name, wave width
+# and JUDGE_NODES=4, so a difference here is the pages, not the harness. One agent per kernel is
+# a single wave; four judges keep out the timeouts that contaminated the campaign (21.7%).
+# No --account: beverin schedules root, a-g200 and a-g34 identically, so -A only picks a
+# billing line nobody chose.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-# beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
-# directory. Slurm drops the file when the folder is missing and the job runs blind: no vLLM
-# serve log, no agent_driver output, only the per-role logs under RUN_DIR.
+# beverin.sbatch writes --output=results/... relative to here; slurm DROPS the file when the
+# folder is missing and the job then runs with no serve log at all.
 mkdir -p results
 
-# No --account, ever: these submit beverin.sbatch and nothing else, and on beverin root,
-# a-g200 and a-g34 are scheduling-identical, so -A only ever picks a billing line nobody
-# chose. The knob is absent rather than empty -- an empty default is still a knob, and it
-# defaulted to a real account here once already.
 MODELS="${MODELS:-oss120b qwen30b}"
 LANGS="${LANGS:-c cpp fortran}"
 

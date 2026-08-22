@@ -271,9 +271,9 @@ def test_the_profiling_skill_teaches_ratios_not_just_counts() -> None:
 
 
 def test_the_profiling_skill_carries_the_two_counter_traps() -> None:
-    """Both are facts a reader WILL hit, and both look like bugs in the tool rather than
-    properties of the CPU. Neither may name a specific CPU or vector width: the page ships to
-    agents graded on machines we do not pin, and a stated number is one they would trust."""
+    """Both look like bugs in the tool rather than properties of the CPU. Neither may name a
+    specific CPU or vector width: agents are graded on machines we do not pin, and a stated
+    number is one they would trust."""
     body = skill_bodies()[PROFILING]
     # Matched across a line break: prose is free to reflow, the CLAIM is not free to disappear.
     assert "fma_instructions" in body and re.search(r"reads exactly 0|reads 0", body), (
