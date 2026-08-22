@@ -55,7 +55,7 @@ optimizations:
 
 - **Floating-point atomics.** `atomicAdd` on `float`/`double` accumulates in
   whatever order the scheduler produces, so two runs differ in the last bits. This
-  is the single most common way a fast GPU reduction fails the gate.
+  is a routine way a fast GPU reduction fails the gate.
 - **Library reductions with a non-deterministic mode.** `cub::DeviceReduce` is
   run-to-run deterministic for a fixed launch geometry, but cuBLAS split-K,
   `cublasGemmEx` with reduced precision, and TF32 tensor-core paths are not.

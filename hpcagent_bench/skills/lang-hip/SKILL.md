@@ -174,7 +174,7 @@ and MIOpen workspaces.
 ### B.3 Device code -- where HIP differs from CUDA most
 - **`warpSize` is NOT 32.** It is 64 on CDNA (gfx90a, gfx942) and 32 on RDNA
   (gfx10xx/gfx11xx), and in HIP it is a **runtime** value. `constexpr int kWarp = 32;`
-  is the most common porting bug on this page, and it produces a silently wrong
+  is an easy porting bug to make here, and it produces a silently wrong
   reduction rather than a crash. There is no supported compile-time replacement:
   `__AMDGCN_WAVEFRONT_SIZE__` is deprecated ("compile-time-constant access to the
   wavefront size will be removed in a future release") and so is a hard error under

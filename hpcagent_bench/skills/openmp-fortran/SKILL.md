@@ -5,17 +5,17 @@ description: "OpenMP in Fortran: the four loop bins, the sharing clauses, and th
 
 # openmp-fortran
 
-Grading is MULTI-CORE: the timed run owns several physical cores, `OMP_NUM_THREADS` preset,
-baseline SERIAL. Never hardcode a thread count -- the grading machine decides it; read
-`omp_get_max_threads()` (needs `use omp_lib`) or size from the environment. `-fopenmp` is always
-on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round trip.
+Grading is MULTI-CORE, baseline SERIAL, `-fopenmp` always on. Never hardcode a thread count --
+the grading machine presets `OMP_NUM_THREADS`, so read
+`omp_get_max_threads()` (needs `use omp_lib`). Classify the loop first, then thread it:
+misfiling returns `correct: false` and costs a round trip.
 (`do concurrent` is the other threading spelling -- the lang-fortran page; one spelling per loop,
 `!$omp simd` cannot sit on a `do concurrent`.)
 
-Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel do` whose inner
-loop strides by a column is memory-bound in every lane. Fortran is COLUMN-major, so the FIRST
-subscript must run innermost -- fix that, THEN thread the loop outside it. Both of the following
-compile, run and return `correct: true`, and both waste the speedup.
+Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel do` whose inner loop
+strides by a column is memory-bound in every lane. Fortran is COLUMN-major, so the FIRST subscript
+runs innermost -- fix that, THEN thread outside it. Both of the following return `correct: true`
+and waste the speedup.
 
 **Wrong 1 -- threaded the outer loop, left the inner one striding.** The dependence runs along
 `j`, so `i` is free AND unit stride. Threading `i` from outside puts the strided walk inside;
@@ -30,16 +30,8 @@ do i = 1, n
 end do
 ```
 
-Interchange, then thread the loop that carries no dependence -- here the inner one:
-
-```fortran
-do j = 2, n                              ! carries the dependence: stays serial
-  !$omp parallel do simd                 ! free AND unit stride
-  do i = 1, n
-    aa(i, j) = aa(i, j - 1) + bb(i, j)
-  end do
-end do
-```
+The repair is a permutation, then a directive on the axis that carries nothing: see
+`loop-transformations-fortran`, which has this nest worked through with its legality test.
 
 **Wrong 2 -- directive on a recurrence, and the comment says so.** A directive is an
 assertion, not a request: `simd` on a carried dependence claims lanes are independent while
@@ -53,9 +45,9 @@ do i = 3, n
 end do
 ```
 
-That stride-2 chain is two independent chains (even `i`, odd `i`). Split the index space along an
+That stride-2 chain is two independent chains (even `i`, odd `i`): split the index space along an
 axis the dependence does not cross, or use the scan form below. If the comment you are about to
-write names a dependence, the directive you are about to write is the wrong one.
+write names a dependence, the directive is the wrong one.
 
 ## The four bins
 
@@ -106,8 +98,7 @@ do i = 1, n
 end do
 ```
 
-`exclusive(s)` is the value-before-this-iteration variant. Scans reassociate, so tolerance
-still applies.
+`exclusive(s)` is the value-before-this-iteration variant. Scans reassociate; tolerance applies.
 
 **SCATTER** -- writes through an index array, `a(idx(i))`. If the task guarantees distinct indices
 it is PARALLEL, no atomics. Only DUPLICATE indices collide: then per-thread copies merged after the

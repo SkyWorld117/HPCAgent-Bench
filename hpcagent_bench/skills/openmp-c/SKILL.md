@@ -5,15 +5,14 @@ description: "OpenMP in C: the four loop bins, the sharing clauses, and the buil
 
 # openmp-c
 
-Grading is MULTI-CORE: the timed run owns several physical cores, `OMP_NUM_THREADS` preset,
-baseline SERIAL. Never hardcode a thread count -- the grading machine decides it; read
-`omp_get_max_threads()` (needs `#include <omp.h>`) or size from the environment. `-fopenmp` is always
-on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round trip.
+Grading is MULTI-CORE, baseline SERIAL, `-fopenmp` always on. Never hardcode a thread count --
+the grading machine presets `OMP_NUM_THREADS`, so read
+`omp_get_max_threads()` (needs `#include <omp.h>`). Classify the loop first, then thread it:
+misfiling returns `correct: false` and costs a round trip.
 
 Threading is the LAST step. Cores add arithmetic, not bandwidth: a `parallel for` whose inner
-loop strides by a row is memory-bound in every lane. Unit-stride axis innermost FIRST, then
-thread the loop outside it. Both of the following compile, run and return `correct: true`, and
-both waste the speedup.
+loop strides by a row is memory-bound in every lane. Unit-stride axis innermost FIRST, then thread
+the loop outside it. Both of the following return `correct: true` and waste the speedup.
 
 **Wrong 1 -- threaded the outer loop, left the inner one striding.** The dependence runs along
 `j`, so `i` is free AND unit stride. Threading `i` from outside puts the strided walk inside;
@@ -26,14 +25,8 @@ for (int64_t i = 0; i < n; i++)
         aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
 ```
 
-Interchange, then thread the loop that carries no dependence -- here the inner one:
-
-```c
-for (int64_t j = 1; j < n; j++)                // carries the dependence: stays serial
-    #pragma omp parallel for simd              // free AND unit stride
-    for (int64_t i = 0; i < n; i++)
-        aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
-```
+The repair is a permutation, then a directive on the axis that carries nothing: see
+`loop-transformations-c`, which has this nest worked through with its legality test.
 
 **Wrong 2 -- directive on a recurrence, and the comment says so.** A pragma is an assertion,
 not a request: `simd` on a carried dependence claims lanes are independent while the line above
@@ -46,9 +39,9 @@ for (int64_t i = 2; i < n; i++)
     a[i] = a[i-2] + x[i];
 ```
 
-That stride-2 chain is two independent chains (even `i`, odd `i`). Split the index space along an
+That stride-2 chain is two independent chains (even `i`, odd `i`): split the index space along an
 axis the dependence does not cross, or use the scan form below. If the comment you are about to
-write names a dependence, the directive you are about to write is the wrong one.
+write names a dependence, the directive is the wrong one.
 
 ## The four bins
 
@@ -87,8 +80,7 @@ for (int64_t i = 0; i < n; i++) {
 }
 ```
 
-`exclusive(s)` is the value-before-this-iteration variant. Scans reassociate, so tolerance
-still applies.
+`exclusive(s)` is the value-before-this-iteration variant. Scans reassociate; tolerance applies.
 
 **SCATTER** -- writes through an index array, `a[idx[i]]`. If the task guarantees distinct indices
 it is PARALLEL, no atomics. Only DUPLICATE indices collide: then per-thread copies merged after the
@@ -113,7 +105,7 @@ for (int64_t i = 0; i < m; i++) {
 | `reduction(op:x)` | per-thread copy at `op`'s identity, combined at the end. What a sum/max/count wants. |
 
 Getting sharing wrong is a RACE, not a build error: it compiles, runs, and returns a different
-answer under load. Induction variables are private already.
+answer under load. Induction variables are already private.
 
 ## Worth one line each
 
@@ -127,9 +119,9 @@ answer under load. Induction variables are private already.
 
 ## Build errors that cost a turn
 
-- **`aligned(p:32|64)` on an ABI input pointer is UB and SIGSEGVs at vector width** -- the #1
-  crash. ABI pointers carry natural alignment only; your own `aligned_alloc` storage and
-  the 256B `workspace` are fair game.
+- **`aligned(p:32|64)` on an ABI input pointer is UB and SIGSEGVs at vector width.** ABI pointers
+  carry natural alignment only; your own `aligned_alloc` storage and the 256B `workspace` are
+  fair game.
 - **Skip `default(none)`.** The one variable you miss is always the accumulator -- which belongs in
   `reduction(...)` anyway. Leaving it off removes a whole class of build failure.
 - **Nothing between the directive and its loop, and the loop must be canonical.** One induction

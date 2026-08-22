@@ -16,9 +16,8 @@ token rather than re-deriving it.
    on the signature itself.
    **Edit in place. Never replace the whole file.**
 2. **Claiming alignment on an ABI pointer.** `__builtin_assume_aligned` or an OpenMP
-   `aligned(p:...)` clause on a judge input pointer is UB and SIGSEGVs at vector width -- the #1
-   crash. Inputs carry NATURAL alignment only; the workspace and your own
-   `aligned_alloc` storage are fair game.
+   `aligned(p:...)` clause on a judge input pointer is UB and SIGSEGVs at vector width. Inputs
+   carry NATURAL alignment only; the workspace and your own `aligned_alloc` storage are fair game.
 3. **Rewriting a loop must not change WHICH elements it writes.** A hand-unrolled
    `for (i = 0; i < n - 3; i += 4)` body stops at the last whole group on purpose; rerolling it to
    `i < n` writes elements the reference does not. Sizes are fuzzed, so `n % 4 != 0` is the normal
@@ -26,7 +25,7 @@ token rather than re-deriving it.
 
 ## What you are allowed to reach for
 
-- **`restrict`** -- the single biggest vectorization enabler; rules below.
+- **`restrict`** -- what usually unblocks the vectorizer; rules below.
 - **C23 is the dialect** (`-std=c23`): `constexpr` for compile-time constants, `typeof`,
   `nullptr`, bare `bool`/`true`/`false` all compile. Compile-time extents the ABI does not pass
   arrive at the top of your stub as `constexpr int64_t` -- use them as loop bounds directly, the
