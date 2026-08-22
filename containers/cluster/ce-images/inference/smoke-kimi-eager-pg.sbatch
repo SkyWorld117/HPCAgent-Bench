@@ -342,8 +342,13 @@ wait "${PROBE_PIDS[@]}" || true
 g1=$(metric generation_tokens_total); t1=$SECONDS
 kill "${SAMPLER_PID}" 2>/dev/null || true
 awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v span="${STEADY_SPAN_S:-60}" '
-    { et[NR] = $1; tok[NR] = $2; run[NR] = $3 }
-    $3 > 0 { s += $3; n += 1; if ($3 > peak) peak = $3 }
+    # A failed /metrics scrape contributes an EMPTY field, and an empty field is not a zero
+    # measurement: carried as one it would make the following window look like a burst and hand
+    # the steady line a rate the engine never reached. Keep only fully numeric samples.
+    NF == 3 && $2 ~ /^[0-9]+([.][0-9]+)?$/ && $3 ~ /^[0-9]+([.][0-9]+)?$/ {
+        k += 1; et[k] = $1; tok[k] = $2; run[k] = $3
+        if ($3 > 0) { s += $3; n += 1; if ($3 > peak) peak = $3 }
+    }
     END {
         conc = n ? s / n : 0
         rate = dt > 0 ? (b - a) / dt : 0
@@ -351,8 +356,8 @@ awk -v a="${g0:-0}" -v b="${g1:-0}" -v dt="$((t1-t0))" -v span="${STEADY_SPAN_S:
         if (conc > 0) printf "                  %.1f tok/s per request\n", rate / conc
         # Best sustained rate over any window of at least `span` seconds -- the same quantity the
         # serving probe reports after excluding its ramp, and the only one comparable to it.
-        for (i = 1; i <= NR; i++)
-            for (j = i + 1; j <= NR; j++)
+        for (i = 1; i <= k; i++)
+            for (j = i + 1; j <= k; j++)
                 if (et[j] - et[i] >= span) {
                     r = (tok[j] - tok[i]) / (et[j] - et[i])
                     if (r > best) { best = r; bs = et[j] - et[i] }
