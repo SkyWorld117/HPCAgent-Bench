@@ -172,3 +172,29 @@ def test_only_so_many_agents_start_at_once(monkeypatch, tmp_path):
         thread.join(timeout=30)
     assert held == 3, f"{held} agents were inside startup at once, cap is 3"
     assert len(spawned) == 12, "every agent must still get its turn"
+
+
+def test_a_crash_is_a_fault_but_a_budget_is_not(monkeypatch, tmp_path):
+    """604475/604476 ended 69 of 240 agents on the wall clock and nothing else. A timed-out agent
+    spent what it was given and keeps every submission it made; relaunching it would hand it a
+    second budget its peers never had."""
+    driver = load_driver(monkeypatch)
+    log = tmp_path / "claude.log"
+    log.write_text("", encoding="utf-8")
+    assert driver.crashed(1, log) is True, "a bare nonzero exit with no result event is a fault"
+    for code in (0, driver.RC_TIMEOUT, driver.RC_TOKEN_BUDGET, driver.RC_CONTEXT):
+        assert driver.crashed(code, log) is False, f"rc={code} is a budget, not a fault"
+
+
+def test_a_reported_result_is_the_cli_verdict_not_a_crash(monkeypatch, tmp_path):
+    """A nonzero exit AFTER the CLI wrote its result is that run's answer; relaunching overwrites it."""
+    driver = load_driver(monkeypatch)
+    log = tmp_path / "claude.log"
+    log.write_text(json.dumps({"type": "result", "subtype": "error_during_execution"}) + "\n", encoding="utf-8")
+    assert driver.crashed(1, log) is False
+
+
+def test_crash_retries_are_bounded(monkeypatch):
+    monkeypatch.delenv("AGENT_CRASH_ATTEMPTS", raising=False)
+    driver = load_driver(monkeypatch)
+    assert 2 <= driver.AGENT_CRASH_ATTEMPTS <= 5
