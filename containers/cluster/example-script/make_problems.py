@@ -102,6 +102,10 @@ def main() -> int:
     parser.add_argument("--track", required=True, help="e.g. loop_level_reasoning")
     parser.add_argument("--language", default="", help="empty = let the agent choose")
     parser.add_argument("--limit", type=int, default=0, help="first N kernels only (0 = all)")
+    parser.add_argument("--tag",
+                        default="",
+                        help="only kernels carrying this taxonomy tag "
+                        "(llr-focus40, par-regression, wavefront, interchange, licm, scalar-rotation)")
     parser.add_argument("--kernel", default="", help="exactly this one kernel (smoke tests)")
     parser.add_argument("--kernels-file",
                         default="",
@@ -147,6 +151,10 @@ def main() -> int:
             continue
         if spec.track != args.track:
             continue
+        # Taxonomy tag, the same vocabulary the `<selector>@<tag>` spelling uses, so a curated
+        # subset is addressed by the fact stamped on the manifest rather than a checked-in list.
+        if args.tag and args.tag.lower() not in {x.lower() for x in spec.tags}:
+            continue
         if args.kernel and name != args.kernel:
             continue
         # KERNELS spells a kernel "track/name/name" while the judge records the bare name, so a
@@ -181,7 +189,8 @@ def main() -> int:
         if args.limit and written >= args.limit:
             break
 
-    print(f"{written} problems on track {args.track!r}", file=sys.stderr)
+    scope = repr(args.track) + (f" tag {args.tag!r}" if args.tag else "")
+    print(f"{written} problems on track {scope}", file=sys.stderr)
     return 0 if written else 1
 
 

@@ -25,5 +25,7 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - interchange
 loop_level_reasoning:
   source: adversarial_tile

@@ -20,6 +20,9 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
+  - scalar-rotation
 loop_level_reasoning:
   source: tsvc_2
   # What vectorizing-compiler pattern this loop probes (from the original TSVC

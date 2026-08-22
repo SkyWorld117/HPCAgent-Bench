@@ -26,6 +26,9 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
+  - par-regression
 loop_level_reasoning:
   source: tsvc_2
   category: control flow
