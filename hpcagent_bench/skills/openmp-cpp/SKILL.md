@@ -20,7 +20,7 @@ read at another iteration's index -- `i-1`, `j+1`, `idx[i]`? A directive asserts
 Assert it wrongly and you get a race: a wrong answer, not a slow one, and the most expensive
 mistake available here.
 
-Having named the dependence, you are in one of three cases:
+Having named the dependence, you are in one of four cases:
 
 - **Another axis is free.** Thread that one instead. `a[j*N+i] = a[(j-1)*N+i]` carries its
   dependence on `j`, so the directive belongs on `i` -- not on whichever loop is outermost.
@@ -30,6 +30,12 @@ Having named the dependence, you are in one of three cases:
   `a[i-1][j]` and `a[i][j-1]`, both reads advance `i+j` by one, so no two points sharing `i+j`
   can depend on each other: skew, and the anti-diagonal runs in parallel. This is the case that
   gets abandoned as sequential. `loop-transformations-cpp` has the rewrite and its legality test.
+- **The dependence is FALSE.** A scalar carried only to hand the next iteration a value it
+  could recompute is not a dependence -- substitute and it vanishes. `t = p[i] + q[i];
+  r[i] = t - carry; carry = t;` carries nothing: `carry` IS `p[i-1] + q[i-1]`, so write
+  `r[i] = (p[i] + q[i]) - (p[i-1] + q[i-1])` and the loop is parallel (guard `i == 0` with the
+  entry value). Reading a FUTURE element (`x[i+1]`) is the same disease: the read means the
+  ORIGINAL value, so keep a copy of the input (or write a fresh output) and it is gone.
 
 Legality settles whether you MAY thread; profit is separate. If the innermost loop is not the one
 walking unit stride -- the last subscript, since C++ is row-major -- the nest is bandwidth-bound
@@ -71,6 +77,27 @@ double s = 0.0;
 for (int64_t i = 0; i < n; i++)
     s += w[i] * v[i];
 ```
+
+**Max or min WITH ITS INDEX** -- `reduction(max:m)` returns the value and LOSES the position, and
+there is no built-in argmax operator. Declare one over a value-index pair; break ties toward the
+SMALLER index or the answer disagrees with a serial sweep:
+
+```c
+typedef struct { double v; int64_t i; } vi_t;
+#pragma omp declare reduction(argmax : vi_t : \
+        omp_out = (omp_in.v > omp_out.v || \
+                   (omp_in.v == omp_out.v && omp_in.i < omp_out.i)) ? omp_in : omp_out) \
+        initializer(omp_priv = { -DBL_MAX, INT64_MAX })
+
+vi_t best = { -DBL_MAX, INT64_MAX };
+#pragma omp parallel for reduction(argmax:best)
+for (int64_t i = 0; i < n; i++)
+    if (v[i] > best.v) { best.v = v[i]; best.i = i; }
+```
+
+No-syntax fallback, two passes, both parallel: `reduction(max:m)` for the value, then
+`reduction(min:first)` over the positions where `v[i] == m` (exact compare is safe -- it is the
+same stored value).
 
 **RECURRENCE** -- the written array is read at ANOTHER iteration's subscript: `x[i-1]`, in-place
 stencil, wavefront. Threading it is WRONG, not slow. Fission the independent statements into their

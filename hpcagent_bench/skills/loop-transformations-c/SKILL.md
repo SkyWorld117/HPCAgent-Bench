@@ -71,5 +71,54 @@ locality: a diagonal strides, and the team re-forks per diagonal. Wins on long d
 work per point. Skew over TILES, not points, to restore unit stride inside a block and cut
 synchronisations to the number of block diagonals.
 
-Cheaper exits first: a dependence in one dimension only needs permutation; a body mixing a chain
-with independent statements needs distribution. What is left may already be parallel.
+## False dependences -- rewrite, no directive needed
+
+Not every carried value is a dependence. Three shapes LOOK serial and are not; each dies to a
+rewrite, after which the loop files under PARALLEL.
+
+- **Rotated scalar.** A scalar saved only so the next iteration can read it is the previous
+  iteration's expression by another name -- substitute it away. Works at two levels of carry too:
+  substitute twice.
+
+```c
+for (int64_t i = 0; i < n; i++) {
+    double t = p[i] + q[i];
+    r[i] = t - carry;          /* carry == p[i-1] + q[i-1] */
+    carry = t;
+}
+/* becomes (i == 0 peeled to use the entry value of carry) */
+#pragma omp parallel for simd
+for (int64_t i = 1; i < n; i++)
+    r[i] = (p[i] + q[i]) - (p[i-1] + q[i-1]);
+```
+
+- **Read of a future element** (`x[i+1]` on the right while `x[i]` is written): an
+  anti-dependence. The read means the ORIGINAL value, so give the loop a copy of the input, or
+  write to a fresh output array -- either way the loop is parallel. Renaming costs one pass of
+  memory traffic; score it.
+- **Write-only clobber**: a scalar or element every iteration overwrites before reading is
+  `private`/`lastprivate` scratch, not a dependence.
+
+## Fusion -- merge two loops; unswitching -- hoist an invariant guard
+
+**Fusion** is legal when no dependence between the two bodies reverses direction, and pays when
+the second loop re-reads what the first wrote: one pass over memory instead of two, and a
+temporary that existed only to connect them becomes a scalar in registers.
+
+```c
+for (int64_t i = 0; i < n; i++) tmp[i] = u[i] + v[i];
+for (int64_t i = 0; i < n; i++) w[i] = tmp[i] * s + u[i];
+/* becomes -- tmp is now a register, one pass, one directive */
+#pragma omp parallel for simd
+for (int64_t i = 0; i < n; i++) { double t = u[i] + v[i]; w[i] = t * s + u[i]; }
+```
+
+**Unswitching** hoists a LOOP-INVARIANT condition out of the loop: `if (scale > 0)` tested every
+iteration becomes two loops behind one test, each a clean vectorizable body. Only for invariant
+guards -- a data-dependent `if (c[i] > 0)` stays inside and becomes arithmetic (select/blend),
+not a branch. The two combine: guarded loops often fuse only AFTER their invariant guards move
+out.
+
+Cheaper exits first: a FALSE dependence needs only its rewrite; one real dimension needs
+permutation; a body mixing a chain with independent statements needs distribution. What is left
+may already be parallel.

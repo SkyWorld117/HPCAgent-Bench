@@ -20,7 +20,7 @@ read at another iteration's index -- `i-1`, `j+1`, `idx(i)`? A directive asserts
 Assert it wrongly and you get a race: a wrong answer, not a slow one, and the most expensive
 mistake available here.
 
-Having named the dependence, you are in one of three cases:
+Having named the dependence, you are in one of four cases:
 
 - **Another axis is free.** Thread that one instead. `a(i,j) = a(i,j-1)` carries its dependence
   on `j`, so the directive belongs on `i` -- not on whichever loop is outermost.
@@ -30,6 +30,12 @@ Having named the dependence, you are in one of three cases:
   and `a(i,j-1)`, both reads advance `i+j` by one, so no two points sharing `i+j` can depend on
   each other: skew, and the anti-diagonal runs in parallel. This is the case that gets abandoned
   as sequential. `loop-transformations-fortran` has the rewrite and its legality test.
+- **The dependence is FALSE.** A scalar carried only to hand the next iteration a value it
+  could recompute is not a dependence -- substitute and it vanishes. `t = p(i) + q(i);
+  r(i) = t - carry; carry = t` carries nothing: `carry` IS `p(i-1) + q(i-1)`, so write
+  `r(i) = (p(i) + q(i)) - (p(i-1) + q(i-1))` and the loop is parallel (guard `i == 1` with the
+  entry value). Reading a FUTURE element (`x(i+1)`) is the same disease: the read means the
+  ORIGINAL value, so keep a copy of the input (or write a fresh output) and it is gone.
 
 Legality settles whether you MAY thread; profit is separate. If the innermost loop is not the one
 walking unit stride -- the first subscript, since Fortran is column-major -- the nest is
@@ -74,6 +80,25 @@ do i = 1, n
   s = s + c(i) * d(i)
 end do
 ```
+
+**Max or min WITH ITS INDEX** -- `reduction(max:m)` returns the value and LOSES the position, and
+declaring a pair reduction needs a derived type. Two passes, both parallel, no new syntax; break
+ties toward the SMALLER index or the answer disagrees with a serial sweep:
+
+```fortran
+!$omp parallel do reduction(max:m)
+do i = 1, n
+  m = max(m, v(i))
+end do
+first = n + 1
+!$omp parallel do reduction(min:first)
+do i = 1, n
+  if (v(i) == m .and. i < first) first = i   ! exact compare: same stored value
+end do
+```
+
+Serial or inside `simd`, `maxloc(v)` is one line -- score it against the two-pass form before
+assuming threads win.
 
 **RECURRENCE** -- the written array is read at ANOTHER iteration's subscript: `x(i-1)`, in-place
 stencil, wavefront. Threading it is WRONG, not slow. Fission the independent statements into their
