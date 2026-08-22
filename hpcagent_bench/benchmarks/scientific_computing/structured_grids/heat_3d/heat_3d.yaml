@@ -5,17 +5,17 @@ kind: microkernel
 level: 2
 parameters:
   S:
-    TSTEPS: 25
+    TSTEPS: 20
     N: 25
   M:
-    TSTEPS: 40
+    TSTEPS: 20
     N: 192
   L:
-    TSTEPS: 63
-    N: 439
+    TSTEPS: 20
+    N: 350
   XL:
-    TSTEPS: 98
-    N: 1006
+    TSTEPS: 20
+    N: 638
 init:
   arrays:
     A: "(N, N, N)"

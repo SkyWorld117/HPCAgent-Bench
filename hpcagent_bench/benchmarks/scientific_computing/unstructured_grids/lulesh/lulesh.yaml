@@ -38,10 +38,10 @@ parameters:
     numElem: 91125
     nsteps: 30
   L:
-    numElem: 1568558
+    numElem: 1132501
     nsteps: 30
   XL:
-    numElem: 27000000
+    numElem: 14074723
     nsteps: 30
   # Fuzzed draws MUST keep numElem a perfect cube -- initialize() -> _edge_elems()
   # raises on a non-cube, so the default continuous [L, XL] range would crash every

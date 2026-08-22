@@ -15,14 +15,14 @@ parameters:
     particles_per_box: 100
     alpha: 0.5
   L:
-    n_boxes: 36483
-    max_neighbors: 26
-    particles_per_box: 100
+    n_boxes: 31595
+    max_neighbors: 22
+    particles_per_box: 86
     alpha: 0.5
   XL:
-    n_boxes: 1000000
-    max_neighbors: 26
-    particles_per_box: 100
+    n_boxes: 749999
+    max_neighbors: 19
+    particles_per_box: 74
     alpha: 0.5
 config:
   seed:

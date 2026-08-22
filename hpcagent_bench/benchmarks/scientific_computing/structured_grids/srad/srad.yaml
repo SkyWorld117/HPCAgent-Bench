@@ -14,12 +14,12 @@ parameters:
     cols: 2048
     lam: 0.5
   L:
-    rows: 4096
-    cols: 4096
+    rows: 4368
+    cols: 4368
     lam: 0.5
   XL:
-    rows: 16384
-    cols: 16384
+    rows: 9316
+    cols: 9316
     lam: 0.5
 config:
   niter:

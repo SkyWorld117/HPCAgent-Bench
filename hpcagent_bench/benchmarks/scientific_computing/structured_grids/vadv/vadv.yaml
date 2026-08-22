@@ -12,13 +12,13 @@ parameters:
     J: 512
     K: 90
   L:
-    I: 1024
-    J: 1024
-    K: 90
+    I: 828
+    J: 828
+    K: 72
   XL:
-    I: 2048
-    J: 2048
-    K: 90
+    I: 1339
+    J: 1339
+    K: 58
 init:
   input_args:
   - I

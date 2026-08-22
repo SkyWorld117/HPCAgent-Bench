@@ -11,10 +11,10 @@ parameters:
     N: 8192
     nlevels: 5
   L:
-    N: 16260
+    N: 11497
     nlevels: 5
   XL:
-    N: 32272
+    N: 16136
     nlevels: 5
   fuzzed:
     N:

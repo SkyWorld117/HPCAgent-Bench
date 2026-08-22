@@ -141,6 +141,9 @@ class FakeSpec:
         # working set is exactly 8*N and every expectation below stays plain arithmetic.
         self.init = FakeInit(shapes if shapes is not None else {"a": "(N,)"})
         self.config_space: list = []
+        # No sparse layout: the fake kernel is dense, so its declared shapes ARE its footprint.
+        self.sparse_layouts: Dict[str, object] = {}
+        self.configurations: Dict[str, object] = {}
         self.relative_path = "fake/kernel"
         self.module_name = "fake_kernel"
 

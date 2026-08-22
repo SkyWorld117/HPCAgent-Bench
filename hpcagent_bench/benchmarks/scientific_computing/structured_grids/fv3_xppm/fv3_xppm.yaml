@@ -27,13 +27,13 @@ parameters:
     nj: 768
     nk: 91
   L:
-    ni: 1420
-    nj: 1420
-    nk: 84
+    ni: 1123
+    nj: 1123
+    nk: 66
   XL:
-    ni: 2625
-    nj: 2625
-    nk: 77
+    ni: 1643
+    nj: 1643
+    nk: 48
 init:
   func_name: initialize
   input_args:

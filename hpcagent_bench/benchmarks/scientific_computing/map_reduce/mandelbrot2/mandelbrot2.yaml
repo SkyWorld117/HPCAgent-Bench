@@ -11,11 +11,11 @@ parameters:
     XN: 500
     YN: 500
   L:
-    XN: 1000
-    YN: 1000
+    XN: 2567
+    YN: 2567
   XL:
-    XN: 22361
-    YN: 22361
+    XN: 13175
+    YN: 13175
 config:
   xmin:
     value: -2.25

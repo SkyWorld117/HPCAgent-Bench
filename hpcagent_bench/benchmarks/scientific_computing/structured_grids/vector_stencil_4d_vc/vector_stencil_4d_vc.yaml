@@ -14,11 +14,11 @@ parameters:
     R: 6
   L:
     B: 16
-    N: 131
+    N: 130
     R: 6
   XL:
-    B: 32
-    N: 178
+    B: 31
+    N: 177
     R: 6
 init:
   func_name: initialize

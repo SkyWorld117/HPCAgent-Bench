@@ -15,15 +15,15 @@ parameters:
     nblks: 48
     nnbr: 6
   L:
-    nproma: 1024
-    nlev: 90
-    nblks: 496
-    nnbr: 6
+    nproma: 858
+    nlev: 75
+    nblks: 416
+    nnbr: 5
   XL:
-    nproma: 1024
-    nlev: 90
-    nblks: 5120
-    nnbr: 6
+    nproma: 719
+    nlev: 63
+    nblks: 3599
+    nnbr: 4
 init:
   input_args:
   - nproma

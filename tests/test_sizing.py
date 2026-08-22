@@ -203,11 +203,11 @@ def test_a_config_knob_is_not_demanded_of_the_proposal_either():
     correctly omits the knob must not be faulted for the omission."""
     spec = spec_for("seissol_batched_gemm")
     assert "order" in spec.parameters["S"]  # the merged view carries it
-    ladder, problems = derive_ladder(spec, {"batch": 4096}, {"batch": 524288})
+    ladder, problems = derive_ladder(spec, {"batch": 4096}, {"batch": 262144})
     assert problems == []
     # S is the manifest's own value, untouched; M and XL are the proposal; L is the midpoint.
     assert ladder["S"] == {"batch": spec.parameters["S"]["batch"]}
-    assert [ladder[p]["batch"] for p in PRESETS] == [1024, 4096, 65536, 524288]
+    assert [ladder[p]["batch"] for p in PRESETS] == [1024, 4096, 32768, 262144]
 
 
 def test_a_tile_size_is_not_a_footprint_symbol():
@@ -267,7 +267,7 @@ def test_a_manifest_constraint_must_hold_at_every_rung():
     rungs, not only at the ends the proposal names."""
     spec = spec_for("seissol_batched_gemm")
     assert spec.constraints  # the manifest states the tie; if it stops doing so this test is moot
-    _ladder, problems = derive_ladder(spec, {"batch": 1024}, {"batch": 524288})
+    _ladder, problems = derive_ladder(spec, {"batch": 1024}, {"batch": 262144})
     assert problems == []
 
 
@@ -353,3 +353,48 @@ def test_the_single_core_rung_fits_one_core_of_an_ordinary_machine():
         if nbytes is not None and nbytes > S_BYTE_CEILING:
             over[key] = nbytes / 2**30
     assert over == {}, f"M over the {S_BYTE_CEILING / 2**30:.0f} GB single-core ceiling: {over}"
+
+
+def test_a_sparse_arrays_logical_shape_is_not_its_footprint():
+    """``bicg_solvers`` declares ``A: (N, N)`` and never materialises it: ``initialize`` builds a
+    scipy matrix and the binding unpacks it into csr buffers. Reading the declaration as a
+    footprint put XL at 4.29 GB against a matrix that is two megabytes."""
+    spec = spec_for("bicg_solvers")
+    values = spec.parameters["XL"]
+    n, nnz = values["N"], values["nnz"]
+    # indptr (N+1) int64 + indices nnz int64 + data nnz fp64, then b and x, which are dense.
+    assert working_bytes(spec, values) == 8 * (n + 1) + 16 * nnz + 2 * 8 * n
+    assert working_bytes(spec, values) * 100 < n * n * 8  # two orders below the logical shape
+
+
+def test_sparse_buffers_no_dense_shape_declares_are_counted():
+    """``spmv`` declares shapes for ``x`` and ``y`` only, so before the layouts were read its
+    indices and values -- the whole matrix -- weighed nothing and its XL sat five times over the
+    ceiling with nothing able to see it."""
+    spec = spec_for("spmv")
+    values = dict(spec.parameters["XL"])
+    dense_only = 2 * 8 * values["N"]
+    nbytes = working_bytes(spec, values)
+    assert nbytes > 10 * dense_only  # the matrix dominates the two dense vectors
+    doubled = working_bytes(spec, {**values, "nnz": values["nnz"] * 2})
+    assert doubled - nbytes == 16 * values["nnz"]  # indices int64 + data fp64, per nonzero
+
+
+def test_the_sparse_footprint_is_the_largest_declared_configuration():
+    """A kernel is graded at every configuration it declares, so the footprint is the worst of
+    them. ``sp_cg`` offers coo beside csr, and coo stores a row AND a column index per nonzero."""
+    spec = spec_for("sp_cg")
+    values = spec.parameters["XL"]
+    n, nnz = values["N"], values["nnz"]
+    csr, coo = 8 * (n + 1) + 16 * nnz, 24 * nnz
+    assert coo > csr
+    assert working_bytes(spec, values) == coo + 2 * 8 * n
+
+
+def test_a_sparse_layout_with_no_configuration_is_unknown_not_dense():
+    """No ``configurations:`` block names no graded format, and a format is what sets the buffer
+    sizes. Falling back to the dense declaration would report a number that is wrong by orders of
+    magnitude in whichever direction the manifest happened to declare."""
+    spec = dataclasses.replace(spec_for("bicg_solvers"), configurations={})
+    assert spec.sparse_layouts and not spec.configurations
+    assert working_bytes(spec, spec.parameters["XL"]) is None

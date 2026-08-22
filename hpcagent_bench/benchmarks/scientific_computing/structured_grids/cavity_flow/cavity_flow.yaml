@@ -14,21 +14,21 @@ parameters:
   M:
     ny: 256
     nx: 256
-    nt: 50
+    nt: 25
     nit: 50
     rho: 1.0
     nu: 0.1
   L:
     ny: 1024
     nx: 1024
-    nt: 71
+    nt: 25
     nit: 50
     rho: 1.0
     nu: 0.1
   XL:
     ny: 4096
     nx: 4096
-    nt: 100
+    nt: 25
     nit: 50
     rho: 1.0
     nu: 0.1

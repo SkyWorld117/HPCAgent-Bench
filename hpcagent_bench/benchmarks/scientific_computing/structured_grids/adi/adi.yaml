@@ -7,14 +7,14 @@ parameters:
     TSTEPS: 5
     N: 100
   M:
-    TSTEPS: 50
+    TSTEPS: 25
     N: 1600
   L:
-    TSTEPS: 50
-    N: 7155
+    TSTEPS: 25
+    N: 6043
   XL:
-    TSTEPS: 50
-    N: 32000
+    TSTEPS: 25
+    N: 22820
 init:
   input_args:
   - N

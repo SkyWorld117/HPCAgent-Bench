@@ -23,23 +23,23 @@ parameters:
     NB: 4
     Norb: 10
   L:
-    Nkz: 8
-    NE: 64
+    Nkz: 7
+    NE: 40
     Nqz: 8
     Nw: 4
-    N3D: 3
-    NA: 512
+    N3D: 2
+    NA: 459
     NB: 4
-    Norb: 10
+    Norb: 9
   XL:
-    Nkz: 16
-    NE: 128
+    Nkz: 12
+    NE: 102
     Nqz: 16
     Nw: 4
-    N3D: 3
-    NA: 2048
+    N3D: 2
+    NA: 1645
     NB: 4
-    Norb: 10
+    Norb: 8
 init:
   input_args:
   - Nkz

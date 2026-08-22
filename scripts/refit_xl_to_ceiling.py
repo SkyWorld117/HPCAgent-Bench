@@ -45,8 +45,12 @@ def strip_config(spec: BenchSpec, values: Dict[str, object]) -> Dict[str, object
     return {k: v for k, v in values.items() if k not in knobs}
 
 
-def proposal_for(spec: BenchSpec) -> Optional[Dict[str, object]]:
+def proposal_for(key: str, spec: BenchSpec) -> Optional[Dict[str, object]]:
     """One kernel's ``{S, XL}`` record, or ``None`` when it already fits.
+
+    ``key`` is the corpus key and is emitted verbatim. Deriving it from ``module_name`` instead
+    put sp_bicg under its module's name, which is also bicg_solvers' -- two kernels, one key, and
+    apply_sizes could only report that no such kernel exists.
 
     ``S`` in a proposal record is the SINGLE-CORE TIMED rung, which is the manifest's ``M`` (see
     apply_sizes.derive) -- carried through unchanged, because only the top of the ladder is being
@@ -73,7 +77,7 @@ def proposal_for(spec: BenchSpec) -> Optional[Dict[str, object]]:
         return None
     print(f"  {spec.short_name:<44} {before / GIB:6.2f} -> {after / GIB:5.2f} GiB", file=sys.stderr)
     return {
-        "key": f"{spec.relative_path}/{spec.module_name}",
+        "key": key,
         "S": strip_config(spec, small),
         "XL": strip_config(spec, fitted),
     }
@@ -94,7 +98,7 @@ def main() -> int:
             continue
         if args.track and spec.track != args.track:
             continue
-        record = proposal_for(spec)
+        record = proposal_for(name, spec)
         if record is not None:
             records.append(record)
     print(f"{len(records)} kernels over ceiling, {skipped} unloadable", file=sys.stderr)

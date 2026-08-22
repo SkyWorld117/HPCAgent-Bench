@@ -5,16 +5,16 @@ kind: microkernel
 level: 1
 parameters:
   S:
-    TSTEPS: 8
+    TSTEPS: 5
     N: 50
   M:
-    TSTEPS: 10
+    TSTEPS: 5
     N: 288
   L:
-    TSTEPS: 10
+    TSTEPS: 5
     N: 1016
   XL:
-    TSTEPS: 10
+    TSTEPS: 5
     N: 3584
 init:
   input_args:
