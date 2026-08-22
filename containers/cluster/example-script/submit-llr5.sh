@@ -13,6 +13,10 @@
 # Extra args go to sbatch verbatim. No --account on beverin.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+# beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
+# directory. Slurm drops the file when the folder is missing and the job runs blind: no vLLM
+# serve log, no agent_driver output, only the per-role logs under RUN_DIR.
+mkdir -p results
 . ./arm_nodes.sh
 
 MODEL="${MODEL:-}"

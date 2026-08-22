@@ -17,6 +17,10 @@
 # that contaminated the campaign measurement (21.7% at 40 agents / 4 judge nodes).
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+# beverin.sbatch writes --output=results/... relative to the submission cwd, which is this
+# directory. Slurm drops the file when the folder is missing and the job runs blind: no vLLM
+# serve log, no agent_driver output, only the per-role logs under RUN_DIR.
+mkdir -p results
 
 ACCOUNT="${ACCOUNT:-a-g200}"
 MODELS="${MODELS:-oss120b qwen30b}"
