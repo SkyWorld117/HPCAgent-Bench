@@ -1,6 +1,6 @@
 ---
 name: lang-c
-description: "Writing fast C here: the mistakes that cost most of the recorded turns, and the idioms that vectorize."
+description: "Writing fast C here: the mistakes that cost a turn, and the idioms that vectorize."
 ---
 
 # lang-c
@@ -13,11 +13,11 @@ token rather than re-deriving it.
 
 1. **Dropping the stub's include block.** The file opens with `<stdint.h> ... <omp.h>` and the
    signature is spelled in `int64_t`. Pasting back only the function loses the headers and fails
-   on the signature itself -- the LARGEST build failure on record (168 of 185 across two C arms).
+   on the signature itself.
    **Edit in place. Never replace the whole file.**
 2. **Claiming alignment on an ABI pointer.** `__builtin_assume_aligned` or an OpenMP
    `aligned(p:...)` clause on a judge input pointer is UB and SIGSEGVs at vector width -- the #1
-   crash on record. Inputs carry NATURAL alignment only; the workspace and your own
+   crash. Inputs carry NATURAL alignment only; the workspace and your own
    `aligned_alloc` storage are fair game.
 3. **Rewriting a loop must not change WHICH elements it writes.** A hand-unrolled
    `for (i = 0; i < n - 3; i += 4)` body stops at the last whole group on purpose; rerolling it to

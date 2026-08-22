@@ -463,6 +463,13 @@ MODEL_SKILL_LANGUAGES: Dict[str, FrozenSet[str]] = {
     "openmp-cpp": frozenset({"cpp"}),
     "openmp-fortran": frozenset({"fortran"}),
     "openacc": frozenset({"c", "cpp", "fortran"}),
+    # Not parallelism models but gated the same way: reshaping a nest is what makes a model
+    # applicable in the first place. One page per language for the same reason the OpenMP pages
+    # are split -- the legality tests are language-neutral but the code must be pasteable, and
+    # row-major vs column-major inverts which axis belongs innermost.
+    "loop-transformations-c": frozenset({"c"}),
+    "loop-transformations-cpp": frozenset({"cpp"}),
+    "loop-transformations-fortran": frozenset({"fortran"}),
 }
 
 #: Pages whose ONLY subject is directive offload to a device. On a ``cpu`` image there is no device

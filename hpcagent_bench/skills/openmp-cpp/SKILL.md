@@ -6,10 +6,50 @@ description: "OpenMP in C++: the four loop bins, the sharing clauses, and the bu
 # openmp-cpp
 
 Grading is MULTI-CORE: the timed run owns 24 physical cores (no SMT), `OMP_NUM_THREADS` preset,
-baseline SERIAL. No `parallel for` = 23 idle cores = the single biggest loss. `-fopenmp` is always
-on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round
+baseline SERIAL. `-fopenmp` is always on. Classify the loop first, then thread it. Misfiling returns `correct: false` and costs a round
 trip. (`<execution>` policies are the other threading spelling -- the lang-cpp page; one spelling
 per loop.)
+
+Threading is the LAST step, not the first. Cores add arithmetic; they do not add bandwidth. A
+`parallel for` whose inner loop strides by a row is memory-bound in every lane, so more threads
+buy nothing -- get the unit-stride axis innermost, THEN thread the loop outside it. Both of the following
+compile, run, and return `correct: true`, and both waste the speedup available.
+
+**Wrong 1 -- threaded the outer loop and left the inner one striding.** The dependence runs along
+`j`, so `i` is the free axis AND the unit-stride one. Threading `i` from the outside puts the
+strided walk on the inside, and every lane misses cache:
+
+```cpp
+#pragma omp parallel for                       // correct, and pointless
+for (std::int64_t i = 0; i < n; i++)
+    for (std::int64_t j = 1; j < n; j++)       // strides by n
+        aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
+```
+
+Interchange so the unit-stride axis is innermost, THEN thread the loop that carries no dependence
+-- here the inner one, because the outer one does carry it:
+
+```cpp
+for (std::int64_t j = 1; j < n; j++)           // carries the dependence: stays serial
+    #pragma omp parallel for simd              // free AND unit stride
+    for (std::int64_t i = 0; i < n; i++)
+        aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
+```
+
+**Wrong 2 -- put a directive on a recurrence and said so in the comment.** A pragma is an
+assertion, not a request. `simd` on a carried dependence claims lanes are independent when the
+line above proves they are not:
+
+```cpp
+// the recurrence relation requires sequential processing   <- correct diagnosis
+#pragma omp simd                                            <- contradicts it
+for (std::int64_t i = 2; i < n; i++)
+    a[i] = a[i-2] + x[i];
+```
+
+That stride-2 chain is really two independent chains (even `i`, odd `i`). Split the index space
+along the axis the dependence does NOT cross, or use the scan form below. If the comment you are
+about to write names a dependence, the directive you are about to write is the wrong one.
 
 ## The four bins
 
@@ -90,7 +130,7 @@ answer under load. Induction variables are private already.
 ## Build errors that cost a turn
 
 - **`aligned(p:32|64)` or `assume_aligned` on an ABI input pointer is UB and SIGSEGVs at vector
-  width** -- the #1 crash on record. ABI pointers carry natural alignment only; storage you
+  width**. ABI pointers carry natural alignment only; storage you
   allocate yourself and the 256B `workspace` are fair game.
 - **Skip `default(none)`.** The one variable you miss is always the accumulator -- which belongs in
   `reduction(...)` anyway.

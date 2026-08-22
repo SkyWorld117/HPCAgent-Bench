@@ -72,16 +72,28 @@ def skills_section(language: str, extra_root: str = "", image: str = "cpu") -> s
     # the decision it settles. The failure-loop hook stays -- that is the moment the matching
     # pattern is the answer.
     lang_page = wanted[0]
-    model_pages = ", ".join(wanted[1:]) if len(wanted) > 1 else "the parallelism pages"
+    # Named so the bullets point at the page this language actually received, not a family name.
+    trans_page = next((n for n in wanted if n.startswith("loop-transformations")), "the transformations page")
+    model_pages = ", ".join(n for n in wanted[1:] if n != trans_page) or "the parallelism pages"
     preamble = ("# Skills\n\n"
                 f"Skill pages for this task: optimization-hints, {', '.join(wanted)}. Skim all of them\n"
                 "before your first rewrite, then:\n\n"
                 "- Before parallelizing ANY loop, re-read optimization-hints (the order of attack) and\n"
                 f"  {model_pages} -- which loops are safe to thread, and the exact directive spelling.\n"
-                f"- While writing code, follow {lang_page}: signature, headers, dialect and its listed\n"
-                "  expensive mistakes are graded exactly as written there.\n"
-                "- On every score with correct: false, find the matching failure pattern in these pages\n"
-                "  BEFORE editing -- wrong answers here are usually a listed pattern applied unsafely.\n")
+                f"- While writing code, follow {lang_page}: signature, headers and dialect are graded\n"
+                "  exactly as written there, as are the mistakes it lists.\n"
+                "- Before you write a directive, say which axis carries the dependence and which axis is\n"
+                "  unit stride. Thread an axis that carries a dependence and the answer is wrong; leave a\n"
+                "  strided axis innermost and the answer is right but no faster.\n"
+                f"- If those two axes are not already the ones you need, reshape the nest before threading\n"
+                f"  it -- {trans_page} carries permutation, distribution and wavefront skewing with the\n"
+                f"  legality test for each. A nest where every axis carries a dependence is not serial; it\n"
+                f"  is a wavefront you have not written yet.\n"
+                "- On a score with correct: false, find the matching failure pattern in these pages BEFORE\n"
+                "  editing -- a wrong answer here is a listed pattern applied where it does not hold.\n"
+                "- On a score that is correct but no faster, do NOT add another directive. Re-derive the\n"
+                "  two axes above, then check the trip count pays for a thread team. Cores add arithmetic,\n"
+                "  not bandwidth: a loop already limited by memory traffic cannot be threaded faster.\n")
     return preamble + "\n" + pages
 
 
