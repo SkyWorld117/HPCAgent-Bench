@@ -5,7 +5,7 @@ description: "Reshaping a Fortran loop nest so it can be threaded: permutation, 
 
 # loop-transformations-fortran
 
-A nest that resists `parallel do` usually needs its SHAPE changed first. Three rewrites cover
+A nest that resists `parallel do` usually needs its SHAPE changed first. A few rewrites cover
 almost all of it, each with a mechanical legality test -- run it, do not guess. Fortran is
 COLUMN-major: the FIRST subscript runs innermost.
 
@@ -13,17 +13,17 @@ COLUMN-major: the FIRST subscript runs innermost.
 
 Two iterations touching the same element: write (later index - earlier index), one component per
 loop, outermost first. `a(i,j) = a(i,j-1) + a(i-1,j)` carries `(0,1)` and `(1,0)`. POSITIVE =
-first non-zero component is positive. The original nest always is; a rewrite is legal exactly when
-every vector still is. A loop is PARALLEL when no vector has a non-zero at its position with all
-outer components zero.
+first non-zero component is positive. The original nest always is; a rewrite is legal exactly
+when every vector still is. A loop is PARALLEL when no vector has a non-zero at its position with
+all outer components zero.
 
 ## Permutation -- swap two loops
 
 **Legal** when permuting every vector the same way leaves them all positive. 2-deep nest: illegal
 exactly when some dependence is `(+,-)`.
 
-**Pays** when it puts the unit-stride axis innermost, or a parallel axis outward. One axis carries
-the dependence, the other is free AND unit stride -- take both:
+**Pays** when it puts the unit-stride axis innermost, or a parallel axis outward. One axis
+carries the dependence, the other is free AND unit stride -- take both:
 
 ```fortran
 do j = 2, n                            ! carries the dependence: serial
@@ -36,23 +36,10 @@ end do
 
 ## Distribution -- split one loop into several
 
-**Legal** when statements on a dependence CYCLE stay together; resulting loops run in topological
-order of the statement graph.
-
-**Pays** on a body mixing a recurrence with independent work -- fused, the whole loop is serial:
-
-```fortran
-do i = 2, n                            ! chain stays serial
-  s(i) = s(i - 1) + x(i)
-end do
-!$omp parallel do simd
-do i = 2, n
-  y(i) = 2.0d0 * x(i)
-end do
-```
-
-Costs an extra pass -- a memory-bound body can come out slower. Fusion is the inverse: legal when
-no dependence between the bodies reverses, pays when the second re-reads the first.
+**Legal** when statements on a dependence CYCLE stay together; the resulting loops run in
+topological order of the statement graph. **Pays** on a body mixing a recurrence with independent
+work: fused, the whole loop is serial; split, the chain keeps a serial loop and everything else
+threads. Costs an extra pass over memory -- a bandwidth-bound body can come out slower.
 
 ## Wavefront -- every loop carries a dependence
 
@@ -69,10 +56,10 @@ do t = 3, n + m                        ! serial across diagonals
 end do
 ```
 
-Bounds keep `j = t - i` inside `2..m` while `i` stays in `2..n`. Buys parallelism with locality: a
-diagonal strides, and the team re-forks per diagonal. Wins on long diagonals with real work per
-point. Skew over TILES, not points, to restore unit stride inside a block and cut synchronisations
-to the number of block diagonals.
+Bounds keep `j = t - i` inside `2..m` while `i` stays in `2..n`. Wins on long diagonals with real
+work per point; a diagonal strides, and the team re-forks per diagonal. Skew over TILES, not
+points, to restore unit stride inside a block and cut synchronisations to the number of block
+diagonals.
 
 ## False dependences -- rewrite, no directive needed
 
@@ -80,8 +67,7 @@ Not every carried value is a dependence. Three shapes LOOK serial and are not; e
 rewrite, after which the loop files under PARALLEL.
 
 - **Rotated scalar.** A scalar saved only so the next iteration can read it is the previous
-  iteration's expression by another name -- substitute it away. Works at two levels of carry too:
-  substitute twice.
+  iteration's expression by another name -- substitute it away (twice for a two-deep carry):
 
 ```fortran
 do i = 1, n
@@ -96,38 +82,21 @@ do i = 2, n
 end do
 ```
 
-- **Read of a future element** (`x(i+1)` on the right while `x(i)` is written): an
-  anti-dependence. The read means the ORIGINAL value, so give the loop a copy of the input, or
-  write to a fresh output array -- either way the loop is parallel. Renaming costs one pass of
-  memory traffic; score it.
+- **Read of a future element** (`x(i+1)` on the right while `x(i)` is written): the read means
+  the ORIGINAL value, so keep a copy of the input, or write to a fresh output array -- either way
+  the loop is parallel. Renaming costs one pass of memory traffic; score it.
 - **Write-only clobber**: a scalar or element every iteration overwrites before reading is
   `private`/`lastprivate` scratch, not a dependence.
 
-## Fusion -- merge two loops; unswitching -- hoist an invariant guard
+## Fusion and unswitching
 
-**Fusion** is legal when no dependence between the two bodies reverses direction, and pays when
-the second loop re-reads what the first wrote: one pass over memory instead of two, and a
-temporary that existed only to connect them becomes a scalar in registers.
-
-```fortran
-do i = 1, n
-  tmp(i) = u(i) + v(i)
-end do
-do i = 1, n
-  w(i) = tmp(i) * s + u(i)
-end do
-! becomes -- tmp is now a scalar, one pass, one directive
-!$omp parallel do simd
-do i = 1, n
-  t = u(i) + v(i)
-  w(i) = t * s + u(i)
-end do
-```
-
-**Unswitching** hoists a LOOP-INVARIANT condition out of the loop: `if (scale > 0)` tested every
-iteration becomes two loops behind one test, each a clean vectorizable body. Only for invariant
-guards -- a data-dependent `if (c(i) > 0)` stays inside and becomes arithmetic (`merge`), not a
-branch. The two combine: guarded loops often fuse only AFTER their invariant guards move out.
+**Fusion** merges two loops into one body. Legal when no dependence between the bodies reverses
+direction; pays when the second loop re-reads what the first wrote: one pass over memory instead
+of two, and a temporary array that existed only to connect them becomes a scalar in registers.
+**Unswitching** hoists a LOOP-INVARIANT condition out: `if (scale > 0)` tested every iteration
+becomes two loops behind one test, each a clean vectorizable body. Only for invariant guards -- a
+data-dependent `if (c(i) > 0)` stays inside and becomes arithmetic (`merge`), not a branch. The
+two combine: guarded loops often fuse only AFTER their invariant guards move out.
 
 Cheaper exits first: a FALSE dependence needs only its rewrite; one real dimension needs
 permutation; a body mixing a chain with independent statements needs distribution. What is left
