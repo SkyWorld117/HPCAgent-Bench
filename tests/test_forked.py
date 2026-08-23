@@ -81,12 +81,11 @@ def test_a_childs_own_signal_beats_the_timeout_it_raced():
     # The caller attributes a failure by its cause, and "TIMEOUT" for a child that segfaulted is
     # the wrong cause: papi.count_gpu_metric turns this string into the reason a metric has no
     # number, so a CUPTI crash that lost a scheduling race would be filed as a slow kernel.
-    # The deadline is 2s, not 0.5s, and the child sleeps 4s rather than 1s: the parent starts its
-    # clock at run_forked() while the child only ignores SIGTERM once the interpreter is up, so a
-    # spawn slower than the deadline lets the SIGTERM land BEFORE the handler exists -- the child
-    # then dies of SIGTERM and TIMEOUT is the correct answer, not the bug this test is about.
-    # That is what went red in CI (job 96804297562, 2026-08-21) on a loaded runner. The assertion
-    # is unchanged; only the spawn headroom is.
+    # The child arms the deadline itself (run_forked waits for its "started" message), so the
+    # SIGTERM lands 2s into the CHILD'S life rather than 2s after p.start() -- the handler is
+    # installed by then no matter how slow the box was to schedule the fork. Widening the headroom
+    # was the earlier answer to this and it does not converge: the same race took CI down again
+    # (jobs 96804297562 and 97244593783) after the deadline had already gone 0.5s -> 2s.
     r = run_forked(_ignore_sigterm_then_segfault, timeout=2.0, label="race")
     assert not r.ok
     assert r.signal == "SIGSEGV", f"child's own signal must win over the timeout, got {r.signal}"
