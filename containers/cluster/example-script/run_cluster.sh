@@ -46,12 +46,6 @@ INFERENCE_NODES="${INFERENCE_NODES:-2}"
 INFERENCE_MODE="${INFERENCE_MODE:-pp}"
 AGENT_NODES="${AGENT_NODES:-1}"
 JUDGE_NODES="${JUDGE_NODES:-1}"
-# Cores each judge grades on. The graded binary inherits the judge step's cgroup, so this is the
-# thread count `omp_get_max_threads()` returns inside a submission. Slurm gives a step ONE core
-# (plus its SMT sibling) unless --cpus-per-task says otherwise: leaving it unset graded every
-# kernel on 2 CPUs of a 192-thread node, which silently made threaded and serial code score the
-# same and let a race on the parallel axis pass as correct.
-GRADE_CPUS="${GRADE_CPUS:-24}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 # Node's physical core count (SMT threads excluded). languages.py::grading_ncores divides by
 # slot count itself, so this stays the whole-node number -- do not divide by GPUS_PER_NODE here.
@@ -73,6 +67,25 @@ detect_physical_cores() {
     printf '%s\n' "${n}"
 }
 HPCAGENT_BENCH_NCORES="${HPCAGENT_BENCH_NCORES:-$(detect_physical_cores)}"
+# Cores one graded submission runs on: ONE socket, asked of the node rather than written down.
+# A host-only judge holds a single CPU slot, so native_call.grading_cpus hands the timed child the
+# whole step -- the step's width IS the width `omp_get_max_threads()` reports inside a submission.
+#
+# A socket, not the node: it is one NUMA domain, so a bandwidth-bound kernel is measured against
+# memory it owns instead of against the interconnect, and the number stays comparable when the
+# node's socket count changes. Slurm gives a step ONE core (plus its SMT sibling) unless
+# --cpus-per-task says otherwise, and leaving it unset graded every kernel on 2 CPUs of a
+# 192-thread node: threaded and serial code scored the same, and a race on the parallel axis
+# passed as correct.
+detect_cores_per_socket() {
+    local n
+    n="$(lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#' | sort -u | awk -F, '$2 == 0' | wc -l)" || true
+    if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
+        n="${HPCAGENT_BENCH_NCORES}"
+    fi
+    printf '%s\n' "${n}"
+}
+GRADE_CPUS="${GRADE_CPUS:-$(detect_cores_per_socket)}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_MASTER_PORT="${VLLM_MASTER_PORT:-29500}"
 JUDGE_PORT="${JUDGE_PORT:-8800}"
@@ -295,7 +308,8 @@ run_judge_node() {
     export HPCAGENT_BENCH_DB_SHARD="${judge_rank}"
     export JUDGE_RANK="${judge_rank}"
     # Submissions run as children of this process and inherit the variable, so grading happens at
-    # the SAME width every time instead of following whatever the allocation handed out.
+    # the SAME width every time instead of following whatever the allocation handed out. Children
+    # spawned through native_call re-derive it from their own affinity mask, which is this.
     export OMP_NUM_THREADS="${GRADE_CPUS}"
     export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
     export OMP_PLACES="${OMP_PLACES:-cores}"
