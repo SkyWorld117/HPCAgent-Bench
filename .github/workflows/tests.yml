@@ -104,16 +104,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -256,8 +263,7 @@ jobs:
           python-version: '3.12'
 
       # Same ccache setup as `unit`; the key is namespaced by github.job, so this job
-      # warms its own cache rather than contending for that one. CPU_KEY is still derived
-      # here because the from-source OpenBLAS cache below is keyed by uarch.
+      # warms its own cache rather than contending for that one.
       - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
@@ -265,10 +271,13 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed for ccache and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
@@ -277,8 +286,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       - name: Setup -- reset the ccache counters
         run: ccache --zero-stats
 
@@ -457,16 +466,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -535,16 +551,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -716,16 +739,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -834,16 +864,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
@@ -1062,16 +1099,23 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # ccache keys are content-addressed on preprocessed source + compiler + flags; a
-          # cache entry only matches when every input is identical, so cross-runner uarch
-          # restores can only miss, never return a wrong object. Per-CPU namespacing is not
-          # needed and fragments the cache.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
+          cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
+            head -2 | sha256sum | cut -c1-12)
+          test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
+          echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.job }}-${{ github.run_id }}
-          restore-keys: ccache-${{ github.job }}-
+          key: ccache-${{ github.job }}-${{ env.CPU_KEY }}-${{ github.run_id }}
+          restore-keys: ccache-${{ github.job }}-${{ env.CPU_KEY }}-
       # Zero AFTER the restore: the cache carries its own counters back, so zeroing earlier
       # would make the end-of-job stats cumulative instead of this run's hit rate.
       - name: Setup -- reset the ccache counters
