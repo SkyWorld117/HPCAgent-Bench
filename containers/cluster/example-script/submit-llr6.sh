@@ -22,6 +22,10 @@ mkdir -p results
 . ./arm_nodes.sh
 . ./check_problems.sh
 
+# Job-name prefix. The env files are keyed on the EXPERIMENT (llr6-<model>-<lang>), which does not
+# change between skill revisions, while the queue and the results dir need to say which revision
+# ran -- so the arm names the env file and CAMPAIGN names the run.
+CAMPAIGN="${CAMPAIGN:-llr6}"
 MODEL="${MODEL:-}"
 [[ -n "${MODEL}" ]] || { echo "MODEL is required, e.g. MODEL=oss120b $0" >&2; exit 2; }
 LANGS="${LANGS:-c fortran}"
@@ -41,7 +45,7 @@ submit_arm() {  # submit_arm <arm> [extra sbatch args...] -> prints the job id
     local arm="$1"; shift
     [[ -f ".env.${arm}" ]] || { echo "no env file for ${arm} -- check MODEL=${MODEL}" >&2; exit 2; }
     sbatch --parsable --nodes="$(arm_nodes ".env.${arm}")" --time="${TIME}" \
-        --job-name="${arm}" "$@" \
+        --job-name="${CAMPAIGN}${arm#llr6}" "$@" \
         --export=ALL,CLUSTER_ENV_FILE="$PWD/.env.${arm}" beverin.sbatch
 }
 
