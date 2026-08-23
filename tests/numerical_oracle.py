@@ -196,7 +196,11 @@ DACE = "dace"
 
 #: Wall-clock cap (s) on one kernel's whole DaCe leg (parse + compile + run). Generous by design,
 #: like the parse gate's own budget: it is here to bound a WEDGED frontend, not to time anything.
-DACE_TIMEOUT_S = float(os.environ.get("HPCAGENT_BENCH_DACE_NUMERIC_TIMEOUT_S", "600"))
+#: 1200 not 600: warpx_field_gather's leg is 742 s measured 2026-08-23 (38 s of it parse, the rest a
+#: C++ build of one very large kernel), so 600 reported a FAIL:timeout on a kernel that agrees with
+#: numpy. It stays under the step's own ``--timeout=1500`` so the cap here is what fires first and
+#: the verdict names the kernel.
+DACE_TIMEOUT_S = float(os.environ.get("HPCAGENT_BENCH_DACE_NUMERIC_TIMEOUT_S", "1200"))
 
 #: Environment every DaCe probe child runs under.
 #:
