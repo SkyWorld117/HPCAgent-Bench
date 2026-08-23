@@ -46,6 +46,12 @@ INFERENCE_NODES="${INFERENCE_NODES:-2}"
 INFERENCE_MODE="${INFERENCE_MODE:-pp}"
 AGENT_NODES="${AGENT_NODES:-1}"
 JUDGE_NODES="${JUDGE_NODES:-1}"
+# Cores each judge grades on. The graded binary inherits the judge step's cgroup, so this is the
+# thread count `omp_get_max_threads()` returns inside a submission. Slurm gives a step ONE core
+# (plus its SMT sibling) unless --cpus-per-task says otherwise: leaving it unset graded every
+# kernel on 2 CPUs of a 192-thread node, which silently made threaded and serial code score the
+# same and let a race on the parallel axis pass as correct.
+GRADE_CPUS="${GRADE_CPUS:-24}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 # Node's physical core count (SMT threads excluded). languages.py::grading_ncores divides by
 # slot count itself, so this stays the whole-node number -- do not divide by GPUS_PER_NODE here.
@@ -288,6 +294,11 @@ run_judge_node() {
     export HPCAGENT_BENCH_RECORD_DB_PATH="${rank_dir}/hpcagent_bench.db"
     export HPCAGENT_BENCH_DB_SHARD="${judge_rank}"
     export JUDGE_RANK="${judge_rank}"
+    # Submissions run as children of this process and inherit the variable, so grading happens at
+    # the SAME width every time instead of following whatever the allocation handed out.
+    export OMP_NUM_THREADS="${GRADE_CPUS}"
+    export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
+    export OMP_PLACES="${OMP_PLACES:-cores}"
     export WEBSEARCH_LLM_BASE_URL="${VLLM_BASE_URL}"
     export WEBSEARCH_LLM_MODEL="${VLLM_SERVED_MODEL:-optarena-vllm}"
     export WEBSEARCH_LLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
@@ -594,6 +605,9 @@ role_srun() {
     local -a srun_args wrap gpu_flags vols
     srun_args=(--nodes="${nodes}" --ntasks="${nodes}" --ntasks-per-node=1
         --nodelist="${nodelist}" --exclusive --kill-on-bad-exit=1 --export=ALL)
+    if [[ "${role_flag}" == "--judge-node" ]]; then
+        srun_args+=(--cpus-per-task="${GRADE_CPUS}" --hint=nomultithread)
+    fi
     gpu_flags=()
     if [[ -n "${CONTAINER_GPU_FLAGS}" ]]; then
         # Trusted operator-controlled word list, same contract as VLLM_EXTRA_ARGS.
