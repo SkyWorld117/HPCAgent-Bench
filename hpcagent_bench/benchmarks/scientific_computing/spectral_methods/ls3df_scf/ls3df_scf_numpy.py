@@ -80,6 +80,8 @@ def _rayleigh_ritz(vloc, proj_f, dij_f, half_inv_h2, Y):
     L = np.linalg.cholesky(s_sub)
     Linv = np.linalg.inv(L)
     w, U = np.linalg.eigh(Linv @ h_sub @ Linv.T)
+    # Ritz vectors are fixed only up to a sign; pin it so psi_frag does not depend on the LAPACK build.
+    U = U * np.sign(U[np.argmax(np.abs(U), axis=0), np.arange(U.shape[1])])
     C = Linv.T @ U
     return (Yf @ C).reshape(shp), w
 

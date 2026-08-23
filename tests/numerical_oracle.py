@@ -333,7 +333,7 @@ def outputs_match(got: np.ndarray, exp: np.ndarray, rtol: float, atol: float) ->
     return bool(np.allclose(got, exp, rtol=rtol, atol=atol, equal_nan=True))
 
 
-def mismatch_detail(name: str, got: np.ndarray, exp: np.ndarray) -> str:
+def mismatch_detail(name: str, got: np.ndarray, exp: np.ndarray, rtol: float = 0.0, atol: float = 0.0) -> str:
     """``FAIL:<name>:d=<worst absolute difference>``.
 
     Integers difference in int64, NOT float64: at 2**63 a float64 cast collapses both sides to the
@@ -358,7 +358,10 @@ def mismatch_detail(name: str, got: np.ndarray, exp: np.ndarray) -> str:
     if rogue:
         return f"FAIL:{name}:nonfinite={rogue}/{g.size}"
     d = float(np.abs(g[finite] - e[finite]).max()) if finite.any() else float("nan")
-    return f"FAIL:{name}:d={d:.2e}"
+    # Magnitudes agreeing while the values do not is the eigenvector GAUGE: a column is fixed only
+    # up to a sign (real) or a unit phase (complex). Name it, so this is not read as a wrong answer.
+    gauge = ":abs_ok" if (rtol or atol) and outputs_match(np.abs(g), np.abs(e), rtol, atol) else ""
+    return f"FAIL:{name}:d={d:.2e}{gauge}"
 
 
 def _is_perfect_cube(n: int) -> bool:
@@ -978,7 +981,7 @@ def _py_backend_compute(backend, short, info, by, syms, expected, compare, rtol,
             if g.shape != e.shape:
                 return f"FAIL:shape:{nm}"
             if g.size and not outputs_match(g, e, rtol, atol):
-                return mismatch_detail(nm, g, e)
+                return mismatch_detail(nm, g, e, rtol, atol)
         return "ok"
 
 
@@ -1099,7 +1102,7 @@ def _jax_compute(short, info, by, syms, expected, compare, rtol, atol, emit_prec
         if g.shape != e.shape:
             return f"FAIL:shape:{nm}"
         if g.size and not outputs_match(g, e, rtol, atol):
-            return mismatch_detail(nm, g, e)
+            return mismatch_detail(nm, g, e, rtol, atol)
     return "ok"
 
 
@@ -1354,5 +1357,5 @@ def _invoke(backend, binding, so, by, syms, expected, compare, rtol, atol) -> st
         if got.shape != exp.shape:
             return f"FAIL:shape:{nm}:{got.shape}!={exp.shape}"
         if got.size and not outputs_match(got, exp, rtol, atol):
-            return mismatch_detail(nm, got, exp)
+            return mismatch_detail(nm, got, exp, rtol, atol)
     return "ok"
