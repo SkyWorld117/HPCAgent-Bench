@@ -62,21 +62,20 @@ TIMEOUT_REASONS = frozenset({"hang"})
 #: hand-editing a ``*_dace.py``, which is regenerated from the numpy reference on the next miss.
 #: Keyed on the kernel directory's PATH under ``benchmarks/`` -- see :func:`kernel_of`.
 #:
-#: The causes on the list below, one process per kernel (153 of 626):
-#:   broadcast     109 -- two extents that ARE one quantity reach a write spelled differently, and
+#: The causes on the list below, one process per kernel (142 of 626):
+#:   broadcast     108 -- two extents that ARE one quantity reach a write spelled differently, and
 #:                        the frontend re-promotes each to a fresh symbol it cannot prove equal
 #:   misc            7 -- one-offs: negative strides, a symbolic ``np.arange`` stop, ``np.ix_``, a
 #:                        memlet dimensionality, a ZeroDivisionError, an unimplemented replacement
 #:   symbol_data     6 -- a scalar used BOTH as data and as a shape symbol ("Cannot create symbol
 #:                        X, the name is used by a data descriptor")
 #:   undefined       6 -- a name the frontend cannot resolve in the emitted scope
-#:   callback        5 -- an untyped callback return value
-#:   reassign        5 -- a second assignment to an array/View name the frontend treats as
-#:                        single-assignment
-#:   keyerror        4 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns
 #:   hang            3 -- the frontend does not finish parsing inside the budget; the deep vision
 #:                        nets spend it in sympy over per-layer extent expressions
 #:   matmul          2 -- ``numpy.matmul`` has no SDFG implementation registered (``np.dot`` does)
+#:   reassign        2 -- a second assignment to an array/View name the frontend treats as
+#:                        single-assignment
+#:   keyerror        2 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns
 #:   symbolic_or     2 -- ``if dim == 0 or dim == -2`` over symbols
 #:   clip_syntax     1 -- the emitted clip tasklet is not valid Python
 #:   keepdims        1 -- ``keepdims=`` on a reduction whose replacement does not take it
@@ -95,7 +94,6 @@ REFUSED: Dict[str, str] = {
     "machine_learning/conv2d_avg_pool_sigmoid_sum": "broadcast",
     "machine_learning/conv2d_batch_norm_scaling": "broadcast",
     "machine_learning/conv2d_divide_leaky_relu": "broadcast",
-    "machine_learning/conv2d_gelu_global_avg_pool": "broadcast",
     "machine_learning/conv2d_group_norm_scale_max_pool_clamp": "broadcast",
     "machine_learning/conv2d_group_norm_tanh_hardswish_residual_add_logsumexp": "broadcast",
     "machine_learning/conv2d_hardswish_relu": "broadcast",
@@ -185,9 +183,7 @@ REFUSED: Dict[str, str] = {
     "machine_learning/convolutional_vision_transformer": "reassign",
     "machine_learning/cumsum_exclusive": "symbolic_or",
     "machine_learning/cumsum_reverse": "symbolic_or",
-    "machine_learning/densenet121": "reassign",
     "machine_learning/densenet121_transition_layer": "broadcast",
-    "machine_learning/densenet201": "reassign",
     "machine_learning/efficientnet_mb_conv": "broadcast",
     "machine_learning/gemm_bias_add_hardtanh_mish_group_norm": "clip_syntax",
     "machine_learning/gemm_group_norm_hardtanh": "symbol_data",
@@ -200,8 +196,6 @@ REFUSED: Dict[str, str] = {
     "machine_learning/kl_div_loss": "undefined",
     "machine_learning/lenet": "broadcast",
     "machine_learning/lstm_bidirectional": "broadcast",
-    "machine_learning/mamba2_return_final_state": "callback",
-    "machine_learning/mamba2_return_y": "callback",
     "machine_learning/matmul_avg_pool_gelu_scale_max": "where_scalars",
     "machine_learning/matmul_group_norm_leaky_relu_sum": "symbol_data",
     "machine_learning/matmul_max_pool_sum_scale": "keepdims",
@@ -228,18 +222,12 @@ REFUSED: Dict[str, str] = {
     "scientific_computing/sparse_linear_algebra/minres": "undefined",
     "scientific_computing/sparse_linear_algebra/spmm": "undefined",
     "scientific_computing/spectral_methods/cegterg": "keyerror",
-    "scientific_computing/spectral_methods/chebyshev_filter_subspace": "callback",
     "scientific_computing/spectral_methods/daubechies_dwt2d": "broadcast",
     "scientific_computing/spectral_methods/dwt2d": "broadcast",
     "scientific_computing/spectral_methods/ls3df_scf": "keyerror",
     "scientific_computing/spectral_methods/vexx": "broadcast",
     "scientific_computing/structured_grids/cloudsc": "hang",
-    "scientific_computing/structured_grids/laplacian_stencil_3d": "callback",
-    "scientific_computing/structured_grids/max_filter": "keyerror",
-    "scientific_computing/structured_grids/poisson_cg_3d": "callback",
-    "scientific_computing/structured_grids/vadv": "keyerror",
     "scientific_computing/unstructured_grids/lulesh": "reassign",
-    "scientific_computing/unstructured_grids/velocity_tendencies": "reassign",
 }
 
 
