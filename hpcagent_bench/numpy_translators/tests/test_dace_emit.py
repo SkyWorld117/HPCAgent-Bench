@@ -658,6 +658,33 @@ def test_swapaxes_becomes_the_transpose_dace_does_have():
     assert _resolved({}, "v = np.swapaxes(a, 1, 2)") == ["    v = np.swapaxes(a, 1, 2)"]
 
 
+def test_an_inner_axis_cumulative_scan_moves_that_axis_to_the_end():
+    """cumsum/cumprod/masked_cumsum, axis=0 branch: dace lowers a prefix scan along the LAST axis
+    only, so the scan axis is transposed to the end and the result transposed back. The permutation
+    is its own inverse, so the same order spells both transposes."""
+    shapes = {"x": ["batch_size", "dim1"], "mask": ["batch_size", "dim1"]}
+    assert _resolved(shapes, "out[:] = np.cumsum(x, axis=0)") == \
+        ["    out[:] = np.transpose(np.cumsum(np.transpose(x, (1, 0)), axis=1), (1, 0))"]
+    # the operand may be an expression, and cumprod takes the same route
+    assert _resolved(shapes, "out[:] = np.cumprod(x * mask, axis=0)") == \
+        ["    out[:] = np.transpose(np.cumprod(np.transpose(x * mask, (1, 0)), axis=1), (1, 0))"]
+    # rank 3, axis 1: only that axis and the last swap, the leading one stays put
+    assert _resolved({"a": ["B", "N", "C"]}, "v = np.cumsum(a, axis=1)") == \
+        ["    v = np.transpose(np.cumsum(np.transpose(a, (0, 2, 1)), axis=2), (0, 2, 1))"]
+
+
+def test_a_last_axis_scan_and_an_unknown_rank_are_left_alone():
+    """The rewrite costs two transposes, so it fires only where dace would otherwise refuse: a
+    last-axis scan (however spelled) already lowers, and a rank the table does not have would need
+    an invented permutation."""
+    shapes = {"x": ["batch_size", "dim1"]}
+    assert _resolved(shapes, "out[:] = np.cumsum(x, axis=1)") == ["    out[:] = np.cumsum(x, axis=1)"]
+    assert _resolved(shapes, "out[:] = np.cumsum(x, axis=-1)") == ["    out[:] = np.cumsum(x, axis=-1)"]
+    assert _resolved({}, "out[:] = np.cumsum(x, axis=0)") == ["    out[:] = np.cumsum(x, axis=0)"]
+    # a rank-1 operand has no inner axis to move
+    assert _resolved({"v": ["N"]}, "c = np.cumsum(v)") == ["    c = np.cumsum(v)"]
+
+
 def test_ascontiguousarray_becomes_the_copy_dace_does_have():
     """The other callback: ``np.ascontiguousarray`` has no dace replacement; a ``copy`` is
     contiguous and does."""

@@ -701,24 +701,59 @@ class ResolveShapeReads(ast.NodeTransformer):
         # deepens once per layer and resnet101's 101 layers overflow the deepcopy in _SubstituteNames.
         self.aliases[name] = fold_expr(_SubstituteNames(self.aliases).visit(copy.deepcopy(value)))
 
+    def cumulative_axis(self, node: ast.Call):
+        """``(operand, axis)`` of an ``np.cumsum``/``np.cumprod`` written with a literal axis, else
+        ``None``. A ``dtype=``/``out=`` spelling is left alone: the rewrite below moves the axis, and
+        carrying the rest of the call across it would be a guess about what they mean here."""
+        if len(node.args) == 2 and not node.keywords:
+            axis = node.args[1]
+        elif len(node.args) == 1 and len(node.keywords) == 1 and node.keywords[0].arg == "axis":
+            axis = node.keywords[0].value
+        else:
+            return None
+        if not (isinstance(axis, ast.Constant) and isinstance(axis.value, int)):
+            return None
+        return node.args[0], axis.value
+
     def visit_Call(self, node: ast.Call):
-        """``np.swapaxes(x, i, j)`` -> ``np.transpose(x, perm)``. Needs the operand RANK, and this
-        table is the emitter's only flow-SENSITIVE one -- netvlad rebinds a name across ranks."""
+        """``np.swapaxes(x, i, j)`` -> ``np.transpose(x, perm)``, and an INNER-axis cumulative scan
+        -> the same scan on the last axis between two transposes. Both need the operand RANK, and
+        this table is the emitter's only flow-SENSITIVE one -- netvlad rebinds a name across ranks."""
         self.generic_visit(node)
-        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "swapaxes"
-                and isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy")
-                and len(node.args) == 3 and not node.keywords):
+        if not (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in ("np", "numpy")):
             return node
-        shape = self.infer(node.args[0])
-        axes = [a.value for a in node.args[1:] if isinstance(a, ast.Constant) and isinstance(a.value, int)]
-        if not shape or len(axes) != 2:
-            return node
-        perm = list(range(len(shape)))
-        i, j = axes[0] % len(shape), axes[1] % len(shape)
-        perm[i], perm[j] = perm[j], perm[i]
-        order = ", ".join(str(p) for p in perm)
-        return ast.copy_location(
-            ast.parse(f"np.transpose({ast.unparse(node.args[0])}, ({order}))", mode="eval").body, node)
+        if node.func.attr == "swapaxes" and len(node.args) == 3 and not node.keywords:
+            shape = self.infer(node.args[0])
+            axes = [a.value for a in node.args[1:] if isinstance(a, ast.Constant) and isinstance(a.value, int)]
+            if not shape or len(axes) != 2:
+                return node
+            perm = list(range(len(shape)))
+            i, j = axes[0] % len(shape), axes[1] % len(shape)
+            perm[i], perm[j] = perm[j], perm[i]
+            order = ", ".join(str(p) for p in perm)
+            return ast.copy_location(
+                ast.parse(f"np.transpose({ast.unparse(node.args[0])}, ({order}))", mode="eval").body, node)
+        # dace lowers a prefix scan along the LAST axis only -- an inner axis is a strided chain per
+        # outer index, which its Scan libnode's single ``stride`` cannot express. The scan axis is
+        # swapped to the end, scanned there, and swapped back; the permutation is its own inverse,
+        # so one order string spells both transposes.
+        if node.func.attr in ("cumsum", "cumprod"):
+            spec = self.cumulative_axis(node)
+            shape = self.infer(spec[0]) if spec else None
+            if not shape or len(shape) < 2:
+                return node
+            operand, axis = spec
+            rank = len(shape)
+            axis %= rank
+            if axis == rank - 1:
+                return node
+            perm = list(range(rank))
+            perm[axis], perm[rank - 1] = perm[rank - 1], perm[axis]
+            order = ", ".join(str(p) for p in perm)
+            scan = f"np.{node.func.attr}(np.transpose({ast.unparse(operand)}, ({order})), axis={rank - 1})"
+            return ast.copy_location(ast.parse(f"np.transpose({scan}, ({order}))", mode="eval").body, node)
+        return node
 
     def visit_Subscript(self, node: ast.Subscript):
         self.generic_visit(node)
