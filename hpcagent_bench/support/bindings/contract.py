@@ -4,6 +4,7 @@
 turns a validated BenchSpec into a Binding (Sec. 8) that the stub generator and host glue both read so every
 language agrees byte-for-byte. Implements Sec. 2 (pointer/scalar args only), Sec. 3 (sparse packing), Sec. 4
 (canonical order), Sec. 5 (const rules), Sec. 6 (no timer argument -- timing is the harness wrapper's job)."""
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -268,6 +269,31 @@ def _dense_shape(spec: BenchSpec, name: str) -> Optional[Tuple[str, ...]]:
     return tuple(t.strip() for t in inner.split(",") if t.strip())
 
 
+#: Fortran caps an external name at 63 characters (F2008 3.2.2), and a symbol must be identical in
+#: every language or the harness binds one name and the emitter defines another.
+FORTRAN_SYMBOL_LIMIT = 63
+#: Hex digits of the digest kept when a name is shortened. 8 hex = 32 bits: over a corpus of a few
+#: thousand kernels the chance of any collision is ~1e-6, and the symbol-uniqueness test would catch
+#: one anyway. Shorter reads better but stops being safe to assert on.
+SYMBOL_DIGEST_CHARS = 8
+
+
+def fortran_safe_symbol(symbol: str) -> str:
+    """``symbol`` unchanged, or deterministically shortened to fit Fortran's 63-character limit.
+
+    A benchmark's name is its identity and belongs to the corpus, not to whichever backend has the
+    tightest symbol rules -- so a name too long for Fortran is shortened HERE, at emission, instead
+    of forcing the manifest to carry a second, shorter identity. Keeping a readable prefix and
+    appending a digest of the full name makes the result stable across runs and machines (blake2s,
+    not hash(), which is salted per process) and injective in practice, so two long names that share
+    a prefix still get different symbols.
+    """
+    if len(symbol) <= FORTRAN_SYMBOL_LIMIT:
+        return symbol
+    digest = hashlib.blake2s(symbol.encode("utf-8"), digest_size=8).hexdigest()[:SYMBOL_DIGEST_CHARS]
+    return f"{symbol[:FORTRAN_SYMBOL_LIMIT - SYMBOL_DIGEST_CHARS - 1]}_{digest}"
+
+
 def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
     """Derive the canonical :class:`Binding` for ``spec`` (Sec. 2-Sec. 8); ``config`` defaults to the first
     declared sparse configuration, ignored ("dense") for a dense kernel."""
@@ -364,13 +390,11 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
     # Lowercase always: Fortran folds case, so a symbol differing from another only in case is the
     # same symbol there, and a mixed-case name reads differently in each language's convention.
     symbols = {lang: f"{base}_fp64".lower() for lang in LANG_SYMBOLS}
+    symbols = {lang: fortran_safe_symbol(sym) for lang, sym in symbols.items()}
     sym = symbols["c"]
     if not sym[0].isalpha():
         raise ValueError(f"{spec.short_name}: symbol {sym!r} must start with a letter -- Fortran "
-                         f"rejects it otherwise; set a `short_name:` in the manifest")
-    if len(sym) > 63:
-        raise ValueError(f"{spec.short_name}: symbol {sym!r} is {len(sym)} characters; Fortran "
-                         f"allows 63 -- set a shorter `short_name:` in the manifest")
+                         f"rejects it otherwise; rename the manifest file")
 
     return Binding(
         constants=dict(spec.init.constants) if spec.init is not None else {},

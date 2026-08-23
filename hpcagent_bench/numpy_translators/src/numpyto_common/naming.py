@@ -35,9 +35,8 @@ def fptype_tag(precision: str = "") -> str:
 def short_for(numpy_py: os.PathLike | str) -> str:
     """The ``short`` every emitter names its artifacts with: the numpy reference's file stem.
 
-    NOT the registry key and NOT the manifest's ``short_name``, both of which are free to differ
-    from the filename -- ``bicg_solvers`` and ``sp_bicg`` are two registry keys over the one
-    ``bicg_numpy.py``, and arc_distance's ``short_name`` is ``adist``. Any consumer that has to
+    NOT the registry key, which is free to differ from the filename -- ``bicg_solvers`` and
+    ``sp_bicg`` are two registry keys over the one ``bicg_numpy.py``. Any consumer that has to
     find an emitted artifact must derive its name through THIS function; deriving it from a
     registry key instead is what made the sparse oracle emit ``bicg_csr_fp64_binding.json`` and
     then open ``bicg_solvers_csr_fp64_binding.json``.

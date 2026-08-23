@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Mandelbrot2
-short_name: mandel2
 kind: microkernel
 level: 2
 parameters:

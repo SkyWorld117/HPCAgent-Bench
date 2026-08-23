@@ -1520,17 +1520,23 @@ class BenchSpec:
                 idx = len(p.parts) - 1 - p.parts[::-1].index("benchmarks")
                 raw["relative_path"] = "/".join(p.parts[idx + 1:-1])
             raw.setdefault("module_name", p.stem)
-            # The remaining identity fields are derivable from the manifest
-            # filename + the numpy reference, so a concise manifest may omit
-            # them: ``short_name`` defaults to the file stem, ``func_name`` to
-            # the reference's entry def, and ``name`` (the human title) to the
-            # short_name. Each is honoured verbatim when written out.
-            raw.setdefault("short_name", p.stem)
+            # A benchmark has ONE name and it is the manifest stem, which is unique across the
+            # corpus and is the name every other identity field is derived from. A manifest may
+            # not override it: a second, shorter identity is how the harness came to hand out a
+            # name it could not then load back, silently taking 34 kernels out of every
+            # python-delivery path. A name too long for a backend's symbol rules is shortened at
+            # EMISSION instead -- see ``bindings.contract.fortran_safe_symbol``.
+            declared = raw.get("short_name")
+            if declared is not None and declared != p.stem:
+                raise ValueError(f"{p}: short_name {declared!r} differs from the manifest stem "
+                                 f"{p.stem!r}. A benchmark has one name; rename the file to change "
+                                 f"it. A Fortran-illegal length is handled by fortran_safe_symbol.")
+            raw["short_name"] = p.stem
             if "func_name" not in raw:
                 fn = derive_func_name(raw.get("relative_path", ""), raw["module_name"])
                 if fn is not None:
                     raw["func_name"] = fn
-            raw.setdefault("name", raw["short_name"])
+            raw.setdefault("name", raw["short_name"])  # human title, free-form; NOT an identity
         taxonomy = raw.pop("taxonomy", None)
         if isinstance(taxonomy, dict):
             for k in ("track", "subtrack", "dwarf", "domain", "scale", "level", "tags", "min_precision"):
@@ -1670,7 +1676,7 @@ class BenchSpec:
         the manifest's ``short_name`` abbreviation (``numpyto_c.cli``). Using
         ``short_name`` here desyncs for the 26 kernels that abbreviate: the
         emitter writes ``arc_distance_fp64.c`` while the loader hunts for
-        ``adist_fp64.c`` and reports the sources as ungenerated.
+        ``arc_distance_fp64.c`` and reports the sources as ungenerated.
         """
         return self.module_name if config in (None, "dense") else f"{self.module_name}_{config}"
 
@@ -1784,7 +1790,7 @@ def _key_to_short_name() -> Dict[str, str]:
 
     The bridge the plot selectors need: ``select`` / ``select_keys`` work in path-key /
     stem space, the results DB in short_name space, and the two DIVERGE for 26 kernels
-    (``heat_3d`` stem / ``heat3d`` short_name, ``jacobi_2d`` / ``jacobi2d``, ...). Without
+    (``heat_3d`` stem / ``heat_3d`` short_name, ``jacobi_2d`` / ``jacobi_2d``, ...). Without
     this map a narrow plot selector silently filters the results table to zero rows. A
     light YAML read (not a full ``BenchSpec.load``): only the one field is needed."""
     out: Dict[str, str] = {}
@@ -1979,9 +1985,9 @@ def select_short_names(selector: str) -> List[str]:
     Resolves through :meth:`KernelRegistry.select_keys` (collision-proof path-keys) and
     maps each to its manifest short_name via :func:`_key_to_short_name` -- NOT the bare
     directory stem :meth:`KernelRegistry.select` returns, which diverges from the DB key
-    for 26 kernels (``heat_3d`` stem vs ``heat3d`` short_name) and would filter a narrow
+    for 26 kernels (``heat_3d`` stem vs ``heat_3d`` short_name) and would filter a narrow
     selection to zero rows. A selector that is itself a short_name the user copied from the
-    DB (``heat3d``) is honoured directly."""
+    DB (``heat_3d``) is honoured directly."""
     sel = selector.strip()
     bare = _BARE_LEVEL.fullmatch(sel)
     if bare:
@@ -1992,7 +1998,7 @@ def select_short_names(selector: str) -> List[str]:
     try:
         keys = KERNELS.select_keys(sel)
     except KeyError:
-        if sel in set(key_to_sn.values()):  # a raw DB short_name (e.g. "heat3d"), not a stem
+        if sel in set(key_to_sn.values()):  # a raw DB short_name (e.g. "heat_3d"), not a stem
             return [sel]
         raise
     return sorted({key_to_sn[k] for k in keys})

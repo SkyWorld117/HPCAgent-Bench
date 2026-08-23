@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Azimuthal Integration - Histogram
-short_name: azimhist
 kind: microapp
 level: 3
 parameters:

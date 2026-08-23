@@ -1,6 +1,5 @@
 # OptArena benchmark manifest (KernelBench port).
 name: conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated
-short_name: convt1d_a_s_pstd
 func_name: conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated
 kind: microkernel
 level: 1

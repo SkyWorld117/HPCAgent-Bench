@@ -15,9 +15,14 @@ from hpcagent_bench import flags, languages, paths
 from hpcagent_bench.spec import BenchSpec
 
 KERNEL = "tsvc_2_s212"  # 1-D: a,b outputs; c,d inputs; LEN_1D symbol
-#: A kernel whose manifest ``short_name`` abbreviates its registry stem (``arc_distance`` -> ``adist``);
+#: A kernel whose manifest ``short_name`` abbreviates its registry stem (``arc_distance`` -> ``arc_distance``);
 #: catches a short_name/stem mix-up that KERNEL above cannot (its three names coincide).
-ABBREVIATED = "arc_distance"
+#: A kernel whose NAME differs from its directory: ``sp_bicg.yaml`` and
+#: ``bicg_solvers.yaml`` are two benchmarks over the one ``bicg_numpy.py``, so the
+#: emitted artifact stem cannot be derived from the name.
+DIVERGENT = "sp_bicg"
+#: A plain dense kernel, one native target and no sparse configuration.
+DENSE = "arc_distance"
 #: framework -> the compiler binary that must be present to build it.
 _COMPILER = {"cc": "gcc", "llvm": "clang", "fortran": "gfortran", "polly": "clang", "pluto": "clang"}
 
@@ -26,29 +31,36 @@ def _emitter_present() -> bool:
     return importlib.util.find_spec("numpyto_c.cli") is not None
 
 
-def test_abbreviated_kernel_premise():
-    """Guard for the two tests below: only meaningful while short_name differs from the stem."""
-    spec = BenchSpec.load(ABBREVIATED)
-    assert spec.short_name != ABBREVIATED, "pick a kernel whose short_name abbreviates its stem"
-    assert spec.module_name == ABBREVIATED
+def test_divergent_kernel_premise():
+    """Guard for the two tests below: only meaningful while the NAME differs from the directory.
+
+    This used to guard a manifest ``short_name:`` that abbreviated the stem. That second identity
+    is gone (tests/test_kernel_identity.py). What survives is a directory holding several
+    benchmarks, where the emitted artifact is still named after the directory."""
+    spec = BenchSpec.load(DIVERGENT)
+    assert spec.short_name == DIVERGENT
+    assert spec.module_name != DIVERGENT, "pick a kernel whose name differs from its directory"
 
 
 def test_native_base_follows_the_module_stem():
-    """The native stem is the ``<module>_numpy.py`` stem, not ``short_name`` -- a short_name-keyed base
-    would desync the loader from the emitter for every abbreviating kernel."""
-    spec = BenchSpec.load(ABBREVIATED)
-    assert spec.native_base() == "arc_distance"
-    assert spec.native_base("dense") == "arc_distance"
+    """The native stem is the ``<module>_numpy.py`` stem, not the benchmark NAME -- a name-keyed
+    base desyncs the loader from the emitter wherever one directory holds several benchmarks."""
+    dense = BenchSpec.load(DENSE)
+    assert dense.native_base() == "arc_distance"
+    assert dense.native_base("dense") == "arc_distance"
     from hpcagent_bench.autogen import _native_targets
-    assert _native_targets(spec) == [(None, "arc_distance")]
+    assert _native_targets(dense) == [(None, "arc_distance")]
+    # The divergent case is where name-keying would actually break: two benchmarks, one module.
+    spec = BenchSpec.load(DIVERGENT)
+    assert spec.native_base() == "bicg" and spec.native_base("csr") == "bicg_csr"
 
 
 @pytest.mark.skipif(not _emitter_present(), reason="translators absent")
 def test_emit_native_resolves_the_manifest_by_stem():
-    """emit_native must emit for a kernel whose short_name != stem: manifests are registered under
-    their stem, so resolving by short_name would KeyError on every native target."""
+    """emit_native must emit through the MODULE stem: a kernel is registered under its own name,
+    but its emitted artifacts are named after the numpy reference they came from."""
     from hpcagent_bench.autogen import emit_native
-    spec = BenchSpec.load(ABBREVIATED)
+    spec = BenchSpec.load(DENSE)
     cppdir = paths.BENCHMARKS / spec.relative_path / "cpp_backend"
     for stale in cppdir.glob("arc_distance_fp*.c"):
         stale.unlink()

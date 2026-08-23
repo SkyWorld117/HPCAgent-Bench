@@ -16,7 +16,7 @@ import pytest
 from hpcagent_bench import inference, plotting
 
 #: The synthetic DB uses REAL short_names so the shared report ordering resolves them.
-KERNELS: Tuple[Tuple[str, str], ...] = (("heat3d", "Physics"), ("jacobi2d", "Physics"))
+KERNELS: Tuple[Tuple[str, str], ...] = (("heat_3d", "Physics"), ("jacobi_2d", "Physics"))
 
 
 def build_results_db(db: pathlib.Path, shift: float = 0.0) -> None:

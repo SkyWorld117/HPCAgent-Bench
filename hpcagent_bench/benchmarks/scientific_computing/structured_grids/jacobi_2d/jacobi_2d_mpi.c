@@ -17,7 +17,7 @@
    (which never fuses), keeping the gathered result bit-identical to the sequential kernel. */
 #pragma STDC FP_CONTRACT OFF
 
-void jacobi2d_mpi(
+void jacobi_2d_mpi(
     double *restrict A,
     double *restrict B,
     const int64_t N,

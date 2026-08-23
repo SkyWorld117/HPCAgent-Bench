@@ -16,7 +16,7 @@
    (which never fuses), keeping the gathered result bit-identical to the sequential kernel. */
 #pragma STDC FP_CONTRACT OFF
 
-void heat3d_mpi(
+void heat_3d_mpi(
     double *restrict A,
     double *restrict B,
     const int64_t N,

@@ -99,7 +99,7 @@ def test_boundary_ranks_own_the_global_boundary(N, R):
     assert int(part[-1][-1]) == N - 1
 
 
-@pytest.mark.parametrize("kernel,sym,ndim", [("jacobi_2d", "jacobi2d_mpi", 2), ("heat_3d", "heat3d_mpi", 3)])
+@pytest.mark.parametrize("kernel,sym,ndim", [("jacobi_2d", "jacobi_2d_mpi", 2), ("heat_3d", "heat_3d_mpi", 3)])
 def test_reference_sources_resolve_and_match_generated_signature(kernel, sym, ndim):
     """The shipped C reference's signature equals the generated Sec. 12 stub's; the python twin defines `kernel_mpi`."""
     binding = binding_from_spec(BenchSpec.load(kernel))

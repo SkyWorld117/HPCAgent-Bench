@@ -12,11 +12,11 @@ def _table() -> List[RowMeta]:
     """A synthetic mixed table: two HPC dwarfs across two levels, two loop_level_reasoning sources, ML."""
     return [
         # deliberately shuffled input order
-        RowMeta("heat3d", TRACK_SCIENTIFIC_COMPUTING, "structured_grids", 2),
+        RowMeta("heat_3d", TRACK_SCIENTIFIC_COMPUTING, "structured_grids", 2),
         RowMeta("mnist", TRACK_MACHINE_LEARNING, None, 3),
         RowMeta("gemm", TRACK_SCIENTIFIC_COMPUTING, "dense_linear_algebra", 1),
         RowMeta("s271", TRACK_LOOP_LEVEL_REASONING, "tsvc_2", 1),
-        RowMeta("jacobi2d", TRACK_SCIENTIFIC_COMPUTING, "structured_grids", 1),
+        RowMeta("jacobi_2d", TRACK_SCIENTIFIC_COMPUTING, "structured_grids", 1),
         RowMeta("conv2d", TRACK_MACHINE_LEARNING, None, 1),
         RowMeta("cholesky", TRACK_SCIENTIFIC_COMPUTING, "dense_linear_algebra", 2),
         RowMeta("wf", TRACK_LOOP_LEVEL_REASONING, "tsvc_2_5", 1),
@@ -34,8 +34,8 @@ def test_by_dwarf_sections_hpc_then_foundation_then_ml() -> None:
     assert names == [
         "gemm",
         "cholesky",  # dense linear algebra: L1 then L2
-        "jacobi2d",
-        "heat3d",  # structured grids: L1 then L2
+        "jacobi_2d",
+        "heat_3d",  # structured grids: L1 then L2
         "s271",
         "wf",  # loop_level_reasoning: tsvc2 then tsvc2_5
         "mnist",
@@ -59,9 +59,9 @@ def test_by_level_primary_groups_by_level() -> None:
     # so each (dwarf, level) block is contiguous and labelled "<dwarf> L<level>".
     assert names == [
         "gemm",
-        "jacobi2d",  # L1: dense linear algebra, then structured grids
+        "jacobi_2d",  # L1: dense linear algebra, then structured grids
         "cholesky",
-        "heat3d",  # L2: dense linear algebra, then structured grids
+        "heat_3d",  # L2: dense linear algebra, then structured grids
         "s271",
         "wf",  # loop_level_reasoning L1: tsvc2, tsvc2_5
         "mnist",

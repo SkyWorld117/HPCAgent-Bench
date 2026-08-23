@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: GoFast
-short_name: npgofast
 kind: microkernel
 level: 2
 parameters:

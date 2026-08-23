@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Gram-Schmidt decomposition
-short_name: gramschm
 kind: microkernel
 level: 2
 parameters:

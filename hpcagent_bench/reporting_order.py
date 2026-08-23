@@ -178,7 +178,7 @@ def _short_name_index() -> Dict[str, "object"]:
 
     Keyed on the manifest's ``short_name`` (the value the results ``benchmark`` column
     stores), NOT the directory stem the selector grammar uses -- the two differ for kernels
-    like ``heat_3d`` (stem) / ``heat3d`` (short_name). Memoized; ~1s to parse every manifest.
+    like ``heat_3d`` (stem) / ``heat_3d`` (short_name). Memoized; ~1s to parse every manifest.
 
     A manifest that fails to parse is SKIPPED rather than propagated, which is what makes
     :func:`row_meta_for`'s "never crashes a plot" promise true. It was not: this used to call

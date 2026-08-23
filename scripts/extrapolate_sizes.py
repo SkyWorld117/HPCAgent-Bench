@@ -345,8 +345,8 @@ def materialised_bytes(spec: BenchSpec, key: str, preset: str) -> Optional[int]:
     try:
         from hpcagent_bench.frameworks.benchmark import Benchmark
         # ``key`` (the canonical path-key), never ``spec.short_name``: short_name and the
-        # manifest's directory stem DIVERGE for 26 kernels (``heat_3d`` stem / ``heat3d``
-        # short_name, ``jacobi_2d`` / ``jacobi2d``, ...) and ``Benchmark.__init__`` resolves
+        # manifest's directory stem DIVERGE for 26 kernels (``heat_3d`` stem / ``heat_3d``
+        # short_name, ``jacobi_2d`` / ``jacobi_2d``, ...) and ``Benchmark.__init__`` resolves
         # by path-key-or-stem (``KernelRegistry.path_key``), not by the declared short_name.
         # ``Benchmark(spec.short_name)`` KeyErrors on exactly those kernels -- 22 of them are
         # also hand-initialized, so this silently dropped a third of the fallback's own

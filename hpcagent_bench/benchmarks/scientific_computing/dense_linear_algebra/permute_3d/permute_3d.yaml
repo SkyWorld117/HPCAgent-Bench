@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: 3D Tensor Permutation
-short_name: permute3d
 kind: microkernel
 level: 1
 parameters:

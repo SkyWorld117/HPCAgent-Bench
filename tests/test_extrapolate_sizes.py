@@ -283,11 +283,13 @@ def test_materialised_bytes_resolves_hand_initialized_kernel_by_path_key():
     (``scripts/declare_init_shapes.py``), so ``working_bytes`` answers for all of them and the
     fallback is no longer reachable from a shipped manifest. It is still the answer for the kernels
     whose declared shapes do not EVALUATE, and for the next manifest someone writes, so the shapes
-    are cleared here on a real spec whose short_name diverges from its stem."""
+    are cleared here on a real spec whose NAME diverges from its directory (a manifest short_name
+    that abbreviated the stem is gone -- see tests/test_kernel_identity.py -- but a directory
+    holding several benchmarks still makes the name alone an insufficient key)."""
     specs = KERNELS.specs()
     candidates = [(key, spec) for key, spec in specs.items()
-                  if spec.init.func_name and key.rsplit("/", 1)[-1] != spec.short_name]
-    assert candidates, "expected at least one hand-initialized kernel with short_name != stem in the corpus"
+                  if spec.init.func_name and spec.module_name != spec.short_name]
+    assert candidates, "expected at least one hand-initialized kernel whose name differs from its directory"
     key, real = candidates[0]
     spec = dataclasses.replace(real, init=dataclasses.replace(real.init, shapes={}))
     nbytes = ex.materialised_bytes(spec, key, "S")
@@ -346,12 +348,12 @@ def test_a_whole_ladder_over_target_slides_down_instead_of_collapsing():
 
 
 def test_extrapolate_respects_the_ceiling_when_arrays_outrank_the_symbol_count():
-    """heat3d: ONE symbol, (N,N,N) arrays. The closed form this replaced raised N by the whole
+    """heat_3d: ONE symbol, (N,N,N) arrays. The closed form this replaced raised N by the whole
     byte ratio, so an 8 GB proposal materialised at 46.6 GB and derive_ladder refused it."""
     n_lo, n_hi = 1_000_000, 10_000_000
     points = [measured("S", 10.0, n_lo), measured("M", 100.0, n_hi)]
     spec = FakeSpec(parameters={"M": {"N": 400}}, shapes={"a": "(N,N,N)", "b": "(N,N,N)"})
-    out = ex.extrapolate(spec, "fake/heat3d", points, target_ms=1e12)  # force the ceiling to bind
+    out = ex.extrapolate(spec, "fake/heat_3d", points, target_ms=1e12)  # force the ceiling to bind
     assert out.ok
     assert out.bound_by == "memory"
     got = FAKE_ELEM_BYTES * 2 * out.XL["N"]**3

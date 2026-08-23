@@ -416,8 +416,8 @@ def test_distributed_test_sh_passes_loadable_kernel_and_distribution(tmp_path):
     """The verifier gets the loadable kernel stem, each artifact's --distribution, and --residency."""
     td = A.generate(str(tmp_path), selector="jacobi_2d", residency="distributed")[0]
     sh = (td / "tests" / "test.sh").read_text()
-    assert "--kernel jacobi_2d" in sh  # the BenchSpec.load-able stem, NOT the short_name jacobi2d
-    assert "--distribution /app/jacobi2d/distribution.json" in sh
+    assert "--kernel jacobi_2d" in sh  # the BenchSpec.load-able stem, NOT the short_name jacobi_2d
+    assert "--distribution /app/jacobi_2d/distribution.json" in sh
     assert "--residency distributed" in sh and "--baseline numpy" in sh
 
 
@@ -431,8 +431,8 @@ def test_distributed_instruction_references_files_and_mpi_contract(tmp_path):
     td = A.generate(str(tmp_path), selector="jacobi_2d", residency="distributed")[0]
     instr = (td / "instruction.md").read_text()
     assert "distributed MPI" in instr and "SPMD" in instr
-    assert "/app/jacobi2d/reference.py" in instr and "/app/jacobi2d/submission.c" in instr
-    assert "/app/jacobi2d/distribution.json" in instr
+    assert "/app/jacobi_2d/reference.py" in instr and "/app/jacobi_2d/submission.c" in instr
+    assert "/app/jacobi_2d/distribution.json" in instr
     assert mpi_symbol(binding_from_spec(spec)) in instr  # the Sec. 12 symbol to implement
     assert row.numpy_reference and row.numpy_reference not in instr  # leak-free (not inlined)
 
@@ -448,7 +448,7 @@ def test_distributed_task_toml_validates_against_real_harbor_model(tmp_path):
     assert cfg.metadata["residency"] == "distributed" and cfg.metadata["ranks"] == "4"
     assert cfg.metadata["baseline"] == "numpy"
     srcs = {a.source for a in cfg.artifacts}
-    assert "/app/jacobi2d/submission.c" in srcs and "/app/jacobi2d/distribution.json" in srcs
+    assert "/app/jacobi_2d/submission.c" in srcs and "/app/jacobi_2d/distribution.json" in srcs
 
 
 def test_distributed_generation_skips_non_mpi_kernels(tmp_path, capsys):

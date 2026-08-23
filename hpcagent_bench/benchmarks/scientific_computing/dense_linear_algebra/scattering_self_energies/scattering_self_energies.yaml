@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Scattering Self Energies
-short_name: sselfeng
 kind: microapp
 level: 3
 parameters:
