@@ -1,6 +1,12 @@
 import numpy as np
 
 
+def _as_tuple(value, dims):
+    if isinstance(value, tuple):
+        return value
+    return tuple(value for _ in range(dims))
+
+
 def _conv3d(x, weight, bias, stride, padding, dilation, groups):
     if isinstance(stride, (int, np.integer)): stride = (stride, stride, stride)
     if isinstance(padding, (int, np.integer)): padding = (padding, padding, padding)
@@ -12,29 +18,27 @@ def _conv3d(x, weight, bias, stride, padding, dilation, groups):
     ow = (w + 2 * padding[2] - dilation[2] * (kw - 1) - 1) // stride[2] + 1
     padded = np.zeros((n, c_in, d + 2 * padding[0], h + 2 * padding[1], w + 2 * padding[2]), dtype=x.dtype)
     padded[:, :, padding[0]:padding[0] + d, padding[1]:padding[1] + h, padding[2]:padding[2] + w] = x
-    # NDHWC once, then one matmul per kernel tap contracts the channel axis; far cheaper than the 9-deep loop nest.
-    ndhwc = np.transpose(padded, (0, 2, 3, 4, 1))
+    out = np.zeros((n, c_out, od, oh, ow), dtype=x.dtype)
     out_per_group = c_out // groups
     in_per_group = c_in // groups
-    acc = np.zeros((n * od * oh * ow, c_out), dtype=x.dtype)
-    span_d = (od - 1) * stride[0] + 1
-    span_h = (oh - 1) * stride[1] + 1
-    span_w = (ow - 1) * stride[2] + 1
-    for g in range(groups):
-        in_g = ndhwc[..., g * in_per_group:(g + 1) * in_per_group]
-        oc_lo, oc_hi = g * out_per_group, (g + 1) * out_per_group
-        for kz in range(kd):
-            zz = kz * dilation[0]
-            for ky in range(kh):
-                yy = ky * dilation[1]
-                for kx in range(kw):
-                    xx = kx * dilation[2]
-                    patch = in_g[:, zz:zz + span_d:stride[0], yy:yy + span_h:stride[1], xx:xx + span_w:stride[2], :]
-                    tap_w = np.transpose(weight[oc_lo:oc_hi, :, kz, ky, kx])
-                    acc[:, oc_lo:oc_hi] += np.reshape(patch, (n * od * oh * ow, in_per_group)) @ tap_w
-    out = np.transpose(np.reshape(acc, (n, od, oh, ow, c_out)), (0, 4, 1, 2, 3))
-    return out + bias.reshape((1, c_out, 1, 1, 1))
-
+    for b in range(n):
+        for oc in range(c_out):
+            g = oc // out_per_group
+            for oz in range(od):
+                for oy in range(oh):
+                    for ox in range(ow):
+                        total = 0.0
+                        for icg in range(c_per_group):
+                            ic = g * in_per_group + icg
+                            for kz in range(kd):
+                                iz = oz * stride[0] + kz * dilation[0]
+                                for ky in range(kh):
+                                    iy = oy * stride[1] + ky * dilation[1]
+                                    for kx in range(kw):
+                                        ix = ox * stride[2] + kx * dilation[2]
+                                        total += padded[b, ic, iz, iy, ix] * weight[oc, icg, kz, ky, kx]
+                        out[b, oc, oz, oy, ox] = total + bias[oc]
+    return out
 
 def conv3d_mish_tanh(x, in_channels, out_channels, kernel_size, stride, padding, conv_weight, conv_bias, out):
     x = _conv3d(x, conv_weight, conv_bias, stride, padding, 1, 1)

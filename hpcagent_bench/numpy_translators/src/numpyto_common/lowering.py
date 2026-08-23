@@ -4081,6 +4081,15 @@ def _scalar_expr_complex(expr: ast.AST, local_dtypes: Dict[str, str]) -> bool:
         return _scalar_expr_complex(expr.left, local_dtypes) or _scalar_expr_complex(expr.right, local_dtypes)
     if isinstance(expr, ast.UnaryOp):
         return _scalar_expr_complex(expr.operand, local_dtypes)
+    if isinstance(expr, ast.Call):
+        fn = expr.func.attr if isinstance(expr.func,
+                                          ast.Attribute) else (expr.func.id if isinstance(expr.func, ast.Name) else "")
+        if fn in _REAL_FROM_COMPLEX:
+            return False
+        # Anything else (exp, sqrt, conj, a reshape, an unknown helper) is assumed to CARRY the
+        # element type of its arguments: assuming real instead would silently drop an imaginary
+        # part, which is the worse failure of the two.
+        return any(_scalar_expr_complex(a, local_dtypes) for a in expr.args)
     return False
 
 
@@ -5412,16 +5421,12 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                 # a subtree carrying a complex literal or a complex-
                 # tagged Name promotes the LHS to ``complex128`` so
                 # the emit declares the right C dtype.
+                # By the expression's OPERANDS, not by ast.walk: walking promoted the result of
+                # ``np.abs(v)`` to complex merely because the complex ``v`` appears inside it, and
+                # a magnitude is real. _scalar_expr_complex stops at the calls that return a real.
                 if target.id not in self.local_dtypes:
-                    for sub in ast.walk(node.value):
-                        if (isinstance(sub, ast.Constant) and isinstance(sub.value, complex)):
-                            self.local_dtypes[target.id] = "complex128"
-                            break
-                        if isinstance(sub, ast.Name):
-                            dt = self.local_dtypes.get(sub.id)
-                            if dt and dt.startswith("complex"):
-                                self.local_dtypes[target.id] = "complex128"
-                                break
+                    if _scalar_expr_complex(node.value, self.local_dtypes):
+                        self.local_dtypes[target.id] = "complex128"
                     else:
                         # Integer-typed whole-array result (``q = j % nx`` where
                         # j is int64) stays integer -- so an index array derived

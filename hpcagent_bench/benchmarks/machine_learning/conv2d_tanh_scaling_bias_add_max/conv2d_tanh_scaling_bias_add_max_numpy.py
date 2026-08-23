@@ -1,6 +1,12 @@
 import numpy as np
 
 
+def _as_tuple(value, dims):
+    if isinstance(value, tuple):
+        return value
+    return tuple(value for _ in range(dims))
+
+
 def _conv2d(x, weight, bias, stride, padding, dilation, groups):
     if isinstance(stride, (int, np.integer)): stride = (stride, stride)
     if isinstance(padding, (int, np.integer)): padding = (padding, padding)
@@ -11,49 +17,48 @@ def _conv2d(x, weight, bias, stride, padding, dilation, groups):
     ow = (w + 2 * padding[1] - dilation[1] * (kw - 1) - 1) // stride[1] + 1
     padded = np.zeros((n, c_in, h + 2 * padding[0], w + 2 * padding[1]), dtype=x.dtype)
     padded[:, :, padding[0]:padding[0] + h, padding[1]:padding[1] + w] = x
-    # NHWC once, then one 2-D matmul per kernel tap contracts the in-channel axis per group.
-    nhwc = np.transpose(padded, (0, 2, 3, 1))
-    span_h, span_w = (oh - 1) * stride[0] + 1, (ow - 1) * stride[1] + 1
-    out_per_group, in_per_group = c_out // groups, c_in // groups
-    acc = np.zeros((n, oh, ow, c_out), dtype=x.dtype)
-    for g in range(groups):
-        ic0, ic1 = g * in_per_group, (g + 1) * in_per_group
-        oc0, oc1 = g * out_per_group, (g + 1) * out_per_group
-        group_in = nhwc[..., ic0:ic1]
-        group_acc = acc[..., oc0:oc1]
-        for ky in range(kh):
-            for kx in range(kw):
-                y0, x0 = ky * dilation[0], kx * dilation[1]
-                patch = group_in[:, y0:y0 + span_h:stride[0], x0:x0 + span_w:stride[1], :]
-                tap = np.transpose(weight[oc0:oc1, :, ky, kx])
-                group_acc += (patch.reshape(n * oh * ow, in_per_group) @ tap).reshape(n, oh, ow, out_per_group)
-    out = np.transpose(acc, (0, 3, 1, 2)) + bias.reshape(1, c_out, 1, 1)
+    out = np.zeros((n, c_out, oh, ow), dtype=x.dtype)
+    out_per_group = c_out // groups
+    in_per_group = c_in // groups
+    for b in range(n):
+        for oc in range(c_out):
+            g = oc // out_per_group
+            for oy in range(oh):
+                for ox in range(ow):
+                    total = 0.0
+                    for icg in range(c_per_group):
+                        ic = g * in_per_group + icg
+                        for ky in range(kh):
+                            iy = oy * stride[0] + ky * dilation[0]
+                            for kx in range(kw):
+                                ix = ox * stride[1] + kx * dilation[1]
+                                total += padded[b, ic, iy, ix] * weight[oc, icg, ky, kx]
+                    out[b, oc, oy, ox] = total + bias[oc]
     return out
 
-
 def _maxpool2d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, (int, np.integer)): kernel_size = (kernel_size, kernel_size)
+    if isinstance(kernel_size, (int, np.integer)): kernel_size = (kernel_size, kernel_size,)
     if stride is None: stride = kernel_size
-    if isinstance(stride, (int, np.integer)): stride = (stride, stride)
-    if isinstance(padding, (int, np.integer)): padding = (padding, padding)
-    n, c, h, w = x.shape
-    ph, pw = h + 2 * padding[0], w + 2 * padding[1]
-    fill = np.finfo(x.dtype).min if np.issubdtype(x.dtype, np.floating) else np.iinfo(x.dtype).min
-    padded = np.full((n, c, ph, pw), fill, dtype=x.dtype)
-    padded[:, :, padding[0]:padding[0] + h, padding[1]:padding[1] + w] = x
-    oh = (ph - kernel_size[0]) // stride[0] + 1
-    ow = (pw - kernel_size[1]) // stride[1] + 1
-    span_h, span_w = (oh - 1) * stride[0] + 1, (ow - 1) * stride[1] + 1
-    acc = np.full((n, c, oh, ow), fill, dtype=x.dtype)
-    # kh*kw taps, each body a whole-array slice, not a materialized kh*kw window pair of axes.
-    for ky in range(kernel_size[0]):
-        for kx in range(kernel_size[1]):
-            acc = np.maximum(acc, padded[:, :, ky:ky + span_h:stride[0], kx:kx + span_w:stride[1]])
-    return acc
+    if isinstance(stride, (int, np.integer)): stride = (stride, stride,)
+    if isinstance(padding, (int, np.integer)): padding = (padding, padding,)
+    padded_shape = (x.shape[0], x.shape[1]) + tuple(x.shape[i + 2] + 2 * padding[i] for i in range(2))
+    fill = -np.inf if "max" == "max" else 0.0
+    padded = np.full(padded_shape, fill, dtype=x.dtype)
+    src = tuple(slice(padding[i], padding[i] + x.shape[i + 2]) for i in range(2))
+    padded[(slice(None), slice(None)) + src] = x
+    out_shape = tuple((padded_shape[i + 2] - kernel_size[i]) // stride[i] + 1 for i in range(2))
+    out = np.zeros((x.shape[0], x.shape[1]) + out_shape, dtype=x.dtype)
+    for b in range(x.shape[0]):
+        for c in range(x.shape[1]):
+            for oy in range(out_shape[0]):
+                for ox in range(out_shape[1]):
+                    sy = oy * stride[0]
+                    sx = ox * stride[1]
+                    window = padded[(b, c, slice(sy, sy + kernel_size[0]), slice(sx, sx + kernel_size[1]))]
+                    out[b, c, oy, ox] = np.max(window)
+    return out
 
-
-def conv2d_tanh_scaling_bias_add_max(x, in_channels, out_channels, kernel_size, scaling_factor, pool_kernel_size,
-                                      conv_weight, conv_bias, bias, out):
+def conv2d_tanh_scaling_bias_add_max(x, in_channels, out_channels, kernel_size, scaling_factor, pool_kernel_size, conv_weight, conv_bias, bias, out):
     x = _conv2d(x, conv_weight, conv_bias, 1, 0, 1, 1)
     x = np.tanh(x)
     x = (x * scaling_factor)
