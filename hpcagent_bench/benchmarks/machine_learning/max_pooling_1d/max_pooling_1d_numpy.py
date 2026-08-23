@@ -1,28 +1,17 @@
 import numpy as np
 
-def _maxpool1d(x, kernel_size, stride, padding):
-    if isinstance(kernel_size, (int, np.integer)):
-        kernel_size = (kernel_size,)
-    if stride is None:
-        stride = kernel_size
-    if isinstance(stride, (int, np.integer)):
-        stride = (stride,)
-    if isinstance(padding, (int, np.integer)):
-        padding = (padding,)
-    padded_shape = (x.shape[0], x.shape[1]) + tuple((x.shape[i + 2] + 2 * padding[i] for i in range(1)))
-    fill = -np.inf if 'max' == 'max' else 0.0
-    padded = np.full(padded_shape, fill, dtype=x.dtype)
-    src = tuple((slice(padding[i], padding[i] + x.shape[i + 2]) for i in range(1)))
-    padded[(slice(None), slice(None)) + src] = x
-    out_shape = tuple(((padded_shape[i + 2] - kernel_size[i]) // stride[i] + 1 for i in range(1)))
-    out = np.zeros((x.shape[0], x.shape[1]) + out_shape, dtype=x.dtype)
-    for b in range(x.shape[0]):
-        for c in range(x.shape[1]):
-            for ox in range(out_shape[0]):
-                sx = ox * stride[0]
-                window = padded[b, c, slice(sx, sx + kernel_size[0])]
-                out[b, c, ox] = np.max(window)
-    return out
 
-def max_pooling_1d(x, kernel_size, stride, padding, dilation, return_indices, maxpool_kernel_size, maxpool_stride, maxpool_padding, out):
-    out[:] = _maxpool1d(x, maxpool_kernel_size, maxpool_stride, maxpool_padding)
+def max_pooling_1d(x, kernel_size, stride, padding, dilation, return_indices, maxpool_kernel_size, maxpool_stride,
+                    maxpool_padding, out):
+    k = int(maxpool_kernel_size)
+    s = k if maxpool_stride is None else int(maxpool_stride)
+    p = int(maxpool_padding)
+    fill = np.finfo(x.dtype).min if np.issubdtype(x.dtype, np.floating) else np.iinfo(x.dtype).min
+    padded = np.full((x.shape[0], x.shape[1], x.shape[2] + 2 * p), fill, dtype=x.dtype)
+    padded[:, :, p:p + x.shape[2]] = x
+    span = out.shape[2] * s
+    acc = np.full(out.shape, fill, dtype=x.dtype)
+    # k taps, each body a whole-array slice, not a materialized k-wide window axis.
+    for kx in range(k):
+        acc = np.maximum(acc, padded[:, :, kx:kx + span:s])
+    out[:] = acc
