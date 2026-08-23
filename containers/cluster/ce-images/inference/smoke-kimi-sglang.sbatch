@@ -32,7 +32,7 @@ export SERVED_MODEL="${SERVED_MODEL:-kimi-k27}"
 export API_PORT="${API_PORT:-8000}"
 export READY_TIMEOUT="${READY_TIMEOUT:-5400}"
 export EDF="${EDF:-${HOME}/.edf/sglang-rocm-mi30x.toml}"
-export MEM_FRACTION="${MEM_FRACTION:-0.85}"  # vs per-GPU HIP-visible ~106 GB; weights+reserve floor is 0.727
+export MEM_FRACTION="${MEM_FRACTION:-0.93}"  # x0.85 multimodal derate -> ~0.79 effective; weights floor 0.727
 export CONTEXT_LEN="${CONTEXT_LEN:-65536}"
 export SWEEP_CONCURRENCY="${SWEEP_CONCURRENCY:-1 8 16}"
 
@@ -58,7 +58,6 @@ srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --exclusive --export=ALL \
     --model-path "${MODEL_REPO}" \
     --served-model-name "${SERVED_MODEL}" \
     --trust-remote-code \
-    --language-model-only \
     --tp-size 4 --pp-size 2 \
     --nnodes 2 --node-rank "${SLURM_PROCID}" \
     --dist-init-addr "'"${MASTER}"':29765" \
@@ -69,6 +68,7 @@ srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --exclusive --export=ALL \
     --context-length "${CONTEXT_LEN}" \
     --max-running-requests 128 \
     --enable-metrics \
+    --pre-warm-nccl \
     --host 0.0.0.0 --port "${API_PORT}" \
     > "${RUN_DIR}/sglang-node${SLURM_PROCID}.log" 2>&1
 ' &

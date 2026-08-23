@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Everything below runs inside this brace group so bash PARSES THE WHOLE FILE before executing
+# any of it. Bash otherwise reads a script lazily by byte offset: edit this file while a job is
+# running and the interpreter resumes at a stale offset, landing mid-token in the new content.
+# That killed llr6 arms 604719/604720/604723 at teardown on 2026-08-22 -- four hours in, parked
+# on `wait -n`, they woke to `line 674: syntax error near unexpected token '('` in a file that
+# `bash -n` calls clean. The group must END IN `exit`, or bash resumes reading past the closing
+# brace and hits the same garbage.
+{
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${CLUSTER_ENV_FILE:-${SCRIPT_DIR}/.env}"
 
@@ -676,3 +685,4 @@ echo "===== node utilization report (${RUN_DIR}/monitor) ====="
     || echo "monitor_report failed; run it manually on the login node with python3.11"
 
 exit "${agent_status}"
+}
