@@ -33,7 +33,9 @@ answer, not a slow one. Having named the dependence, you are in one of four case
 
 Legality settles whether you MAY thread; profit is separate. If the innermost loop is not the one
 walking unit stride -- the FIRST subscript, since Fortran is column-major -- the nest is
-bandwidth-bound and threading returns ~1.00x however many cores you use. Interchange first.
+bandwidth-bound and threading returns ~1.00x however many cores you use. Interchange FIRST -- the
+right order run on ONE core beats the wrong order run on every core, so a directive is not by
+itself progress -- then thread, and keep it only if it actually pays.
 
 If the comment you are about to write names a dependence, the directive is wrong. The tell:
 
@@ -77,9 +79,25 @@ Serial or inside `simd`, `maxloc(v)` is one line -- score it against the two-pas
 assuming threads win.
 
 **RECURRENCE** -- the written array is read at ANOTHER iteration's subscript: `x(i-1)`, in-place
-stencil, wavefront. Threading it is WRONG, not slow. Fission the independent statements out and
-keep the chain serial; thread a dimension the chain does not cross; give a stencil a separate
-output. Prefix sum is the one recurrence with a directive; statements before the `scan` feed the
+stencil, wavefront. Threading the chain is WRONG, not slow. Fission independent statements into
+their own threaded loop; give a stencil a separate output; or work a dimension the chain does not
+cross -- and that last one is where this bin gets left unfinished. Ask which subscript is
+fastest-varying -- in Fortran the FIRST. If the chain is the INNER loop it strides across memory,
+and the ORDER is the bug before the parallelism is: swap the loops so the chain runs outermost and the
+unit-stride axis inner. That swap alone, on ONE core, beats threading the unswapped order several
+times over. THEN thread the free axis, giving each thread a WIDE contiguous band of it -- a narrow
+strip breaks the stream and gives most of the win back -- which is worth several times the swap
+again. Threading the chain itself races: it prints a plausible answer and is still wrong.
+
+```fortran
+do k = 2, n                            ! the chain: outermost, SERIAL, never threaded
+  do i = 1, n                          ! unit stride: vectorizes, and is the axis to thread
+    u(i, k) = u(i, k - 1) + w(i, k)
+  end do
+end do
+```
+
+Prefix sum is the one recurrence with a directive; statements before the `scan` feed the
 sum, statements after read the scanned value:
 
 ```fortran
@@ -163,5 +181,7 @@ private already.
 - **No `exit` / `cycle` to an outer loop, no `return`, out of a threaded loop.** A search loop
   keeps its trip count and reduces instead: `reduction(min:first)` over a per-iteration
   candidate.
+- Split a combined construct and drop the closing barrier with `nowait` when the next loop does
+  not read what this one wrote; keep the barrier when it does.
 - `nowait` does not exist on a combined `parallel do`; `schedule` is worksharing-only (on a bare
   `simd` it is a build error).

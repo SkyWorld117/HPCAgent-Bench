@@ -29,7 +29,7 @@ carries the dependence, the other is free AND unit stride -- take both:
 do j = 2, n                            ! carries the dependence: serial
   !$omp parallel do simd               ! free and unit stride
   do i = 1, n
-    aa(i, j) = aa(i, j - 1) + bb(i, j)
+    u(i, j) = u(i, j - 1) + w(i, j)
   end do
 end do
 ```

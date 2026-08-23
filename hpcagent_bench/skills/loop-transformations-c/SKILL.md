@@ -29,7 +29,7 @@ the dependence, the other is free AND unit stride -- take both:
 for (int64_t j = 1; j < n; j++)            /* carries the dependence: serial */
     #pragma omp parallel for simd          /* free and unit stride */
     for (int64_t i = 0; i < n; i++)
-        aa[j*n + i] = aa[(j-1)*n + i] + bb[j*n + i];
+        u[j*n + i] = u[(j-1)*n + i] + w[j*n + i];
 ```
 
 ## Distribution -- split one loop into several
