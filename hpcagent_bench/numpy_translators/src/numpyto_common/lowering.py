@@ -35,7 +35,7 @@ import copy
 import math
 import os
 import re
-from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
 from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
@@ -3203,7 +3203,18 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         align = max(0, len(lhs_slice_iters) - rhs_result_axes)
         idx_nodes: List[ast.AST] = []
         rhs_slice_idx = 0
-        for axis, d in enumerate(dims):
+        # ``axis`` below is the SOURCE axis a dim reads, not its position in ``dims``: a newaxis
+        # inserts a RESULT axis and consumes no source axis, so ``conv1[np.newaxis, :, :, :]``
+        # reads source axes 0, 1, 2 where enumerate() would say 1, 2, 3. The distinction only
+        # cost a bound lookup before; now that the axis picks which extent decides a broadcast
+        # PIN, getting it wrong would pin the wrong axis.
+        source_axes = []
+        consumed = 0
+        for d in dims:
+            source_axes.append(consumed)
+            if not (isinstance(d, ast.Constant) and d.value is None):
+                consumed += 1
+        for axis, d in zip(source_axes, dims):
             if isinstance(d, ast.Constant) and d.value is None:
                 # numpy newaxis -- result-axis inserter; consume one
                 # LHS slice iter but emit no source-axis index. The
@@ -3250,7 +3261,9 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
             # where the destination is also length 1 the iter var only ever takes that one value.
             rhs_stop = (self._resolve_bound(d.upper, rhs_name, axis, default=_const(0))
                         if d.upper is not None else None)
-            if _is_unit_extent(rhs_start, rhs_stop):
+            src_shape = self.array_shapes.get(rhs_name)
+            axis_len = src_shape[axis] if src_shape and axis < len(src_shape) else None
+            if _is_unit_extent(rhs_start, rhs_stop, axis_len):
                 idx_nodes.append(rhs_start)
                 continue
             if step is not None and step != 1:
@@ -3353,14 +3366,21 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         return bound
 
 
-def _is_unit_extent(start: ast.AST, stop: Optional[ast.AST]) -> bool:
-    """Is this slice exactly one element long -- ``[0:1]`` or the symbolic ``[k:k+1]``?
+def _is_unit_extent(start: ast.AST, stop: Optional[ast.AST], axis_len: Any = None) -> bool:
+    """Is this slice exactly one element long -- ``[0:1]``, the symbolic ``[k:k+1]``, or a full
+    ``[:]`` over an axis the array itself declares as 1?
 
     Length 1 is the case where numpy's two indexing rules visibly differ: the slice keeps its axis
     and broadcasts along it, while the integer index would have removed the axis entirely.
+
+    An open upper bound is the whole axis, so it is length 1 exactly when the AXIS is -- which is
+    what ``axis_len`` answers. cfd's ``pressure[..., np.newaxis]`` expands to ``pressure[:, :, None]``
+    over an ``(ncells, 1)`` array, and that axis-1 full slice lands on a result axis of extent 4:
+    consuming the result iter walks off the single column into the next cell's row, and off the
+    allocation entirely at the last cell.
     """
     if stop is None:
-        return False  # an open upper bound is the whole axis; length 1 only if the axis is
+        return str(axis_len).strip() == "1"
     if _fold_offset(stop, start) == 1:
         return True
     return (isinstance(stop, ast.BinOp) and isinstance(stop.op, ast.Add) and isinstance(stop.right, ast.Constant)
@@ -5830,10 +5850,29 @@ class _SubscriptifyNames(ast.NodeTransformer):
                     if result_rank <= len(self.iters):
                         axis_pos = len(self.iters) - result_rank
                         new_elts: List[ast.expr] = []
+                        # ``src_axis`` tracks the SOURCE axis each element reads: a slice or a
+                        # concrete index consumes one, a newaxis consumes none.
+                        src_shape = self.shape_table.get(node.value.id)
+                        src_axis = 0
                         for e in sl.elts:
                             if isinstance(e, ast.Slice):
+                                # A source axis the array declares as 1 BROADCASTS along the result
+                                # axis it lands on -- every result position reads the same element --
+                                # so it pins to 0 instead of consuming the (larger) iter.
+                                # ``visit_Name`` applies this rule to a bare Name; a slice spelling
+                                # of the same operand has to agree. cfd's ``pressure[..., None]`` is
+                                # an ``(ncells, 1)`` array under an ``(ncells, 4, 3)`` nest: taking
+                                # the extent-4 iter reads the next cell's row, and runs past the
+                                # allocation at the last cell.
+                                if (src_shape and src_axis < len(src_shape)
+                                        and str(src_shape[src_axis]).strip() == "1"):
+                                    new_elts.append(ast.Constant(value=0))
+                                    axis_pos += 1
+                                    src_axis += 1
+                                    continue
                                 iter_name = self.iters[axis_pos]
                                 axis_pos += 1
+                                src_axis += 1
                                 # Add the slice's ``lower`` bound to
                                 # the iter so ``arr[1:, j]`` lowers as
                                 # ``arr(iter + 1, j)`` instead of
@@ -5852,6 +5891,7 @@ class _SubscriptifyNames(ast.NodeTransformer):
                                 axis_pos += 1
                             else:
                                 new_elts.append(e)
+                                src_axis += 1
                         if not new_elts:
                             return ast.Name(id=node.value.id, ctx=ast.Load())
                         new_slot = (new_elts[0] if len(new_elts) == 1 else ast.Tuple(elts=new_elts, ctx=ast.Load()))

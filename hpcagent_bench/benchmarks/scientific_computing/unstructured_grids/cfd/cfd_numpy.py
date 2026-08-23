@@ -1,3 +1,13 @@
+# Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# CFD -- compressible Euler flux on an UNSTRUCTURED mesh (OpenDwarfs / Rodinia
+# ``cfd``). Each cell carries the conserved state (density, momentum, energy);
+# the residual is the sum, over a cell's face-neighbors, of a Lax-Friedrichs
+# flux built from the cell's and the neighbor's physical fluxes through the face
+# normal. The neighbor gather (``*[neigh[:, j]]``) is the unstructured-grid
+# access pattern.
+
 import numpy as np
 
 
