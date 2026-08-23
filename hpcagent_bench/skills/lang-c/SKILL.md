@@ -5,9 +5,9 @@ description: "Writing fast C here: the mistakes that cost a turn, and the idioms
 
 # lang-c
 
-Threading and loop classification: the openmp-c page. The task text prints the exact signature,
-build line (`-std=c23`, OpenMP on, fast-math off) and scoring -- match the signature token for
-token rather than re-deriving it.
+Threading and loop legality: the openmp-c and loop-transformations-c pages. The task text prints
+the exact signature, build line (`-std=c23`, OpenMP on, fast-math off) and scoring -- match the
+signature token for token rather than re-deriving it.
 
 ## The expensive mistakes
 
@@ -18,10 +18,10 @@ token rather than re-deriving it.
 2. **Claiming alignment on an ABI pointer.** `__builtin_assume_aligned` or an OpenMP
    `aligned(p:...)` clause on a judge input pointer is UB and SIGSEGVs at vector width. Inputs
    carry NATURAL alignment only; the workspace and your own `aligned_alloc` storage are fair game.
-3. **Rewriting a loop must not change WHICH elements it writes.** A hand-unrolled
-   `for (i = 0; i < n - 3; i += 4)` body stops at the last whole group on purpose; rerolling it to
-   `i < n` writes elements the reference does not. Sizes are fuzzed, so `n % 4 != 0` is the normal
-   case.
+3. **Changing WHICH elements the loop writes.** The reference's iteration space is part of the
+   spec: a bound that stops short of `n`, a stride, a peeled first or last iteration are all
+   deliberate. Sizes are fuzzed, so the case where the trip count does not divide evenly is the
+   normal case, not the corner.
 
 ## What you are allowed to reach for
 

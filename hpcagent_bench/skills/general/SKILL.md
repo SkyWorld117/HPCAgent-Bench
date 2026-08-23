@@ -15,9 +15,9 @@ within tolerance of the oracle. For example:
   locality, AoS<->SoA, pad/align for vectorization.
 - **Vectorization & parallelism** -- SIMD, multithreading/OpenMP, GPU offload
   (within the target's toolchain). Legal ONLY on loops whose iterations are
-  independent: classify first (parallel / reduction / recurrence / scatter -- the
-  openmp-<language> page's bins); a recurrence or colliding scatter parallelized
-  anyway returns a WRONG answer, not a slow one.
+  independent: name the dependence before the directive, the way the
+  openmp-<language> page asks; a loop parallelized over an axis that carries one
+  returns a WRONG answer, not a slow one.
 - **Algebraic / numerical rewrites** -- reassociation, strength reduction,
   precomputation, exploiting symmetry/sparsity -- provided the result still
   matches the oracle within rtol/atol.
