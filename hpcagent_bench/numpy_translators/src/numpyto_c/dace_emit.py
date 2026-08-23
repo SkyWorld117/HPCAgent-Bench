@@ -211,9 +211,15 @@ def _dace_dtype(tag: str) -> str:
 
 
 def _array_annotation(arr) -> str:
-    """``a`` of shape ``(LEN_1D,)`` float64 -> ``dc_float[LEN_1D]``."""
-    shape = ", ".join(str(s) for s in arr.shape) if arr.shape else "1"
-    return f"{_dace_dtype(arr.dtype)}[{shape}]"
+    """``a`` of shape ``(LEN_1D,)`` float64 -> ``dc_float[LEN_1D]``; a 0-d array -> a dace scalar.
+
+    A shapeless manifest entry is a SCALAR the harness happens to file under ``arrays``. Declaring
+    it ``[1]`` gave the program a rank the initializer does not build and the other backends do not
+    pass -- the same declared-rank-vs-initialize disagreement that runs and still lies.
+    """
+    if not arr.shape:
+        return _dace_dtype(arr.dtype)
+    return f"{_dace_dtype(arr.dtype)}[{', '.join(str(s) for s in arr.shape)}]"
 
 
 #: Map framework precision globals (np_float/np_complex) to the dace globals the module imports.
