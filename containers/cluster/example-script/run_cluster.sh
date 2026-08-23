@@ -621,6 +621,18 @@ role_srun() {
         --nodelist="${nodelist}" --exclusive --kill-on-bad-exit=1 --export=ALL)
     if [[ "${role_flag}" == "--judge-node" ]]; then
         srun_args+=(--cpus-per-task="${GRADE_CPUS}" --hint=nomultithread)
+    else
+        # --exclusive gives the JOB the node; it does not give the STEP the node's CPUs. An srun
+        # step without --cpus-per-task claims ONE, and every vLLM worker in 605443 came up pinned
+        # to "0,96" -- core 0 plus its SMT sibling, out of 192, shared by all four workers on the
+        # node. EngineCore does scheduling, block management, prefix-cache hashing (190,350 xxhash
+        # queries over ~25k-token prompts in that run), detokenization and sampling on the host,
+        # and PP adds gloo tensor-dict serialization between stages. Starved of CPU it degrades
+        # with load rather than failing: 2 s per step early, 147 s per step after 30 minutes, with
+        # nothing waiting, nothing preempted and a 99.3% prefix-cache hit rate. The kimi-smoke
+        # probes served the same model on the same four nodes at 88-91 tok/s with --cpus-per-task=32.
+        # The role is --ntasks-per-node=1, so the one task must carry the whole node.
+        srun_args+=(--cpus-per-task="${SLURM_CPUS_ON_NODE:-$(nproc)}")
     fi
     gpu_flags=()
     if [[ -n "${CONTAINER_GPU_FLAGS}" ]]; then
