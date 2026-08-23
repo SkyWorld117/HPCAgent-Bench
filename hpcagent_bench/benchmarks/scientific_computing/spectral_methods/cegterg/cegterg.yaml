@@ -179,6 +179,7 @@ array_args:
 # per-root gauge / degenerate-subspace rotation, so they are computed in place but
 # not compared.
 output_args:
+- evc
 - e
 taxonomy:
   track: scientific_computing

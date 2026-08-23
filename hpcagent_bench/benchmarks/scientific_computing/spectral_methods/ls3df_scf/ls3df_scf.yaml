@@ -93,6 +93,7 @@ array_args:
 - rho
 - V_tot
 output_args:
+- psi_frag
 - rho
 - V_tot
 fuzz:

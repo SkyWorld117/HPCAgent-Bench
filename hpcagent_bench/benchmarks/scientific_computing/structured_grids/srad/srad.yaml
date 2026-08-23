@@ -110,6 +110,11 @@ array_args:
 - c
 output_args:
 - J
+- dN
+- dS
+- dW
+- dE
+- c
 taxonomy:
   track: scientific_computing
   subtrack: srad

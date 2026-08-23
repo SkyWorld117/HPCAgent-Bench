@@ -37,6 +37,7 @@ array_args:
 - Q
 - R
 output_args:
+- A
 - Q
 - R
 taxonomy:

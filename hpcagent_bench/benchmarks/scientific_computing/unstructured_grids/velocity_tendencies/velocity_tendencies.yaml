@@ -400,6 +400,7 @@ output_args:
   - p_diag_vn_ie
   - p_diag_w_concorr_c
   - p_diag_ddt_vn_apc_pc
+  - p_diag_ddt_vn_cor_pc
   - p_diag_ddt_w_adv_pc
   - p_diag_max_vcfl_dyn
   - z_w_concorr_me

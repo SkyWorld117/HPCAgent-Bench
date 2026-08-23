@@ -34,6 +34,7 @@ array_args:
 - data
 - cov
 output_args:
+- data
 - cov
 taxonomy:
   track: scientific_computing

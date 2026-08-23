@@ -39,6 +39,7 @@ array_args:
 - data
 - corr
 output_args:
+- data
 - corr
 taxonomy:
   track: scientific_computing
