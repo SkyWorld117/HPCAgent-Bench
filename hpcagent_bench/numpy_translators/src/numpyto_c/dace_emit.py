@@ -630,6 +630,200 @@ class _DropAliasAssign(ast.NodeTransformer):
         return node
 
 
+def view_slice_binding(node: ast.stmt) -> Optional[str]:
+    """The bound name of ``name = arr[...]`` when the subscript keeps a dimension, else ``None``.
+
+    That is the spelling numpy answers with a VIEW rather than a copy or a scalar, and the one dace
+    turns into a View node.
+    """
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+        return None
+    target, value = node.targets[0], node.value
+    if not (isinstance(target, ast.Name) and isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name)):
+        return None
+    index = value.slice
+    elements = index.elts if isinstance(index, ast.Tuple) else [index]
+    if not any(isinstance(element, (ast.Slice, ast.Starred)) for element in elements):
+        return None
+    return target.id
+
+
+def statement_lists(root: ast.AST) -> List[List[ast.stmt]]:
+    """Every statement list in the subtree -- the blocks a name's live range can be confined to."""
+    blocks = []
+    for parent in ast.walk(root):
+        for field in ("body", "orelse", "finalbody"):
+            block = vars(parent).get(field)
+            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+                blocks.append(block)
+    return blocks
+
+
+#: numpy calls that build a FRESH buffer, so the name they bind is a new array rather than a rebind
+#: of the old one. dace sizes one descriptor per name and refuses a second of a different shape.
+ALLOCATION_CALLS = frozenset({"empty", "zeros", "ones", "full", "empty_like", "zeros_like", "ones_like", "full_like"})
+
+
+def allocation_binding(node: ast.stmt) -> Optional[str]:
+    """The bound name of ``name = np.empty(..)`` and friends, else ``None``."""
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+        return None
+    call = node.value
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ALLOCATION_CALLS):
+        return None
+    return node.targets[0].id
+
+
+def binding_regions(blocks: List[List[ast.stmt]], name: str, binding_of):
+    """``(binding, statements the binding owns)`` per binding of ``name``, in source order.
+
+    A binding's region runs from the statement AFTER it to the next binding in the same block. The
+    next binding's own right-hand side belongs to this region, not to itself: ``e = e[1:]`` reads
+    the value the PREVIOUS binding holds.
+    """
+    regions = []
+    for block in blocks:
+        indices = [i for i, stmt in enumerate(block) if binding_of(stmt) == name]
+        for position, index in enumerate(indices):
+            stop = indices[position + 1] if position + 1 < len(indices) else len(block)
+            owned = list(block[index + 1:stop])
+            if stop < len(block):
+                owned.append(block[stop].value)
+            regions.append((block[index], owned))
+    regions.sort(key=lambda region: region[0].lineno)
+    return regions
+
+
+def written_through(fn: ast.FunctionDef) -> set:
+    """Names an element or slice store lands on. A copy of one of those is not the same array."""
+    names = set()
+    for node in ast.walk(fn):
+        targets = node.targets if isinstance(
+            node, ast.Assign) else ([node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else [])
+        for target in targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                names.add(target.value.id)
+    return names
+
+
+def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
+    """Rewrite each view binding of ``names`` to ``np.copy(..)``, in place.
+
+    The name stops being a View and becomes a plain array, which dace rebinds freely as long as the
+    shape holds. A name written THROUGH is left alone: a copy no longer reaches the base array, and
+    a wrong port is worse than an unported kernel.
+    """
+    names = set(names) - written_through(fn)
+    if not names:
+        return
+    for block in statement_lists(fn):
+        for stmt in block:
+            if view_slice_binding(stmt) in names:
+                copied = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
+                                                     attr="copy",
+                                                     ctx=ast.Load()),
+                                  args=[stmt.value],
+                                  keywords=[])
+                stmt.value = ast.copy_location(copied, stmt.value)
+
+
+def mixed_view_names(fn: ast.FunctionDef) -> set:
+    """Names bound BOTH to a view and to a computed value.
+
+    dace makes a View node for ``horiz = padded[:, 0:W]`` and then refuses the ``horiz =
+    np.maximum(horiz, ..)`` that follows (``Cannot reassign View``; the loop-carried spelling says
+    ``Variable .. has been already defined``). Versioning cannot separate them -- the value binding
+    reads the name it rebinds -- so the view becomes the array that binding materializes anyway.
+    """
+    views = set()
+    valued = set()
+    for block in statement_lists(fn):
+        for stmt in block:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                (views if view_slice_binding(stmt) == target.id else valued).add(target.id)
+    for node in ast.walk(fn):
+        target = node.target if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For)) else None
+        if isinstance(target, ast.Name):
+            valued.add(target.id)
+    return views & valued
+
+
+def version_rebound_views(fn: ast.FunctionDef) -> List[str]:
+    """Give each rebinding of a view name its own name. Returns the names it DECLINED."""
+    return version_rebound_names(fn, view_slice_binding)
+
+
+def version_reallocations(fn: ast.FunctionDef) -> None:
+    """Give each re-ALLOCATION of a name its own name, where the allocations differ.
+
+    ``padded = np.empty((H, W + 2 * r))`` then ``padded = np.empty((H + 2 * r, W))`` is one dace
+    descriptor asked to hold two shapes: ``Cannot reassign value to variable "padded"``. Two names
+    are two descriptors. Allocations spelled identically are left alone -- dace accepts those, and a
+    second name would cost a second buffer for nothing.
+    """
+    spellings: Dict[str, set] = {}
+    for block in statement_lists(fn):
+        for stmt in block:
+            name = allocation_binding(stmt)
+            if name is not None:
+                spellings.setdefault(name, set()).add(ast.unparse(stmt.value))
+    version_rebound_names(fn, allocation_binding, {n for n, texts in spellings.items() if len(texts) > 1})
+
+
+def version_rebound_names(fn: ast.FunctionDef, binding_of, candidates=None) -> List[str]:
+    """Give each rebinding of a name its own name, in place. Returns the names it DECLINED.
+
+    ``col = a[k]`` twice is a numpy REFERENCE rebind, but dace makes a View node per binding and the
+    second has nowhere to go (``Cannot reassign View``). Distinct names say the same thing, and cost
+    nothing -- a view is a descriptor, not a buffer.
+
+    Only names whose bindings already have disjoint live ranges are versioned. A name bound in one
+    branch of a conditional and read after the merge needs a phi, and so does one rebound inside a
+    loop and read after it; both show up as a read reachable from two regions, or from none.
+    Renaming those would bind the read to whichever binding the parser saw last, so they are
+    declined here for :func:`copy_view_bindings`, which pays for a buffer to say the same thing.
+    """
+    declined: List[str] = []
+    blocks = statement_lists(fn)
+    stores = {}
+    loads = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name):
+            (stores if isinstance(node.ctx, ast.Store) else loads).setdefault(node.id, []).append(node)
+    taken = set(loads) | set(stores) | {arg.arg for arg in fn.args.args}
+
+    for name in sorted({n for block in blocks for stmt in block if (n := binding_of(stmt))}):
+        if candidates is not None and name not in candidates:
+            continue
+        regions = binding_regions(blocks, name, binding_of)
+        if len(regions) < 2:
+            continue
+        bound_here = {id(binding.targets[0]) for binding, _ in regions}
+        if any(id(store) not in bound_here for store in stores.get(name, [])):
+            declined.append(name)
+            continue  # something else writes the name; its value is no longer just these bindings
+        reached = [{id(node) for stmt in owned for node in ast.walk(stmt)} for _, owned in regions]
+        if any(sum(id(load) in nodes for nodes in reached) != 1 for load in loads.get(name, [])):
+            declined.append(name)
+            continue  # a read no region owns, or one two regions reach: neither is a rename
+        for version, (binding, owned) in enumerate(regions[1:], start=2):
+            renamed = f"{name}__v{version}"
+            while renamed in taken:
+                version += 1
+                renamed = f"{name}__v{version}"
+            taken.add(renamed)
+            binding.targets[0].id = renamed
+            for stmt in owned:
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load):
+                        node.id = renamed
+    return declined
+
+
 #: numpy allocators whose first arg is a shape tuple (dims dace requires to be symbolic).
 #: Calls whose result has the same shape as their first shaped argument -- elementwise, so a read of
 #: ``.shape`` on the result is a read of that argument's shape.
@@ -1606,6 +1800,14 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     floats = _float_names(fn_ast, declared_floats)
     fn_ast = _CopyScalarAlias(value_shapes, floats, set(symbol_names) | set(scalars)).visit(fn_ast)
     _widen_int_seeds(fn_ast, floats, set(symbol_names))
+    ast.fix_missing_locations(fn_ast)
+    # Last, over the settled body: dace makes a View node per binding and refuses to reassign one.
+    # A rebound view name gets a fresh name per binding where the live ranges are disjoint, and a
+    # copy where they are not -- a merge or a loop needs a phi, which a rename is not. One
+    # descriptor also cannot hold two shapes, so a re-allocation gets its own name too.
+    copy_view_bindings(fn_ast, mixed_view_names(fn_ast))
+    copy_view_bindings(fn_ast, version_rebound_views(fn_ast))
+    version_reallocations(fn_ast)
     ast.fix_missing_locations(fn_ast)
     body = list(fn_ast.body)
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
