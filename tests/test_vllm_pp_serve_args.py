@@ -16,13 +16,17 @@ import pathlib
 import re
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "containers/cluster/example-script/run_cluster.sh"
-PP_BRANCH = re.compile(r"^    elif \(\( INFERENCE_NODES > 1 \)\); then$(.*?)^    else$", re.MULTILINE | re.DOTALL)
+# Indentation-agnostic: the branch already moved one level deeper once when run_vllm_node was
+# wrapped, and pinning a literal four spaces made three tests fail over a change that touched none
+# of the argv they assert. The backreference keeps the closing `else` matched at the branch's own
+# level, so a nested if/else inside it cannot end the match early.
+PP_BRANCH = re.compile(r"^(\s*)elif \(\( INFERENCE_NODES > 1 \)\); then$(.*?)^\1else$", re.MULTILINE | re.DOTALL)
 
 
 def pp_branch() -> str:
     match = PP_BRANCH.search(SCRIPT.read_text())
     assert match, "the INFERENCE_NODES > 1 branch of run_vllm_node moved; re-point this test"
-    return match.group(1)
+    return match.group(2)
 
 
 def test_async_scheduling_is_off_on_the_pipeline_path():
