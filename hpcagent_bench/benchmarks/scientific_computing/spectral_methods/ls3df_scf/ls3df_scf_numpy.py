@@ -31,8 +31,8 @@ def _upper_bound(vloc, proj_f, dij_f, half_inv_h2, v):
     # k-step Lanczos upper bound: theta_max alone is a lower bound, so add residual beta_k, else CheFSI's [a,b] can invert and amplify.
     v = v / (np.linalg.norm(v) + 1.0e-30)
     v_prev = np.zeros_like(v)
-    alphas = np.zeros(_NLANC)  # tridiagonal diagonal, one entry per Lanczos step taken
-    betas = np.zeros(_NLANC)  # tridiagonal off-diagonal, one per non-terminal step
+    alphas = np.zeros(_NLANC, dtype=v.dtype)  # tridiagonal diagonal, one entry per Lanczos step taken
+    betas = np.zeros(_NLANC, dtype=v.dtype)  # tridiagonal off-diagonal, one per non-terminal step
     na = 0  # number of Lanczos steps taken (order of T)
     nb = 0  # number of off-diagonal entries recorded
     beta = 0.0
@@ -76,7 +76,7 @@ def _rayleigh_ritz(vloc, proj_f, dij_f, half_inv_h2, Y):
     Yf = Y.reshape(-1, k)
     Wf = _hpsi(Y, vloc, proj_f, dij_f, half_inv_h2).reshape(-1, k)
     h_sub = 0.5 * (Yf.T @ Wf + (Yf.T @ Wf).T)
-    s_sub = 0.5 * (Yf.T @ Yf + (Yf.T @ Yf).T) + 1.0e-12 * np.eye(k)  # jitter -> SPD
+    s_sub = 0.5 * (Yf.T @ Yf + (Yf.T @ Yf).T) + 1.0e-12 * np.eye(k, dtype=Yf.dtype)  # jitter -> SPD
     L = np.linalg.cholesky(s_sub)
     Linv = np.linalg.inv(L)
     w, U = np.linalg.eigh(Linv @ h_sub @ Linv.T)
@@ -90,7 +90,7 @@ def _poisson_fft(rho, h):
     # Hartree potential from reciprocal-space Poisson: V_H(G) = 4 pi rho(G)/|G|^2, G=0 -> 0.
     N = rho.shape[0]
     rho_g = np.fft.fftn(rho - rho.mean())
-    kx = 2.0 * np.pi * np.fft.fftfreq(N, d=h)
+    kx = (2.0 * np.pi * np.fft.fftfreq(N, d=h)).astype(rho.dtype)  # fftfreq is always float64
     gx, gy, gz = np.meshgrid(kx, kx, kx, indexing="ij")
     gsq = gx**2 + gy**2 + gz**2
     gsq[0, 0, 0] = 1.0
@@ -131,7 +131,7 @@ def kernel(dvol, half_inv_h2, tol, nscf, mix, m, offsets, alpha, occ, V_ion, pro
     rho_in = rho.copy()
     nelec = float(rho_in.sum()) * dvol  # electrons to conserve while patching
     V_tot[:] = _genpot(rho_in, V_ion, h)  # potential of the seed density
-    b_frag = np.zeros(nfrag)  # per-fragment upper bound (set once)
+    b_frag = np.zeros(nfrag, dtype=psi_frag.dtype)  # per-fragment upper bound (set once)
     b_frag_valid = np.zeros(nfrag, dtype=bool)  # True once a fragment's bound is frozen
 
     for _ in range(int(nscf)):

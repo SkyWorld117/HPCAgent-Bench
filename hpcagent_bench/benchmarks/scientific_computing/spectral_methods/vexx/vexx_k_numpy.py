@@ -65,11 +65,11 @@ def _vcut_init(a, cutoff, security=6.0):
 
     # --- table nodes q_i = b.(i1,i2,i3), only inside the cutoff sphere ---
     idx = (np.stack(np.meshgrid(np.arange(-n1, n1 + 1), np.arange(-n2, n2 + 1), np.arange(-n3, n3 + 1), indexing="ij"),
-                    axis=-1).reshape(-1, 3).astype(np.float64))
+                    axis=-1).reshape(-1, 3).astype(b.dtype))
     Q = idx @ b.T  # (Nq,3)  q = b.idx
     q2 = np.sum(Q**2, axis=1)
     inside = q2 <= cutoff**2
-    corrected = np.zeros((2 * n1 + 1, 2 * n2 + 1, 2 * n3 + 1))
+    corrected = np.zeros((2 * n1 + 1, 2 * n2 + 1, 2 * n3 + 1), b.dtype)
     Qin = Q[inside]
     # short-range (reciprocal): e2 2pi/sigma^2 at q->0 else e2 4pi/q^2 (1-exp(-q^2/2sigma^2))
     q2in = q2[inside]
@@ -142,7 +142,7 @@ def _g2_convolution(g,
             onall &= np.abs(x - np.rint(x)) < eps
         gf = np.where(onall, 0.0, grid_factor)
     else:
-        gf = np.ones(ngm)
+        gf = np.ones(ngm, g.dtype)
     nonsing = qq > eps_qdiv
     qqn = np.where(nonsing, qq, 1.0)  # guard the divide
     if gau_scrlen > 0.0:
@@ -395,8 +395,8 @@ def vexx_all_paths(psi,
     omega_inv = 1.0 / omega
     nqs_inv = 1.0 / nqs
     eg = my_egrp_id
-    at_ = np.eye(3) if at is None else np.asarray(at)
-    vcut_a_ = np.eye(3) if vcut_a is None else np.asarray(vcut_a)
+    at_ = np.eye(3, dtype=g.dtype) if at is None else np.asarray(at)
+    vcut_a_ = np.eye(3, dtype=g.dtype) if vcut_a is None else np.asarray(vcut_a)
 
     def invfft(col):  # G/recip -> real space (normalised)
         return np.fft.ifftn(col.reshape(grid, order="F"), axes=(0, 1, 2)).reshape(nrxxs, order="F")
@@ -435,7 +435,7 @@ def vexx_all_paths(psi,
         coulomb_fac = np.array(coulomb_fac_q[:ngm, :nqs], dtype=np.float64)
         coulomb_done = np.ones(nqs, dtype=bool)
     else:
-        coulomb_fac = np.zeros((ngm, nqs), dtype=np.float64)
+        coulomb_fac = np.zeros((ngm, nqs), dtype=g.dtype)
         coulomb_done = np.zeros(nqs, dtype=bool)
 
     # ---- main loop over q-points ------------------------------------------
@@ -447,7 +447,7 @@ def vexx_all_paths(psi,
                                   eps_qdiv, gau_scrlen, erf_scrlen, erfc_scrlen, yukawa, x_gamma_extrapolation,
                                   grid_factor, at_, nq1, nq2, nq3, eps_gcv, use_coulomb_vcut_spheric, vcut_a_,
                                   use_coulomb_vcut_ws, vcut_cutoff, vcut_corrected)
-        facb = np.zeros(nrxxs)
+        facb = np.zeros(nrxxs, fac.dtype)
         facb[nl0] = fac  # Coulomb factor on the FFT grid
 
         # per-q US augmentation data (qvan2); falls back to q-independent synthetic args when not supplied.

@@ -88,6 +88,7 @@ def generate_random_lavamd_inputs(
     seed: int = 7,
     alpha: float = 0.5,
     particles_per_box: int = NUMBER_PAR_PER_BOX,
+    dtype=np.float64,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate deterministic, Rodinia-style lavaMD inputs."""
 
@@ -125,10 +126,10 @@ def generate_random_lavamd_inputs(
                     dtype=np.int32,
                 )
 
-    rv = rng.integers(1, 11, size=(n_particles, 4), dtype=np.int32).astype(np.float64)
+    rv = rng.integers(1, 11, size=(n_particles, 4), dtype=np.int32).astype(dtype)
     rv *= 0.1
 
-    qv = rng.integers(1, 11, size=n_particles, dtype=np.int32).astype(np.float64)
+    qv = rng.integers(1, 11, size=n_particles, dtype=np.int32).astype(dtype)
     qv *= 0.1
 
     return box_offsets, neighbor_counts, neighbor_list, rv, qv
@@ -203,7 +204,7 @@ def lavamd_kernel(
     want a return value rather than a pre-allocated buffer."""
 
     if fv is None:
-        fv = np.zeros((rv.shape[0], 4), dtype=np.float64)
+        fv = np.zeros((rv.shape[0], 4), dtype=rv.dtype)
 
     lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv)
 

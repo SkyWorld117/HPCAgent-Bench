@@ -41,8 +41,8 @@ INDEX_DTYPE = np.int64
 
 def _as_float_array(array: np.ndarray, name: str) -> np.ndarray:
     array = np.asarray(array)
-    if array.dtype != FLOAT_DTYPE:
-        raise TypeError(f"{name} must have dtype {FLOAT_DTYPE}")
+    if not np.issubdtype(array.dtype, np.floating):
+        raise TypeError(f"{name} must have a floating-point dtype")
     if array.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional")
     if not array.flags.c_contiguous:
@@ -125,6 +125,7 @@ def generate_random_minife_inputs(
     nz: int = 32,
     seed: int = 0,
     index_dtype: np.dtype | type[np.integer] = INDEX_DTYPE,
+    dtype: np.dtype | type[np.floating] = FLOAT_DTYPE,
 ) -> tuple[np.ndarray, ...]:
     """Generate deterministic MiniFE-like CSR data for SpMV and CG kernels."""
 
@@ -134,6 +135,9 @@ def generate_random_minife_inputs(
     index_dtype = np.dtype(index_dtype)
     if index_dtype != INDEX_DTYPE:
         raise TypeError(f"index_dtype must be {INDEX_DTYPE}")
+    dtype = np.dtype(dtype)
+    if not np.issubdtype(dtype, np.floating):
+        raise TypeError("dtype must be a floating-point dtype")
 
     nx_nodes = nx + 1
     ny_nodes = ny + 1
@@ -151,7 +155,7 @@ def generate_random_minife_inputs(
 
     nnz = int(row_offsets[-1])
     packed_cols = np.empty(nnz, dtype=index_dtype)
-    packed_coefs = np.empty(nnz, dtype=FLOAT_DTYPE)
+    packed_coefs = np.empty(nnz, dtype=dtype)
 
     for row in range(nrows):
         offset = int(row_offsets[row])
@@ -173,9 +177,9 @@ def generate_random_minife_inputs(
         packed_coefs[diag_slot] = diag_sum + 1.0
 
     rng = np.random.default_rng(seed)
-    x = np.ascontiguousarray(rng.random(nrows), dtype=FLOAT_DTYPE)
-    y = np.zeros(nrows, dtype=FLOAT_DTYPE)
-    b = np.zeros(nrows, dtype=FLOAT_DTYPE)
+    x = np.ascontiguousarray(rng.random(nrows), dtype=dtype)
+    y = np.zeros(nrows, dtype=dtype)
+    b = np.zeros(nrows, dtype=dtype)
 
     row_offsets = np.ascontiguousarray(row_offsets)
     packed_cols = np.ascontiguousarray(packed_cols)
@@ -345,9 +349,9 @@ def cg_solve_minife(
     xcoefs = _vector_coefs(x, "x")
     nrows = row_offsets.shape[0] - 1
 
-    r = np.zeros(nrows, dtype=FLOAT_DTYPE)
+    r = np.zeros(nrows, dtype=xcoefs.dtype)
     p = np.zeros_like(xcoefs)
-    ap = np.zeros(nrows, dtype=FLOAT_DTYPE)
+    ap = np.zeros(nrows, dtype=xcoefs.dtype)
 
     waxpby(1.0, xcoefs, 0.0, xcoefs, p)
     matvec_std(row_offsets, cols, values, p, ap)
@@ -388,8 +392,8 @@ def minife(row_offsets, cols, values, x, b, max_iter, tolerance):
 
     nrows = row_offsets.shape[0] - 1
     p = np.zeros_like(x)
-    ap = np.zeros(nrows, dtype=np.float64)
-    r = np.zeros(nrows, dtype=np.float64)
+    ap = np.zeros(nrows, dtype=x.dtype)
+    r = np.zeros(nrows, dtype=x.dtype)
 
     p = waxpby(1.0, x, 0.0, x, p)
     ap = _matvec_std_arrays(row_offsets, cols, values, p, ap)

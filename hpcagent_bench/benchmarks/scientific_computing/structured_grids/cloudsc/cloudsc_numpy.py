@@ -11,7 +11,7 @@
 # them). `klev` is renamed `nlev` to match the hpcagent_bench manifest.
 
 import numpy as np
-from hpcagent_bench.frameworks.framework import np_float
+from hpcagent_bench.frameworks import framework
 nclv = 5
 ncldql = 1
 ncldqi = 2
@@ -120,6 +120,10 @@ yrecldp_rcl_cdenom2 = 103000000.0
 yrecldp_rcl_cdenom3 = 204.0
 
 def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdynl, pfcqlng, pfcqnng, pfcqrng, pfcqsng, pfhpsl, pfhpsn, pfplsl, pfplsn, pfsqif, pfsqitur, pfsqlf, pfsqltur, pfsqrf, pfsqsf, phrlw, phrsw, picrit_aer, plcrit_aer, plsm, plu, plude, pmfd, pmfu, pnice, pq, prainfrac_toprfz, pre_ice, psnde, psupsat, pt, pvervel, pvfa, pvfi, pvfl, tendency_loc_a, tendency_loc_cld, tendency_loc_q, tendency_loc_t, tendency_tmp_a, tendency_tmp_cld, tendency_tmp_q, tendency_tmp_t, kfdia, kidia, klon, nlev, ptsphy):
+    # Read off the framework module rather than imported by name: a `from ... import
+    # np_float` snapshots the value at first import, so a process that runs fp64 and then
+    # fp32 keeps computing in whichever precision it imported under.
+    np_float = framework.np_float
     zlcond1 = np.empty((klon,), dtype=np_float)
     zlcond2 = np.empty((klon,), dtype=np_float)
     zlevapl = np.empty((klon,), dtype=np_float)

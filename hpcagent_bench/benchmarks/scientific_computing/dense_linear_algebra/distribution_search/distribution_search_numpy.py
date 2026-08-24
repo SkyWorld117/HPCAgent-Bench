@@ -11,9 +11,9 @@
 import numpy as np
 
 
-def solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_b):
+def solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_b, dtype):
     # damped Newton iteration for the 3 group log-probabilities meeting both KL targets
-    counts = np.array([count_a, count_b, count_c], dtype=np.float64)
+    counts = np.array([count_a, count_b, count_c], dtype=dtype)
 
     def residual(vec):
         pv = np.exp(vec)
@@ -22,7 +22,7 @@ def solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_
         e3 = counts @ (pv * vec) - (target_f - log_v)
         return np.array([e1, e2, e3])
 
-    vec = np.array([-log_v + 2.0, -log_v, -log_v - 8.0], dtype=np.float64)
+    vec = np.array([-log_v + 2.0, -log_v, -log_v - 8.0], dtype=dtype)
     prev = np.inf
     for _ in range(200):
         pv = np.exp(vec)
@@ -34,7 +34,7 @@ def solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_
             [count_a * pv[0], count_b * pv[1], count_c * pv[2]],
             [count_a, count_b, count_c],
             [count_a * pv[0] * (vec[0] + 1.0), count_b * pv[1] * (vec[1] + 1.0), count_c * pv[2] * (vec[2] + 1.0)],
-        ])
+        ], dtype=dtype)
         try:
             delta = np.linalg.solve(jac, -res)
         except np.linalg.LinAlgError:
@@ -79,7 +79,7 @@ def distribution_search(forward_target, backward_target, p):
             count_c = size - count_a - count_b
             if count_a < 1 or count_b < 1 or count_c < 1:
                 continue
-            sol = solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_b)
+            sol = solve_three_levels(count_a, count_b, count_c, size, log_v, target_f, target_b, p.dtype)
             if sol is None:
                 continue
             kl_f, kl_b, pv = sol

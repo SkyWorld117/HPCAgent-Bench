@@ -99,8 +99,9 @@ def _make_g_psi(h_diag, s_diag, npw_k, npwx, npol):
     kernel does not derive them), mirroring the cegterg.f90 dataflow where
     ``g_psi`` reads the module arrays."""
     kdim = npw_k if npol == 1 else npwx * npol
-    hd = np.zeros(kdim)
-    sd = np.ones(kdim)
+    diag_dtype = np.asarray(h_diag).dtype
+    hd = np.zeros(kdim, diag_dtype)
+    sd = np.ones(kdim, diag_dtype)
     for ip in range(npol):
         sl = slice(0, npw_k) if npol == 1 else slice(ip * npwx, ip * npwx + npw_k)
         hd[sl] = np.asarray(h_diag)[:npw_k, ip]
@@ -266,7 +267,7 @@ def _diaghg(hc, sc, n, nvec):
     b = sc[:n, :n].copy()
     a = 0.5 * (a + a.conj().T)                              # strictly Hermitian
     b = 0.5 * (b + b.conj().T)
-    w = np.zeros(n, dtype=np.float64)
+    w = np.zeros(n, dtype=np.empty(0, a.dtype).real.dtype)
     v = np.zeros((n, n), dtype=a.dtype)
     if nvec < n:                                            # zhegvx subset 1..nvec
         ws, vs = _sci_eigh(a, b, lower=False, subset_by_index=[0, nvec - 1])
@@ -311,7 +312,9 @@ def cegterg(g2kin, vrs, nlk, vkb, deeq, qq, h_diag, s_diag, evc, e, btype, ethr,
     npw_k = int(np.asarray(npw).reshape(-1)[ck0])
     uspp, lrot, noncolin, domag = bool(uspp), bool(lrot), bool(noncolin), bool(domag)
     nnr = n1 * n2 * n3
-    cdt = np.complex128
+    # The Davidson working space follows the trial vectors' own precision. Pinned to
+    # complex128 it iterated in double while every native backend iterated in single.
+    cdt = np.asarray(evc).dtype
 
     # ---- config guards (catch not-appropriate configurations) ----
     if exx_active:
@@ -367,7 +370,7 @@ def cegterg(g2kin, vrs, nlk, vkb, deeq, qq, h_diag, s_diag, evc, e, btype, ethr,
     hc = np.zeros((nvecx, nvecx), dtype=cdt)
     sc = np.zeros((nvecx, nvecx), dtype=cdt)
     vc = np.zeros((nvecx, nvecx), dtype=cdt)
-    ew = np.zeros(nvecx, dtype=np.float64)
+    ew = np.zeros(nvecx, dtype=np.empty(0, cdt).real.dtype)
     conv = np.zeros(nvec, dtype=bool)
 
     nhpsi = 0

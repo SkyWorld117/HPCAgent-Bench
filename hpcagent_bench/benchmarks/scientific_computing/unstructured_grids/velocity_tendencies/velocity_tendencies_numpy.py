@@ -120,10 +120,10 @@ def velocity_tendencies(
     vci = p_patch_verts_cell_idx  # (nproma, nblks_v, 6)
     vcb = p_patch_verts_cell_blk
     awv = p_int_cells_aw_verts  # (nproma, 6, nblks_v)
-    z_w_v = np.zeros((nproma, nlevp1, nblks_v), order='F')
+    z_w_v = np.zeros((nproma, nlevp1, nblks_v), dtype=w.dtype, order='F')
     if not lvn_only:
         for jk in range(nlevp1):  # elev = ubound(w,2) = nlevp1
-            acc_zwv = np.zeros((nproma, nblks_v))
+            acc_zwv = np.zeros((nproma, nblks_v), dtype=w.dtype)
             for n in range(6):
                 acc_zwv += awv[:, n, :] * gat(w, vci, vcb, n, jk)
             z_w_v[:, jk, :] = acc_zwv
@@ -132,9 +132,9 @@ def velocity_tendencies(
     vei = p_patch_verts_edge_idx  # (nproma, nblks_v, 6)
     veb = p_patch_verts_edge_blk
     grot = p_int_geofac_rot  # (nproma, 6, nblks_v)
-    zeta = np.zeros((nproma, nlev, nblks_v), order='F')
+    zeta = np.zeros((nproma, nlev, nblks_v), dtype=vn.dtype, order='F')
     for jk in range(nlev):  # elev = ubound(vn,2) = nlev
-        acc_zeta = np.zeros((nproma, nblks_v))
+        acc_zeta = np.zeros((nproma, nblks_v), dtype=vn.dtype)
         for n in range(6):
             acc_zeta += gat(vn, vei, veb, n, jk) * grot[:, n, :]
         zeta[:, jk, :] = acc_zeta
@@ -154,7 +154,7 @@ def velocity_tendencies(
     if istep == 1:
         # vt[:,jk,:] = sum_4 rbf[n] * vn[quad_idx[n], jk, quad_blk[n]]  jk=1..nlev
         for jk in range(nlev):
-            acc_vt = np.zeros((nproma, nblks_e))
+            acc_vt = np.zeros((nproma, nblks_e), dtype=vn.dtype)
             for n in range(4):
                 acc_vt += rbf[n, :, :] * gat(vn, qi, qb, n, jk)
             vt[:, jk, :] = acc_vt
@@ -195,7 +195,7 @@ def velocity_tendencies(
     ft_e = p_patch_edges_ft_e
     gradh_ifc = p_metrics_deepatmo_gradh_ifc  # (nlevp1,)
     invr_ifc = p_metrics_deepatmo_invr_ifc
-    z_v_grad_w = np.zeros((nproma, nlev, nblks_e), order='F')
+    z_v_grad_w = np.zeros((nproma, nlev, nblks_e), dtype=vn_ie.dtype, order='F')
     if not lvn_only:
         for jk in range(nlev):
             z_v_grad_w[:, jk, :] = (vn_ie[:, jk, :] * inv_dual * (gat(w, eci, ecb, 0, jk) - gat(w, eci, ecb, 1, jk)) +
@@ -223,18 +223,18 @@ def velocity_tendencies(
     area_c = p_patch_cells_area  # (nproma, nblks_c)
     owner = p_patch_cells_decomp_info_owner_mask != 0  # (nproma, nblks_c) bool
 
-    z_ekinh = np.zeros((nproma, nlev, nblks_c), order='F')
+    z_ekinh = np.zeros((nproma, nlev, nblks_c), dtype=z_kin_hor_e.dtype, order='F')
     for jk in range(nlev):
-        acc_ek = np.zeros((nproma, nblks_c))
+        acc_ek = np.zeros((nproma, nblks_c), dtype=z_kin_hor_e.dtype)
         for n in range(3):
             acc_ek += ebln[:, n, :] * gat(z_kin_hor_e, cei, ceb, n, jk)
         z_ekinh[:, jk, :] = acc_ek
 
     # istep==1: z_w_concorr_mc (jk=nflatlev..nlev) then w_concorr_c
     if istep == 1:
-        z_w_concorr_mc = np.zeros((nproma, nlev, nblks_c), order='F')
+        z_w_concorr_mc = np.zeros((nproma, nlev, nblks_c), dtype=z_w_concorr_me.dtype, order='F')
         for jk in range(nf - 1, nlev):
-            acc_wcm = np.zeros((nproma, nblks_c))
+            acc_wcm = np.zeros((nproma, nblks_c), dtype=z_w_concorr_me.dtype)
             for n in range(3):
                 acc_wcm += ebln[:, n, :] * gat(z_w_concorr_me, cei, ceb, n, jk)
             z_w_concorr_mc[:, jk, :] = acc_wcm
@@ -244,7 +244,7 @@ def velocity_tendencies(
             w_concorr_c[:, jk, :] = wc * z_w_concorr_mc[:, jk, :] + (1.0 - wc) * z_w_concorr_mc[:, jk - 1, :]
 
     # z_w_con_c (nproma, nlevp1, nblks_c): copy of w, top zeroed, minus concorr
-    z_w_con_c = np.zeros((nproma, nlevp1, nblks_c), order='F')
+    z_w_con_c = np.zeros((nproma, nlevp1, nblks_c), dtype=w.dtype, order='F')
     z_w_con_c[:, :nlev, :] = w[:, :nlev, :]
     z_w_con_c[:, nlevp1 - 1, :] = 0.0
     # jk = nlev..nflatlev+1 step -1 (0-based nf..nlev-1); order irrelevant
@@ -252,7 +252,7 @@ def velocity_tendencies(
         z_w_con_c[:, jk, :] -= w_concorr_c[:, jk, :]
 
     # CFL clipping band (jk=MAX(3,nrdmax-2)..nlev-3): clips |z_w_con_c| > 0.85*CFL, tracks max_vcfl_dyn/cfl_clip/levelmask.
-    vcflmax = np.zeros(nblks_c)
+    vcflmax = np.zeros(nblks_c, dtype=z_w_con_c.dtype)
     cfl_clip = np.zeros((nproma, nlevp1, nblks_c), dtype=np.bool_)
     jk0_lo = max(3, nrdmax_jg - 2) - 1  # 0-based; jk1 range was 1-based inclusive
     jk0_hi = nlev - 4  # inclusive upper (jk1 upper nlev-3, jk0 = jk1-1)
@@ -272,7 +272,7 @@ def velocity_tendencies(
         z_w_con_c[:, jk0_lo:jk0_hi + 1, :] = np.where(lo_clip, -0.85 * h / dtime,
                                                       np.where(hi_clip, 0.85 * h / dtime, zc))
 
-    z_w_con_c_full = np.zeros((nproma, nlev, nblks_c), order='F')
+    z_w_con_c_full = np.zeros((nproma, nlev, nblks_c), dtype=z_w_con_c.dtype, order='F')
     for jk in range(nlev):
         z_w_con_c_full[:, jk, :] = 0.5 * (z_w_con_c[:, jk, :] + z_w_con_c[:, jk + 1, :])
 
@@ -286,7 +286,7 @@ def velocity_tendencies(
                                                              w[:, jk + 1, :] * coeff2[:, jk, :] + w[:, jk, :] *
                                                              (coeff2[:, jk, :] - coeff1[:, jk, :]))
         for jk in range(1, nlev):
-            acc_dwa = np.zeros((nproma, nblks_c))
+            acc_dwa = np.zeros((nproma, nblks_c), dtype=z_v_grad_w.dtype)
             for n in range(3):
                 acc_dwa += ebln[:, n, :] * gat(z_v_grad_w, cei, ceb, n, jk)
             ddt_w_adv[:, jk, :, t] += acc_dwa

@@ -34,7 +34,6 @@ the per-particle deposition runs in a serial loop and the atomic ``AddNoRet``
 scatter becomes ``+=`` into guard-padded NumPy current arrays indexed exactly as
 the original amrex::Array4 ``(i, j, k, comp)`` accesses.
 """
-import math
 
 import numpy as np
 
@@ -109,12 +108,12 @@ def compute_shifted_shape_factor_into(sx, base, order, x_old, i_new):
     in-place form so the emitter inlines it (Form-3 helper)."""
     idx = 0
     if order == 0:
-        i = int(math.floor(x_old + 0.5))
+        i = int(np.floor(x_old + 0.5))
         i_shift = i - i_new
         sx[base + 1 + i_shift] = 1.0
         idx = i
     if order == 1:
-        i = int(math.floor(x_old))
+        i = int(np.floor(x_old))
         i_shift = i - i_new
         xint = x_old - i
         sx[base + 1 + i_shift] = 1.0 - xint
@@ -189,15 +188,15 @@ def warpx_esirkepov_deposition(
     # Shape-factor scratch, allocated once for the whole sweep: each geometry branch
     # zeroes the buffers it uses before writing, so no state crosses particles. The
     # axes a geometry never touches keep their initial zeros, as the original does.
-    sx_new = np.zeros(o + 3)
-    sx_old = np.zeros(o + 3)
-    sy_new = np.zeros(o + 3)
-    sy_old = np.zeros(o + 3)
-    sz_new = np.zeros(o + 3)
-    sz_old = np.zeros(o + 3)
+    sx_new = np.zeros(o + 3, dtype=xp.dtype)
+    sx_old = np.zeros(o + 3, dtype=xp.dtype)
+    sy_new = np.zeros(o + 3, dtype=xp.dtype)
+    sy_old = np.zeros(o + 3, dtype=xp.dtype)
+    sz_new = np.zeros(o + 3, dtype=xp.dtype)
+    sz_old = np.zeros(o + 3, dtype=xp.dtype)
 
     for ip in range(wp.shape[0]):
-        gaminv = 1.0 / math.sqrt(1.0 + (uxp[ip] * uxp[ip] + uyp[ip] * uyp[ip] + uzp[ip] * uzp[ip]) * INV_C2)
+        gaminv = 1.0 / np.sqrt(1.0 + (uxp[ip] * uxp[ip] + uyp[ip] * uyp[ip] + uzp[ip] * uzp[ip]) * INV_C2)
         wq = q * wp[ip]
         if do_ion != 0:
             wq *= ion_lev[ip]
@@ -221,9 +220,9 @@ def warpx_esirkepov_deposition(
             yp_mid = yp_new - 0.5 * dt * uyp[ip] * gaminv
             xp_old = xp_new - dt * uxp[ip] * gaminv
             yp_old = yp_new - dt * uyp[ip] * gaminv
-            rp_new = math.sqrt(xp_new * xp_new + yp_new * yp_new)
-            rp_mid = math.sqrt(xp_mid * xp_mid + yp_mid * yp_mid)
-            rp_old = math.sqrt(xp_old * xp_old + yp_old * yp_old)
+            rp_new = np.sqrt(xp_new * xp_new + yp_new * yp_new)
+            rp_mid = np.sqrt(xp_mid * xp_mid + yp_mid * yp_mid)
+            rp_old = np.sqrt(xp_old * xp_old + yp_old * yp_old)
             costheta_mid = xp_mid / rp_mid if rp_mid > 0.0 else 1.0
             sintheta_mid = yp_mid / rp_mid if rp_mid > 0.0 else 0.0
             x_new = (rp_new - xmin) * dinvx
@@ -249,9 +248,9 @@ def warpx_esirkepov_deposition(
             xp_old = xp_new - dt * uxp[ip] * gaminv
             yp_old = yp_new - dt * uyp[ip] * gaminv
             zp_old = zp_new - dt * uzp[ip] * gaminv
-            rpxy_mid = math.sqrt(xp_mid * xp_mid + yp_mid * yp_mid)
-            rp_new = math.sqrt(xp_new * xp_new + yp_new * yp_new + zp_new * zp_new)
-            rp_old = math.sqrt(xp_old * xp_old + yp_old * yp_old + zp_old * zp_old)
+            rpxy_mid = np.sqrt(xp_mid * xp_mid + yp_mid * yp_mid)
+            rp_new = np.sqrt(xp_new * xp_new + yp_new * yp_new + zp_new * zp_new)
+            rp_old = np.sqrt(xp_old * xp_old + yp_old * yp_old + zp_old * zp_old)
             rp_mid = (rp_new + rp_old) * 0.5
             costheta_mid = xp_mid / rpxy_mid if rpxy_mid > 0.0 else 1.0
             sintheta_mid = yp_mid / rpxy_mid if rpxy_mid > 0.0 else 0.0
@@ -276,18 +275,18 @@ def warpx_esirkepov_deposition(
         if reduce_enabled:
             if geom == GEOM_3D:
                 reduce_shape_old = reduced_particle_shape_mask[
-                    lox + int(math.floor(x_old)), loy + int(math.floor(y_old)), loz + int(math.floor(z_old))]
+                    lox + int(np.floor(x_old)), loy + int(np.floor(y_old)), loz + int(np.floor(z_old))]
                 reduce_shape_new = reduced_particle_shape_mask[
-                    lox + int(math.floor(x_new)), loy + int(math.floor(y_new)), loz + int(math.floor(z_new))]
+                    lox + int(np.floor(x_new)), loy + int(np.floor(y_new)), loz + int(np.floor(z_new))]
             elif (geom == GEOM_XZ or geom == GEOM_RZ):
-                reduce_shape_old = reduced_particle_shape_mask[lox + int(math.floor(x_old)), loy + int(math.floor(z_old)), 0]
-                reduce_shape_new = reduced_particle_shape_mask[lox + int(math.floor(x_new)), loy + int(math.floor(z_new)), 0]
+                reduce_shape_old = reduced_particle_shape_mask[lox + int(np.floor(x_old)), loy + int(np.floor(z_old)), 0]
+                reduce_shape_new = reduced_particle_shape_mask[lox + int(np.floor(x_new)), loy + int(np.floor(z_new)), 0]
             elif (geom == GEOM_RCYLINDER or geom == GEOM_RSPHERE):
-                reduce_shape_old = reduced_particle_shape_mask[lox + int(math.floor(x_old)), 0, 0]
-                reduce_shape_new = reduced_particle_shape_mask[lox + int(math.floor(x_new)), 0, 0]
+                reduce_shape_old = reduced_particle_shape_mask[lox + int(np.floor(x_old)), 0, 0]
+                reduce_shape_new = reduced_particle_shape_mask[lox + int(np.floor(x_new)), 0, 0]
             elif geom == GEOM_1D_Z:
-                reduce_shape_old = reduced_particle_shape_mask[lox + int(math.floor(z_old)), 0, 0]
-                reduce_shape_new = reduced_particle_shape_mask[lox + int(math.floor(z_new)), 0, 0]
+                reduce_shape_old = reduced_particle_shape_mask[lox + int(np.floor(z_old)), 0, 0]
+                reduce_shape_new = reduced_particle_shape_mask[lox + int(np.floor(z_new)), 0, 0]
 
         # -------------------------------------------------- velocities
         if geom == GEOM_RZ:
