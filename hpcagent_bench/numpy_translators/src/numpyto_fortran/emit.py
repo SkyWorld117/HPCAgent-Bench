@@ -345,10 +345,17 @@ def _double_kind() -> str:
 #: Calls whose Fortran result is INTEGER unconditionally (int/len/floor/ceil/round/...);
 #: the _INT_CALLS_ARGDEP subset (max/min/int helpers) is integer only when every arg is.
 #: Shared by the min/max operand typing and _expr_is_integer so the two never drift.
+#: numpy's integer dtype CONSTRUCTORS, which ``x.astype(np.int64)`` lowers to (``np.int64(x)``).
+#: Missing them made ``min``/``max`` read a cast operand as real, so the pair lowered to the
+#: REAL-typed NaN-propagating helper, which then rejected its own INTEGER argument.
+_NUMPY_INT_CASTS = frozenset(
+    {"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "intp", "uintp", "intc", "longlong"})
+#: ``fmax``/``fmin`` are the POST-RENAME spelling of np.maximum/np.minimum: _MathRewriter renames
+#: them before this check runs, so a nested min(max(...)) saw an unknown callee and read as real.
 _INT_RETURNING_CALLS = {
-    "int", "len", "max", "min", "floor", "ceil", "round", "ceiling", "nint", "int_floor", "python_mod"
-}
-_INT_CALLS_ARGDEP = {"max", "min", "int_floor", "python_mod"}
+    "int", "len", "max", "min", "fmax", "fmin", "floor", "ceil", "round", "ceiling", "nint", "int_floor", "python_mod"
+} | set(_NUMPY_INT_CASTS)
+_INT_CALLS_ARGDEP = {"max", "min", "fmax", "fmin", "int_floor", "python_mod"}
 
 #: Fortran intrinsics whose argument the standard requires to be REAL/COMPLEX (an INTEGER
 #: is rejected outright); numpy promotes an integer operand to float for these, so mirror
@@ -1483,7 +1490,13 @@ class _FortranBodyEmitter(BaseEmitter):
         for a in self.kir.arrays:
             if a.name == name:
                 return (self._int_tag(a.dtype) is not None and _fortran_type(a.dtype) != _fortran_type("int64"))
-        return False
+        # A local slice of an UNSIGNED narrow parameter (``excl_masks = cj_excl[a:b]`` on uint16)
+        # promotes on read exactly like the parameter, but was reported at its own declared width,
+        # so the paired bitwise literal came out ``1_c_int16_t`` against an int64 operand.
+        # Unsigned only: a SIGNED narrow local is cloudsc's int-as-bool spelling, and promoting
+        # those wraps a logical read in ``INT()``, which the standard rejects.
+        dtype = str(self.kir.local_dtypes.get(name) or "")
+        return dtype.startswith("uint") and _fortran_type(dtype) != _fortran_type("int64")
 
     def _unsigned_read_mask(self, name: str) -> Optional[str]:
         """The 2**N - 1 mask that recovers a uintN element's unsigned value from Fortran's signed-integer storage."""
@@ -1923,6 +1936,14 @@ class _FortranBodyEmitter(BaseEmitter):
                     if fn in _INT_CALLS_ARGDEP:
                         return all(is_int(a) for a in e.args)
                     return True
+                if fn == "astype" and e.args:
+                    # ``rs.astype(np.int64)`` is an integer operand. Missing it made
+                    # min/max read as mixed and lower to the REAL-typed NaN-propagating helper,
+                    # which then rejected its own INTEGER argument.
+                    dtype_arg = e.args[0]
+                    dtype_name = (dtype_arg.attr if isinstance(dtype_arg, ast.Attribute) else
+                                  dtype_arg.id if isinstance(dtype_arg, ast.Name) else "")
+                    return dtype_name.startswith("int") or dtype_name.startswith("uint")
                 return False
             if isinstance(e, ast.IfExp):
                 return is_int(e.body) and is_int(e.orelse)
