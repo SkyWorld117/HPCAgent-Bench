@@ -9,14 +9,18 @@ def _gru_layer(x_seq, h, w_ih, w_hh, b_ih, b_hh, y):
     """One sequence-major GRU layer; h is updated in place, y takes every step's hidden state.
 
     torch packs the three gates along the row axis in the order [reset, update, new]. The reset gate
-    scales the ENTIRE hidden term of the new gate, b_hh included -- not just the matmul."""
+    scales the ENTIRE hidden term of the new gate, b_hh included -- not just the matmul.
+
+    The input-to-hidden term does not depend on h, so it is one wide matmul over every timestep;
+    only the hidden-to-hidden term and the gate nonlinearities stay inside the time recurrence."""
     hidden_size = w_hh.shape[1]
+    w_hh_t = w_hh.T
+    gi = x_seq @ w_ih.T + b_ih
     for t in range(x_seq.shape[0]):
-        gi = x_seq[t] @ w_ih.T + b_ih
-        gh = h @ w_hh.T + b_hh
-        r = _sigmoid(gi[:, 0:hidden_size] + gh[:, 0:hidden_size])
-        z = _sigmoid(gi[:, hidden_size:2 * hidden_size] + gh[:, hidden_size:2 * hidden_size])
-        n = np.tanh(gi[:, 2 * hidden_size:3 * hidden_size] + r * gh[:, 2 * hidden_size:3 * hidden_size])
+        gh = h @ w_hh_t + b_hh
+        r = _sigmoid(gi[t, :, 0:hidden_size] + gh[:, 0:hidden_size])
+        z = _sigmoid(gi[t, :, hidden_size:2 * hidden_size] + gh[:, hidden_size:2 * hidden_size])
+        n = np.tanh(gi[t, :, 2 * hidden_size:3 * hidden_size] + r * gh[:, 2 * hidden_size:3 * hidden_size])
         h[:] = (1.0 - z) * n + z * h
         y[t] = h
 

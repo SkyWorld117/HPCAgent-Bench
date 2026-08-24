@@ -179,7 +179,10 @@ array_args:
 # per-root gauge / degenerate-subspace rotation, so they are computed in place but
 # not compared.
 output_args:
-- evc
+# evc is NOT graded: an eigenvector is fixed only up to a phase, and nothing in LAPACK pins it --
+# zhegv's choice is an artifact of its tridiagonal reduction, so no other eigensolver (nor another
+# LAPACK build) reproduces it. Grading it made the kernel's verdict a fingerprint of one library
+# path rather than a statement about the answer. The eigenVALUES are phase-independent and stay.
 - e
 taxonomy:
   track: scientific_computing
