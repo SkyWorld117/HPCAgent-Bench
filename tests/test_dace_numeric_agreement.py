@@ -8,7 +8,8 @@ one of those states grades submissions against a DaCe baseline nobody checked. M
 331 gated kernels on the day this landed, 19 of them parse clean and are still not usable --
 ``channel_flow`` and ``cp2k_grid_integrate`` returned wrong numbers (both fixed 2026-08-08, in the
 generator), ``fft_1d`` emitted C++ that did not compile (fixed 2026-08-17, in the generator),
-``nbody`` cannot be called at all. The parse gate is green for every one of them.
+``nbody`` could not be called at all (fixed 2026-08-24, in the generator and the probe). The parse
+gate is green for every one of them.
 
 So the two gates ask different questions and neither subsumes the other. This one lowers with
 ``to_sdfg(simplify=True)`` -- the graph a run actually executes, library nodes expanded -- and
@@ -80,6 +81,15 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: now renames every BOUND name the parser will not accept and exports the map as
 #: ``__hpcagent_bench_renames__``; a reserved name that is only CALLED (``sqrt``, ``exp``) is left
 #: alone, since DaCe resolves those through its own replacement table.
+#: ``nbody`` left the list 2026-08-24, in the GENERATOR and the probe -- no DaCe change needed.
+#: ``Missing program argument "KE"`` was a PROMOTED RETURN: the numpy reference allocates ``KE`` and
+#: ``PE`` and returns them, so ``dace_emit`` takes them as output PARAMETERS -- but it also kept the
+#: reference's own ``KE = np.zeros(...)``, which rebinds the name to a transient and leaves the
+#: caller's array unwritten. ``_FillOutputParamRealloc`` now turns a shape-matching re-allocation of
+#: a parameter into an in-place fill; a differently-shaped local that merely shares the name is left
+#: alone, since filling the parameter from it would be a miscompile rather than the missed write it
+#: replaces. The probe never bound them either -- they are outputs, not manifest inputs -- so it now
+#: binds any compare-list name the SDFG takes as an array.
 NUMERIC_BAD: Dict[str, str] = {
     # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
     # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
@@ -136,8 +146,6 @@ NUMERIC_BAD: Dict[str, str] = {
     # unroll_reduction_11_accs (out: d=1.12e+03) -- were one of two dace frontend defects on SCALAR
     # containers, and all four agree since the emitter routes around both (dace issues 05 and 06;
     # see the desugars in numpyto_c.dace_emit). Remeasured 2026-08-08.
-    # Missing program argument "KE" -- an output the SDFG wants that the case does not carry.
-    "nbody": "run_fail",
 }
 
 #: Tracks this gate covers. ``machine_learning`` is DELIBERATELY out of scope, not truncated: its

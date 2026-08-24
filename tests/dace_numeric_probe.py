@@ -129,6 +129,21 @@ def main() -> int:
             rec["verdict"], rec["detail"] = "run_fail", f"unresolved argument {name!r}"
             print(json.dumps(rec), flush=True)
             return 0
+    # A PROMOTED RETURN is an output PARAMETER of the emitted program but not a manifest input: the
+    # numpy reference allocates it and returns it, so ``by`` has no entry and the loop above never
+    # bound it. nbody read ``Missing program argument "KE"`` for exactly this. Zero-filled, the way
+    # the reference's own ``np.zeros`` left it, and registered in ``call`` so the readback below
+    # reads the array the program actually wrote.
+    for name in case["compare"]:
+        spelling = renames.get(name, name)
+        if spelling in kwargs or spelling not in sdfg.arrays:
+            continue
+        if name not in call:
+            if name not in case["expected"]:
+                continue
+            call[name] = np.zeros_like(case["expected"][name])
+        kwargs[spelling] = call[name]
+
     # Free SDFG symbols the MANIFEST already names, bound before the shape matching below so a
     # ``__hpcagent_bench_symbol_defs__`` recipe can be evaluated over them as well.
     #
