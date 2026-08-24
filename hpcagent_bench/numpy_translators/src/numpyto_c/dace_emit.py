@@ -240,6 +240,26 @@ class _RewriteFrameworkDtype(ast.NodeTransformer):
             self.used_complex = True
         return ast.copy_location(ast.Name(id=mapped, ctx=node.ctx), node)
 
+    def visit_Assign(self, node: ast.Assign):
+        """Drop a reference's call-time rebinding of the precision globals.
+
+        A reference reads them off the framework module (``np_float = framework.np_float``) rather
+        than importing the names, because a ``from ... import np_float`` snapshots the value at
+        first import and a process that runs two precisions keeps the first one. Renaming that
+        statement's target would emit ``dc_float = framework.np_float`` into a module that has no
+        ``framework`` and already imports ``dc_float`` -- so the whole assignment goes."""
+        targets = []
+        for t in node.targets:
+            targets.extend(t.elts if isinstance(t, ast.Tuple) else [t])
+        if not targets or not all(isinstance(t, ast.Name) and t.id in _FRAMEWORK_DTYPE_TO_DACE for t in targets):
+            return self.generic_visit(node)
+        values = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
+        if not all(isinstance(v, ast.Attribute) and v.attr in _FRAMEWORK_DTYPE_TO_DACE for v in values):
+            return self.generic_visit(node)
+        if any(_FRAMEWORK_DTYPE_TO_DACE[t.id] == "dc_complex_float" for t in targets):
+            self.used_complex = True
+        return None
+
 
 class _TernaryValueHoister(ast.NodeTransformer):
     """Hoist each ternary-used-as-value to a scalar temp assigned by a guarding if/else appended to prelude."""
