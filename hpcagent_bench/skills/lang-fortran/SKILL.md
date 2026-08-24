@@ -130,10 +130,61 @@ side effects inside.
   `x(2:n) = a(2:n)*x(1:n-1)` is a DIFFERENT computation from the loop. A recurrence stays a loop.
   And array syntax VECTORIZES but never THREADS here -- a loop that needs cores stays explicit
   under `parallel do` (the openmp-fortran page).
-- **Reach for the intrinsic first**: `matmul` (blocked, you will not beat it by hand),
-  `dot_product`, `sum`/`maxval`/`minloc` with `dim=`, `merge`, `pack`/`count`, `transpose`.
+- **Reach for the intrinsic first** -- the table below maps each one to the numpy it replaces.
 - **`elemental`** for your own per-element work (implicitly `pure`, applies to whole arrays,
   vectorizes); `pure` is what lets a call sit inside `do concurrent` at all.
+
+## The intrinsics, and the numpy each one replaces
+
+The reference is numpy. Most numpy one-liners have an exact Fortran intrinsic, and writing the
+loop by hand instead costs correctness (the 1-based / column-major traps below) before it costs
+speed. Every reduction takes an optional `dim=` (reduce along ONE axis, like numpy's `axis=`) and
+most take `mask=` (reduce only where true).
+
+| numpy | Fortran | notes |
+|---|---|---|
+| `a.sum()`, `a.sum(axis=0)` | `sum(a)`, `sum(a, dim=1)` | `dim` is 1-based and counts the FIRST subscript as 1 |
+| `a.prod()` | `product(a)` | |
+| `a.max()` / `a.min()` | `maxval(a)` / `minval(a)` | `mask=` restricts it |
+| `a.argmax()` | `maxloc(a, dim=1)` | see the two traps below |
+| `a.argmin()` | `minloc(a, dim=1)` | |
+| `np.flatnonzero(a == v)[0]` | `findloc(a, v, dim=1)` | `back=.true.` for the LAST match; 0 when absent |
+| `np.count_nonzero(m)` | `count(m)` | `m` must be LOGICAL, not integer |
+| `m.any()` / `m.all()` | `any(m)` / `all(m)` | |
+| `np.where(m, x, y)` | `merge(x, y, m)` | elemental; evaluates BOTH sides |
+| `a[m]` | `pack(a, m)` | rank-1 result, allocates |
+| `np.put(out, idx, v)` | `unpack(v, m, field)` | inverse of `pack` |
+| `np.broadcast_to` / `np.repeat` | `spread(a, dim, n)` | adds a dimension |
+| `a.T` | `transpose(a)` | rank 2 only |
+| `a.reshape(...)` | `reshape(a, [n, m])` | fills COLUMN-major -- see below |
+| `np.roll(a, k)` | `cshift(a, k)` | `eoshift` shifts in `boundary=` instead of wrapping |
+| `np.dot(u, v)` | `dot_product(u, v)` | |
+| `a @ b` | `matmul(a, b)` | NOT a BLAS call -- see below |
+| `np.linalg.norm(a)` | `norm2(a)` | computes `sqrt(sum(a*a))` without the overflow |
+
+**`maxloc`/`minloc` have two traps, both silent.** They return a rank-1 ARRAY of subscripts, so
+`maxloc(v)` is an array of size 1 and only `maxloc(v, dim=1)` is the scalar you want. And the
+subscript is 1-BASED, so it is `numpy_argmax + 1` -- writing it straight into an output the
+reference filled with an argmax gives every element off by one, on every input.
+
+**`reshape` fills column-major.** `np.reshape` defaults to C order, so a transliterated reshape
+permutes the data. numpy's own `order='F'` is the one that matches.
+
+**`merge` is not a short-circuit.** It is elemental: both `tsource` and `fsource` are evaluated
+everywhere, so it cannot guard a division by zero or an out-of-range subscript the way a Python
+conditional expression can. That is also why it is fast -- it is a select, not a branch.
+
+**`matmul` is not automatically fast.** gfortran expands it inline as a plain O(n**3) loop nest,
+about what a reasonable hand-written nest gives; it becomes a BLAS `dgemm` only under
+`-fexternal-blas` with a BLAS linked, which is not this build line. So treat it as correct and
+tidy rather than as a free win, and if a matmul is the hot loop, blocking it by hand is a real
+option here in a way it would not be against a tuned library.
+
+**`pack`, `unpack`, `spread`, `reshape`, `transpose` and `cshift` allocate.** Each materializes a
+whole temporary array. In a hot loop that is a full pass of memory traffic per call, which can
+cost more than the loop it replaced -- so prefer them at the OUTER level, or where they remove a
+pass rather than add one. The reductions (`sum`, `count`, `maxval`, ...) and the elemental
+`merge` do not allocate.
 
 ## Workflow
 
