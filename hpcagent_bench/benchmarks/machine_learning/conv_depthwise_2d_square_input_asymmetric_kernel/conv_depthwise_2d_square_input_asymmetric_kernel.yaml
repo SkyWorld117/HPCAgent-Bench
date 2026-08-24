@@ -10,15 +10,15 @@ parameters:
     height: 8
     width: 8
   M:
-    batch_size: 64
+    batch_size: 50
     bias: false
-    height: 1024
-    width: 1024
+    height: 804
+    width: 804
   L:
-    batch_size: 71
+    batch_size: 63
     bias: false
-    height: 1146
-    width: 1146
+    height: 1016
+    width: 1016
   XL:
     batch_size: 79
     bias: false
