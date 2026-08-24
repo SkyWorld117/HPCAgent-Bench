@@ -10,8 +10,10 @@ from the grading + orchestration logic. The scorer uses only :func:`_call_isolat
 everything else here is internal to this module.
 """
 import copy
+import ctypes
 import dataclasses
 import functools
+import gc
 import importlib.util
 import math
 import os
@@ -482,6 +484,25 @@ def _call_native_impl(
     # image starts with an empty cache. Untimed, so no sample moves.
     extras = [run_followup(make_src, call_with, rep_timeout) for make_src in followups]
     return outputs, samples, extras
+
+
+def reclaim_memory() -> None:
+    """Return freed arenas to the OS between grades.
+
+    A grade allocates and drops several full-size array sets. CPython frees them promptly, but
+    glibc keeps the arenas, so RSS ratchets up across a long-lived judge and the next grade's
+    child hits its RLIMIT_AS against a parent that is merely holding empty space. ``gc.collect``
+    breaks the reference cycles numpy views create; ``malloc_trim`` is what actually hands the
+    pages back.
+
+    ``malloc_trim`` is glibc-only and advisory -- missing on musl, and it can legitimately return
+    0 ("nothing to give back"). Neither is an error, so a failed lookup is silent and this stays a
+    best-effort hint, never a correctness dependency."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):  # not glibc / no symbol -> gc.collect() alone
+        pass
 
 
 def _is_host_oom(run) -> bool:
@@ -963,6 +984,11 @@ def _call_isolated(
                          mp_context=mp_context)
         if run.ok or attempt == OOM_RETRIES or not _is_host_oom(run):
             break
+        # Reclaim BEFORE backing off. The child died for want of address space, and what a
+        # long-lived judge is most likely holding is freed-but-untrimmed arenas from the previous
+        # grade -- sleeping does not return those, so a retry that only waits re-runs into the
+        # same ceiling. Trim first, then give any concurrent grade time to release its own.
+        reclaim_memory()
         time.sleep(OOM_BACKOFF_S * (2**attempt))
     if not run.ok:
         if run.signal == "TIMEOUT":

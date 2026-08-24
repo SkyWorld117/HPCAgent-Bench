@@ -48,21 +48,51 @@ class Preset(str, Enum):
 #: The preset vocabulary as a tuple; the single source of truth is :class:`Preset`.
 PRESET_CHOICES = tuple(p.value for p in Preset)
 
+#: The SIZE RUNGS -- the presets that name a fixed size, i.e. everything a ``+fuzz`` can
+#: attach to. Derived from :class:`Preset` rather than imported from ``sizing`` because
+#: ``sizing`` imports this module.
+RUNGS = tuple(p.value for p in Preset if p is not Preset.FUZZED)
 
-def parse_preset(preset: str) -> Tuple[str, Optional[int]]:
-    """Split a preset token into ``(base, seed)``. ``S``/``M``/``L``/``XL``/``fuzzed``
-    give ``(base, None)``; ``fuzzed:42`` gives ``("fuzzed", 42)``. Only ``fuzzed``
-    takes a ``:seed`` suffix. Raises ``ValueError`` on an unknown base or a
-    non-integer / misplaced seed."""
-    base, sep, rest = preset.partition(":")
-    if base not in PRESET_CHOICES:
-        raise ValueError(f"unknown preset {base!r}; choose from {', '.join(PRESET_CHOICES)}")
+#: The one preset MODIFIER: ``<rung>+fuzz`` samples sizes around ``<rung>``.
+FUZZ_SUFFIX = "fuzz"
+
+#: What a bare ``fuzzed`` token anchors on. XL is the size the manifests declare as the
+#: production shape, so it is what a submission is graded at unless a caller says otherwise.
+DEFAULT_FUZZ_ANCHOR = "XL"
+
+
+def parse_preset(preset: str) -> Tuple[str, Optional[int], str]:
+    """Split a preset token into ``(base, seed, anchor)``.
+
+    Fuzzing is a PROPERTY of a preset, not a preset of its own: ``+fuzz`` samples sizes around
+    the rung it is attached to, so ``XL+fuzz`` draws around XL and ``M+fuzz`` around M. Every
+    rung accepts it. The bare ``fuzzed`` token is the historical spelling of ``XL+fuzz`` and
+    still resolves to exactly that.
+
+    ``S`` / ``M`` / ``L`` / ``XL`` give ``(base, None, base)`` -- a fixed size, anchor unused.
+    ``XL+fuzz`` gives ``("fuzzed", None, "XL")``; ``M+fuzz:42`` gives ``("fuzzed", 42, "M")``.
+    A ``:seed`` suffix pins the sampling RNG and is only meaningful with ``+fuzz``.
+
+    Raises ``ValueError`` on an unknown rung or a non-integer / misplaced seed."""
+    head, sep, rest = preset.partition(":")
+    anchor, plus, suffix = head.partition("+")
+    if plus:
+        if suffix != FUZZ_SUFFIX:
+            raise ValueError(f"unknown preset modifier {suffix!r} in {preset!r}; only '+{FUZZ_SUFFIX}' exists")
+        if anchor not in RUNGS:
+            raise ValueError(f"'+{FUZZ_SUFFIX}' attaches to a size rung; "
+                             f"got {anchor!r}, choose from {', '.join(RUNGS)}")
+        base = Preset.FUZZED.value
+    else:
+        base, anchor = head, (head if head != Preset.FUZZED.value else DEFAULT_FUZZ_ANCHOR)
+        if base not in PRESET_CHOICES:
+            raise ValueError(f"unknown preset {base!r}; choose from {', '.join(PRESET_CHOICES)}")
     if not sep:
-        return base, None
-    if base != "fuzzed":
-        raise ValueError(f"only the fuzzed preset takes a ':seed' suffix (got {preset!r})")
+        return base, None, anchor
+    if base != Preset.FUZZED.value:
+        raise ValueError(f"only a fuzzed preset takes a ':seed' suffix (got {preset!r})")
     try:
-        return base, int(rest)
+        return base, int(rest), anchor
     except ValueError:
         raise ValueError(f"fuzzed seed must be an integer (got {rest!r})") from None
 
@@ -75,11 +105,17 @@ def preset_arg(preset: str) -> str:
 
 
 def resolve_preset(preset: str) -> str:
-    """Parse a preset token, apply any ``fuzzed:seed`` as a ``seeds.fuzz`` override for
-    this process, and return the base preset (``fuzzed``/``S``/...) to run with."""
-    base, seed = parse_preset(preset)
+    """Parse a preset token, apply its modifiers as process overrides, and return the base
+    preset (``fuzzed``/``S``/...) to run with.
+
+    Two overrides, both following the pattern this function already used for ``:seed``: the
+    sampling RNG (``seeds.fuzz``) and the rung the sizes are drawn around (``fuzz.anchor``).
+    The anchor is set for EVERY token, so a plain ``M`` leaves no stale ``XL`` behind from a
+    previous call in the same process."""
+    base, seed, anchor = parse_preset(preset)
     if seed is not None:
         config.set_override("seeds.fuzz", seed)
+    config.set_override("fuzz.anchor", anchor)
     return base
 
 

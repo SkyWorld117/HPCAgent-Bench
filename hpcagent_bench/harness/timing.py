@@ -111,6 +111,21 @@ def measurement_repeat() -> int:
     return max(1, int(config.get("measurement.repeat", 50)))
 
 
+def local_repeat() -> int:
+    """Timed repeats for ``/score``, the unrecorded route. ``measurement.local_repeat``.
+
+    Deliberately far below :func:`measurement_repeat`: ``/score`` reduces with
+    :data:`LOCAL_BACKEND` (best-of-k), which needs no distributional power, and nothing it
+    returns is ever recorded. Paying the ranked route's repeat count for a signal the agent only
+    uses to pick its next edit is the single largest avoidable cost in a grade.
+
+    ``/score`` ONLY. ``/profile`` reduces through :func:`measurement_repeat` in
+    ``profiling.py``, and ``/baseline`` must keep the ranked count because it advertises the
+    number the agent is trying to beat -- ``min`` of fewer samples is never smaller, so a cheap
+    baseline there is an easier target than the one ``/submit`` grades against."""
+    return max(1, int(config.get("measurement.local_repeat", 5)))
+
+
 def measurement_baseline() -> str:
     """The speed-up denominator baseline -- the ONE source of truth every scoring
     path (judge service, Harbor grade + its CLI, the harbor adapter) reads, so the
@@ -204,6 +219,13 @@ def reduce_mannwhitney_delta(candidate_ns: Sequence,
     # delta is a surviving grid point, all of which are < 1.0, so 1 - delta > 0 always.
     speedup = 1.0 / (1.0 - delta)
     return ReducedTiming(int(a_ns), int(b_ns), speedup, "mannwhitney_delta", significant=True, delta=delta)
+
+
+#: The backend the UNRECORDED local route (/score) reduces with. Best-of-k over few repeats:
+#: it needs no distributional power because nothing it produces is ever recorded, and holding
+#: it to the recorded route's repeat floor would make every local iteration cost 4x for a
+#: signal the agent only uses to decide what to try next.
+LOCAL_BACKEND = "min_of_k"
 
 
 def reduce(candidate_ns: Sequence, baseline_ns: Sequence, *, backend: str = None) -> ReducedTiming:

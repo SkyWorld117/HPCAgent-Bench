@@ -94,9 +94,15 @@ Note where the recurrence lands: correct code carries it along the SECOND subscr
 independent loop is the FIRST subscript -- which is also the contiguous one, and therefore the
 one to make innermost and vectorize.
 
+Which the `! CORRECT` block above has NOT done: it is correct, not yet fast. `i` is the
+contiguous, independent axis and it sits on the outside. Correctness first, then INTERCHANGE --
+swap the two `do` lines so `i` is innermost. The swap is legal exactly because `i` is the
+independent axis; `j` carries the recurrence and must stay outer.
+
 **A 2D kernel that builds clean and scores `numeric mismatch` is a transposed subscript until
-proven otherwise -- and so is one that grades correct but will not go faster.** Check that before touching the algorithm: print one element and compare it
-against the reference's, or `profile` with `tool: "none"` and dump the first differing index.
+proven otherwise -- and so is one that grades correct but will not go faster.** Check that
+before touching the algorithm: print one element and compare it against the reference's, or
+`profile` with `tool: "none"` and dump the first differing index.
 
 ## `do concurrent` -- the other threading spelling
 

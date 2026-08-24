@@ -7,9 +7,11 @@
 seeds:
   input_dist: 0          # array data-value generation
   fuzz: 42               # dimension + distribution sampling
-  public_tests: 42       # agent-visible test inputs
-  reverify: 777          # fresh seed for the judge's independent re-verify (never
-                         # returned to the agent, so a fixed constant is safe)
+  # NOTE: the two GRADING seeds are deliberately NOT here. config.yaml ships into the agent
+  # image, so a seed written here is readable by the submission. They live in
+  # harness/hidden_tests/seeds.py (a path .dockerignore excludes twice) and are read through
+  # secret_seed_first() / secret_seed_second() -- the one way to see a seed. Override on the
+  # JUDGE with $HPCAGENT_BENCH_SEEDS_FIRST / $HPCAGENT_BENCH_SEEDS_SECOND.
   secret_shape: 31337    # JUDGE-ONLY persistent secret -- selects the TIMED shape of the
                          # secret performance mode (perf.mode=secret_3shapes). It lives in
                          # config so it is PERSISTENT/reproducible across runs, yet stays
@@ -19,14 +21,19 @@ seeds:
                          # built-agent-image guard (scripts/check_no_hidden_in_image.py)
                          # asserts no agent image ever ships a populated secret_shape.
                          # Change this per deployment to rotate the secret.
-  # NOTE: the held-out (hidden) seed is intentionally NOT here -- shipping it in
-  # the image (or as a fixed public constant) would let a submission regenerate
-  # the held-out inputs and defeat the overfit gate. It defaults to a per-process
-  # random value host-side (hpcagent_bench/harness/hidden_tests, .dockerignore'd);
-  # pin HPCAGENT_BENCH_SEEDS_HIDDEN_TESTS only for a deterministic test.
+  # NOTE: the held-out cases have no seed of their own -- they ARE the submit seed, so there is
+  # one recorded input set rather than two things to keep in step.
 
 fuzz:
   iterations: 20
+  # Correctness draws per config on the AGENT GRADING path only, counted INCLUDING draw 0, which
+  # is the declared MAXIMUM rather than a random sample -- so 8 is the max plus 7 random draws,
+  # on top of the edge shapes, which are separate. Separate from `iterations`
+  # because that key also drives the `run` verb's framework sweep and harbor_grade's default
+  # --k, which produce framework-comparison numbers; shrinking it globally would have moved
+  # those too. Every axis the correctness suite tests is unchanged -- only how many times the
+  # size axis is resampled per config.
+  correctness_iterations: 8
   # Upper dimension bound = paper_size * hi ("big enough" => >= paper).
   size_hi_mult: 4.0
   # Absolute clamp on every drawn size dimension. 0 = off (full GPU-scale range).
@@ -36,8 +43,15 @@ fuzz:
   # Fuzz is ALWAYS anchored on XL: [XL * xl_lo_mult, XL * xl_hi_mult]. Not a span from L, and not
   # clamped by the correctness cap -- a timed draw must be the production shape, or the measurement
   # is of thread-team startup rather than of the optimisation.
-  xl_lo_mult: 0.85
-  xl_hi_mult: 1.15
+  # These bound the CORRECTNESS draws directly; the TIMED draws take the upper half of the
+  # interval (large_shapes' big_spec), so the timed span is [(lo+hi)/2, hi] x XL, not [lo, hi].
+  # 0.50/1.00 therefore times [0.75, 1.00] x XL -- production-scale, per the note above, with a
+  # real spread instead of the three-measurements-of-one-point that 0.85/1.15 timed
+  # ([1.00, 1.15], span 0.15 -- and every draw over 1.00 BREACHED the track ceiling, since
+  # sizing.fit_to_ceiling puts XL at 0.97 * TRACK_XL_CEILING = 3.88 GiB and 1.15x is 4.46 GiB).
+  # Capping hi at 1.00 makes XL a real ceiling; lowering lo widens correctness coverage too.
+  xl_lo_mult: 0.50
+  xl_hi_mult: 1.00
   # Per-dimension ceiling for the Stage-1 CORRECTNESS fuzz shapes only (edge probes
   # and the timed large shapes are unaffected). Correctness checks indexing/shape
   # handling, not speed, so the fuzzed sizes stay bounded well below the timed range:
@@ -82,7 +96,16 @@ service:
   # key below (one source of truth read by both the judge and the Harbor grader, so the two
   # measurement paths cannot drift).
   input_mode: source       # POST /submit accepts: py-binding | source | library | any
-  preset: fuzzed           # data-size preset the judge scores at
+  score_enabled: true      # /score is ON by default and that is the intended protocol: the free
+                           # iteration loop is where the agent learns, and the measured cost of
+                           # taking it away is real (oss120b lost 40% of its rounds per kernel to
+                           # packet rent alone and its submissions fell with them). Set false ONLY
+                           # for the deliberate submit-only EXPERIMENT ARM; the route then 403s
+                           # and the agent is told to submit instead of being left to retry.
+  preset: XL+fuzz          # data-size preset the judge scores at. `+fuzz` is a MODIFIER on a
+                           # size rung, so it attaches to any of them -- M+fuzz draws around M.
+                           # XL is the default because it is the production shape the manifests
+                           # declare. The bare `fuzzed` token still means exactly XL+fuzz.
   datatype: float64
   # NOTE: the timed-rep count is NOT here -- it is the SHARED `measurement.repeat`
   # key below (one source of truth read by the judge, Harbor grader, and API, so the
@@ -101,6 +124,11 @@ measurement:
                            #   a C-oracle track, where that degradation fails the score instead.
   repeat: 20               # timed reps kept per measurement (>= 20 keeps the CI meaningful; 20 is
                            # that floor, and halves the timed work per grade against the old 50).
+  local_repeat: 5          # timed reps on /score ONLY, which reduces with min_of_k and so needs
+                           # no distributional power. Nothing /score returns is recorded, so
+                           # paying the ranked count there bought nothing. NOT used by /baseline:
+                           # that route advertises the agent's TARGET, and min-of-5 >= min-of-20
+                           # would hand out a target systematically easier than the graded one.
   warmup: 1                # untimed warmup reps run + discarded before the timed reps, on the
                            # submission AND every baseline (fair), so cold caches / first-touch
                            # faults don't pollute the samples. 0 = off. Timed cells only.
@@ -126,8 +154,12 @@ perf:
   mode: all_configs_3shapes   # all_configs_3shapes (default; n_large_shapes fixed+public
                               # large shapes per config) | secret_3shapes (n_large_shapes
                               # shapes per config drawn from seeds.secret_shape, hidden)
-  n_large_shapes: 3           # timed large shapes per config -- applies to BOTH modes
-                              # (public or hidden, always this many)
+  n_large_shapes: 3           # timed cells IN TOTAL -- applies to BOTH modes (public or hidden,
+                              # always this many). Each cell pairs ONE large shape with ONE
+                              # config, dealt round-robin (metric._timed_cells); it is not this
+                              # many shapes per config, which made timed cost scale with the
+                              # config count. A config past index n-1 is not TIMED; it is still
+                              # graded for correctness, which enumerates configs uncapped.
   max_configs: 5              # cap on configs evaluated per kernel (deterministic seeded
                               # subset when a config space exceeds it -> bounded cost)
 
@@ -256,6 +288,19 @@ record:
   harden: true                    # independent rebuild+re-run before a leaderboard write
   dual_oracle: true               # also require agreement with the C reference (when it builds)
   speedup_suspect_above: 1000.0   # flag implausible speedups for review (still recorded)
+  harvest_unsubmitted: true       # at judge shutdown, re-grade the last CORRECT /score of every
+                                  # run that never reached /submit, and record it. An agent that
+                                  # times out or runs out of tokens otherwise leaves a solved
+                                  # kernel as a non-submission, which understates the arm rather
+                                  # than the agent. The stashed SOURCE is re-graded through the
+                                  # ordinary recorded path (submit's seed, ranked repeats, harden
+                                  # gate), so a promoted row is measured like every other row; the
+                                  # /score number itself is never promoted. Rows carry
+                                  # optimizer="harvested" so analysis can separate them.
+  harvest_cap: 512                # most recent (run, kernel) sources held at once -- the ledger is
+                                  # keyed by client-supplied identity, so it is bounded on purpose
+  harvest_budget_s: 1800          # wall-clock ceiling on the shutdown harvest. What it cuts is
+                                  # logged, never dropped silently
   log_attempts: true              # log non-verified submissions to the attempts table
   log_calls: true                 # log EVERY served grade (/score and /submit alike) to the calls
                                   # table, so an arm's whole trajectory -- the failures before the
