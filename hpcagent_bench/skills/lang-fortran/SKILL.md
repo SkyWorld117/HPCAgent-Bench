@@ -30,6 +30,67 @@ Extents are DECLARED, not assumed -- which is what makes `a = 2.0d0 * a`, `size(
 and `collapse(2)` legal here. An extent must be typed before the array using it; the generated
 stub already orders them.
 
+## Translating the numpy reference -- three conversions, all silent if missed
+
+numpy is row-major, 0-based, half-open. Fortran is column-major, 1-based, INCLUSIVE. All
+three differ, none of them raise, and a miss scores as a bare `numeric mismatch` that never
+says why.
+
+1. **Subscripts REVERSE.** numpy `x[j, i]` is Fortran `x(i + 1, j + 1)`. The stub already
+   declares the extents reversed (`A(NK, NI)` for a C `A[NI][NK]`), so the shape looks right
+   whichever order you write it -- and when the array is SQUARE, `x(n, n)`, the signature
+   tells you nothing at all. Transliterating `x[j,i]` to `x(j,i)` computes the TRANSPOSE:
+   same shape, clean build, wrong numbers on every input, forever.
+2. **Indices start at 1.** `for i in range(n)` is `do i = 1, n`, and every subscript carried
+   over from a numpy index needs its `+ 1`.
+3. **`do` bounds are INCLUSIVE.** `range(1, n)` stops at `n - 1`; `do j = 1, n` runs THROUGH
+   `n`. Half-open to inclusive is `do j = 1, n - 1`.
+
+Safest transliteration keeps the reference's own 0-based counters and offsets at the
+subscript -- `do i = 0, n - 1` ... `a(i + 1)` -- so bounds stay comparable line by line.
+
+### The whole mapping, on one 2D loop nest
+
+A recurrence down the first numpy axis, independent across the second:
+
+```python
+def demo(dst, src, n):             # dst, src are (n, n)
+    for i in range(n):
+        for j in range(1, n):
+            dst[j, i] = dst[j - 1, i] * 0.5 + src[j, i]
+```
+
+Element by element, `dst[j, i]` is `dst(i + 1, j + 1)`. Keep the reference's own 0-based
+counters and put the offset on the subscript; `range(1, n)` becomes the inclusive `1, n - 1`:
+
+```fortran
+! CORRECT
+do i = 0, n - 1
+  do j = 1, n - 1
+    dst(i + 1, j + 1) = dst(i + 1, (j - 1) + 1) * 0.5d0 + src(i + 1, j + 1)
+  end do
+end do
+```
+
+```fortran
+! WRONG -- what a straight transliteration produces
+do i = 1, n
+  do j = 2, n
+    dst(j, i) = dst(j - 1, i) * 0.5d0 + src(j, i)
+  end do
+end do
+```
+
+The wrong version builds clean, runs at full speed, and returns the TRANSPOSE. When the array
+is square no shape check can catch it; the only symptom is `numeric mismatch` on every input.
+Note where the recurrence lands: correct code carries it along the SECOND subscript, so the
+independent loop is the FIRST subscript -- which is also the contiguous one, and therefore the
+one to make innermost and vectorize.
+
+**A 2D kernel that builds clean and scores `numeric mismatch` is a transposed subscript until
+proven otherwise.** Check that before touching the algorithm: print one element and compare it
+against the reference's, or `profile` with `tool: "none"` and dump the first differing index.
+
 ## `do concurrent` -- the other threading spelling
 
 A PROMISE, not a command: you assert the iterations are independent and the compiler runs them in
@@ -44,8 +105,8 @@ side effects inside.
 
 ## Writing fast Fortran
 
-- **Column-major: first index fastest, so it belongs innermost.** An element the reference writes
-  as `a[i][j]` is `a(j + 1, i + 1)` here -- subscripts reversed, starting at 1.
+- **Column-major: first index fastest, so it belongs innermost** -- the same reversal the
+  translation section above makes a correctness gate, now also the fast loop order.
 - Dummy arguments cannot alias: `restrict` for free. `pointer`/`target` gives that back -- plain
   arrays, integer indices.
 - **Scalars, never length-1 arrays or sections**: a scalar is a register.
