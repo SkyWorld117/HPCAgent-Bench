@@ -83,7 +83,7 @@ it for you; it is written out here so you can read an error and fix the request 
 
 Base URL: `$JUDGE_URL`, else `$OPTARENA_AGENT_API_URL`, else `http://127.0.0.1:8800`.
 
-    GET  /task/<kernel>?language=<lang>&rank=<n>   spec: signature, symbol, rtol/atol, input_mode, shared
+    GET  /baseline/<kernel>?language=<lang>&preset=<p>&rank=<n>   the time to beat
     POST /score      public-seed grade
     POST /submit     terminal grade, recorded
     POST /profile    diagnostics

@@ -8,6 +8,7 @@ default rank 0, so ``rank=0`` is what a conforming client sends -- omitting it i
 which is :mod:`tests.test_judge_routing`'s subject."""
 import json
 import threading
+import urllib.error
 import urllib.request
 
 import pytest
@@ -45,30 +46,32 @@ def test_verify_settings_keys_are_independent_verify_kwargs():
     assert set(verify_settings()) == {"reverify_seed", "dual_oracle", "suspect_above"}
 
 
-def test_health_and_task():
+def test_health_is_served_and_the_removed_task_route_is_not():
+    """The task context is rendered into the prompt and pre-generated into the shared folder,
+    so the judge no longer serves it. Assert the route is GONE rather than silently restored:
+    a second way to read the contract is a second thing to keep in step with the first."""
     srv, port = _server(ServiceConfig())
     try:
         code, body = _get(port, "/health")
         assert code == 200 and body["status"] == "ok" and body["rank"] == RANK
-        code, spec = _get(port, f"/task/gemm?language=c&rank={RANK}")
-        assert code == 200
-        assert spec["kernel"] == "gemm" and spec["symbol"] and spec["signature"]
-        assert "speedup" in spec["goal"]
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _get(port, f"/task/gemm?language=c&rank={RANK}")
+        assert caught.value.code == 404, "the /task route was reintroduced"
     finally:
         srv.shutdown()
         srv.server_close()
 
 
-def test_task_accepts_path_style_kernel_keys():
+def test_get_routes_accept_path_style_kernel_keys():
     """Every registry key is path-style (track/dir/name), so the kernel is everything after the
-    verb. Truncating to one segment 404'd the first tool call of every campaign task."""
+    verb. Truncating to one segment 404'd the first tool call of every campaign task. /baseline
+    is now the only GET route that parses a kernel, so it carries the guard."""
     srv, port = _server(ServiceConfig())
     try:
         key = "loop_level_reasoning/argmax_value/argmax_value"
-        code, spec = _get(port, f"/task/{key}?language=c&rank={RANK}")
-        assert code == 200
-        assert spec["kernel"] == "argmax_value" and spec["symbol"] and spec["signature"]
-        assert "dir" in spec["shared"]
+        code, body = _get(port, f"/baseline/{key}?language=c&preset=S&rank={RANK}")
+        assert code == 200, body
+        assert body["baselines"], "a path-style key must resolve to a real kernel"
     finally:
         srv.shutdown()
         srv.server_close()

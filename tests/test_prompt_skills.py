@@ -328,12 +328,12 @@ def test_tool_fragments_are_overridable(tmp_path):
 # --------------------------- the service prompt path --------------------------- #
 def test_service_prompt_honours_inline_kernel():
     """The HTTP judge-loop prompt is a different template, not a different system: it names
-    where to READ the reference instead of pasting it. An HTTP-driven agent may have no
-    container filesystem, so it is pointed at the /task endpoint it definitely has -- not at
-    an /app path that may not exist for it."""
+    where to READ the reference instead of pasting it. That place is the agent's own task folder,
+    which materialize_shared.sh fills before the run -- both containers see it, and it now holds a
+    per-language baseline as well as the numpy semantics."""
     from hpcagent_bench.harness.service import service_prompt
     prompt = service_prompt("gemm", "c", "http://judge:8000")
-    assert "http://judge:8000/task" in prompt and "reference_numpy" in prompt
+    assert "/tasks/gemm/" in prompt and "_numpy.py" in prompt
     assert reference_body() not in prompt
 
 
@@ -371,13 +371,14 @@ def test_service_prompt_never_leaks_the_host_path():
 
 
 # ---------------------------- judge access, multi-task ---------------------------- #
-def test_task_endpoint_names_the_kernel():
-    """One judge serves many kernels, so every documented call carries the kernel -- a bare
-    /task would 400 ('usage: GET /task/<kernel>?language=c')."""
+def test_the_prompt_points_at_this_kernels_own_material():
+    """One judge and one shared folder serve many kernels, so every path the prompt hands the
+    agent carries the kernel. A bare tasks/ directory would have it reading someone else's
+    reference -- and the route that used to serve this is gone, so the folder is the only copy."""
     from hpcagent_bench.harness.service import service_prompt
     prompt = service_prompt("gemm", "c", "http://judge:8000")
-    assert "http://judge:8000/task/gemm?language=c" in prompt
-    assert "/task |" not in prompt and "/task \n" not in prompt
+    assert "/tasks/gemm/" in prompt
+    assert "/task/gemm" not in prompt, "the removed /task route came back into the prompt"
 
 
 def test_both_a_curl_and_a_python_call_are_offered():
@@ -396,10 +397,11 @@ def test_the_python_wrapper_really_exposes_what_the_prompt_claims():
     import inspect
 
     from hpcagent_bench.harness.tools import JudgeClient
-    for method in ("task", "baseline", "submit"):
-        assert callable(getattr(JudgeClient, method, None)), method
-    params = inspect.signature(JudgeClient.task).parameters
+    for method in ("baseline", "score", "submit"):
+        assert callable(vars(JudgeClient).get(method)), method
+    params = inspect.signature(JudgeClient.baseline).parameters
     assert "kernel" in params and "language" in params
+    assert "task" not in vars(JudgeClient), "the removed /task route came back onto the client"
 
 
 def test_the_judge_url_is_per_prompt_not_global():
@@ -415,7 +417,7 @@ def test_the_judge_url_is_per_prompt_not_global():
 def test_one_judge_serves_many_kernels():
     from hpcagent_bench.harness.service import service_prompt
     for kernel in ("gemm", "gesummv"):
-        assert f"/task/{kernel}?language=c" in service_prompt(kernel, "c", "http://j:1")
+        assert f"/tasks/{kernel}/" in service_prompt(kernel, "c", "http://j:1")
 
 
 # --------------------------- timed shapes are never disclosed --------------------------- #

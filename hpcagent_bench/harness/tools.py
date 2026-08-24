@@ -7,7 +7,6 @@ hidden tests, the references, and the timer. An optimizer never imports the
 scorer directly; it goes through this thin client, which speaks the judge's three
 routes over stdlib HTTP (``/oracle`` backs three method views):
 
-* :meth:`JudgeClient.task`     -> ``GET  /task/<kernel>``     (leak-free signature)
 * :meth:`JudgeClient.baseline` -> ``GET  /baseline/<kernel>`` (reference times)
 * :meth:`JudgeClient.verify`   -> ``POST /oracle``            (correctness slice)
 * :meth:`JudgeClient.score`    -> ``POST /oracle``            (speedup slice)
@@ -146,10 +145,6 @@ class JudgeClient:
         """Liveness + the judge's OWN rank (``rank``) -- the one route that answers whatever
         rank was asked for, so a mismatch can be diagnosed rather than merely refused."""
         return self._get("/health")
-
-    def task(self, kernel: str, language: str = "c") -> Dict[str, Any]:
-        """The leak-free task spec (signature, ABI doc, tolerances, goal)."""
-        return self._get(f"/task/{kernel}", {"language": language})
 
     def baseline(self, kernel: str, language: str = "c", preset: str = "S") -> Dict[str, Any]:
         """Reference times (e.g. ``{"numpy": ns, "c": ns}``) timed in the judge."""

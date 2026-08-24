@@ -9,9 +9,10 @@ HTTP API the agent (a second instance of the SAME image, e.g. driving
 mini-swe-agent) calls over a port:
 
 * ``GET  /health``               -> liveness + this judge's own ``rank``.
-* ``GET  /task/<kernel>?language=c``  -> the leak-free task spec (signature to
-  implement, the NumPy reference's semantics, tolerances, the goal, how to
-  submit). This is what the agent's prompt is built from.
+* (There is no ``/task`` route. The signature, the tolerances and the goal are rendered
+  INTO the agent's prompt, and the NumPy reference plus a per-language baseline are
+  pre-generated files in the shared folder -- so a route that re-served them was a second
+  way to read what the agent already has.)
 * ``GET  /baseline/<kernel>?language=c&preset=S``  -> the reference time(s) the
   agent must beat (``{"baselines": {"numpy": ns, ...}}``), measured IN THIS
   CONTAINER so they share the submission's toolchain/CPU.
@@ -206,55 +207,6 @@ def from_config() -> RunConfig:
         datatype=str(config.get("service.datatype", "float64")),
         repeat=measurement_repeat(),
     )
-
-
-def _task_spec(kernel: str, language: str, cfg: RunConfig, prompt_config=None) -> dict:
-    """The leak-free task spec for ``/task`` (and the agent's prompt).
-
-    Takes the SAME PromptConfig the prompt is rendered from -- the context must not be
-    assembled two different ways for one run.
-    """
-    from hpcagent_bench.harness.prompts import PromptConfig, build_context
-    ctx = build_context(Task(kernel, "restricted", language),
-                        oracle=cfg.oracle.value,
-                        baseline=cfg.baseline_token,
-                        prompt_config=prompt_config or PromptConfig.from_config())
-    return {
-        "kernel":
-        ctx["kernel"],
-        "language":
-        ctx["language"],
-        "signature":
-        ctx["stub"],
-        "symbol":
-        ctx["symbol"],
-        "reference_numpy":
-        ctx["reference"],
-        "rtol":
-        ctx["rtol"],
-        "atol":
-        ctx["atol"],
-        "preset":
-        cfg.preset,
-        "oracle":
-        cfg.oracle.value,
-        "baseline":
-        ctx["baseline"],  # the resolved concrete kind (the ``auto`` selector is mapped per kernel)
-        "input_mode":
-        cfg.input_mode.value,
-        "abi_doc":
-        ctx["abi_doc"],
-        # The one filesystem both containers see. A prebuilt `.so` is read from HERE (its path in
-        # the agent's container means nothing in the judge's), and a dependency installed here is
-        # linkable with a bare -l<name> because the judge already passes the search paths.
-        "shared": {
-            "dir": sandbox.shared_dir(),
-            "libraries": sandbox.installed_libraries(),
-        },
-        "goal": ("Return the FASTEST implementation that stays correct. Submit it to "
-                 "POST /submit; maximize the returned 'speedup' while 'correct' is true, "
-                 "iterating against POST /score on the way."),
-    }
 
 
 def service_prompt(kernel: str,
@@ -573,19 +525,10 @@ class JudgeHandler(BaseHTTPRequestHandler):
                     "baseline": self.cfg.baseline_token,
                     "input_mode": self.cfg.input_mode.value
                 })
-        if route not in ("task", "baseline"):
+        if route != "baseline":
             return self._send(404, {"error": f"unknown route {self.path!r}"})
         if self.misrouted((qs.get("rank") or [None])[0]):
             return None
-        if route == "task":
-            kernel, language = self._task(parts, qs)
-            if not kernel:
-                return self._send(400, {"error": "usage: GET /task/<kernel>?language=c&rank=<judge rank>"})
-            try:
-                return self._send(200, _task_spec(kernel, language, self.cfg))
-            except Exception as exc:  # noqa: BLE001 -- unknown kernel etc. -> 404
-                return self._send(404, {"error": f"no task for {kernel!r}: {exc}"})
-        # route == "baseline" -- the only one left
         kernel, language = self._task(parts, qs)
         preset = (qs.get("preset") or [self.cfg.preset])[0]
         if not kernel:

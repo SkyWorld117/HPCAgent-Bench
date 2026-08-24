@@ -821,6 +821,24 @@ jobs:
           python -m pytest -q -p no:cacheprovider -rfEs --timeout=2400 \
             tests/test_kernelbench_translation.py
 
+      # Every loop_level_reasoning kernel ships a committed reference in ALL THREE languages, and the
+      # agent reads that FILE -- there is no route serving it. Two ways it silently rots: the
+      # emitter changes and the committed file does not (drift), or a file grades correct but has
+      # the wrong shape (the Fortran bind(C) ABI is where submissions actually fail, and a
+      # module-wrapped or function-shaped baseline teaches the wrong thing). The dry-run catches
+      # the first -- it must want to create NOTHING -- and the form test catches the second.
+      - name: Phase 5e -- generated references are committed, current and well-formed
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          python scripts/collect_reference_sources.py --dry-run | tee /tmp/refgen.txt
+          if grep -q '^\[dry-run\] emitted_baselines' /tmp/refgen.txt; then
+            echo "::error::a generated reference is missing or stale -- run scripts/collect_reference_sources.py and commit the result"
+            grep '^\[dry-run\] emitted_baselines' /tmp/refgen.txt | head -20
+            exit 1
+          fi
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=600 tests/test_generated_references.py
+
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
         if: always()

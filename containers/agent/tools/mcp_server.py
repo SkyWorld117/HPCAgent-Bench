@@ -19,11 +19,9 @@ import score
 import search
 import submit
 import syntax_check
-import task
 
 #: MCP tool name -> the module implementing it.
 TOOLS: dict[str, ModuleType] = {
-    "task": task,
     "score": score,
     "submit": submit,
     "profile": profile_tool,
