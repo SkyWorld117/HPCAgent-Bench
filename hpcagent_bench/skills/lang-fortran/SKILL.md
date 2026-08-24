@@ -81,14 +81,21 @@ do i = 1, n
 end do
 ```
 
-The wrong version builds clean, runs at full speed, and returns the TRANSPOSE. When the array
-is square no shape check can catch it; the only symptom is `numeric mismatch` on every input.
+The wrong version builds clean and returns the TRANSPOSE. When the array is square no shape
+check can catch it, and the usual symptom is `numeric mismatch` on every input.
+
+It has a second, quieter symptom. If the stencil's offsets are SYMMETRIC in the two axes -- a
+pure elementwise update, a diagonal `(-1, -1)` carry, a box of corners, a whole-array max or
+sum -- then transposing the code transposes the answer too, and the answer compares EQUAL. The
+run is graded correct and is 2x to 6x slower, because every access now strides the long way
+through memory. So `numeric mismatch` proves a transpose, but passing does not rule one out:
+on a symmetric stencil the only evidence is the speed.
 Note where the recurrence lands: correct code carries it along the SECOND subscript, so the
 independent loop is the FIRST subscript -- which is also the contiguous one, and therefore the
 one to make innermost and vectorize.
 
 **A 2D kernel that builds clean and scores `numeric mismatch` is a transposed subscript until
-proven otherwise.** Check that before touching the algorithm: print one element and compare it
+proven otherwise -- and so is one that grades correct but will not go faster.** Check that before touching the algorithm: print one element and compare it
 against the reference's, or `profile` with `tool: "none"` and dump the first differing index.
 
 ## `do concurrent` -- the other threading spelling
