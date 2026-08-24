@@ -92,6 +92,17 @@ fp32, and the corpus grades both. Test in the kernel's real dtype, not whatever
   array scalar, which returns a python float computed in double. Inherit the dtype from an input
   (`np.zeros(shape, x.dtype)`) and use the `np.` ufunc, never the `math.` one.
 
+**Use the size symbol the manifest already passes you, not `arr.shape[k]`.** Read the `.yaml`:
+when a dimension is a declared symbol AND that symbol is a parameter of the kernel, name it
+directly -- `for i in range(N)`, not `n = A.shape[0]; for i in range(n)`. The symbol is the
+authority on that extent; a `.shape` read is a re-derivation of it that only happens to agree.
+It also costs the generated columns real work: DaCe has no runtime `.shape`, so the emitter has to
+resolve every read back to the symbol it came from (`_ShapeToSymbol`, `ResolveShapeReads`,
+`hoist_compound_extents`, `_plan_size_promotion` in `dace_emit`), and a read it cannot resolve
+poisons the whole enclosing size expression -- promotion is all-or-nothing. Where the signature
+does NOT carry the symbol, `.shape` is the only spelling available and is correct; use it there and
+nowhere else.
+
 **When the oracle is too slow to grade, verify equivalence directly.** Some scalar references cost
 hundreds of millions of interpreted iterations at the SMALLEST rung -- the standard-conv reference
 is 421,660,800 -- so `check.py` never returns and the kernel comes back unverified. Unverified is
