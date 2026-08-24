@@ -203,6 +203,11 @@ jobs:
         # not the job. --timeout is the per-test backstop; the oracle already SIGKILLs its
         # own forked jax/native children, so this only catches an in-process numba hang.
         #
+        # --timeout MUST stay above numerical_oracle.PY_FORK_TIMEOUT_S (600), or the backstop fires
+        # first and the oracle's own SIGKILL never runs: at 600 == 600 the cloudsc numba leg (618s,
+        # measured) died as a pytest Timeout instead of recording skip:too-long, and reported twice
+        # because _result runs every backend in ONE cached call per stem.
+        #
         # 35 -> 55: the old budget was set against a 200-port kernelbench subtrack and an
         # UNINSTRUMENTED run. Both moved. The subtrack is now 239 (+19.5%) and coverage is on
         # job-wide, which is deliberate here -- unlike Phase 2c this phase drives real library
@@ -214,7 +219,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "numba,jax"
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=900 tests/test_e2e_numerical.py
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
@@ -1061,9 +1066,12 @@ jobs:
     name: mpi + dace-numeric + hf-export (distributed track, DaCe-vs-numpy corpus, HF dataset)
     runs-on: ubuntu-latest
     # ~11m51s (mpi) + ~16m18s (dace-numeric) + ~2m37s (hf-export), measured on runs 31478271044 /
-    # 31023526869 -- ~31m sequential. 75 leaves more than 2x that, with room above the two explicit
-    # phase caps below (30 + 30) on a bad day for either.
-    timeout-minutes: 75
+    # 31023526869 -- ~31m sequential, all three WARM. 95 leaves more than 2x that, with room above
+    # the two explicit phase caps below (30 + 50) on a bad day for either. The dace-numeric cap is
+    # sized for a COLD compile cache, not the warm measurement: a job that trips a step timeout ends
+    # red, actions/cache skips the save, and the next run starts cold again -- so a cap that fits
+    # only the warm number never lets the first cold run save the cache that would make it warm.
+    timeout-minutes: 95
     env:
       # OpenMPI on a GH-Actions runner has no high-speed fabric (no InfiniBand / UCX device), so pin
       # the simple self + shared-memory transports and disable UCX's VFS probe -- otherwise MPI_Init
@@ -1217,7 +1225,11 @@ jobs:
         # difference between a ten-minute job and a forty-minute one.
         #
         # --maxfail=20 so a translator-wide break reports twenty named kernels, not three hundred.
-        timeout-minutes: 30
+        #
+        # 50, not the ~16m18s warm measurement: run 32669847845 was killed at 81% on a cold cache
+        # (357/798 hits against ~99% warm) after the ccache key rotated, and the kill is what stops
+        # the new-format cache from ever being saved.
+        timeout-minutes: 50
         env:
           # NOT /tmp: it is tmpfs, and exhausting it fails builds in a way that reads as a kernel defect.
           HPCAGENT_BENCH_DACE_BUILD_ROOT: ${{ runner.temp }}/dace_numeric
