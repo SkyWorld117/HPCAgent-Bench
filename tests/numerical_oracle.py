@@ -864,6 +864,21 @@ def _coerce_to_dtype(v, dt):
     return dt(v)
 
 
+#: Kernels whose numba leg is compiled at a lower LLVM optimization level, keyed to that level.
+#: This sweep grades NUMBERS, not speed, so optimization is pure cost in it -- but only where the
+#: cost is real. Every other kernel keeps numba's default pipeline (parfors, both vectorizers) under
+#: test, which on a 0.6-7.5s leg is nearly free, and a demoted kernel is still fully graded.
+#:
+#: cloudsc, measured 2026-08-24 on a four-core box: 1166.6s at the default, 381s+ at NUMBA_OPT=1
+#: (stopped, unfinished), 71.4s and still ``ok`` at NUMBA_OPT=0 -- the cliff is between 0 and 1. What
+#: LLVM spends that time on is the 58 explicit column loops a27abad20 introduced; the body itself
+#: passes at either level.
+#:
+#: Not keyed on body size, which does not predict the cost: fv3_dycore is twice cloudsc's size at
+#: 2606 lines and compiles in 39.9s.
+NUMBA_LOW_OPT: Dict[str, str] = {"cloudsc": "0"}
+
+
 def _dep_available(dep: str) -> bool:
     import importlib.util
     if importlib.util.find_spec(dep) is None:
@@ -892,6 +907,10 @@ def _py_backend_compute(backend, short, info, by, syms, expected, compare, rtol,
     """Emit + compile + import + run + compare a Python/JIT backend, only in the forked child."""
     import importlib.util
     cli, extra, pattern, dep = PY_BACKENDS[backend]
+    # Before the emitted module is imported, because that import is what pulls numba in and numba
+    # reads NUMBA_OPT once, at import. Safe to set in place: this only ever runs in the forked child.
+    if backend == "numba" and short in NUMBA_LOW_OPT:
+        os.environ["NUMBA_OPT"] = NUMBA_LOW_OPT[short]
     npy = (REPO / "hpcagent_bench" / "benchmarks" / info["relative_path"] / f'{info["module_name"]}_numpy.py')
     from hpcagent_bench.emit_bridge import bench_info_tempfile
     # bench_info JSON synthesized from the co-located YAML.

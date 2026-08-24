@@ -10,8 +10,8 @@ import yaml
 from hpcagent_bench import paths
 from hpcagent_bench.precision import Precision
 from hpcagent_bench.spec import KERNELS, BenchSpec, validate_min_precision
-from tests.numerical_oracle import (CHAOTIC_FLOAT_TOLERANCE, FP16_BACKENDS, MISSING_EMIT_FEATURE, OUT_OF_SCOPE,
-                                    PRECISIONS, PY_FORK_TIMEOUT_S, outputs_match, run_kernel)
+from tests.numerical_oracle import (CHAOTIC_FLOAT_TOLERANCE, FP16_BACKENDS, MISSING_EMIT_FEATURE, NUMBA_LOW_OPT,
+                                    OUT_OF_SCOPE, PRECISIONS, outputs_match, run_kernel)
 from tests.corpus_counts import KERNELBENCH_PORT_COUNT
 
 #: Backends fed DIRECTLY by the static translators' native emit, so a MISSING_EMIT_FEATURE entry
@@ -113,22 +113,6 @@ def test_the_ungated_subtrack_does_not_grow():
                                            f"{sorted(set(ungated))[:5]}")
 
 
-#: Kernels whose numba leg is not run, keyed to the seconds it costs. Measured 2026-08-24 with
-#: HPCAGENT_BENCH_PY_FORK_TIMEOUT_S lifted so the leg could finish: numba compiles the whole body on
-#: every run, and the emitter's ``cache=True`` lands in a throwaway tempdir, so CI pays the compile
-#: each time rather than amortizing it.
-#:
-#: One entry, and it is a measurement rather than a policy. A 20-kernel spread across the gated
-#: corpus costs 0.6-7.5s per numba leg, the fifteen largest BODIES cost 0.9-87.4s (fv3_dycore, at
-#: 2606 lines the biggest kernel here, is 39.9s), and cloudsc is 1166.6s -- 13x the next worst. On
-#: one xdist worker that single leg is most of Phase 5 going from 26:01 to 50:20. Trimming numba
-#: more broadly would drop coverage for seconds; trimming it here recovers twenty minutes.
-#:
-#: Cost, not correctness: cloudsc's numba leg PASSES when it is allowed to finish. It stays graded
-#: by c/cpp/fortran/jax/pythran, each of which grades it in under a minute, so the precision-lowering
-#: witness PINNED_KERNELS names it for is intact.
-SLOW_NUMBA: dict = {"cloudsc": 1167}
-
 # run_kernel emits+runs ALL backends in one call; cache per stem so per-backend items share it.
 _CACHE: dict = {}
 
@@ -154,13 +138,7 @@ def _result(stem: str) -> dict:
             _CACHE[stem] = {b: skip for b in E2E_BACKENDS}
             return _CACHE[stem]
         # pluto is opt-in in run_kernel; runs only when named in E2E_BACKENDS.
-        # A SLOW_NUMBA kernel is dropped from the backend set BEFORE the call, not skipped after it:
-        # the cost being avoided is the compile itself, and the oracle's fork cap can only fire once
-        # that compile has already run.
-        wanted = [b for b in E2E_BACKENDS if not (b == "numba" and stem in SLOW_NUMBA)]
-        res = run_kernel(stem, "S", precision=E2E_PRECISION, only_backends=frozenset(wanted)) if wanted else {}
-        if stem in SLOW_NUMBA and "numba" in E2E_BACKENDS:
-            res["numba"] = f"skip:too-long:compile:{SLOW_NUMBA[stem]}s"
+        res = run_kernel(stem, "S", precision=E2E_PRECISION, only_backends=frozenset(E2E_BACKENDS))
         # jax fork-timeout -> skip:too-long; retry alone at a capped size to still validate correctness.
         if res.get("jax", "") == "skip:too-long":
             jres = run_kernel(stem, "S", precision=E2E_PRECISION, max_size=_JAX_E2E_MAX_SIZE, only_backends={"jax"})
@@ -191,37 +169,31 @@ def test_pinned_kernels_stay_in_the_sweep():
                           f"precision-lowering bug class")
 
 
-def test_the_numba_compile_exemption_stays_measured_and_rare():
-    """SLOW_NUMBA is a cost exemption, so both halves of that claim are pinned here.
+def test_the_numba_opt_override_stays_measured_and_rare():
+    """NUMBA_LOW_OPT trades numba's optimizer away for compile time, so both halves are pinned.
 
-    MEASURED: an entry's cost must exceed the oracle's own fork cap. Below it the leg finishes
-    inside the harness and there is nothing to exempt -- an entry there would be hiding a failure
-    behind a performance word.
+    RARE: the corpus's numba legs cost seconds (0.6-7.5s over a twenty-kernel spread, 0.9-87.4s over
+    the fifteen largest bodies). Every kernel not listed keeps the default pipeline -- parfors and
+    both vectorizers -- under test, which is the coverage this override spends. A list that grows
+    past a handful has stopped being the outlier it was measured to be.
 
-    RARE: the corpus's numba legs cost seconds (0.6-7.5s over a 20-kernel spread, 0.9-87.4s over
-    the fifteen largest bodies). A list that grows past a handful stops being the outlier it was
-    measured to be and becomes a quiet retreat from numba coverage; adding to it means measuring
-    first and moving this number deliberately.
-
-    Every entry stays IN the sweep: the exemption is per backend, so the kernel is still graded by
-    the native backends, jax and pythran.
+    VALID: the level must be one numba accepts. A typo here does not fail, it is ignored, and the
+    kernel silently goes back to costing twenty minutes.
     """
     gated = set(_gated_stems())
-    for stem, seconds in SLOW_NUMBA.items():
-        assert stem in gated, f"{stem} is exempted from the numba leg but is not in the gated sweep at all"
-        assert seconds > PY_FORK_TIMEOUT_S, (
-            f"{stem}'s numba leg is listed at {seconds}s, inside the {PY_FORK_TIMEOUT_S}s fork cap that would "
-            f"record it on its own; measure it again, and if it now finishes, DELETE the entry")
-    assert len(SLOW_NUMBA) <= 3, (f"{len(SLOW_NUMBA)} kernels now skip their numba leg on compile cost; that is a "
-                                  f"retreat from numba coverage, not an outlier: {sorted(SLOW_NUMBA)}")
+    for stem, level in NUMBA_LOW_OPT.items():
+        assert stem in gated, f"{stem} carries a numba opt override but is not in the gated sweep at all"
+        assert level in {"0", "1", "2", "3"}, f"{stem}: NUMBA_OPT={level!r} is not a level numba accepts"
+    assert len(NUMBA_LOW_OPT) <= 3, (f"{len(NUMBA_LOW_OPT)} kernels now compile with numba's optimizer turned "
+                                     f"down; measure before adding another: {sorted(NUMBA_LOW_OPT)}")
 
 
-def test_a_numba_exempt_kernel_is_still_graded_by_the_other_backends():
-    """The exemption drops ONE backend. A kernel excused everywhere would be out of the sweep."""
-    for stem in SLOW_NUMBA:
-        assert stem not in OUT_OF_SCOPE, f"{stem} is both numba-exempt and out of scope, so nothing grades it"
-        assert MISSING_EMIT_FEATURE.get(stem) is None, (f"{stem} is numba-exempt AND excused on the native "
-                                                        f"backends, which leaves no backend grading it")
+def test_a_numba_opt_override_still_grades_the_kernel():
+    """The override changes HOW the leg is compiled, never whether it is graded."""
+    for stem in NUMBA_LOW_OPT:
+        assert stem not in OUT_OF_SCOPE, f"{stem} carries an opt override but is out of scope, so nothing runs it"
+        assert MISSING_EMIT_FEATURE.get(stem) is None, (f"{stem} carries an opt override AND is excused on the "
+                                                        f"native backends, which leaves the override pointless")
 
 
 def test_mandelbrots_declare_min_precision_fp64():
