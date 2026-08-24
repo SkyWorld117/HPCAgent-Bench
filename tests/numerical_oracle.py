@@ -176,6 +176,31 @@ COMPILE = {
 }
 BACKENDS = tuple(COMPILE)
 
+#: Kernels whose NATIVE legs compile at a lower optimization level, keyed to that level. Measured
+#: 2026-08-24 on a four-core box, all three languages per kernel: cloudsc 71.3s -> 19.2s and lulesh
+#: 41.8s -> 16.6s at -O0, both still ``ok``.
+#:
+#: A list rather than a corpus-wide flag, because -O2 is not pure cost here the way it is for numba:
+#: optimization is what exposes undefined behaviour in the EMITTED C -- strict-aliasing violations,
+#: uninitialized reads, an out-of-bounds the optimizer acts on. Dropping it everywhere would retire
+#: that detection to save ~2 min: a twenty-kernel spread moves only 11.2s -> 8.7s, since a typical
+#: native leg is ~0.56s of which optimization is ~0.12s and the rest is emit/import/run overhead.
+#: These two are where the level actually pays.
+NATIVE_LOW_OPT: Dict[str, str] = {"cloudsc": "-O0", "lulesh": "-O0"}
+
+
+def compile_command(backend: str, short: str) -> List[str]:
+    """``COMPILE[backend]`` with ``short``'s optimization override applied, if it declares one.
+
+    Only the level token is swapped: the -std flag has to stay exactly what the harness builds
+    submissions with, and -shared/-fPIC are what make the result loadable at all.
+    """
+    level = NATIVE_LOW_OPT.get(short)
+    if level is None:
+        return list(COMPILE[backend])
+    return [level if part == "-O2" else part for part in COMPILE[backend]]
+
+
 #: Pluto backend: polyhedral auto-parallelization of the emitted scop via ``polycc`` (see
 #: :func:`_run_pluto`). Opt-in: only runs (and appears in the status dict) when requested via
 #: ``only_backends``, so legacy suites scanning for ``FAIL`` never see it.
@@ -735,7 +760,7 @@ def run_kernel(short: str,
             src = matches[0]
             so = tdp / f"lib{short}_{backend}.so"
             try:
-                c = subprocess.run(COMPILE[backend] + [str(src), "-o", str(so)],
+                c = subprocess.run(compile_command(backend, short) + [str(src), "-o", str(so)],
                                    capture_output=True,
                                    text=True,
                                    timeout=_cfg("compile_timeout_s", short))
@@ -1191,7 +1216,7 @@ def _run_pluto(tdp, short, fptype, binding, by, syms, expected, compare, rtol, a
         return f"skip:unsupported:polycc:{reason}" if reason else "skip:unsupported:polycc"
     so = tdp / f"lib{short}_pluto.so"
     try:
-        proc = pluto_transform.run_bounded(COMPILE["c"] + _PLUTO_EXTRA_FLAGS +
+        proc = pluto_transform.run_bounded(compile_command("c", short) + _PLUTO_EXTRA_FLAGS +
                                            [str(out_c), "-o", str(so)],
                                            cwd=str(tdp),
                                            timeout=_cfg("compile_timeout_s", short))
@@ -1283,7 +1308,7 @@ def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected
         return "FAIL:no-source"
     so = tdp / f"lib{short}_isopar.so"
     try:
-        c = subprocess.run(COMPILE["cpp"] + [str(matches[0]), "-o", str(so)] + _ISOPAR_LINK,
+        c = subprocess.run(compile_command("cpp", short) + [str(matches[0]), "-o", str(so)] + _ISOPAR_LINK,
                            capture_output=True,
                            text=True,
                            timeout=_cfg("compile_timeout_s", short))
