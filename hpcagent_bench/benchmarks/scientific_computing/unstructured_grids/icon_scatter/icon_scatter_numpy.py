@@ -19,7 +19,14 @@ import numpy as np
 def icon_scatter(val, nbr_idx, nbr_blk, out, out_semi):
     nproma, nlev, nblks = out.shape
     nnbr = nbr_idx.shape[2]
-    for jk in range(nlev):
-        for n in range(nnbr):
-            np.add.at(out, (nbr_idx[:, :, n] - 1, jk, nbr_blk[:, :, n] - 1), val[:, jk, :])
-            np.add.at(out_semi, (nbr_idx[:, :, n] - 1, jk, 0), val[:, jk, :])
+
+    # Neither the jk axis nor the neighbour axis n changes the index formula's shape --
+    # broadcast both into the index/value arrays and let one add.at do every (p, jk, b, n)
+    # contribution at once; there is no per-neighbour weight here to justify a tap loop.
+    idx = nbr_idx[:, None, :, :] - 1
+    blk = nbr_blk[:, None, :, :] - 1
+    lev = np.arange(nlev)[None, :, None, None]
+    vals = np.broadcast_to(val[:, :, :, None], (nproma, nlev, nblks, nnbr))
+
+    np.add.at(out, (idx, lev, blk), vals)
+    np.add.at(out_semi, (idx, lev, 0), vals)
