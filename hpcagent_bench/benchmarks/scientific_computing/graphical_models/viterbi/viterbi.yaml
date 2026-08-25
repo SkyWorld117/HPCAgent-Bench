@@ -43,9 +43,11 @@ init:
     obs:
       shape: (T,)
       dtype: int64
+      index_array: true
     path:
       shape: (T,)
       dtype: int64
+      index_array: true
   func_name: initialize
 array_args:
 - log_init

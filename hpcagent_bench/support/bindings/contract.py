@@ -4,10 +4,11 @@
 turns a validated BenchSpec into a Binding (Sec. 8) that the stub generator and host glue both read so every
 language agrees byte-for-byte. Implements Sec. 2 (pointer/scalar args only), Sec. 3 (sparse packing), Sec. 4
 (canonical order), Sec. 5 (const rules), Sec. 6 (no timer argument -- timing is the harness wrapper's job)."""
-import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from numpyto_common.naming import FORTRAN_SYMBOL_LIMIT, SYMBOL_DIGEST_CHARS, entry_symbol
 
 from hpcagent_bench.dtypes import c_type
 from hpcagent_bench.spec import BenchSpec, Preset
@@ -48,6 +49,24 @@ def workspace_c_params(lang: str = "c") -> Tuple[str, str]:
 #: launch internally), so the binding is byte-identical to the CPU languages; only source/compiler differ.
 LANG_SYMBOLS = ("c", "cpp", "fortran", "cuda", "hip")
 
+#: Where each language starts counting array elements. The numpy reference is the 0-based truth
+#: for every ``index_array`` buffer; this table says what a given language's code is handed and
+#: expected to hand back. Fortran is the only 1-based member, and that is the whole point: a
+#: Fortran submission should write ``a(ip(j))``, the way the vendored .f90 references upstream do,
+#: instead of the ``a(ip(j) + 1)`` a 0-based delivery would force on it.
+INDEX_BASE = {"c": 0, "cpp": 0, "fortran": 1, "cuda": 0, "hip": 0}
+
+
+def index_base(lang: str) -> int:
+    """The first valid subscript in ``lang`` -- 1 for Fortran, 0 for everything else.
+
+    An unknown language is 0-based rather than an error: a new backend that never declares an
+    index array is unaffected, and one that does will be caught by the reference grading the
+    moment its gathers land off by one.
+    """
+    return INDEX_BASE.get(lang, 0)
+
+
 #: Default element dtypes when the spec does not pin one (fp64 leg; size symbols int64).
 DEFAULT_FLOAT_DTYPE = "float64"
 DEFAULT_SYMBOL_DTYPE = "int64"
@@ -63,6 +82,11 @@ class Arg:
     is_const: bool
     shape: Optional[Tuple[str, ...]] = None
     role: Optional[str] = None
+    #: This buffer's ELEMENTS are subscripts into another array (``init.arrays[name].index_array``).
+    #: The values a language sees are in ITS OWN base -- 0 for C/C++/numpy, 1 for Fortran -- because
+    #: :func:`index_base` rebases the buffer at the ABI seam. A submission therefore never adjusts
+    #: an index it reads: it subscripts with it directly.
+    is_index: bool = False
 
     def to_json(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -73,6 +97,8 @@ class Arg:
         }
         if self.kind == "ptr":
             out["shape"] = list(self.shape) if self.shape is not None else None
+            if self.is_index:
+                out["index"] = True
         if self.role is not None:
             out["role"] = self.role
         return out
@@ -269,31 +295,6 @@ def _dense_shape(spec: BenchSpec, name: str) -> Optional[Tuple[str, ...]]:
     return tuple(t.strip() for t in inner.split(",") if t.strip())
 
 
-#: Fortran caps an external name at 63 characters (F2008 3.2.2), and a symbol must be identical in
-#: every language or the harness binds one name and the emitter defines another.
-FORTRAN_SYMBOL_LIMIT = 63
-#: Hex digits of the digest kept when a name is shortened. 8 hex = 32 bits: over a corpus of a few
-#: thousand kernels the chance of any collision is ~1e-6, and the symbol-uniqueness test would catch
-#: one anyway. Shorter reads better but stops being safe to assert on.
-SYMBOL_DIGEST_CHARS = 8
-
-
-def fortran_safe_symbol(symbol: str) -> str:
-    """``symbol`` unchanged, or deterministically shortened to fit Fortran's 63-character limit.
-
-    A benchmark's name is its identity and belongs to the corpus, not to whichever backend has the
-    tightest symbol rules -- so a name too long for Fortran is shortened HERE, at emission, instead
-    of forcing the manifest to carry a second, shorter identity. Keeping a readable prefix and
-    appending a digest of the full name makes the result stable across runs and machines (blake2s,
-    not hash(), which is salted per process) and injective in practice, so two long names that share
-    a prefix still get different symbols.
-    """
-    if len(symbol) <= FORTRAN_SYMBOL_LIMIT:
-        return symbol
-    digest = hashlib.blake2s(symbol.encode("utf-8"), digest_size=8).hexdigest()[:SYMBOL_DIGEST_CHARS]
-    return f"{symbol[:FORTRAN_SYMBOL_LIMIT - SYMBOL_DIGEST_CHARS - 1]}_{digest}"
-
-
 def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
     """Derive the canonical :class:`Binding` for ``spec`` (Sec. 2-Sec. 8); ``config`` defaults to the first
     declared sparse configuration, ignored ("dense") for a dense kernel."""
@@ -305,6 +306,7 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
 
     array_set = set(spec.array_args)
     output_set = set(spec.output_args)
+    index_set = set(spec.init.index_arrays) if spec.init is not None else set()
 
     pointers: List[Arg] = []
     packed: List[PackedGroup] = []
@@ -332,6 +334,7 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
                         is_const=True,  # sparse inputs are read-only
                         shape=tuple(buf.shape),
                         role="output" if buf.name in output_set else None,
+                        is_index=buf.name in index_set,
                     ))
         else:
             is_output = name in output_set
@@ -343,6 +346,7 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
                     is_const=not is_output,
                     shape=_dense_shape(spec, name),
                     role="output" if is_output else None,
+                    is_index=name in index_set,
                 ))
 
     # Plain scalars: input_args minus arrays/phantoms/size-symbols (added below with role="symbol")
@@ -384,13 +388,21 @@ def binding_from_spec(spec: BenchSpec, config: Optional[str] = None) -> Binding:
         raise ValueError(f"{spec.short_name}: argument name(s) {clash} are reserved by the ABI "
                          f"(workspace / workspace_size); rename them in the manifest")
 
-    # Canonical symbol: <short>[_<config>]_fp64, same for every language; a sparse config is part
-    # of the stem (each layout is its own kernel).
-    base = spec.short_name if config in (None, "dense") else f"{spec.short_name}_{config}"
-    # Lowercase always: Fortran folds case, so a symbol differing from another only in case is the
-    # same symbol there, and a mixed-case name reads differently in each language's convention.
-    symbols = {lang: f"{base}_fp64".lower() for lang in LANG_SYMBOLS}
-    symbols = {lang: fortran_safe_symbol(sym) for lang, sym in symbols.items()}
+    # Canonical symbol: <native_base>_fp64, same for every language; a sparse config is part of the
+    # stem (each layout is its own kernel). Both halves of the name come from the emitter's own
+    # authorities, because the emitter is what DEFINES the symbol and this only BINDS it:
+    #
+    #   spec.native_base -- the stem, keyed on module_name. Not short_name: the emitter names its
+    #     artifacts from the ``<module>_numpy.py`` filename it is handed, and for the six sparse
+    #     solvers the manifest stem differs from it (``bicg_solvers`` and ``sp_bicg`` are two
+    #     registry keys over the one ``bicg_numpy.py``). Building the symbol from short_name asked
+    #     for ``bicg_solvers_csr_fp64`` while the emitter defined ``bicg_csr_fp64``.
+    #   entry_symbol -- lowercase, then folded to Fortran's 63-char limit. Deriving either half a
+    #     second time is what broke s353_2d_row_unroll_K (case) and the long kernelbench ports.
+    #
+    # ``kernel`` below stays short_name: that is the corpus identity the registry resolves, and
+    # handing out a name that cannot be loaded back is the two-identity bug this corpus already had.
+    symbols = {lang: entry_symbol(f"{spec.native_base(config)}_fp64") for lang in LANG_SYMBOLS}
     sym = symbols["c"]
     if not sym[0].isalpha():
         raise ValueError(f"{spec.short_name}: symbol {sym!r} must start with a letter -- Fortran "

@@ -3,7 +3,7 @@
 ! Not the scoring oracle -- the numpy reference remains the correctness oracle.
 
 ! hpcagent_bench-autogen -- generated from s353_2d_row_unroll_K_numpy.py; edit the numpy reference and regenerate, or delete this line to keep local edits as a hand override.
-subroutine s353_2d_row_unroll_K_fp64(a, b, ip, N) bind(C, name="s353_2d_row_unroll_K_fp64")
+subroutine s353_2d_row_unroll_k_fp64(a, b, ip, N) bind(C, name="s353_2d_row_unroll_k_fp64")
     use, intrinsic :: iso_c_binding
     integer(c_int64_t), value, intent(in) :: N
     real(c_double), intent(in) :: a(N, N)
@@ -35,4 +35,4 @@ subroutine s353_2d_row_unroll_K_fp64(a, b, ip, N) bind(C, name="s353_2d_row_unro
         i = i + (1)
     end do
 
-end subroutine s353_2d_row_unroll_K_fp64
+end subroutine s353_2d_row_unroll_k_fp64

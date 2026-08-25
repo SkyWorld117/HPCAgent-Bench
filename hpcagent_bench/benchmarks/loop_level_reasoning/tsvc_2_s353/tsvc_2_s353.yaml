@@ -19,6 +19,7 @@ init:
     ip:
       shape: (LEN_1D,)
       dtype: int32
+      index_array: true
 output_args:
 - a
 taxonomy:

@@ -47,7 +47,7 @@ _MAXTER = 20  # cegterg.f90: INTEGER, PARAMETER :: maxter = 20
 def _make_operators(g2kin, vrs, nlk, vkb, deeq, qq, npw_k, npwx, npol, nnr, n1, n2, n3, ck0, uspp):
     grid = (n1, n2, n3)
     g2 = np.asarray(g2kin)[:npw_k, ck0]  # |k+G|^2 (npw_k,)
-    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp) - 1  # FFT-grid index (0-based)
+    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp)  # FFT-grid index (0-based)
     vrs2 = vrs if vrs.ndim == 2 else vrs[:, None]  # (nnr, npol)
     vkbk = np.asarray(vkb)[:npw_k, :, ck0]  # (npw_k, nkb); nkb may be 0
     has_nl = vkbk.shape[1] > 0  # nonlocal projectors present?
@@ -139,7 +139,7 @@ def _wrap_meta(h_psi, kedtau, kplusg, nlk, npw_k, nnr, n1, n2, n3, ck0):
     ``- Σⱼ (k+G)ⱼ · FFT[ kedtau(r) · FFT⁻¹[ i (k+G)ⱼ ψ ] ]`` on top of h_psi.
     ``kedtau`` is the kinetic-energy-density potential ``(nnr,)``; ``kplusg`` is
     ``(3, npw)`` = ``(k+G)·tpiba``."""
-    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp) - 1
+    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp)
     ked = np.asarray(kedtau)
     kpg = np.asarray(kplusg)
 
@@ -180,7 +180,7 @@ def _make_operators_nc(g2kin, vrs, nlk, vkb, qq, deeq_nc, npw_k, npwx, nnr, n1, 
     npol = 2
     kdim = npwx * npol
     g2 = np.asarray(g2kin)[:npw_k, ck0]
-    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp) - 1
+    gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp)
     vkbk = np.asarray(vkb)[:npw_k, :, ck0] if uspp else np.zeros((npw_k, 0), np.complex128)
     vrs = np.asarray(vrs)  # (nnr, nspin_mag)
     rows = lambda ip: slice(ip * npwx, ip * npwx + npw_k)

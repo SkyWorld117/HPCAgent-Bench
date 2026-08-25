@@ -113,13 +113,14 @@ def velocity_tendencies(
     w = p_prog_w  # (nproma, nlevp1, nblks_c)
 
     def gat(A, idx, blk, n, lvl=slice(None)):
-        """A[idx[:,:,n]-1, lvl, blk[:,:,n]-1] with the level axis moved back to position 1.
+        """A[idx[:,:,n], lvl, blk[:,:,n]] with the level axis moved back to position 1.
 
         idx/blk carry no level dependence, so the whole level range gathers in one advanced-index
-        call instead of one call per jk.
+        call instead of one call per jk. The index arrays are 0-based: the manifest tags them and
+        only the Fortran emitter carries the +1.
         """
-        i = idx[:, :, n] - 1
-        b = blk[:, :, n] - 1
+        i = idx[:, :, n]
+        b = blk[:, :, n]
         return np.moveaxis(A[i, lvl, b], -1, 1)
 
     # ===== z_w_v = cells2verts_scalar_ri(w, cells_aw_verts) (6 cells/vertex) ==

@@ -26,10 +26,8 @@ answer, not a slow one. Having named the dependence, you are in one of four case
   no two points sharing `i+j` can depend on each other: skew, and the anti-diagonal runs in
   parallel. This is the case that gets abandoned as sequential;
   `loop-transformations-fortran` has the rewrite and its legality test.
-- **The dependence is FALSE.** A scalar carried only to hand the next iteration a value it could
-  recompute is not a dependence -- substitute it away and the loop is parallel. Reading a FUTURE
-  element (`x(i+1)`) means the ORIGINAL value: keep a copy of the input (or write a fresh output)
-  and it is gone. Rewrites on the `loop-transformations-fortran` page.
+- **The dependence is FALSE.** A rotated scalar, or a read of a FUTURE element, only looks
+  serial; `loop-transformations-fortran` has the three shapes and their rewrites.
 
 Legality settles whether you MAY thread; profit is separate. If the innermost loop is not the one
 walking unit stride -- the FIRST subscript, since Fortran is column-major -- the nest is

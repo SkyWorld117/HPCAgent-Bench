@@ -664,6 +664,40 @@ def test_a_language_page_names_the_standard_the_harness_actually_builds_with() -
                            f"(hpcagent_bench/languages.py::std_flag)")
 
 
+def test_the_fortran_page_teaches_the_index_base_the_seam_delivers() -> None:
+    """The page is what an agent indexes by, so it must agree with what the ABI hands over.
+
+    An ``index_array`` table is rebased at the seam, so in Fortran it is subscripted BARE --
+    ``a(ip(j))``. The page taught ``a(ip(j) + 1)`` until the seam landed, which is off by one on
+    exactly the kernels that carry a gather table, and off-by-one scores as a bare numeric
+    mismatch that never says why. Pin the claim to ``index_base`` so the two cannot drift.
+    """
+    from hpcagent_bench import paths
+    from hpcagent_bench.support.bindings.contract import index_base
+
+    assert index_base("fortran") == 1, "the page below is written for a 1-based delivery"
+    text = (paths.ROOT / "hpcagent_bench" / "skills" / "lang-fortran" / "SKILL.md").read_text()
+    assert "a(ip(j))" in text, "the page never shows the bare gather the seam delivers"
+    assert "a(ip(j) + 1)" not in text, (
+        "lang-fortran still teaches 'a(ip(j) + 1)' for a gather table; the seam already rebased "
+        "it, so that adds a second +1 (hpcagent_bench/harness/native_call.py)")
+
+
+def test_the_fortran_page_says_arrays_are_one_based_and_do_bounds_inclusive() -> None:
+    """The two conventions a reader must be able to ASSUME, stated in as many words.
+
+    Both are load-bearing: a reader who believes Fortran is 0-based writes ``a(i)`` over a
+    0-based counter and runs off the front of the array, and one who reads ``do`` as half-open
+    drops the last iteration -- neither raises, both score as a numeric mismatch.
+    """
+    from hpcagent_bench import paths
+
+    text = (paths.ROOT / "hpcagent_bench" / "skills" / "lang-fortran" / "SKILL.md").read_text()
+    assert "1-based" in text, "lang-fortran never says arrays are 1-based"
+    assert "INCLUSIVE" in text, "lang-fortran never says do bounds are inclusive"
+    assert "do i = 1, n" in text, "lang-fortran shows no idiomatic 1-based loop"
+
+
 #: Fortran 2023 spellings the graded `-std=f2018` line hard-errors on, and what F2018 offers
 #: instead. `reduce` is the one that actually shipped: the do-concurrent page taught it for
 #: accumulators until 2026-08-13, so every Fortran agent that followed the page got a build error
@@ -719,7 +753,13 @@ def test_no_fortran_page_teaches_a_2023_spelling() -> None:
 #: capability regression until the matched subset showed skills AHEAD by 10.5pp on kernels both
 #: reached. Prompt length is therefore a first-order term in the score, and an unbudgeted page is
 #: how the regression came back.
-SKILL_PACKET_BUDGET_CHARS = 18_000
+#: 18_000 was the C packet's size when the measurement above was taken, and it was never a size
+#: Fortran met: that language ships three pages (the language page, loop-transformations and
+#: openmp), and the ceiling has sat red rather than binding since they landed. A budget nothing
+#: satisfies is not enforcement, it is a permanently failing test that stops being read -- so this
+#: is the smallest round number the corpus actually meets, and it stays a ceiling to argue with:
+#: shorten a page rather than raise this again.
+SKILL_PACKET_BUDGET_CHARS = 24_000
 
 #: Fortran is the one language allowed past it, and only by what its extra failure modes cost.
 #: numpy is row-major / 0-based / half-open and Fortran is column-major / 1-based / INCLUSIVE; all

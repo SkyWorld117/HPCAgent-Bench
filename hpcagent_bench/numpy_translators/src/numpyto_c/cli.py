@@ -10,7 +10,7 @@ from numpyto_common.frontend import parse_kernel
 from numpyto_common.ir import apply_precision
 from numpyto_common.lowering import lower
 from numpyto_common.emit_io import write_generated
-from numpyto_common.naming import native_base, short_for
+from numpyto_common.naming import entry_symbol, native_base, short_for
 
 
 def cmd_emit(args: argparse.Namespace) -> int:
@@ -23,28 +23,30 @@ def cmd_emit(args: argparse.Namespace) -> int:
     # Precision applied on the IR so the emitted source is precision-monomorphic.
     if args.precision:
         kir = apply_precision(kir, args.precision)
-    # Canonical native name: <short>[_<sparse>]_<fptype>, for both file and symbol.
+    # Canonical native name: <short>[_<sparse>]_<fptype> names the FILE; the exported symbol is
+    # that stem lowercased, because Fortran folds case (see naming.entry_symbol).
     base = native_base(short, precision=args.precision, sparse=args.config)
+    sym = entry_symbol(base)
     src = f"{short}_numpy.py"
     if args.isopar:
         # ISO standard-algorithm variant: C++ only (C has no <algorithm>), same symbol as sequential.
-        write_generated(out / f"{base}_isopar.cpp", emit_cpp_isopar(kir, fn_name=base), line_comment="// ", source=src)
-        emit_binding(kir, out / f"{base}_isopar_binding.json", base_name=base)
+        write_generated(out / f"{base}_isopar.cpp", emit_cpp_isopar(kir, fn_name=sym), line_comment="// ", source=src)
+        emit_binding(kir, out / f"{base}_isopar_binding.json", base_name=base, symbol=sym)
         print(f"numpyto_c: emitted {base}_isopar.cpp (ISO algorithms) + {base}_isopar_binding.json")
         return 0
     if args.parallel:
         # OpenMP variant, same symbol as sequential; no Pluto (sequential-only track).
-        write_generated(out / f"{base}_omp.c", emit_c_omp(kir, fn_name=base), line_comment="// ", source=src)
-        write_generated(out / f"{base}_omp.cpp", emit_cpp_omp(kir, fn_name=base), line_comment="// ", source=src)
-        emit_binding(kir, out / f"{base}_omp_binding.json", base_name=base)
+        write_generated(out / f"{base}_omp.c", emit_c_omp(kir, fn_name=sym), line_comment="// ", source=src)
+        write_generated(out / f"{base}_omp.cpp", emit_cpp_omp(kir, fn_name=sym), line_comment="// ", source=src)
+        emit_binding(kir, out / f"{base}_omp_binding.json", base_name=base, symbol=sym)
         print(f"numpyto_c: emitted {base}_omp.{{c,cpp}} (OpenMP) + {base}_omp_binding.json")
         return 0
-    write_generated(out / f"{base}.c", emit_c(kir, fn_name=base), line_comment="// ", source=src)
-    write_generated(out / f"{base}.cpp", emit_cpp(kir, fn_name=base), line_comment="// ", source=src)
-    write_generated(out / f"{base}_pluto_input.c", emit_pluto(kir, fn_name=base), line_comment="// ", source=src)
-    emit_binding(kir, out / f"{base}_binding.json", base_name=base)
+    write_generated(out / f"{base}.c", emit_c(kir, fn_name=sym), line_comment="// ", source=src)
+    write_generated(out / f"{base}.cpp", emit_cpp(kir, fn_name=sym), line_comment="// ", source=src)
+    write_generated(out / f"{base}_pluto_input.c", emit_pluto(kir, fn_name=sym), line_comment="// ", source=src)
+    emit_binding(kir, out / f"{base}_binding.json", base_name=base, symbol=sym)
     # Pluto's VLA-param signature reorders args (symbols first), so it needs its own binding.
-    emit_pluto_binding(kir, out / f"{base}_pluto_binding.json", base_name=base)
+    emit_pluto_binding(kir, out / f"{base}_pluto_binding.json", base_name=base, symbol=sym)
     print(f"numpyto_c: emitted {base}.{{c,cpp}} + {base}_pluto_input.c + {base}_binding.json")
     return 0
 

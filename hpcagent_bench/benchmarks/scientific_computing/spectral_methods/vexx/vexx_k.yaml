@@ -221,6 +221,7 @@ init:
     ijtoh:
       shape: (nh, nh)
       dtype: int32
+      index_array: true
     ofsbeta:
       shape: (nat,)
       dtype: int32

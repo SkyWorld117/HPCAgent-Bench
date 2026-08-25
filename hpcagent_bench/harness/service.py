@@ -68,6 +68,7 @@ import dataclasses
 import json
 import multiprocessing
 import queue
+import signal
 import threading
 import time
 from collections import OrderedDict
@@ -368,7 +369,14 @@ HARVEST_OPTIMIZER = "harvested"
 def record_result(cfg: RunConfig, result, submission: Submission, task: Task, run_id: str, optimizer,
                   preset: str) -> dict:
     """Harden-gate ``result`` and persist it. Module-level, not a handler method, because the
-    shutdown harvest records rows with no request in flight."""
+    shutdown harvest records rows with no request in flight.
+
+    ``record.enabled`` is honoured HERE rather than at the callers, because this is the one door
+    into persistence and it has three of them: the ``/submit`` handler, the shutdown harvest, and
+    an offline re-grade. Gated at only one, the flag silently meant "off for submissions, on for
+    everything else" -- a run with recording disabled still wrote harvest rows."""
+    if not config.get("record.enabled", False):
+        return {"skipped": "record.enabled is false"}
     from hpcagent_bench.harness import recording
     from hpcagent_bench.harness.scoring import independent_verify
     try:
@@ -645,7 +653,7 @@ class JudgeHandler(BaseHTTPRequestHandler):
             # The size that was actually graded. /submit may have overridden the one the body asked
             # for, and an agent comparing a submit against its own scores needs to see that.
             payload["preset"] = preset
-            if hidden and config.get("record.enabled", False):
+            if hidden:  # record_result owns the record.enabled gate
                 payload["recorded"] = self._record(result, submission, task, body, preset)
             run_id = str(body.get("run_id", "adhoc"))
             if hidden:
@@ -841,11 +849,23 @@ def serve(host: str = "0.0.0.0",
     print(f"hpcagent_bench judge service on http://{host}:{port}  "
           f"(rank={rank}, oracle={cfg.oracle.value}, baseline={cfg.baseline_token}, "
           f"input_mode={cfg.input_mode.value}, preset={cfg.preset})")
+
+    # The harvest below lives in the finally, and serve_forever only unwinds on KeyboardInterrupt
+    # -- which is SIGINT. Every launcher stops this process with a plain ``kill`` (SIGTERM), whose
+    # default disposition terminates the interpreter outright: the finally never ran, and llr8 lost
+    # 76 correct-but-unsubmitted kernels across 8 arms with no harvest line in any judge log.
+    # Re-raise as KeyboardInterrupt rather than calling srv.shutdown(), which would deadlock -- it
+    # waits for the serve_forever loop this handler is running inside.
+    def stop_on_term(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, stop_on_term)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        signal.signal(signal.SIGTERM, previous)
         # Before the socket closes, not after: harvesting re-grades, and a grade needs the same
         # process state (forkserver preload, memory pool) the service ran with.
         try:

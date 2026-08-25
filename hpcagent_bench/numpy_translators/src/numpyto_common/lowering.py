@@ -7758,7 +7758,12 @@ def _tag_complex_locals(kir, zeros_locals: Dict[str, Tuple[str, ...]], dtype_src
 
     stores = [(name, n.value) for n in ast.walk(kir.tree) for name in [store_target(n)] if name is not None]
     for _ in range(8):
-        before = len(seed)
+        # The WHOLE mapping, not its size: after the first pass propagation stops adding names and
+        # only flips a name real -> complex, so a size comparison calls a fixpoint that has not been
+        # reached. A chain whose stores do not appear in dependency order then stops one link short
+        # and the last buffer is declared real -- the imaginary-part loss this function exists to
+        # prevent, now silent.
+        before = dict(seed)
         seed.update({n: k for n, k in _dtype_table(kir.tree, seed).items() if k})
         for name, src in dtype_src.items():
             if seed.get(src) == "complex":
@@ -7770,7 +7775,7 @@ def _tag_complex_locals(kir, zeros_locals: Dict[str, Tuple[str, ...]], dtype_src
         for base, value in stores:
             if base not in pinned_real and _dtype_kind(value, seed) == "complex":
                 seed[base] = "complex"
-        if len(seed) == before:
+        if seed == before:
             break
     for name in zeros_locals:
         if name not in pinned_real and seed.get(name) == "complex":

@@ -23,8 +23,8 @@ def icon_scatter(val, nbr_idx, nbr_blk, out, out_semi):
     # Neither the jk axis nor the neighbour axis n changes the index formula's shape --
     # broadcast both into the index/value arrays and let one add.at do every (p, jk, b, n)
     # contribution at once; there is no per-neighbour weight here to justify a tap loop.
-    idx = nbr_idx[:, None, :, :] - 1
-    blk = nbr_blk[:, None, :, :] - 1
+    idx = nbr_idx[:, None, :, :]
+    blk = nbr_blk[:, None, :, :]
     lev = np.arange(nlev)[None, :, None, None]
     vals = np.broadcast_to(val[:, :, :, None], (nproma, nlev, nblks, nnbr))
 

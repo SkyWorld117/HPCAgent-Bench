@@ -99,15 +99,20 @@ def wait_for_json(name: str, url: str, timeout: float, headers: dict[str, str] |
 def judge_urls() -> list[str]:
     """Every judge router URL, in the rank order the judges were started with.
 
-    ``JUDGE_NODELIST`` is what run_cluster.sh assigns the judge step, so a node's position in it IS
-    the ``--rank`` its upstream was started with -- the two lists cannot drift because one launcher
-    writes both. A deployment with a single judge (or an older one that exports no nodelist) falls
-    back to ``JUDGE_BASE_URL``, which is that judge."""
+    ``JUDGE_NODELIST`` is what run_cluster.sh assigns the judge step and ``JUDGES_PER_NODE`` is how
+    many tasks it starts on each, so position in this list IS the ``--rank`` that judge was started
+    with -- the two cannot drift because one launcher writes both. A deployment with a single judge
+    (or an older one that exports no nodelist) falls back to ``JUDGE_BASE_URL``, which is that
+    judge."""
     nodes = [node.strip() for node in os.environ.get("JUDGE_NODELIST", "").split(",") if node.strip()]
-    if len(nodes) < 2:
+    per_node = max(1, int(os.environ.get("JUDGES_PER_NODE", "1")))
+    if not nodes or (len(nodes) == 1 and per_node == 1):
         return [os.environ["JUDGE_BASE_URL"].rstrip("/")]
-    port = os.environ.get("JUDGE_PORT", "8800")
-    return [f"http://{node}:{port}" for node in nodes]
+    base = int(os.environ.get("JUDGE_PORT", "8800"))
+    # Node-major, slot-minor -- the order SLURM_PROCID counts in under --ntasks-per-node, so the
+    # i-th URL here is the judge started with --rank i. The port stride is the launcher's
+    # judge_router_port: slot s on a node owns base + 2s, its upstream base + 2s + 1.
+    return [f"http://{node}:{base + 2 * slot}" for node in nodes for slot in range(per_node)]
 
 
 def vllm_urls() -> list[str]:
@@ -906,8 +911,57 @@ def await_mcp(log_path: pathlib.Path, process: subprocess.Popen[bytes], deadline
     return mcp_failed(log_path)
 
 
-def start_agent(command: list[str], workdir: pathlib.Path, environment: dict[str, str], log,
-                log_path: pathlib.Path) -> tuple[subprocess.Popen[bytes], int]:
+def agent_cpus(worker_index: int, agents: int) -> list[int]:
+    """The CPUs agent ``worker_index`` of ``agents`` is pinned to, dealt round-robin.
+
+    ``agents`` is how many agents this node ACTUALLY runs, never ``AGENTS_PER_NODE``. The pool is
+    sized for the biggest arm and a node usually gets fewer problems than that -- dealing over the
+    declared size gave each of 40 agents ``cpus[i::120]``, two CPUs of 192, and left 112 idle on a
+    node the arm had already paid for. Two CPUs of 192 is the shape that has twice cost this
+    project a measurement: the inference wedge and the judge that could not be threaded.
+
+    The step owns the whole agent node, and without this every agent inherited that full mask, so
+    where 40 of them ran was entirely the scheduler's guess -- and the thing being measured on the
+    other side of the run is wall clock. Dealing the node's CPUs out round-robin
+    (``cpus[i::agents]``) gives each agent a disjoint share, uses every CPU, and keeps the shares
+    within one of each other however badly ``agents`` divides the node.
+
+    Round-robin rather than contiguous blocks on purpose: consecutive CPU ids are siblings and
+    same-socket neighbours, so a block would pack a worker onto one socket and leave whole sockets
+    to the workers that happen to sort last. An agent is a CLI process waiting on HTTP, not a timed
+    kernel -- spreading it is right, and unlike the judge it has no locality to protect.
+
+    Returns [] when the mask cannot be read or there are fewer CPUs than agents to deal from, and
+    the caller then leaves the process unpinned rather than crowding several agents onto one CPU.
+    """
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):  # not Linux, or the mask is unreadable
+        return []
+    if agents < 1 or len(cpus) < agents:
+        return []
+    return cpus[worker_index::agents]
+
+
+def pin(process: subprocess.Popen[bytes], cpus: list[int], log) -> None:
+    """Confine ``process`` to ``cpus``. Never raises -- an unpinned agent still runs.
+
+    Set on the child AFTER the spawn rather than through ``preexec_fn``: the driver spawns from a
+    ThreadPoolExecutor and preexec_fn is documented as unsafe in the presence of threads. Anything
+    the agent forks later inherits this mask, which is the point -- the MCP servers and the CLI's
+    own workers are most of what actually consumes the share.
+    """
+    if not cpus:
+        return
+    try:
+        os.sched_setaffinity(process.pid, set(cpus))
+    except (AttributeError, OSError) as exc:  # exited already, or no permission
+        log.write(f"\nagent_driver: could not pin agent to CPUs {cpus}: {exc}\n")
+        log.flush()
+
+
+def start_agent(command: list[str], workdir: pathlib.Path, environment: dict[str, str], log, log_path: pathlib.Path,
+                cpus: list[int]) -> tuple[subprocess.Popen[bytes], int]:
     """Spawn the agent, retrying while its MCP server fails to connect; returns (process, attempts).
 
     The gate is held across the spawn and the wait, so at most AGENT_START_CONCURRENCY agents are
@@ -919,6 +973,8 @@ def start_agent(command: list[str], workdir: pathlib.Path, environment: dict[str
     while True:
         with START_GATE:
             process = subprocess.Popen(command, cwd=workdir, env=environment, stdout=log, stderr=subprocess.STDOUT)
+            # Before the MCP wait, so a retry's replacement process is pinned too.
+            pin(process, cpus, log)
             failed = await_mcp(log_path, process, time.monotonic() + AGENT_MCP_READY_SECONDS)
         if failed is False or attempt >= AGENT_MCP_ATTEMPTS:
             if failed is not False:
@@ -1014,8 +1070,8 @@ def watch_token_budget(process: subprocess.Popen[bytes], log_path: pathlib.Path,
             return
 
 
-def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path, judges: list[str],
-              problem_index: int) -> int:
+def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path, judges: list[str], problem_index: int,
+              agents: int) -> int:
     # Every agent spawns its own stdio MCP server (python3 tools/mcp_server.py), and the pool
     # submits all AGENTS_PER_NODE of them at once, so ~120 interpreters start within milliseconds
     # and the client's init handshake times out on the losers. Measured on 604479: 72 of 121 agents
@@ -1023,6 +1079,9 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
     # tool and burns its whole budget in api_retry. Spread the starts instead.
     if AGENT_START_STAGGER_SECONDS > 0:
         time.sleep(min(worker_index * AGENT_START_STAGGER_SECONDS, AGENT_START_STAGGER_MAX_SECONDS))
+
+    # This agent's share of the node, dealt round-robin; every process the agent spawns inherits it.
+    cpus = agent_cpus(worker_index, agents)
 
     runtime = pathlib.Path("/opt/optarena-agent")
     if not runtime.is_dir():
@@ -1176,7 +1235,7 @@ def run_agent(problem: dict[str, Any], worker_index: int, node_dir: pathlib.Path
         # attempt 2 attempt 1's init verdict. The previous attempt is preserved by moving it aside
         # below instead, which keeps the evidence without breaking that assumption.
         with log_path.open("w", encoding="utf-8") as log:
-            process, mcp_attempts = start_agent(command, workdir, environment, log, log_path)
+            process, mcp_attempts = start_agent(command, workdir, environment, log, log_path, cpus)
             watcher: threading.Thread | None = None
             if max_tokens > 0:
                 watcher = threading.Thread(target=watch_token_budget,
@@ -1317,7 +1376,10 @@ def main() -> int:
     failures = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(run_agent, problem, worker_index, node_dir, judges, problem_index): problem
+            # len(local_problems), NOT workers: the pool is sized for the biggest arm, and dealing
+            # the node over that size starves every agent of the CPUs the smaller arm left free.
+            executor.submit(run_agent, problem, worker_index, node_dir, judges, problem_index, len(local_problems)):
+            problem
             for worker_index, (problem_index, problem) in enumerate(local_problems)
         }
         for future in concurrent.futures.as_completed(futures):

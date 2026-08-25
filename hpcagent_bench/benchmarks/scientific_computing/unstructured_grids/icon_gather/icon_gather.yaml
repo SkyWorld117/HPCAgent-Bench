@@ -44,9 +44,11 @@ init:
     nbr_idx:
       shape: (nproma, nblks, nnbr)
       dtype: int64
+      index_array: true
     nbr_blk:
       shape: (nproma, nblks, nnbr)
       dtype: int64
+      index_array: true
     coef:
       shape: (nproma, nnbr, nblks)
       dtype: float64

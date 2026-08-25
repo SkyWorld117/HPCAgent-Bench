@@ -24,8 +24,8 @@ def icon_gather(A, nbr_idx, nbr_blk, coef, out, out_semi):
     acc = np.zeros((nproma, nlev, nblks), A.dtype)
     acc_semi = np.zeros((nproma, nlev, nblks), A.dtype)
     for n in range(nnbr):
-        idx = nbr_idx[:, None, :, n] - 1
-        blk = nbr_blk[:, None, :, n] - 1
+        idx = nbr_idx[:, None, :, n]
+        blk = nbr_blk[:, None, :, n]
         w = coef[:, None, n, :]
         acc += w * A[idx, lev, blk]
         acc_semi += w * A[idx, lev, 0]

@@ -96,9 +96,9 @@ init:
     fy: "(numNode,)"
     fz: "(numNode,)"
     nodalMass: "(numNode,)"
-    symmX: {shape: "(numSymm,)", dtype: int64}
-    symmY: {shape: "(numSymm,)", dtype: int64}
-    symmZ: {shape: "(numSymm,)", dtype: int64}
+    symmX: {shape: "(numSymm,)", dtype: int64, index_array: true}
+    symmY: {shape: "(numSymm,)", dtype: int64, index_array: true}
+    symmZ: {shape: "(numSymm,)", dtype: int64, index_array: true}
     arealg: "(numElem,)"
     delv: "(numElem,)"
     delv_eta: "(numElem,)"
@@ -128,7 +128,7 @@ init:
     vdov: "(numElem,)"
     vnew: "(numElem,)"
     volo: "(numElem,)"
-    nodelist: "(numElem, 8)"
+    nodelist: {shape: "(numElem, 8)", dtype: int64, index_array: true}
   # dtypes of SCALAR symbols only; an array's element type lives on its own
   # init.arrays entry. Both are int64 size/index symbols the C ABI must match.
   scalars:

@@ -25,6 +25,7 @@ init:
     ip:
       shape: (N,)
       dtype: int64
+      index_array: true
 output_args:
 - a
 taxonomy:

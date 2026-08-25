@@ -1,155 +1,93 @@
-# Submitting the llr4 campaign on Beverin
+# Submitting a campaign on Beverin
 
-Every command below runs from `containers/cluster/example-script/`. The submitters derive
-`--nodes` from the arm's own `.env` (`arm_nodes.sh`), so never pass `--nodes` yourself -- an
-allocation that disagrees with `INFERENCE_NODES + AGENT_NODES + JUDGE_NODES` makes
-`beverin.sbatch` exit 2 before the run starts.
+Every command below runs from `containers/cluster/example-script/`.
 
 ```bash
 cd containers/cluster/example-script
 ```
 
+The live campaign is `llr8`: the `llr-focus40` tag (40 kernels, one agent each) crossed over two
+models and two languages, in two legs -- base prompt, and hints plus the per-language skills
+packet. See `containers/cluster/example-script/README.md` for what an arm IS; this page is how to
+put one on the machine.
+
 ## Node budget
 
-Hard ceiling: **32 nodes in flight**, agreed with the team sharing the machine. Builds may take
-2 more (34 total).
+Hard ceiling: **36 nodes in flight**, agreed with the team sharing the machine.
 
 | model | nodes per arm | why |
 |---|---|---|
-| qwen30b | 10 | 1 inference + 1 agent + 8 judge |
-| qwen3next | 10 | 1 inference + 1 agent + 8 judge |
+| qwen30b | 6 | 1 inference + 1 agent + 4 judge |
 | oss120b | 8 | 1 inference + 1 agent + 6 judge |
-| kimi27code | 6 | 4 inference (pp=4) + 1 agent + 1 judge |
 
-Three arms at once is the practical shape: `10 + 8 + 6 = 24`, or `10 + 10 + 8 = 28`.
+`JUDGE_NODES` is sized from the measured grading rate, not picked: judges >= agents x
+grades-per-agent-per-hour / 30. One judge node runs `JUDGES_PER_NODE` judges, one per socket.
 
-Every arm carries **80 agents** (`AGENT_NODES=1`, `AGENTS_PER_NODE=80`). It is a batch-size
-knob, not a throughput knob: agents are in tools or a compile most of their wall clock, so 48
-of them held a mean vLLM batch of 20 and 40 split across 3 oss120b replicas held 1.4
-(600514/600515/600516). A 384-expert MoE reads every expert weight per step regardless of how
-few tokens ride along, so a small batch wastes the engine outright. Do not lower it, and do not
-add replicas to a family without scaling agents with them.
+**Never pass `--nodes` yourself.** `arm_nodes.sh` derives it from the arm's own `.env`, and
+`beverin.sbatch` exits 2 before the run starts if the allocation disagrees with
+`INFERENCE_NODES + AGENT_NODES + JUDGE_NODES`.
 
-## Before you submit anything
+**No `--account` on beverin.** The user default association is `root`, and `root`, `a-g200` and
+`a-g34` all carry QOS `normal` with no GrpTRES, MaxJobs, MaxSubmit, MaxTRES or priority set --
+measured, and a 2-node accountless job allocated and ran (600940). Omitting the flag costs nothing
+in scheduling and stops jobs from silently splitting across two project accounts depending on
+which command line was typed.
 
-1. **The skills packet is FROZEN INTO the problems file.** `make_problems.py` inlines the
-   `SKILL.md` bodies at generation time; a running arm never re-reads the pages. Edit a page and
-   the jsonl is stale until you regenerate it:
+## Submitting
 
-   ```bash
-   for lang in c cpp fortran; do
-       PYTHONHASHSEED=0 python3 make_problems.py \
-           --track loop_level_reasoning --language "$lang" --skills \
-           > "problems-llr4-${lang}-skills.jsonl"
-   done
-   ```
-
-   The off arms read `problems-llr2-<lang>.jsonl`, which carries no skill text and does not need
-   regenerating when a page changes.
-
-2. **Check the pair is intact** -- 242 problems each, same kernels, same ids:
-
-   ```bash
-   wc -l problems-llr4-*-skills.jsonl problems-llr2-*.jsonl
-   ```
-
-3. **Confirm nothing is already running:**
-
-   ```bash
-   squeue -u "$USER" -o "%.10i %.30j %.9T %.10M %.5D"
-   ```
-
-## The submitters
-
-One script, `MODEL` names the family. Each takes two knobs and passes any extra argument through to
-`sbatch` verbatim.
+One script. `MODEL` names the family and therefore the env files
+(`.env.llr8-<MODEL>-<lang>[-skills]`). Extra arguments pass through to `sbatch` verbatim.
 
 | knob | values | default |
 |---|---|---|
-| `LANGS` | `c` `cpp` `fortran`, space separated | all three |
-| `ARMS` | `off` `skills` | both |
-| `TIME` | wall clock | 20 h (qwen/oss), 24 h (kimi) |
-| `ACCOUNT` | Slurm account | unset -- **no `--account` on beverin** |
+| `MODEL` | `qwen30b` `oss120b` | **required** |
+| `LANGS` | `c` `fortran`, space separated | both |
+| `LEGS` | `1` (base) `2` (skills) | both |
+| `TIME` | wall clock | `08:00:00` |
+| `CAMPAIGN` | job-name prefix | `llr8` |
 
 ```bash
-MODEL=qwen30b ./submit-llr4.sh          # 6 arms x 10 nodes -- WAY over budget, always narrow it
+MODEL=qwen30b ./submit-llr8.sh --partition=mi300     # 4 arms, peaks at 12 nodes
+MODEL=oss120b ./submit-llr8.sh --partition=mi300     # 4 arms, peaks at 16 nodes
 ```
 
-So in practice always name the slice:
+Both models together is 28 nodes at peak, inside the ceiling. Within a leg the languages are
+chained `--dependency=afterany`, so at most one language of each leg holds nodes -- the pair costs
+wall clock instead of nodes. `afterany`, never `afterok`: an arm that dies still leaves a usable
+judge DB and you want the pair either way.
+
+Narrow it to one arm by naming the slice:
 
 ```bash
-LANGS=c ARMS=off    MODEL=qwen30b ./submit-llr4.sh      # 1 arm, 10 nodes
-LANGS=c ARMS=skills MODEL=oss120b ./submit-llr4.sh      # 1 arm, 10 nodes
-LANGS=c             MODEL=kimi27code ./submit-llr4.sh   # 2 arms (off + skills), 6 nodes each
+LANGS=c LEGS=1 MODEL=qwen30b ./submit-llr8.sh --partition=mi300
 ```
 
-## A full wave, inside the budget
-
-C first, both sides of the skills pair, all three models. 24 nodes:
+A smoke run is the same command with the walltime cut, which answers "does a task reach an agent,
+get graded, and come back" before you commit a wave:
 
 ```bash
-LANGS=c ARMS=off    MODEL=qwen30b ./submit-llr4.sh
-LANGS=c ARMS=off    MODEL=oss120b ./submit-llr4.sh
-LANGS=c ARMS=off    MODEL=kimi27code ./submit-llr4.sh
+TIME=01:00:00 LANGS=c LEGS=1 MODEL=qwen30b ./submit-llr8.sh --partition=mi300
 ```
 
-Then chain the skills side behind it rather than doubling the footprint -- see below.
+## Before you submit
 
-## Chaining with a dependency
-
-The skills arm is the same 242 kernels as the off arm, so running them back to back costs wall
-clock but not nodes. `afterany` (not `afterok`) because an arm that dies still leaves a usable
-judge DB, and you want the pair either way.
+**The skills packet is FROZEN INTO the problems file.** `make_problems.py` inlines the `SKILL.md`
+bodies at generation time; a running arm never re-reads the pages. The submitter refuses a stale
+list rather than grading a treatment nobody meant to run, so an edited page shows up as a refused
+submit:
 
 ```bash
-# 1. submit the off side and capture its job id.  `tee /dev/stderr` keeps the submitter's own
-#    "submitted <arm>" confirmation visible -- a bare $( ) would swallow it with the id.
-off_id=$(LANGS=c ARMS=off MODEL=qwen30b ./submit-llr4.sh | tee /dev/stderr \
-             | grep -oP 'Submitted batch job \K[0-9]+')
-echo "off arm: ${off_id}"
-
-# 2. submit the skills side held behind it
-LANGS=c ARMS=skills MODEL=qwen30b ./submit-llr4.sh --dependency="afterany:${off_id}"
+PYTHON=$SCRATCH/venv-optarena/bin/python ./regen_problems.sh llr6
 ```
 
-The extra `--dependency=...` lands on the `sbatch` line unchanged, which is what `"$@"` in the
-submitter is for.
+The lists are named for the TAG, not the campaign -- `llr8` reuses the `llr6` focus40 lists
+unchanged, which is what makes the two campaigns comparable.
 
-For all three models chained in pairs (24 nodes at any instant, six arms total):
+Then confirm nothing is already running and the budget has room:
 
 ```bash
-for model in qwen30b oss120b kimi27code; do
-    off_id=$(LANGS=c ARMS=off MODEL="${model}" ./submit-llr4.sh | grep -oP 'Submitted batch job \K[0-9]+')
-    [[ -n "${off_id}" ]] || { echo "no job id from ${model} -- sbatch refused, stopping" >&2; break; }
-    LANGS=c ARMS=skills MODEL="${model}" ./submit-llr4.sh --dependency="afterany:${off_id}"
-done
+squeue -u "$USER" -o "%.10i %.30j %.9T %.10M %.5D"
 ```
-
-**A dependency can only be added while the job is still PENDING.** Once it starts,
-`scontrol update jobid=<id> dependency=afterany:<other>` answers *"Job is no longer pending
-execution"* and the two run concurrently.
-
-## Later waves: cpp and fortran
-
-Same commands with `LANGS` changed. Run them only once the C wave has drained, so the
-32-node ceiling holds:
-
-```bash
-LANGS=cpp     ARMS=off MODEL=qwen30b ./submit-llr4.sh
-LANGS=fortran ARMS=off MODEL=qwen30b ./submit-llr4.sh
-```
-
-## The regression smoke
-
-Narrow gate: only the 69 kernels the skills arms previously got wrong. Cheap, and the right
-thing to run before committing a full wave to a freshly edited packet.
-
-```bash
-MODELS="oss120b qwen30b" LANGS="c cpp fortran" ./submit-regress-smoke.sh
-```
-
-It needs `problems-regress-<lang>-skills.jsonl`; the script prints the exact regeneration
-command if one is missing.
 
 ## Watching a run
 
@@ -158,10 +96,15 @@ squeue -u "$USER" -o "%.10i %.30j %.9T %.10M %.5D %R"
 sacct -j <jobid> -o JobID,JobName%30,State,Elapsed,ExitCode --parsable2
 
 # the job's own logs
-tail -f containers/cluster/example-script/results/beverin-services-<jobid>.err
+tail -f results/beverin-services-<jobid>.err
 
 # is the engine actually decoding?  zero of these after requests arrive = a wedged engine
 grep -c 'Avg generation throughput' results/beverin-services-<jobid>.out
+
+# did the agents get their tools?  an agent whose MCP server failed at init never submits,
+# burns its whole budget in api_retry, and still exits rc=0 -- so this is not visible in sacct.
+# Want one "connected" per agent and no "failed"; a log with neither has not started yet.
+grep -ho '"status":"[a-z]*"' <RUN_ROOT>/<jobid>/agents/node-*/*/claude.log | sort | uniq -c
 
 # outcome counts, live, from the per-rank judge shards
 python3 - <<'PY'
@@ -179,26 +122,55 @@ PY
 
 `RUN_ROOT` is `$SCRATCH/hpcagent-bench-runs` (see the arm's `.env`).
 
+Completion counts matter: an arm cut off by wall clock is `COMPLETED` but did not finish all 40
+kernels. Check the counts before treating an arm as done.
+
+After the job, fold the per-rank judge DBs into one and read the balance report:
+
+```bash
+python3 merge_results.py  <RUN_ROOT>/<jobid>
+python3 monitor_report.py <RUN_ROOT>/<jobid>/monitor
+```
+
 ## Cancelling
 
 ```bash
 scancel <jobid> [<jobid> ...]
-scancel -u "$USER" --name=llr4-qwen30b-c     # by arm name, since every arm is --job-name'd
+scancel -u "$USER" --name=llr8-qwen30b-c     # by arm name, since every arm is --job-name'd
 ```
 
 Judge shards written before the cancel survive under `<RUN_ROOT>/<jobid>/judge/`, so a cancelled
 arm still carries partial results.
 
+## Known traps
+
+- **A walltime can be lowered but never raised.** `scontrol update jobid=<id> TimeLimit=<t>`
+  answers *"Access/permission denied"* when `<t>` is longer than the current limit, so an arm
+  submitted too tight has to be cancelled and resubmitted, losing its warmup. Submit with slack.
+- **A dependency can only be added while the job is PENDING.** Once it starts,
+  `scontrol update jobid=<id> dependency=...` answers *"Job is no longer pending execution"* and
+  the two run concurrently.
+- **Never edit a file a running arm reads.** Slurm snapshots the BATCH SCRIPT at submit time, so
+  editing `beverin.sbatch` does not reach a queued job -- but `run_cluster.sh`, `agent_driver.py`,
+  the skills pages, the manifests and the problems lists are all read LIVE from
+  `HPCAGENT_BENCH_REPO`, which is the submitting worktree. A `.env.<arm>` is read when the job
+  STARTS, not when you submit it, so moving one breaks a pending arm.
+- **Arms are only comparable if the serve config is identical.** Changing an `.env.llr8-*` file
+  mid-campaign splits the A/B.
+- **An arm that logs requests but zero `Avg generation throughput` is wedged, not slow.** It will
+  burn its whole wall clock. Kill it.
+- **An agent whose MCP server failed at init never submits** and still exits rc=0, so the arm
+  looks healthy in `sacct`. Historically 22-25% of every arm's first wave. `AGENT_START_CONCURRENCY`
+  staggers the starts; check the connected count rather than assuming.
+- **Image patches rewrite the image IN PLACE**, so never let one land while arms are queued
+  against it.
+- **kimi27code is not a viable family.** At campaign context it needs ~4.1 s per forward pass;
+  its envs and probes were removed. Anything reintroducing it needs a decode gate first.
+
 ## Infrastructure jobs (images, gates, weights)
 
-These are not campaign arms. They take one to four nodes and are what you submit when the
-question is "can the campaign move", not "how did the model score".
-
-No `--account` on beverin. The user default association is `root`, and `root`, `a-g200` and
-`a-g34` all carry QOS `normal` with no GrpTRES, MaxJobs, MaxSubmit, MaxTRES or priority set --
-measured, and a 2-node accountless job allocated and ran (600940). Omitting the flag therefore
-costs nothing in scheduling, and it stops jobs from silently splitting across two project
-accounts depending on which command line was typed.
+Not campaign arms. One to four nodes, and what you submit when the question is "can the campaign
+move", not "how did the model score".
 
 ```bash
 cd containers/cluster/ce-images
@@ -214,11 +186,6 @@ VLLM_VERSION=0.27.1 sbatch \
     --export=ALL,VLLM_BUILD_ROOT=$PWD/inference \
     inference/build/build-vllm023-pt211.sbatch
 
-# 2-node RCCL/CXI check. OPTARENA_REPO is REQUIRED -- Slurm spools the script, so it cannot
-# find its own driver.
-sbatch --export=ALL,OPTARENA_REPO=<repo root> \
-    ../example-script/test-rccl-ofi-2node.sbatch
-
 # 0.27.1 serving-surface gate: serve-arg parity, tool/reasoning parser choices, the tuned-MoE
 # env var, and the internal API the pp collective split depends on. One node, ~2 minutes,
 # no weights. Run it BEFORE spending a 4-node hour on a decode gate.
@@ -230,18 +197,6 @@ sbatch inference/gate-0271-serving-surface.sbatch
 # a .before-aiter backup, so a decode gate must be re-run after it.
 VLLM_VERSION=0.27.1 sbatch --export=ALL,VLLM_VERSION=0.27.1 \
     inference/build/add-aiter-pt211.sbatch
-
-# aiter JIT cache, then the decode gate, both chained behind it. aiter ships no prebuilt .so,
-# so an unprimed image builds module_aiter_core inside the serving job and can miss the API
-# timeout outright (598021). Give each vLLM version its OWN AITER_JIT_DIR -- the pin is
-# discovered from the image, so two versions sharing one cache is a silent kernel mismatch.
-JIT=/iopsstor/scratch/cscs/$USER/aiter-jit-0271
-sbatch --dependency=afterok:<aiter job> \
-    --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
-    inference/prebuild-aiter-jit.sbatch
-sbatch --dependency=afterok:<prebuild job> \
-    --export=ALL,INFERENCE_EDF=rocm723-vllm-0.27.1-pytorch211-ofi,AITER_JIT_DIR=$JIT \
-    inference/smoke-kimi-eager-pg.sbatch
 ```
 
 Promoting a candidate image is a rename, and only when nothing has the old one mounted:
@@ -267,15 +222,3 @@ Only if that ever reports a narrow count, and only while NOTHING is reading the 
 ```bash
 lfs migrate -c 16 -S 4M <blob>
 ```
-
-## Known traps
-
-- **kimi27code is `INFERENCE_MODE=pp`** (4 nodes, one engine). The other two are
-  `INFERENCE_MODE=replicas` (one engine per node behind LiteLLM). Only the pp topology has the
-  pipeline process group, which is why only kimi has ever wedged on it.
-- **An arm that logs requests but zero `Avg generation throughput` is wedged, not slow.** It will
-  burn its whole wall clock. Kill it.
-- **Never edit a file a running arm reads.** The problems jsonl is snapshotted at submit time, but
-  `run_cluster.sh` and the repo tree are read live.
-- **Regenerate the problems files after ANY skill page edit**, or the arm measures the old pages
-  while the tree shows the new ones.

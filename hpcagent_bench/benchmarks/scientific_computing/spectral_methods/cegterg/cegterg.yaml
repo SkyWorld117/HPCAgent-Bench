@@ -97,6 +97,7 @@ init:
     nlk:
       shape: (npwx, nks)
       dtype: int64
+      index_array: true
     vkb:
       shape: (npwx, nkb, nks)
       dtype: complex128

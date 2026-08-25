@@ -169,7 +169,7 @@ static inline int64_t __npb_int_pow(int64_t base, int64_t exp) {
     return result;
 }
 
-void s353_2d_row_unroll_K_fp64(const double *restrict a, double *restrict b, const int64_t *restrict ip, int64_t N) {
+void s353_2d_row_unroll_k_fp64(const double *restrict a, double *restrict b, const int64_t *restrict ip, int64_t N) {
         int64_t i;
         i = 0;
         while (((i + 11) <= N)) {

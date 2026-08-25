@@ -53,6 +53,7 @@ init:
     neigh_idx:
       shape: (NA, NB)
       dtype: int32
+      index_array: true
     dH:
       shape: (NA, NB, N3D, Norb, Norb)
       dtype: complex128

@@ -412,11 +412,11 @@ def vexx_all_paths(psi,
         out = np.fft.fftn(col.reshape(shape, order="F"), axes=(0, 1, 2))
         return out.reshape(col.shape, order="F")
 
-    nl0 = nl[:ngm] - 1  # G-sphere -> FFT grid (0-based)
-    gki = igk_exx[:n, current_k - 1] - 1  # wavefunction G-index -> G-sphere
-    nlg = nl[gki] - 1  # wavefunction G -> FFT grid
-    ijtoh0 = ijtoh - 1
-    ofsbeta0 = ofsbeta - 1
+    nl0 = nl[:ngm]  # G-sphere -> FFT grid (0-based)
+    gki = igk_exx[:n, current_k - 1]  # wavefunction G-index -> G-sphere
+    nlg = nl[gki]  # wavefunction G -> FFT grid
+    ijtoh0 = ijtoh
+    ofsbeta0 = ofsbeta
 
     my_n = int(nibands[eg])
     # local working exxbuff (rotated for negrp>1); shape (nrxxs*npol, nbnd, nks)
@@ -449,8 +449,8 @@ def vexx_all_paths(psi,
     # ---- main loop over q-points ------------------------------------------
     for iq in range(1, nqs + 1):
         ikq = int(index_xkq[current_ik - 1, iq - 1])
-        ik = int(index_xk[ikq - 1])
-        xkq = xkq_collect[:, ikq - 1]
+        ik = int(index_xk[ikq])
+        xkq = xkq_collect[:, ikq]
         fac = _g2_convolution_all(coulomb_fac, coulomb_done, iq, ngm, g, xk[:, current_k - 1], xkq, tpiba2, exxdiv,
                                   eps_qdiv, gau_scrlen, erf_scrlen, erfc_scrlen, yukawa, x_gamma_extrapolation,
                                   grid_factor, at_, nq1, nq2, nq3, eps_gcv, use_coulomb_vcut_spheric, vcut_a_,
@@ -492,38 +492,38 @@ def vexx_all_paths(psi,
                     continue
                 for jbnd in range(jstart, jend + 1):
                     buf = jbnd - all_start_tmp + iexx_start - 1  # exxbuff col (0-based)
-                    phi_stack = exxbuff_w[:, buf, ikq - 1].reshape(npol, nrxxs)
+                    phi_stack = exxbuff_w[:, buf, ikq].reshape(npol, nrxxs)
                     # ---- rhoc = conj(phi) * psi / omega ----
                     rhoc = np.sum(np.conj(phi_stack) * temppsic[:, :, ii].T, axis=0) * omega_inv
                     # ---- US real-space augmentation (tqr) on rho ----
                     if okvan and tqr:
-                        _addusxx_r(rhoc, becxx[:, jbnd - 1, ikq - 1], becpsi[:, ibnd - 1], tabxx_box, tabxx_qr,
+                        _addusxx_r(rhoc, becxx[:, jbnd - 1, ikq], becpsi[:, ibnd - 1], tabxx_box, tabxx_qr,
                                    ijtoh0, nat, nh, ofsbeta0)
                     rhocg = fwfft(rhoc)
                     # ---- US G-space augmentation ----
                     if okvan and not tqr:
-                        _addusxx_g(rhocg, nl0, qgm_use, becxx[:, jbnd - 1, ikq - 1], becpsi[:, ibnd - 1], ijtoh0,
+                        _addusxx_g(rhocg, nl0, qgm_use, becxx[:, jbnd - 1, ikq], becpsi[:, ibnd - 1], ijtoh0,
                                    nat, nh, ofsbeta0, eigqts_use, sfac_use)
                     # ---- vc = facb * rhoc * occ / nqs ----
-                    vc = facb * rhocg * (x_occupation[jbnd - 1, ik - 1] * nqs_inv)
+                    vc = facb * rhocg * (x_occupation[jbnd - 1, ik] * nqs_inv)
                     # ---- US G-space non-local potential ----
                     if okvan and not tqr:
-                        _newdxx_g(vc, nl0, qgm_use, becxx[:, jbnd - 1, ikq - 1], deexx[:, ii], ijtoh0, nat, nh,
+                        _newdxx_g(vc, nl0, qgm_use, becxx[:, jbnd - 1, ikq], deexx[:, ii], ijtoh0, nat, nh,
                                   ofsbeta0, eigqts_use, sfac_use, omega)
                     vcr = invfft(vc)
                     # ---- US real-space non-local potential (tqr) ----
                     if okvan and tqr:
-                        _newdxx_r(vcr, becxx[:, jbnd - 1, ikq - 1], deexx[:, ii], tabxx_box, tabxx_qr, ijtoh0, nat,
+                        _newdxx_r(vcr, becxx[:, jbnd - 1, ikq], deexx[:, ii], tabxx_box, tabxx_qr, ijtoh0, nat,
                                   nh, ofsbeta0, omega, nrxxs)
                     # ---- PAW Fock-kernel contraction ----
                     if okpaw:
-                        _paw_newdxx(x_occupation[jbnd - 1, ik - 1] * nqs_inv, becxx[:, jbnd - 1, ikq - 1],
+                        _paw_newdxx(x_occupation[jbnd - 1, ik] * nqs_inv, becxx[:, jbnd - 1, ikq],
                                     becpsi[:, ibnd - 1], deexx[:, ii], ke, nat, nh, ofsbeta0)
                     # ---- result += vc * phi ----
                     result[:, :, ii] += vcr[:, None] * phi_stack.T
             # circular-shift the band-group's exxbuff slab left (MPI exchange).
             if negrp > 1:
-                exxbuff_w[:, :, ikq - 1] = np.roll(exxbuff_w[:, :, ikq - 1], -1, axis=1)
+                exxbuff_w[:, :, ikq] = np.roll(exxbuff_w[:, :, ikq], -1, axis=1)
 
     # ---- finalize: result(r) -> G-sphere, accumulate onto hpsi ------------
     for ii in range(my_n):

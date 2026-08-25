@@ -57,15 +57,19 @@ init:
     iN:
       shape: (rows,)
       dtype: int32
+      index_array: true
     iS:
       shape: (rows,)
       dtype: int32
+      index_array: true
     jW:
       shape: (cols,)
       dtype: int32
+      index_array: true
     jE:
       shape: (cols,)
       dtype: int32
+      index_array: true
     dN:
       shape: (rows, cols)
       dtype: float64

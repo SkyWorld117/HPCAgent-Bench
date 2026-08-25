@@ -557,6 +557,138 @@ _BINOP = operators.BINOP["fortran"]
 _CMPOP = operators.CMPOP["fortran"]
 _BOOLOP = operators.BOOLOP["fortran"]
 
+#: numpy calls that RE-VIEW an array without changing what its elements mean. A local bound to one
+#: of these over an index array is still an index array, so the ``+ 1`` suppression has to follow
+#: it (cegterg spells its FFT-grid map ``gmap = np.asarray(nlk)[:npw_k, ck0].astype(np.intp)``).
+_PURE_VIEW_FNS = frozenset({"asarray", "array", "ascontiguousarray", "astype", "ravel", "flatten", "copy"})
+
+#: Value-preserving INTEGER casts. A cast re-TYPES an index, it does not renumber it, so the
+#: result is still in the base the seam delivered -- ``J[i, int(jW[j])]`` is as much a bare
+#: gather as ``J[i, jW[j]]`` is. Covers the builtin (``int(x)``), the numpy constructors
+#: (``np.intp(x)``) and the scalar read-out (``x.item()``), which is every spelling the corpus uses.
+_PURE_INT_CASTS = frozenset(
+    {"int", "intp", "item", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"})
+
+
+def _pure_index_root(node: ast.AST, tainted: Set[str]) -> Optional[str]:
+    """The index-array ``node`` is a value-preserving read of, or ``None``.
+
+    Value-PRESERVING is the whole point: slicing, reshaping and re-typing carry an index through
+    unchanged, so the result is still in the delivered base -- but arithmetic does not, and
+    ``idx[i] - 1`` must fall through to the ordinary 0-based path. Only the forms below propagate.
+    """
+    while True:
+        if isinstance(node, ast.Name):
+            return node.id if node.id in tainted else None
+        if isinstance(node, ast.Subscript):
+            node = node.value
+            continue
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id in _PURE_INT_CASTS and node.args:
+                # Builtin form -- ``int(idx[j])``.
+                node = node.args[0]
+                continue
+            if isinstance(fn, ast.Attribute) and fn.attr in (_PURE_VIEW_FNS | _PURE_INT_CASTS):
+                # Method form -- ``x.astype(...)`` / ``x.item()`` -- or the numpy function form,
+                # ``np.asarray(x)`` / ``np.intp(x)``, where the value is the ARGUMENT not the receiver.
+                node = node.args[0] if (isinstance(fn.value, ast.Name) and fn.value.id in ("np", "numpy")
+                                        and node.args) else fn.value
+                continue
+        return None
+
+
+def _peel_int_casts(node: ast.AST) -> ast.AST:
+    """``node`` with value-preserving integer casts stripped from the outside.
+
+    ``int(ip[j])`` subscripts with exactly the value ``ip[j]`` holds -- the cast is spelling, not
+    arithmetic -- so the "is this axis ONE index read" test has to see through it or it refuses a
+    bare gather as though it were ``ip[j] + k``.
+    """
+    while isinstance(node, ast.Call):
+        fn = node.func
+        if isinstance(fn, ast.Name) and fn.id in _PURE_INT_CASTS and node.args:
+            node = node.args[0]
+            continue
+        if isinstance(fn, ast.Attribute) and fn.attr in _PURE_INT_CASTS:
+            node = node.args[0] if (isinstance(fn.value, ast.Name) and fn.value.id in ("np", "numpy")
+                                    and node.args) else fn.value
+            continue
+        return node
+    return node
+
+
+def _supplies_no_values(node: Optional[ast.AST]) -> bool:
+    """``node`` allocates a buffer without putting anything in it.
+
+    Two spellings reach here, and only these two: ``np.empty(...)``, and the lowering's
+    ``__hpcagent_bench_zeros__("__reassign__")`` marker, which is a no-op immediately followed by
+    a loop that FULLY overwrites the buffer. A genuine ``np.zeros`` / ``np.ones`` is NOT one of
+    them -- a zero that survives into a subscript is a real 0-based value, and suppressing the
+    ``+ 1`` on it would subscript element 0 of a 1-based array.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    fn = node.func
+    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) \
+            and fn.value.id in ("np", "numpy") and fn.attr == "empty":
+        return True
+    return (isinstance(fn, ast.Name) and fn.id in _ZEROS_MARKER_NAMES
+            and any(isinstance(a, ast.Constant) and a.value == "__reassign__" for a in node.args))
+
+
+def _index_aliases(kir: KernelIR, seeds: Set[str]) -> Set[str]:
+    """Local names that carry an index-array value, to a fixed point over ``seeds``.
+
+    A name qualifies only when EVERY assignment to it is a value-preserving read of something
+    already known to be an index (:func:`_pure_index_root`). One impure assignment disqualifies
+    the name outright rather than tainting it conditionally: a name that is an index on some
+    paths and a count on others has no single base, and guessing would shift a gather silently.
+
+    Both ways a local receives values count. Lowering SPILLS any call in an index position to a
+    temp (``lowering._hoist_index``) and then fills it ELEMENT-WISE, so the only assignment to
+    ``__ix2`` is ``__ix2[w] = np.int64(targets[w])`` -- a Subscript target. Reading whole-name
+    assignments alone left that temp untainted, and ``log_probs[arange(n), targets]`` re-added the
+    ``+ 1`` the seam had already applied. The ``np.empty`` that precedes such a fill is skipped
+    because it supplies no values; ``np.zeros`` is NOT skipped, since a zero that survives the
+    fill is a real 0-based value the suppression would turn into an out-of-bounds subscript.
+    """
+    if not seeds:
+        return set()  # nothing declared -- do not walk the tree at all
+    assigns: Dict[str, List[ast.AST]] = {}
+
+    def record(name: str, value: Optional[ast.AST]) -> None:
+        if _supplies_no_values(value):
+            return  # an allocation, not a value
+        # ``None`` (a bare annotation) and an AugAssign both land as the node itself, which
+        # ``_pure_index_root`` rejects -- an arithmetic update is never value-preserving.
+        assigns.setdefault(name, []).append(value)
+
+    for node in ast.walk(kir.tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                record(target.id, node.value)
+            elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                record(target.value.id, node.value)  # element-wise fill of a spilled temp
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            record(node.target.id, node.value if node.value is not None else node)
+        elif isinstance(node, ast.AugAssign):
+            base = node.target.value if isinstance(node.target, ast.Subscript) else node.target
+            if isinstance(base, ast.Name):
+                record(base.id, node)  # arithmetic update -- disqualifies outright
+    tainted = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for name, values in assigns.items():
+            if name in tainted:
+                continue
+            if all(_pure_index_root(v, tainted) is not None for v in values):
+                tainted.add(name)
+                changed = True
+    return tainted - seeds
+
 
 class _FortranBodyEmitter(BaseEmitter):
     """Walk the Python AST and emit Fortran statements, adjusting subscripts from 0-based to 1-based indexing."""
@@ -602,6 +734,13 @@ class _FortranBodyEmitter(BaseEmitter):
         #: name -> ABI position of that out-param dummy (see :func:`_helper_abi_order`).
         self._helper_ret_slot: Dict[str, int] = {}
         self.array_names: Set[str] = {a.name for a in kir.arrays}
+        #: Arrays whose ELEMENTS are subscripts (``init.arrays[name].index_array``). The harness
+        #: hands Fortran these buffers already rebased to 1 (see
+        #: ``support.bindings.contract.index_base``), so a value read out of one is ALREADY a
+        #: Fortran subscript: emitting the usual ``+ 1`` on top of it would shift every gathered
+        #: element by one. Locals that alias one inherit the property -- see :meth:`_index_alias`.
+        self.index_arrays: Set[str] = {a.name for a in kir.arrays if a.is_index}
+        self.index_arrays.update(_index_aliases(kir, self.index_arrays))
         zeros = kir.zeros_locals
         self.local_arrays: Dict[str, List[str]] = {
             name: list(shape) if shape else ["1"]
@@ -904,6 +1043,10 @@ class _FortranBodyEmitter(BaseEmitter):
         fns = self._store_fns(target)
         if fns is not None:  # fp8 target: demote the real(c_float) RHS to the byte
             rhs = f"{fns.demote}({rhs})"
+        # Rebase a value entering an index array. Skipped when the RHS is itself an index read
+        # (``path[t] = perm[k]`` is already one-based) -- that is the one shape that would double.
+        if self._writes_index_array(target) and not self._is_index_value(node.value):
+            rhs = f"({rhs}) + 1"
         return f"{indent}{lhs} = {rhs}"
 
     def _emit_augassign(self, node: ast.AugAssign, indent: str) -> str:
@@ -1003,6 +1146,77 @@ class _FortranBodyEmitter(BaseEmitter):
         fns = _fp8_fns(used[0]) if used else None
         self._fp8_fns_cache = fns
         return fns
+
+    def _index_reads(self, node: ast.AST) -> List[ast.AST]:
+        """Every read of an index array inside ``node``, outermost-first.
+
+        A read's own axes are NOT searched: ``nbr_idx[i, j, n]`` gathers with ``i``/``j``/``n``,
+        which are ordinary 0-based expressions and get the ordinary ``+ 1``.
+        """
+        hits: List[ast.AST] = []
+        stack: List[ast.AST] = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, ast.Subscript) and isinstance(cur.value, ast.Name) and cur.value.id in self.index_arrays:
+                hits.append(cur)
+                continue
+            if isinstance(cur, ast.Name) and cur.id in self.index_arrays:
+                hits.append(cur)
+                continue
+            stack.extend(ast.iter_child_nodes(cur))
+        return hits
+
+    def _reads_index_array(self, node: ast.AST) -> bool:
+        """``node`` IS one index-array read, so the delivered value is already the subscript.
+
+        An axis that mixes an index read with anything else is REFUSED, not guessed: the buffer
+        carries exactly one base shift, and ``idx[i] + k`` would silently consume it as though it
+        were part of ``k``. Rewriting the reference to subscript with the index directly is the
+        fix -- that is the canonical form the tag exists to describe.
+        """
+        if not self.index_arrays:
+            return False  # the common case: no declared index arrays, no walk
+        node = _peel_int_casts(node)
+        hits = self._index_reads(node)
+        if not hits:
+            return False
+        if len(hits) == 1 and hits[0] is node:
+            return True
+        raise NotImplementedError(
+            f"{self.kir.short_name or self.kir.kernel_name}: subscript {ast.unparse(node)!r} combines an "
+            f"index_array read with other terms. An index array is delivered in the target language's "
+            f"own base, so it must be used as the subscript itself (``a[ip[j]]``), not inside "
+            f"arithmetic -- fold the offset into the generated index data instead.")
+
+    def _is_index_value(self, node: ast.AST) -> bool:
+        """``node`` AS A WHOLE evaluates to an index-array element, so it already carries the base.
+
+        Distinct from :meth:`_reads_index_array`, which asks the same of a SUBSCRIPT AXIS and
+        refuses a mix. A right-hand side is allowed to contain an index read without being one --
+        ``back[t + 1, path[t + 1]]`` gathers WITH ``path`` and yields an element of ``back`` -- so
+        this looks at the node itself and never walks into it.
+        """
+        if not self.index_arrays:
+            return False
+        node = _peel_int_casts(node)
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            return node.value.id in self.index_arrays
+        return isinstance(node, ast.Name) and node.id in self.index_arrays
+
+    def _writes_index_array(self, target: ast.AST) -> bool:
+        """``target`` STORES into a buffer whose elements are subscripts (Sec. 7 ``index_array``).
+
+        The seam hands such a buffer to Fortran one-based and takes it back zero-based, so a value
+        the emitter computed in its own zero-based convention -- an argmax result, a loop variable,
+        a literal -- has to be shifted on the way in or it lands a base low AND leaves a base low.
+        Suppressing the ``+ 1`` on reads without doing this is worse than not tagging at all:
+        ``viterbi``'s backtrace then gathers one short and reports one short, silently.
+        """
+        if not self.index_arrays:
+            return False  # the common case: no declared index arrays, no walk
+        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            return target.value.id in self.index_arrays
+        return isinstance(target, ast.Name) and target.id in self.index_arrays
 
     def _name_dtype(self, name: str) -> Optional[str]:
         """dtype of a Name -- an array, a local, or a by-value scalar param (so an fp8 alpha is promoted on read)."""
@@ -1473,6 +1687,10 @@ class _FortranBodyEmitter(BaseEmitter):
                     adjusted.append(f"{lo}:{hi}")
                 else:
                     adjusted.append(f"{lo}:{hi}:{self.emit_expr(e.step)}")
+                continue
+            # A value read out of an index array is already 1-based -- subscript with it as-is.
+            if self._reads_index_array(e):
+                adjusted.append(self.emit_expr(e))
                 continue
             adjusted.append(f"({self.emit_expr(e)}) + 1")
         # Reverse the index order so Python row-major arr[i, j, k] accesses the same

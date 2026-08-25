@@ -66,11 +66,17 @@ def fake_popen_class(statuses, seen=None):
     return FakePopen
 
 
+#: The CPU share start_agent pins the child to. Empty is its own "leave the mask alone" path,
+#: which is what these tests want: they drive a fake Popen with no real pid, and the pinning
+#: itself is covered against a live process in test_agent_driver_affinity.py.
+_UNPINNED: list[int] = []
+
+
 def start(driver, monkeypatch, tmp_path, statuses, seen=None):
     monkeypatch.setattr(driver.subprocess, "Popen", fake_popen_class(statuses, seen))
     log_path = tmp_path / "claude.log"
     with log_path.open("w", encoding="utf-8") as log:
-        process, attempts = driver.start_agent(["claude"], tmp_path, {}, log, log_path)
+        process, attempts = driver.start_agent(["claude"], tmp_path, {}, log, log_path, _UNPINNED)
     return process, attempts, log_path
 
 
@@ -158,7 +164,7 @@ def test_only_so_many_agents_start_at_once(monkeypatch, tmp_path):
         def run(workdir=workdir):
             log_path = workdir / "claude.log"
             with log_path.open("w", encoding="utf-8") as log:
-                driver.start_agent(["claude"], workdir, {}, log, log_path)
+                driver.start_agent(["claude"], workdir, {}, log, log_path, _UNPINNED)
 
         threads.append(threading.Thread(target=run))
     for thread in threads:
@@ -243,7 +249,7 @@ def supervise(driver, monkeypatch, tmp_path, exit_codes):
     node_dir = tmp_path / "node-0"
     node_dir.mkdir()
     problem = {"id": 0, "kernel": "loop_level_reasoning/k/k", "language": "c", "task": "do it"}
-    driver.run_agent(problem, 0, node_dir, ["http://127.0.0.1:8800"], 0)
+    driver.run_agent(problem, 0, node_dir, ["http://127.0.0.1:8800"], 0, 1)
     return node_dir / "problem-0-worker-0"
 
 
@@ -291,7 +297,7 @@ def test_every_attempt_shares_one_wall_clock(monkeypatch, tmp_path):
         "kernel": "loop_level_reasoning/k/k",
         "language": "c",
         "task": "x"
-    }, 0, node_dir, ["http://127.0.0.1:8800"], 0)
+    }, 0, node_dir, ["http://127.0.0.1:8800"], 0, 1)
     assert len(waits) == 3, f"expected three attempts, got {len(waits)}"
     assert all(w is not None for w in waits), "the wall-clock cap must stay armed across relaunches"
     # Strictly decreasing, not merely non-increasing: a relaunch handed a FRESH budget produces
