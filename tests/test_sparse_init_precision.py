@@ -18,14 +18,23 @@ Two bugs the sparse fp32 leg was hiding:
 import numpy as np
 import pytest
 
+from hpcagent_bench.spec import BenchSpec
 from hpcagent_bench.support.helpers.sparse.generators import build_sparse, to_format
 
 KRYLOV = ("cg", "bicg", "minres", "gmres", "bicgstab")
 
 
 def solver_initialize(name):
-    module = __import__(f"hpcagent_bench.benchmarks.scientific_computing.sparse_linear_algebra.{name}.{name}",
-                        fromlist=["initialize"])
+    """The sparse solver's own ``initialize``, resolved through its manifest.
+
+    Neither the directory nor the module stem is derivable from the solver name: two manifests share
+    each directory, and ``sp_bicg`` had to be renamed off the stem ``bicg`` to break a collision with
+    the DENSE bicg (fb26d7e61). Reading both off the spec is what keeps this test pointing at the
+    module the harness itself loads.
+    """
+    spec = BenchSpec.load(f"sp_{name}")
+    dotted = "hpcagent_bench.benchmarks." + spec.relative_path.replace("/", ".")
+    module = __import__(f"{dotted}.{spec.module_name}", fromlist=["initialize"])
     return module.initialize
 
 

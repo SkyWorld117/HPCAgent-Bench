@@ -17,10 +17,13 @@ from hpcagent_bench.spec import BenchSpec
 KERNEL = "tsvc_2_s212"  # 1-D: a,b outputs; c,d inputs; LEN_1D symbol
 #: A kernel whose manifest ``short_name`` abbreviates its registry stem (``arc_distance`` -> ``arc_distance``);
 #: catches a short_name/stem mix-up that KERNEL above cannot (its three names coincide).
-#: A kernel whose NAME differs from its directory: ``sp_bicg.yaml`` and
-#: ``bicg_solvers.yaml`` are two benchmarks over the one ``bicg_numpy.py``, so the
-#: emitted artifact stem cannot be derived from the name.
-DIVERGENT = "sp_bicg"
+#: A kernel whose NAME differs from its module stem: ``sp_bicg.yaml`` and
+#: ``bicg_solvers.yaml`` are two benchmarks over the one ``sp_bicg_numpy.py``, so the
+#: emitted artifact stem cannot be derived from the name. ``sp_bicg`` itself is NOT the
+#: divergent one -- its name and stem coincide (fb26d7e61 renamed the module to break a
+#: stem collision with the dense ``bicg``), which is exactly what the premise test below
+#: rejects; ``bicg_solvers`` is the sibling manifest that still differs.
+DIVERGENT = "bicg_solvers"
 #: A plain dense kernel, one native target and no sparse configuration.
 DENSE = "arc_distance"
 #: framework -> the compiler binary that must be present to build it.
@@ -39,7 +42,7 @@ def test_divergent_kernel_premise():
     benchmarks, where the emitted artifact is still named after the directory."""
     spec = BenchSpec.load(DIVERGENT)
     assert spec.short_name == DIVERGENT
-    assert spec.module_name != DIVERGENT, "pick a kernel whose name differs from its directory"
+    assert spec.module_name != DIVERGENT, "pick a kernel whose name differs from its module stem"
 
 
 def test_native_base_follows_the_module_stem():
@@ -52,7 +55,7 @@ def test_native_base_follows_the_module_stem():
     assert _native_targets(dense) == [(None, "arc_distance")]
     # The divergent case is where name-keying would actually break: two benchmarks, one module.
     spec = BenchSpec.load(DIVERGENT)
-    assert spec.native_base() == "bicg" and spec.native_base("csr") == "bicg_csr"
+    assert spec.native_base() == "sp_bicg" and spec.native_base("csr") == "sp_bicg_csr"
 
 
 @pytest.mark.skipif(not _emitter_present(), reason="translators absent")
