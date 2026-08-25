@@ -1493,6 +1493,13 @@ _NP_ELEMENTWISE: Set[str] = {
     "logical_and",
     "logical_or",
     "logical_not",
+    # Complex accessors are elementwise like any other ufunc. Left out, ``rhoc += np.conj(phi_c) *
+    # temppsic[:, ip, ii]`` scalarised the sibling operand and left ``phi_c`` a bare POINTER, which
+    # the C backend then passed to ``__npb_conj(double _Complex)`` (vexx_k, incompatible argument).
+    "conj",
+    "conjugate",
+    "real",
+    "imag",
 }
 
 # Every unary libm intrinsic is elementwise by construction, so take them from the table that

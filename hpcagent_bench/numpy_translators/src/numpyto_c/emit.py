@@ -1403,10 +1403,12 @@ class _CBodyEmitter(BaseEmitter):
             # z.conjugate()/z.conj() never reaches emit (native_desugar rewrites it to np.conj(z), handled just below).
             if (isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy") and attr in _CONJ_ATTRS
                     and len(node.args) == 1):
+                self._refuse_whole_array_operand(attr, node.args[0])
                 return f"__npb_conj({self.emit_expr(node.args[0])})"
             # np.real(z)/np.imag(z): complex operand -> creal/cimag; a real operand is the value / 0.
             if (isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy")
                     and attr in _REAL_IMAG_ATTRS and len(node.args) == 1):
+                self._refuse_whole_array_operand(attr, node.args[0])
                 x = self.emit_expr(node.args[0])
                 if self._is_complex_operand(node.args[0]):
                     return f"creal({x})" if attr == "real" else f"cimag({x})"
@@ -1587,6 +1589,19 @@ class _CBodyEmitter(BaseEmitter):
         out.update(_integer_valued_locals(self.kir))
         self._int_locals_cache = out
         return out
+
+    def _refuse_whole_array_operand(self, attr: str, operand: ast.AST) -> None:
+        """Refuse an elementwise complex accessor that reached emit on a whole array.
+
+        These take a VALUE (``__npb_conj(double _Complex)``, ``creal``), so a bare array Name here
+        is a pointer where an element belongs -- which C rejects for conj but happily accepts for
+        creal, returning the real part of the POINTER. The lowering scalarises the argument (they
+        are in ``_NP_ELEMENTWISE``); reaching emit unscalarised means it did not, and a diagnosis
+        beats a miscompile.
+        """
+        if not self._is_scalar_operand(operand):
+            raise NotImplementedError(f"np.{attr}({ast.unparse(operand)}) reached emit on a whole array; "
+                                      f"it takes one element, so the operand must be scalarised first")
 
     def _is_scalar_operand(self, node: ast.AST) -> bool:
         """True when ``node`` reads a single VALUE, not a whole array: a literal, a scalar name, or
