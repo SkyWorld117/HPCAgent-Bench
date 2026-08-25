@@ -4,7 +4,7 @@
 #
 # Regenerate every problems file the submitters read.
 #
-#   ./regen_problems.sh [llr6|all]
+#   ./regen_problems.sh [llr6|llr8kimi|all]
 #
 # The lists are generated, not checked in, and they drift the moment a skills page changes. Both
 # submitters refuse a stale list (check_problems.sh), so the failure mode is a refused submit
@@ -13,6 +13,25 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 PYTHON="${PYTHON:-python3}"
 gen() { PYTHONHASHSEED=0 "${PYTHON}" ./make_problems.py "$@"; }
+
+# The kimi arms run the same focus40 lists in two halves: 12 workers means 40 kernels is four
+# waves of the per-problem budget, which does not fit the partition's 24 h ceiling. Split from the
+# llr6 lists rather than regenerated, so a half is the same records the full arm would have run and
+# both languages divide at the same point.
+half() {
+    local src="$1" stem="$2" n
+    n=$(($(wc -l <"${src}") / 2))
+    head -n "${n}" "${src}" >"${stem}-a.jsonl"
+    tail -n +$((n + 1)) "${src}" >"${stem}-b.jsonl"
+}
+
+regen_llr8kimi() {
+    regen_llr6
+    for lang in c fortran; do
+        half "problems-llr6-${lang}.jsonl" "problems-llr8kimi-${lang}"
+        half "problems-llr6-${lang}-skills.jsonl" "problems-llr8kimi-${lang}-skills"
+    done
+}
 
 # llr6 is the focused two-leg experiment: one tag, ONE agent per kernel.
 #
@@ -32,6 +51,7 @@ regen_llr6() {
 }
 
 case "${1:-all}" in
-    llr6 | all) regen_llr6 ;;
-    *) echo "usage: $0 [llr6|all]" >&2; exit 2 ;;
+    llr6) regen_llr6 ;;
+    llr8kimi | all) regen_llr8kimi ;;
+    *) echo "usage: $0 [llr6|llr8kimi|all]" >&2; exit 2 ;;
 esac
