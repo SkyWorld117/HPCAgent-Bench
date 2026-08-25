@@ -14,22 +14,31 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 PYTHON="${PYTHON:-python3}"
 gen() { PYTHONHASHSEED=0 "${PYTHON}" ./make_problems.py "$@"; }
 
-# The kimi arms run the same focus40 lists in two halves: 12 workers means 40 kernels is four
-# waves of the per-problem budget, which does not fit the partition's 24 h ceiling. Split from the
-# llr6 lists rather than regenerated, so a half is the same records the full arm would have run and
-# both languages divide at the same point.
-half() {
-    local src="$1" stem="$2" n
-    n=$(($(wc -l <"${src}") / 2))
-    head -n "${n}" "${src}" >"${stem}-a.jsonl"
-    tail -n +$((n + 1)) "${src}" >"${stem}-b.jsonl"
+# The kimi arms run the same focus40 lists in QUARTERS: 12 workers means 10 kernels is ONE wave of
+# the per-problem budget, so a batch is ~10 h and fits inside a maintenance window that 20 kernels
+# (two waves, ~20 h) does not. Split from the llr6 lists rather than regenerated, so a quarter is
+# the same records the full arm would have run and both languages divide at the same points.
+quarter() {
+    local src="$1" stem="$2" n q i start
+    n=$(wc -l <"${src}")
+    q=$((n / 4))
+    i=0
+    for part in a b c d; do
+        i=$((i + 1))
+        start=$(((i - 1) * q + 1))
+        if [[ "${part}" == d ]]; then          # d takes the remainder, so nothing is dropped
+            sed -n "${start},\$p" "${src}" >"${stem}-${part}.jsonl"
+        else
+            sed -n "${start},$((i * q))p" "${src}" >"${stem}-${part}.jsonl"
+        fi
+    done
 }
 
 regen_llr8kimi() {
     regen_llr6
     for lang in c fortran; do
-        half "problems-llr6-${lang}.jsonl" "problems-llr8kimi-${lang}"
-        half "problems-llr6-${lang}-skills.jsonl" "problems-llr8kimi-${lang}-skills"
+        quarter "problems-llr6-${lang}.jsonl" "problems-llr8kimi-${lang}"
+        quarter "problems-llr6-${lang}-skills.jsonl" "problems-llr8kimi-${lang}-skills"
     done
 }
 
