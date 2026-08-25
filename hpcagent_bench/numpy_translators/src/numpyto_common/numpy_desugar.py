@@ -1781,6 +1781,167 @@ def _ufunc_at_op(node: ast.AST) -> Optional[str]:
     return None
 
 
+class _DiffToSliceDifference(ast.NodeTransformer):
+    """``np.diff(p)`` -> ``p[1:] - p[:-1]``.
+
+    The identity numpy documents, and every python backend traces the slice form natively -- dace
+    otherwise falls back to a Python callback for the whole enclosing program, which is not a
+    lowering at all. Only the single-argument form: an ``n``/``axis``/``prepend`` argument is a
+    different computation, left standing for the caller to see.
+    """
+
+    def __init__(self) -> None:
+        self.changed = False
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if _np_attr(node) != "diff" or len(node.args) != 1 or node.keywords:
+            return node
+        base = node.args[0]
+        self.changed = True
+        tail = ast.Subscript(value=copy.deepcopy(base),
+                             slice=ast.Slice(lower=ast.Constant(value=1), upper=None, step=None),
+                             ctx=ast.Load())
+        head = ast.Subscript(value=copy.deepcopy(base),
+                             slice=ast.Slice(lower=None, upper=ast.Constant(value=-1), step=None),
+                             ctx=ast.Load())
+        return ast.copy_location(ast.BinOp(left=tail, op=ast.Sub(), right=head), node)
+
+
+class _StripAstypeCopyKwarg(ast.NodeTransformer):
+    """``x.astype(dt, copy=False)`` -> ``x.astype(dt)``.
+
+    ``copy`` is a hint about whether numpy may return the input unchanged when the dtype already
+    matches; the VALUE is the same either way. dace's astype replacement takes no such argument and
+    fails the build outright (``_ndarray_astype() got an unexpected keyword argument 'copy'``).
+    """
+
+    def __init__(self) -> None:
+        self.changed = False
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "astype"
+                and any(k.arg == "copy" for k in node.keywords)):
+            node.keywords = [k for k in node.keywords if k.arg != "copy"]
+            self.changed = True
+        return node
+
+
+class _RepeatCountsInline(ast.NodeTransformer):
+    """``np.repeat(src, np.diff(p))`` -> a prefix-sum fill loop.
+
+    A PER-ELEMENT repeat count is a different computation from the scalar one: the destination
+    offset is the running sum of the counts, not ``i * K``. numba and dace have no array-count
+    repeat, so the CSR row-index idiom fell back to a callback.
+
+    The output length is ``sum(counts)``, which is data -- except for a first difference, where it
+    TELESCOPES to ``p[-1] - p[0]``. That is the only form claimed here; any other per-element count
+    is left standing rather than sized by a guess.
+    """
+
+    def __init__(self, ranks: Dict[str, int]) -> None:
+        self.ranks = ranks
+        self.changed = False
+        self._ctr = 0
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        calls = [n for n in ast.walk(node.value) if _np_attr(n) == "repeat" and len(n.args) == 2 and not n.keywords]
+        pre: List[ast.stmt] = []
+        for call in calls:
+            counts = call.args[1]
+            if _np_attr(counts) != "diff" or len(counts.args) != 1:
+                continue  # scalar count, or a sum we cannot derive -- not ours
+            if (expr_rank(call.args[1], self.ranks) or 0) < 1 and not isinstance(counts, ast.Call):
+                continue
+            ptr = ast.unparse(counts.args[0])
+            name = f"__rp{self._ctr}"
+            self._ctr += 1
+            src, i, r, pos = f"{name}_src", f"{name}_i", f"{name}_r", f"{name}_pos"
+            lines = [
+                f"{src} = {ast.unparse(call.args[0])}",
+                f"{name} = np.zeros({ptr}[-1] - {ptr}[0], dtype={src}.dtype)",
+                f"{pos} = 0",
+                f"for {i} in range({src}.shape[0]):",
+                f"    for {r} in range({ptr}[{i} + 1] - {ptr}[{i}]):",
+                f"        {name}[{pos}] = {src}[{i}]",
+                f"        {pos} = {pos} + 1",
+            ]
+            pre.extend(ast.parse("\n".join(lines)).body)
+            _replace_call_with_name(node, call, name)
+        if not pre:
+            return node
+        self.changed = True
+        out = pre + [node]
+        for stmt in out:
+            ast.copy_location(stmt, node)
+            ast.fix_missing_locations(stmt)
+        return out
+
+
+class _BincountInline(ast.NodeTransformer):
+    """``np.bincount(idx, weights=w, minlength=M)`` -> zero M slots, then a scatter-add loop.
+
+    No python backend implements it: numba has no bincount at all, and dace routes it to a Python
+    callback that drags the whole program back into the interpreter. The loop is the definition --
+    duplicate indices ACCUMULATE, which is why it is ``+=`` and not a store.
+
+    ``minlength`` is required. numpy sizes the result ``max(minlength, idx.max() + 1)`` and the
+    second term is data; every corpus caller assigns the result into a buffer of exactly M, so an
+    index at or past M would make numpy return a LONGER array and the assignment itself would raise.
+    """
+
+    def __init__(self, ranks: Dict[str, int]) -> None:
+        self.ranks = ranks
+        self.changed = False
+        self._ctr = 0
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        calls = [n for n in ast.walk(node.value) if _np_attr(n) == "bincount" and n.args]
+        if not calls:
+            return node
+        pre: List[ast.stmt] = []
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            minlength = kw.get("minlength") or (call.args[2] if len(call.args) > 2 else None)
+            weights = kw.get("weights") or (call.args[1] if len(call.args) > 1 else None)
+            if minlength is None:
+                return node  # data-dependent extent -- leave it standing rather than guess one
+            name = f"__bc{self._ctr}"
+            self._ctr += 1
+            idx, it = ast.unparse(call.args[0]), f"{name}_i"
+            dtype = f"{ast.unparse(weights)}.dtype" if weights is not None else "np.int64"
+            rhs = f"{ast.unparse(weights)}[{it}]" if weights is not None else "1"
+            lines = [
+                f"{name} = np.zeros({ast.unparse(minlength)}, dtype={dtype})",
+                f"for {it} in range({idx}.shape[0]):",
+                f"    {name}[{idx}[{it}]] += {rhs}",
+            ]
+            pre.extend(ast.parse("\n".join(lines)).body)
+            call.func = ast.Name(id="__bincount_result__", ctx=ast.Load())
+            _replace_call_with_name(node, call, name)
+        self.changed = True
+        out = pre + [node]
+        for stmt in out:
+            ast.copy_location(stmt, node)
+            ast.fix_missing_locations(stmt)
+        return out
+
+
+def _replace_call_with_name(root: ast.AST, target: ast.Call, name: str) -> None:
+    """Swap one already-lowered Call node for a Name reference, wherever it sits in ``root``."""
+
+    class Swap(ast.NodeTransformer):
+
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            self.generic_visit(node)
+            return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node) if node is target else node
+
+    Swap().visit(root)
+
+
 class _AddAtInline(ast.NodeTransformer):
     """``np.add.at(A, idx, vals)`` -> an explicit scatter loop. numba has no
     ufunc.at; a sequential ``+=`` loop reproduces its defining property --
@@ -4843,6 +5004,14 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
             _MaskedAssignToLoop(ranks, dtypes),
             _AddAtInline(ranks),
             _SearchsortedMaterialize(),
+            # Bincount BEFORE the diff rewrite: the repeat lowering below reads ``np.diff(p)``
+            # structurally to prove its output length telescopes.
+            _StripAstypeCopyKwarg(),
+            _RepeatCountsInline(ranks),
+            _BincountInline(ranks),
+            # LAST of the three: the repeat lowering above reads ``np.diff(p)`` structurally, so the
+            # slice rewrite has to come after it.
+            _DiffToSliceDifference(),
             _HistogramInline(ranks),
             _RepeatAxisInline(ranks),
             _ReshapeContiguousInline(noncontig),
