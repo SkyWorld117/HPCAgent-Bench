@@ -176,11 +176,13 @@ void gemver_fp64(double *restrict A, const double *restrict u1, const double *re
         double *__mm4 = (double *)malloc((size_t)((N)) * sizeof(double));
         double *__sm1 = (double *)malloc((size_t)((N)) * sizeof(double));
         double *__sm2 = (double *)malloc((size_t)((N) * (N)) * sizeof(double));
+        /* numpy: np.outer(u1, v1) */
         for (int64_t __i = 0; __i < N; ++__i) {
           for (int64_t __j = 0; __j < N; ++__j) {
             __cb1[(__i)*(N) + (__j)] = (u1[__i] * v1[__j]);
           }
         }
+        /* numpy: np.outer(u2, v2) */
         for (int64_t __i = 0; __i < N; ++__i) {
           for (int64_t __j = 0; __j < N; ++__j) {
             __cb2[(__i)*(N) + (__j)] = (u2[__i] * v2[__j]);

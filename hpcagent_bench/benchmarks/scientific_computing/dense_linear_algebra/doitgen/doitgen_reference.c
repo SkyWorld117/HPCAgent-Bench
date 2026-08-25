@@ -173,6 +173,7 @@ void doitgen_fp64(double *restrict A, const double *restrict C4, int64_t NP, int
         double *__cb1 = (double *)malloc((size_t)((NR) * (NQ) * (1) * (NP)) * sizeof(double));
         double *__mm2 = (double *)malloc((size_t)((NR) * (NQ) * (1) * (NP)) * sizeof(double));
         double *__cb3 = (double *)malloc((size_t)((NR) * (NQ) * (NP)) * sizeof(double));
+        /* numpy: np.reshape(A, (NR, NQ, 1, NP)) */
         for (int64_t __rs0 = 0; __rs0 < NR; ++__rs0) {
           for (int64_t __rs1 = 0; __rs1 < NQ; ++__rs1) {
             for (int64_t __rs2 = 0; __rs2 < NP; ++__rs2) {
@@ -192,6 +193,7 @@ void doitgen_fp64(double *restrict A, const double *restrict C4, int64_t NP, int
             }
           }
         }
+        /* numpy: np.reshape(__mm2, (NR, NQ, NP)) */
         for (int64_t __rs0 = 0; __rs0 < NR; ++__rs0) {
           for (int64_t __rs1 = 0; __rs1 < NQ; ++__rs1) {
             for (int64_t __rs2 = 0; __rs2 < NP; ++__rs2) {

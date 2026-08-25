@@ -192,6 +192,7 @@ void comet_int4_gemm_fp64(const int8_t *__restrict__ codes_left, const int8_t *_
             rj0[(__w0)*(num_field) + (__w1)] = (2 - rj1[(__w0)*(num_field) + (__w1)]);
           }
         }
+        /* numpy: np.transpose(rj0) */
         for (int64_t __t0 = 0; __t0 < num_vector; ++__t0) {
           for (int64_t __t1 = 0; __t1 < num_field; ++__t1) {
             __cb1[(__t1)*(num_vector) + (__t0)] = rj0[(__t0)*(num_field) + (__t1)];
@@ -210,6 +211,7 @@ void comet_int4_gemm_fp64(const int8_t *__restrict__ codes_left, const int8_t *_
             out[(((si0)*(num_vector) + (si1))*(2) + (0))*(2) + (0)] = __mm2[(si0)*(num_vector) + (si1)];
           }
         }
+        /* numpy: np.transpose(rj1) */
         for (int64_t __t0 = 0; __t0 < num_vector; ++__t0) {
           for (int64_t __t1 = 0; __t1 < num_field; ++__t1) {
             __cb3[(__t1)*(num_vector) + (__t0)] = rj1[(__t0)*(num_field) + (__t1)];
@@ -228,6 +230,7 @@ void comet_int4_gemm_fp64(const int8_t *__restrict__ codes_left, const int8_t *_
             out[(((si0)*(num_vector) + (si1))*(2) + (0))*(2) + (1)] = __mm4[(si0)*(num_vector) + (si1)];
           }
         }
+        /* numpy: np.transpose(rj0) */
         for (int64_t __t0 = 0; __t0 < num_vector; ++__t0) {
           for (int64_t __t1 = 0; __t1 < num_field; ++__t1) {
             __cb5[(__t1)*(num_vector) + (__t0)] = rj0[(__t0)*(num_field) + (__t1)];
@@ -246,6 +249,7 @@ void comet_int4_gemm_fp64(const int8_t *__restrict__ codes_left, const int8_t *_
             out[(((si0)*(num_vector) + (si1))*(2) + (1))*(2) + (0)] = __mm6[(si0)*(num_vector) + (si1)];
           }
         }
+        /* numpy: np.transpose(rj1) */
         for (int64_t __t0 = 0; __t0 < num_vector; ++__t0) {
           for (int64_t __t1 = 0; __t1 < num_field; ++__t1) {
             __cb7[(__t1)*(num_vector) + (__t0)] = rj1[(__t0)*(num_field) + (__t1)];

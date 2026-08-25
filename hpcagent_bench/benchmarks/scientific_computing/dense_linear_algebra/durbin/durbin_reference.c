@@ -185,9 +185,11 @@ void durbin_fp64(const double *restrict r, double *restrict y, int64_t N) {
             __cb1[__w0] = r[__w0];
           }
           double __cb2[(k)];
+          /* numpy: np.flip(__cb1) */
           for (int64_t __fl0 = 0; __fl0 < k; ++__fl0) {
             __cb2[__fl0] = __cb1[((k - 1) - __fl0)];
           }
+          /* numpy: np.dot(__cb2, y[:k]) */
           __cb3 = 0.0;
           for (int64_t __r0 = 0; __r0 < k; ++__r0) {
             __cb3 += (__cb2[__r0] * y[__r0]);
@@ -198,6 +200,7 @@ void durbin_fp64(const double *restrict r, double *restrict y, int64_t N) {
             __cb4[__w0] = y[__w0];
           }
           double __cb5[(k)];
+          /* numpy: np.flip(__cb4) */
           for (int64_t __fl0 = 0; __fl0 < k; ++__fl0) {
             __cb5[__fl0] = __cb4[((k - 1) - __fl0)];
           }

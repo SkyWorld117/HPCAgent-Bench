@@ -78,6 +78,9 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="write the files (default: report only)")
     ap.add_argument("--only", default="", help="substring filter on the kernel stem")
     ap.add_argument("--ext", default=".c,.cpp")
+    ap.add_argument("--force",
+                    action="store_true",
+                    help="regenerate even a conforming reference (the numpy oracle moved under it)")
     args = ap.parse_args()
     exts = args.ext.split(",")
 
@@ -92,7 +95,7 @@ def main() -> int:
             # likewise not corpus references.
             if stem.endswith("_pluto") or "/tests/" in str(ref.parent.relative_to(BENCH)) + "/":
                 continue
-            if needs_regen(ref, ext):
+            if args.force or needs_regen(ref, ext):
                 targets.append((ref.parent, stem, ext, ref))
 
     by_kernel: dict[tuple[pathlib.Path, str], list] = {}

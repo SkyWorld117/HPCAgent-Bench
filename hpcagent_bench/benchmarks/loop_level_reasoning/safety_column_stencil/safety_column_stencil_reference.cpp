@@ -10,14 +10,18 @@
 // predefine M_PI / M_E as macros (glibc __USE_MISC); undefine
 // them so the names rebind to our constexpr values -- we emit no
 // macro DEFINITION, only remove the platform ones.
+// [[maybe_unused]]: namespace-scope constexpr has internal linkage, so a
+// kernel that references neither draws -Wunused-const-variable from clang
+// (the C prelude spells these as macros and never does). They are prelude
+// vocabulary offered to every kernel, which is exactly this attribute.
 #ifdef M_PI
 #undef M_PI
 #endif
 #ifdef M_E
 #undef M_E
 #endif
-constexpr double M_PI = 3.14159265358979323846;
-constexpr double M_E  = 2.71828182845904523536;
+[[maybe_unused]] constexpr double M_PI = 3.14159265358979323846;
+[[maybe_unused]] constexpr double M_E  = 2.71828182845904523536;
 // Complex support via the GCC/Clang ``double _Complex`` extension
 // (no <complex.h>, so no name clashes). The imaginary unit and
 // the C99-named helpers are constexpr/inline FUNCTIONS, not macros.

@@ -174,6 +174,7 @@ void covariance_fp64(double *restrict cov, double *restrict data, int64_t M, int
         double *__cb2 = (double *)malloc((size_t)((M) * (N)) * sizeof(double));
         double *__mm3 = (double *)malloc((size_t)((M) * (M)) * sizeof(double));
         double *mean = (double *)malloc((size_t)((M)) * sizeof(double));
+        /* numpy: np.mean(data, axis=0) */
         for (int64_t __ax0 = 0; __ax0 < M; ++__ax0) {
           __cb1[__ax0] = 0.0;
           for (int64_t __rd0 = 0; __rd0 < N; ++__rd0) {
@@ -189,6 +190,7 @@ void covariance_fp64(double *restrict cov, double *restrict data, int64_t M, int
             data[(__w0)*(M) + (__w1)] -= mean[__w1];
           }
         }
+        /* numpy: np.transpose(data) */
         for (int64_t __t0 = 0; __t0 < N; ++__t0) {
           for (int64_t __t1 = 0; __t1 < M; ++__t1) {
             __cb2[(__t1)*(N) + (__t0)] = data[(__t0)*(M) + (__t1)];

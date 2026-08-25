@@ -174,6 +174,7 @@ void gramschmidt_fp64(double *restrict A, double *restrict Q, double *restrict R
         double nrm;
         double *__mm2 = (double *)malloc((size_t)((N)) * sizeof(double));
         for (int64_t k = 0; k < N; ++k) {
+          /* numpy: np.dot(A[:, k], A[:, k]) */
           __cb1 = 0.0;
           for (int64_t __r0 = 0; __r0 < M; ++__r0) {
             __cb1 += (A[(__r0)*(N) + (k)] * A[(__r0)*(N) + (k)]);
@@ -193,6 +194,7 @@ void gramschmidt_fp64(double *restrict A, double *restrict Q, double *restrict R
             R[(k)*(N) + (si1)] = __mm2[(si1 - (k + 1))];
           }
           double __cb3[(M) * (N - (k + 1))];
+          /* numpy: np.outer(Q[:, k], R[k, k + 1:]) */
           for (int64_t __i = 0; __i < M; ++__i) {
             for (int64_t __j = 0; __j < (N - (k + 1)); ++__j) {
               __cb3[(__i)*(N - (k + 1)) + (__j)] = (Q[(__i)*(N) + (k)] * R[(k)*(N) + ((__j + (k + 1)))]);

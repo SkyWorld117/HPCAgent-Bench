@@ -177,6 +177,7 @@ void ludcmp_fp64(double *restrict A, const double *restrict b, double *restrict 
             A[(si0)*(N) + (k)] /= A[(k)*(N) + (k)];
           }
           double __cb1[(N - (k + 1)) * (N - (k + 1))];
+          /* numpy: np.outer(A[k + 1:, k], A[k, k + 1:]) */
           for (int64_t __i = 0; __i < (N - (k + 1)); ++__i) {
             for (int64_t __j = 0; __j < (N - (k + 1)); ++__j) {
               __cb1[(__i)*(N - (k + 1)) + (__j)] = (A[((__i + (k + 1)))*(N) + (k)] * A[(k)*(N) + ((__j + (k + 1)))]);

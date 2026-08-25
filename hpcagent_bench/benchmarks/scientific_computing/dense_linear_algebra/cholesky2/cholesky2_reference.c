@@ -173,6 +173,7 @@ void cholesky2_fp64(double *restrict A, int64_t N) {
         double __s;
         double *__cb1 = (double *)malloc((size_t)((N) * (N)) * sizeof(double));
         double *__cb2 = (double *)malloc((size_t)((N) * (N)) * sizeof(double));
+        /* numpy: np.linalg.cholesky(A) */
         for (int64_t __zi = 0; __zi < N; ++__zi) {
           for (int64_t __zj = (__zi + 1); __zj < N; ++__zj) {
             __cb1[(__zi)*(N) + (__zj)] = 0.0;
@@ -192,6 +193,7 @@ void cholesky2_fp64(double *restrict A, int64_t N) {
             __cb1[(__i)*(N) + (__j)] = (__s / __cb1[(__j)*(N) + (__j)]);
           }
         }
+        /* numpy: np.triu(A, k=1) */
         for (int64_t __i = 0; __i < N; ++__i) {
           for (int64_t __j = 0; __j < N; ++__j) {
             __cb2[(__i)*(N) + (__j)] = ((__j >= (__i + 1)) ? A[(__i)*(N) + (__j)] : 0.0);
