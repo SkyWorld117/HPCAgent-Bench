@@ -18,9 +18,10 @@ NBNXN_MIN_DISTANCE_SQUARED = 1.0e-36
 def _v_q_ewald_lr(beta, r):
     if r == 0.0:
         return beta * 2.0 / np.sqrt(np.pi)
-    # numpy has no erf (and scipy is off-limits here); the real-space Ewald term stays on
-    # math.erf, computed in double, and narrows once when stored into table_f below. It is the
-    # only surviving `math.` call in the corpus: NumPy has no erf and scipy is banned in a kernel.
+    # numpy has no erf and scipy is banned in a kernel, so the real-space Ewald term stays on
+    # math.erf, computed in double, and narrows once when stored into table_f below. Scalar here
+    # because the table is built point by point; vexx_k needs the same value over an array and
+    # wraps the identical stdlib call in frompyfunc.
     return math.erf(beta * r) / r
 
 

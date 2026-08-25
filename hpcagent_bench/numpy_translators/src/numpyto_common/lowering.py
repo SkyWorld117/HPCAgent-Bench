@@ -2248,6 +2248,17 @@ class _ZerosRewriter(ast.NodeTransformer):
         # aliases an OUTPUT parameter (zeros -> memset 0, ones -> fill 1,
         # empty -> nothing) instead of declaring a shadowing local.
         self.fills: Dict[str, str] = {}
+        #: Harvested local -> the array whose dtype it was built to match, for the two constructors
+        #: that say so: ``np.zeros_like(a)`` and ``np.zeros(shape, a.dtype)``. Without it every such
+        #: local falls back to the kernel's default float, which is not a slower answer for a
+        #: COMPLEX source -- it is a buffer half the width, and the imaginary part is dropped on the
+        #: way in, with nothing on the path saying so.
+        self.dtype_src: Dict[str, str] = {}
+        #: Harvested local -> the dtype its constructor named OUTRIGHT (``np.zeros(n, np.float64)``).
+        #: A stated dtype is a decision, not a hint: the eigenVALUE array of a complex Hermitian
+        #: problem is declared real on purpose, and inference that reaches it through the complex
+        #: matrix it was computed from would widen it and then compare two complex with ``<``.
+        self.dtype_literal: Dict[str, str] = {}
         self.aliases = set(NP_ZEROS_ALIASES)
         self.shape_table = shape_table or {}
 
@@ -2260,13 +2271,20 @@ class _ZerosRewriter(ast.NodeTransformer):
             attr = node.value.func.attr
             shape: Optional[Tuple[str, ...]] = None
             if attr.endswith("_like"):
-                # ``np.zeros_like(a)`` -> share ``a``'s shape.
+                # ``np.zeros_like(a)`` -> share ``a``'s shape, and its dtype.
                 if node.value.args and isinstance(node.value.args[0], ast.Name):
                     other = node.value.args[0].id
                     shape = self.shape_table.get(other)
+                    self.dtype_src[name] = other
             else:
                 shape_arg = _ctor_shape_arg(node.value)
                 shape = _shape_from_ast(shape_arg, self.shape_table)
+                src = _ctor_dtype_src(node.value)
+                if src is not None:
+                    self.dtype_src[name] = src
+                lit = _ctor_dtype_literal(node.value)
+                if lit is not None:
+                    self.dtype_literal[name] = lit
             if shape is not None:
                 self.zeros[name] = shape
                 self.fills[name] = attr
@@ -2277,6 +2295,28 @@ class _ZerosRewriter(ast.NodeTransformer):
                     keywords=[],
                 )
         return node
+
+
+def _ctor_dtype_src(call: ast.Call) -> Optional[str]:
+    """The array a constructor's ``dtype`` argument points at -- ``np.zeros(shape, a.dtype)`` or
+    ``np.zeros(shape, dtype=a.dtype)`` -> ``"a"``. ``None`` for a literal dtype or none at all."""
+    kw = {k.arg: k.value for k in call.keywords}
+    node = kw.get("dtype") or (call.args[1] if len(call.args) > 1 else None)
+    if isinstance(node, ast.Attribute) and node.attr == "dtype" and isinstance(node.value, ast.Name):
+        return node.value.id
+    return None
+
+
+def _ctor_dtype_literal(call: ast.Call) -> Optional[str]:
+    """The dtype a constructor names outright -- ``np.zeros(n, np.float64)`` -> ``"float64"``.
+    ``None`` when the dtype is absent or comes from another array."""
+    kw = {k.arg: k.value for k in call.keywords}
+    node = kw.get("dtype") or (call.args[1] if len(call.args) > 1 else None)
+    if isinstance(node, ast.Attribute) and node.attr != "dtype":
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
 
 
 def _shape_from_ast(node, shape_table=None) -> Tuple[str, ...]:
@@ -4178,15 +4218,27 @@ def _seed_complex_work_dtypes(tree: ast.AST, local_dtypes: Dict[str, str]) -> No
             ctag = _ctor_complex_tag(value, local_dtypes)
             if ctag is not None:
                 return ctag
-            # X = Y.copy() / np.copy(Y) / np.ascontiguousarray(Y) -- inherit the complex source
+            # X = Y.copy() / np.copy(Y) / np.ascontiguousarray(Y) -- inherit the complex source.
+            # ``transpose`` / ``conj`` / ``conjugate`` / ``where`` sit here for the same reason:
+            # they rearrange or select values without changing what a value IS, so an operand
+            # reached through one of them is still complex. Reaching eigh through ANY of them used
+            # to leave its work matrices untyped, which is precisely the case this whole function
+            # exists to prevent -- ``np.linalg.eigh(np.transpose(m))`` lost the conj from its own
+            # rotation and returned zeros.
             if isinstance(value.func, ast.Attribute):
                 f = value.func
-                src = (f.value.id if f.attr == "copy" and isinstance(f.value, ast.Name) else
-                       value.args[0].id if f.attr in ("copy", "ascontiguousarray", "asarray", "array") and value.args
-                       and isinstance(value.args[0], ast.Name) else None)
+                one_operand = ("copy", "ascontiguousarray", "asarray", "array", "transpose", "conj", "conjugate")
+                src = (f.value.id if f.attr == "copy" and isinstance(f.value, ast.Name) else value.args[0].id
+                       if f.attr in one_operand and value.args and isinstance(value.args[0], ast.Name) else None)
                 sdt = local_dtypes.get(src) if src else None
                 if sdt and sdt.startswith("complex"):
                     return sdt
+                if f.attr == "where" and len(value.args) == 3:
+                    # Either arm decides it -- numpy promotes, so one complex arm is enough.
+                    for arm in value.args[1:]:
+                        adt = local_dtypes.get(arm.id) if isinstance(arm, ast.Name) else None
+                        if adt and adt.startswith("complex"):
+                            return adt
             # m = np.hypot/abs/real/imag(<complex ...>) -- a real-returning magnitude of a
             # complex operand types to the MATCHING REAL width (so ``m`` is real, not complex).
             fn = (value.func.attr if isinstance(value.func, ast.Attribute) else
@@ -5451,13 +5503,28 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                 self.local_dtypes[target.id] = ctag
         # ``X = Y.copy()`` / ``np.copy(Y)`` / ``np.ascontiguousarray(Y)`` -- inherit
         # the source's (complex) dtype (the Jacobi copies its working matrix).
+        #
+        # ``np.transpose`` / ``np.conj`` / ``np.where`` belong here for the same reason: they
+        # rearrange or select values, they do not change what a value IS. Left out, a matrix
+        # reached through one of them was UNTYPED, and ``_RealConjDropper`` reads untyped as real
+        # -- so it deleted the ``conj`` from the eigh Jacobi's own rotation. The rotation stopped
+        # being unitary and the eigenvalues of ``np.linalg.eigh(np.transpose(m))`` came back as
+        # zeros, with nothing failing to say so.
         if (isinstance(target, ast.Name) and target.id not in self.local_dtypes and isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Attribute)):
             f = node.value.func
+            args = node.value.args
             src = (f.value.id if f.attr == "copy" and isinstance(f.value, ast.Name) else
-                   node.value.args[0].id if f.attr in ("copy", "ascontiguousarray", "asarray", "array")
-                   and node.value.args and isinstance(node.value.args[0], ast.Name) else None)
+                   args[0].id if f.attr in ("copy", "ascontiguousarray", "asarray", "array", "transpose", "conj",
+                                            "conjugate") and args and isinstance(args[0], ast.Name) else None)
             dt = self.local_dtypes.get(src) if src else None
+            if dt is None and f.attr == "where" and len(args) == 3:
+                # Either arm decides it: numpy promotes, so one complex arm makes the result complex.
+                for arm in args[1:]:
+                    arm_dt = self.local_dtypes.get(arm.id) if isinstance(arm, ast.Name) else None
+                    if arm_dt and arm_dt.startswith("complex"):
+                        dt = arm_dt
+                        break
             if dt and dt.startswith("complex"):
                 self.local_dtypes[target.id] = dt
         # ``X = <scalar complex arithmetic>`` (``ephi = apq / m``) -- a scalar
@@ -6928,6 +6995,7 @@ def _lp_whole_array_and_zeros(ctx: LoweringContext) -> None:
     # name aliases an OUTPUT parameter -- to initialise the caller's buffer correctly
     # without a shadowing declaration.
     ctx.kir.zeros_fills = dict(ctx.zeros.fills)
+    _tag_complex_locals(ctx.kir, zeros_locals, ctx.zeros.dtype_src, ctx.zeros.dtype_literal)
     # Scalar call-hoist temps: declared as plain double locals by the emit walker
     # via its implicit-local logic (they appear as a bare Name on the LHS of an
     # Assign whose RHS is a Call).
@@ -7226,6 +7294,82 @@ def _assert_lowering_invariants(phase_name: str, ctx: LoweringContext) -> None:
     except Exception as exc:
         raise AssertionError(f"lowering invariant after '{phase_name}': kir.tree does "
                              f"not round-trip through ast.unparse ({exc})") from exc
+
+
+def _tag_complex_locals(kir, zeros_locals: Dict[str, Tuple[str, ...]], dtype_src: Dict[str, str],
+                        dtype_literal: Dict[str, str]) -> None:
+    """Give every COMPLEX zeros-local its complex dtype, so the emitter does not default it to real.
+
+    A local array the emitter has no tag for is declared at the kernel's default FLOAT width. For a
+    buffer that holds complex values that is not an approximation, it is half the storage, and the
+    imaginary part is dropped on the way in with nothing to say so -- eigh_test's Jacobi work matrix
+    came out real and its eigenvalues were wrong by 0.24.
+
+    Only the complex verdict is applied, and only where nothing has pinned the name already: real
+    and integer locals already resolve elsewhere, so widening the change past the failure it fixes
+    would re-type buffers across the whole corpus for no stated reason.
+    """
+    from numpyto_common.numpy_desugar import _dtype_kind, _dtype_table  # here: numpy_desugar imports this module
+
+    try:
+        complex_tag = dtypes.complex_dtype_for(kir.float_precision or "float64")
+    except KeyError:
+        return  # no nameable complex width at this precision -- nothing to tag
+
+    def verdict(tag):
+        """``"complex"`` / ``"real"`` for a dtype token, ``None`` for one that names no width here.
+
+        ``np_float`` / ``np_complex`` are the framework's PRECISION GLOBALS: a reference binds them
+        off the framework module so one source runs at either precision, and they arrive as bare
+        names the dtype registry has never carried. Unknown stays unknown rather than defaulting --
+        such a token must neither pin a name real nor widen it, and the registry RAISES on one it
+        does not know (cloudsc's ``np.empty(shape, dtype=np_float)`` crashed the whole emit).
+        """
+        if tag in ("np_complex", "np_float"):
+            return "complex" if tag == "np_complex" else "real"
+        try:
+            return "complex" if dtypes.canonical(tag).startswith("complex") else "real"
+        except (KeyError, TypeError):
+            return None
+
+    # Two sources, run together to a fixpoint because each feeds the other: a ``zeros_like`` chain
+    # (``scaled`` from ``bu`` from the eigh work matrix from the operand) resolves link by link, and
+    # the assignment walk carries the answer across the matmul temps in between.
+    seed = {a.name: ("complex" if verdict(a.dtype) == "complex" else "float") for a in kir.arrays}
+    seed.update({n: "complex" for n, t in kir.local_dtypes.items() if verdict(t) == "complex"})
+    # Names whose constructor stated a real dtype are settled; inference must not reach them.
+    pinned_real = {n for n, lit in dtype_literal.items() if verdict(lit) == "real"}
+    seed.update({n: "float" for n in pinned_real})
+
+    def store_target(node):
+        """``name`` written by an elementwise store, or None. AugAssign counts: a matmul temp is
+        ZEROED by a plain assign and then ACCUMULATED into, so the accumulate is the only statement
+        that carries its operands' dtype."""
+        tgt = (node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else
+               node.target if isinstance(node, ast.AugAssign) else None)
+        if isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name):
+            return tgt.value.id
+        return None
+
+    stores = [(name, n.value) for n in ast.walk(kir.tree) for name in [store_target(n)] if name is not None]
+    for _ in range(8):
+        before = len(seed)
+        seed.update({n: k for n, k in _dtype_table(kir.tree, seed).items() if k})
+        for name, src in dtype_src.items():
+            if seed.get(src) == "complex":
+                seed[name] = "complex"
+        # A buffer written ELEMENTWISE from a complex value is a complex buffer. The whole-array
+        # form (``x = <complex expr>``) is what the assignment walk reads, but by this point the
+        # lowering has turned most of them into a store loop, so the name that gets declared is only
+        # ever the base of a subscript.
+        for base, value in stores:
+            if base not in pinned_real and _dtype_kind(value, seed) == "complex":
+                seed[base] = "complex"
+        if len(seed) == before:
+            break
+    for name in zeros_locals:
+        if name not in pinned_real and seed.get(name) == "complex":
+            kir.local_dtypes.setdefault(name, complex_tag)
 
 
 def lower(kir: KernelIR) -> KernelIR:

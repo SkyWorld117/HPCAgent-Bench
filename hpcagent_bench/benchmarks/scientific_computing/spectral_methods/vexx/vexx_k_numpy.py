@@ -1,8 +1,19 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """NumPy port of QE's exx_bp::vexx_bp_k band-parallel exact-exchange kernel (GPL v2+); all Fortran config paths ported."""
+import math
+
 import numpy as np
-from scipy.special import erf as _erf
+
+
+def _erf(x):
+    """Elementwise ``erf``. numpy ships no ufunc for it and this corpus does not depend on scipy,
+    so the value comes from the stdlib's scalar one, which agrees with scipy's to 2.2e-16 in fp64
+    and bit-for-bit in fp32. ``frompyfunc`` returns an object array; the cast both narrows it back
+    and keeps the kernel computing in the precision it was handed."""
+    x = np.asarray(x)
+    return np.frompyfunc(math.erf, 1, 1)(x).astype(x.dtype, copy=False)
+
 
 _E2 = 2.0
 _FPI = 4.0 * np.pi
