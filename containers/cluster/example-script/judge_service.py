@@ -186,15 +186,8 @@ def health() -> dict[str, Any]:
         "vllm_base_url": os.environ.get("WEBSEARCH_LLM_BASE_URL", ""),
         "judge_upstream_url": UPSTREAM_URL,
         "implemented": ["health", "search", "web-search"],
-        "proxied": ["task", "baseline", "submit", "score", "bench", "verify", "profile"],
+        "proxied": ["baseline", "submit", "score", "bench", "verify", "profile"],
     }
-
-
-@app.get("/task/{kernel:path}")
-async def task(request: Request, kernel: str) -> Response:
-    """The leak-free task spec the agent reads before writing anything. Read-only, never graded.
-    ``:path`` because kernel keys carry slashes (``track/dir/name``)."""
-    return relay(await forward(request, f"/task/{kernel}"))
 
 
 @app.get("/baseline/{kernel:path}")

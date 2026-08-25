@@ -8,7 +8,8 @@ one of those states grades submissions against a DaCe baseline nobody checked. M
 331 gated kernels on the day this landed, 19 of them parse clean and are still not usable --
 ``channel_flow`` and ``cp2k_grid_integrate`` returned wrong numbers (both fixed 2026-08-08, in the
 generator), ``fft_1d`` emitted C++ that did not compile (fixed 2026-08-17, in the generator),
-``nbody`` cannot be called at all. The parse gate is green for every one of them.
+``nbody`` could not be called at all (fixed 2026-08-24, in the generator and the probe). The parse
+gate is green for every one of them.
 
 So the two gates ask different questions and neither subsumes the other. This one lowers with
 ``to_sdfg(simplify=True)`` -- the graph a run actually executes, library nodes expanded -- and
@@ -80,37 +81,45 @@ from tests.test_dace_frontend_validity import REFUSED, generated_programs, kerne
 #: now renames every BOUND name the parser will not accept and exports the map as
 #: ``__hpcagent_bench_renames__``; a reserved name that is only CALLED (``sqrt``, ``exp``) is left
 #: alone, since DaCe resolves those through its own replacement table.
+#: ``nbody`` left the list 2026-08-24, in the GENERATOR and the probe -- no DaCe change needed.
+#: ``Missing program argument "KE"`` was a PROMOTED RETURN: the numpy reference allocates ``KE`` and
+#: ``PE`` and returns them, so ``dace_emit`` takes them as output PARAMETERS -- but it also kept the
+#: reference's own ``KE = np.zeros(...)``, which rebinds the name to a transient and leaves the
+#: caller's array unwritten. ``_FillOutputParamRealloc`` now turns a shape-matching re-allocation of
+#: a parameter into an in-place fill; a differently-shaped local that merely shares the name is left
+#: alone, since filling the parameter from it would be a miscompile rather than the missed write it
+#: replaces. The probe never bound them either -- they are outputs, not manifest inputs -- so it now
+#: binds any compare-list name the SDFG takes as an array.
 NUMERIC_BAD: Dict[str, str] = {
-    # A DIFFERENT complex defect, split off fft_1d's bullet 2026-08-08 after reading the build:
-    # `real` / `imag` are emitted UNQUALIFIED on an operand ADL cannot reach a namespace through
-    # ("'real' was not declared in this scope; did you mean 'std::real'?", 6 sites each). Both
-    # kernels reach it through the same `np.linalg.eigh` desugar, whose Jacobi sweep asks for
-    # `np.real`/`np.imag` of a REAL operand: a complex operand would resolve to `std::real` by ADL,
-    # a `double` reaches no namespace at all and the runtime headers declare no `dace::real`. Filed
-    # as dace issue 08-unqualified-real-imag; fixed in the desugar 2026-08-17 by not emitting the
-    # accessor at all when the eigh operand's dtype is PROVABLY real (numpy_desugar._eigh_jacobi_lines'
-    # `is_real`) -- `largest_eigenval` (`eigh(a)` on the bench_info-declared real `a`) is gone.
-    # `rayleigh_ritz_rotation` reached the guard too as of 2026-08-17, in two steps: `_dtype_kind`
-    # now traces dtype through `.T` and through `np.linalg.cholesky`/`inv`/`solve`, and
-    # `_EighLoopRewriter` PROPAGATES the manifest's declared kinds across each function's own
-    # assignments (`visit_FunctionDef`) instead of consulting a table holding only declared array
-    # names -- its operand `M = Linv @ h_sub @ Linv.T` is three assignments and two factorisations
-    # away from anything bench_info declares, so it read as unknown and the real branch was
-    # unreachable. It now compiles: the six `'real' was not declared in this scope` errors are gone.
+    # The `crash`, `compile_fail` and `parse_fail` classes are EMPTY since 2026-08-24. Their last
+    # three entries were four DaCe defects, all fixed on extended and all reachable only through
+    # this corpus -- the branch's own suites never built a graph shaped the way the generator emits
+    # one:
     #
-    # What it fails with instead is a SECOND defect the compile error was standing in front of --
-    # the compiled SDFG dies with SIGSEGV (probe rc -11), so the class moves compile_fail -> crash.
-    # The LOWERING is not what is wrong: `c` and `numba`, which build the same Jacobi sweep from the
-    # same desugar, both return `ok` on this kernel, and `largest_eigenval` takes the identical
-    # real branch and agrees. dace's native `cholesky` and `inv` were checked standalone against
-    # this box's NO_LAPACKE OpenBLAS and both run and agree, so that is not it either. The segfault
-    # is dace-side and NOT yet localised -- do not delete this entry until it is.
-    "rayleigh_ritz_rotation": "crash",
-    # Two more codegen defects in one kernel, measured 2026-08-08: `complex128* + double` (a
-    # pointer given a floating offset) and an OpenMP loop gcc rejects as "invalid controlling
-    # predicate". Neither is issue 07's operator gap.
-    "stockham_fft": "compile_fail",
-    "subset_sum": "parse_fail",  # KeyError: ConditionalBlock (if_32)
+    #   rayleigh_ritz_rotation  ScalarToSymbolPromotion hoisted a scalar definition into an
+    #       interstate assignment while the index that reads it is computed by the SAME state. The
+    #       index arrives through a memlet SUBSET, which names the container as a symbol and grows
+    #       no read edge, so the pass's dataflow-degree guards were blind to the dependence and the
+    #       promoted expression read the array one state early (SIGSEGV once the stale pointer was
+    #       dereferenced). `find_promotable_scalars` now refuses a candidate whose subset free
+    #       symbols intersect the state's own writes (dace 7b057d94b).
+    #   stockham_fft  two causes. `dace::math::pow` declared integral overloads for `int` and
+    #       `unsigned int` only, so `pow(int64_t, int64_t)` fell through to `std::pow` and returned
+    #       a double -- the `complex128* + double` pointer arithmetic gcc rejected. The overload
+    #       pair is now constrained on `is_integral` for both operands (dace 53bf707fc). Underneath
+    #       it, `allocate_view` re-allocated the array it views whenever the view sits in a LATER
+    #       state than the allocation, because its `defined_vars` guard is SCOPED and that scope has
+    #       already been popped; the view got a fresh buffer and the earlier state's writes were
+    #       discarded. The guard now asks `declared_arrays`, which the frame generator owns
+    #       (dace 1c09ab0c4). The same fix cured `velocity_tendencies`, which was failing outside
+    #       this list with d=1.58e+276.
+    #   subset_sum  ContinueToCondition called `successors()` on a block a previous apply had
+    #       already detached, so a loop with consecutive `continue` guards raised
+    #       `KeyError: ConditionalBlock`. The pass now materialises its candidate list and declines
+    #       a candidate whose parent graph no longer holds it (dace 6e348fcae).
+    #
+    # CI clones spcl/dace@extended unpinned (containers/cpu.def), so all four are present and this
+    # list moves with the branch. Do not re-add an entry without a fresh probe run.
     # The `unbound_symbols` class is EMPTY. Its four entries (cp2k_density_matrix_trs4,
     # examinimd, gromacs_nbnxm, lavamd) were never a kernel defect: the symbols are manifest
     # PARAMETERS, and the probe consulted the case's `syms` for input arguments only, so a symbol
@@ -136,8 +145,6 @@ NUMERIC_BAD: Dict[str, str] = {
     # unroll_reduction_11_accs (out: d=1.12e+03) -- were one of two dace frontend defects on SCALAR
     # containers, and all four agree since the emitter routes around both (dace issues 05 and 06;
     # see the desugars in numpyto_c.dace_emit). Remeasured 2026-08-08.
-    # Missing program argument "KE" -- an output the SDFG wants that the case does not carry.
-    "nbody": "run_fail",
 }
 
 #: Tracks this gate covers. ``machine_learning`` is DELIBERATELY out of scope, not truncated: its

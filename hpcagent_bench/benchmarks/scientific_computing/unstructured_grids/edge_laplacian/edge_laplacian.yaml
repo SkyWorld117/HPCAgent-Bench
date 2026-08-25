@@ -36,9 +36,11 @@ init:
     src:
       shape: (E,)
       dtype: int64
+      index_array: true
     dst:
       shape: (E,)
       dtype: int64
+      index_array: true
     w:
       shape: (E,)
     x:

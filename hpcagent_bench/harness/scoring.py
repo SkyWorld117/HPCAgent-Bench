@@ -43,6 +43,7 @@ from hpcagent_bench.harness.grading import (AUTO_ORACLE, ReferencePlan, _data_se
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.sandbox import Sandbox
 from hpcagent_bench.harness.task import Task
+from hpcagent_bench.harness.hidden_tests.seeds import secret_seed_first, secret_seed_second
 from hpcagent_bench.support.bindings import binding_from_spec
 from hpcagent_bench.support.bindings.contract import Binding
 from hpcagent_bench.flags import Mode
@@ -200,8 +201,10 @@ class VerifyResult:
     * ``determinism_ok`` -- two clean runs on the public input produce
       byte-identical output AND still match the NumPy reference (catches
       uninitialized-memory / UB that passed once by luck).
-    * ``reverify_ok`` -- the submission still matches NumPy on a seed it never
-      saw (catches overfit to the scored seeds).
+    * ``reverify_ok`` -- the submission still matches NumPy on a DIFFERENT VALUE SET at the
+      same size (catches value-dependent UB that re-running one input set cannot). Catching
+      overfit is no longer this leg's job: /score and /submit grade different secret seeds, so
+      a submission fitted to the iteration signal fails the recorded grade outright.
     * ``dual_oracle_ok`` -- the output also agrees with the compiled C reference
       (no single-oracle blind spot); ``dual_oracle_applied`` is False when the C
       reference could not be built (best-effort, not a hard fail).
@@ -239,40 +242,63 @@ def _determinism_check(spec, o1, o2, np_public, rtol, atol, bitwise=True):
     return reproduces and _grade(spec, np_public, o1, rtol, atol)[0]
 
 
-def _verify_triad(spec, o1, o2, np_public, re_out, np_re, c_public, rtol, atol, bitwise=True):
-    """The determinism + fresh-seed re-verify + dual-oracle CHECK triad, shared by
-    :func:`independent_verify` and :func:`_verify_distributed` so the gate cannot
-    drift between them (:func:`score_cells` reuses the determinism leg via
-    :func:`_determinism_check` but amortizes it across cells).
+def _reverify_check(spec, np_re, re_out, rtol, atol) -> bool:
+    """The fresh-VALUES leg: ``re_out`` grades correct against ``np_re``."""
+    return _grade(spec, np_re, re_out, rtol, atol)[0]
 
-    * determinism: :func:`_determinism_check` (``o1`` reproduces + grades vs ``np_public``);
-    * fresh-seed re-verify: ``re_out`` grades correct vs ``np_re`` (a never-seen value seed);
-    * dual-oracle: ``o1`` grades correct vs the C reference ``c_public`` when supplied,
-      else recorded not-applied.
+
+def _dual_oracle_check(spec, c_public, o1, rtol, atol) -> Tuple[bool, bool]:
+    """The dual-oracle leg: ``o1`` grades correct against the C reference when one was built.
+
+    Returns ``(ok, applied)``; an unavailable C reference is not-applied, never a failure."""
+    if c_public is None:
+        return True, False
+    return _grade(spec, c_public, o1, rtol, atol)[0], True
+
+
+def _verify_triad(spec, o1, o2, np_public, re_out, np_re, c_public, rtol, atol, bitwise=True):
+    """All three verify legs at once, for a caller that already holds every array.
+
+    :func:`independent_verify` does NOT use this -- it runs the same three legs in sequence so
+    the two input sets are never live together (see its docstring). Both paths call the SAME
+    per-leg functions, so the gate cannot drift between them even though the schedules differ.
 
     Returns ``(determinism_ok, reverify_ok, dual_ok, dual_applied)``."""
     determinism_ok = _determinism_check(spec, o1, o2, np_public, rtol, atol, bitwise)
-    reverify_ok = _grade(spec, np_re, re_out, rtol, atol)[0]
-    if c_public is not None:
-        return determinism_ok, reverify_ok, _grade(spec, c_public, o1, rtol, atol)[0], True
-    return determinism_ok, reverify_ok, True, False
+    reverify_ok = _reverify_check(spec, np_re, re_out, rtol, atol)
+    dual_ok, dual_applied = _dual_oracle_check(spec, c_public, o1, rtol, atol)
+    return determinism_ok, reverify_ok, dual_ok, dual_applied
 
 
 #: Label the compiled verify pair carries its fresh-seed outputs under (never an agent-visible case).
 REVERIFY_LABEL = "reverify"
 
 
-def verify_references(spec: BenchSpec, task: Task, binding: Binding, data: Dict, redata: Dict, timeout: float,
-                      memory_gb: float) -> Tuple[Dict, Dict]:
-    """Expected outputs for the verify pair (public + fresh-seed).
+def verify_references(spec: BenchSpec, task: Task, binding: Binding, data: Dict, redata_factory: Callable[[], Dict],
+                      timeout: float, memory_gb: float) -> Tuple[Dict, Callable[[], Tuple[Dict, Dict]]]:
+    """Expected outputs for the verify pair, with the fresh-VALUES half DEFERRED.
 
-    numpy where the track allows it; on a C-only track ONE build of the compiled reference produces
-    both, so the hardening gate keeps its full strength without an interpreted reference run."""
+    Returns ``(np_public, fresh)`` where ``fresh()`` yields ``(redata, np_re)``. The deferral is
+    what lets :func:`independent_verify` finish its first leg and release those arrays before the
+    second leg allocates any: the fresh input set and its reference are the two largest things
+    that used to be live for the whole gate while contributing to none of it until the end.
+
+    On a C-only track ONE build of the compiled reference must produce both -- a second build per
+    verify would cost far more than the arrays it frees -- so there ``fresh()`` hands back
+    already-computed arrays and the peak is what it always was. ``redata_factory`` is called
+    exactly once on either path."""
     if numpy_reference_allowed(spec):
-        return _numpy_reference(spec, data), _numpy_reference(spec, redata)
+
+        def fresh() -> Tuple[Dict, Dict]:
+            redata = redata_factory()
+            return redata, _numpy_reference(spec, redata)
+
+        return _numpy_reference(spec, data), fresh
+    redata = redata_factory()
     public, _ns, others, _samples = _run_c_reference(spec, task, binding, data, [(REVERIFY_LABEL, lambda: redata)], 1,
                                                      timeout, memory_gb)
-    return public, others[REVERIFY_LABEL]
+    np_re = others[REVERIFY_LABEL]
+    return public, lambda: (redata, np_re)
 
 
 def suspect_threshold(override: Optional[float] = None) -> float:
@@ -298,7 +324,7 @@ def independent_verify(submission: Submission,
                        preset: str = "S",
                        datatype: str = "float64",
                        repeat: int = 3,
-                       reverify_seed: int = 777,
+                       reverify_seed: Optional[int] = None,
                        dual_oracle: bool = True,
                        suspect_above: Optional[float] = None,
                        fuzz_iteration: Optional[int] = None,
@@ -308,13 +334,14 @@ def independent_verify(submission: Submission,
     """Re-verify ``submission`` from scratch before its result is persisted.
 
     A FRESH :class:`Sandbox` rebuild + clean re-runs (single-core), independent
-    of the scoring run: determinism, a never-seen seed, and agreement with the C
+    of the scoring run: determinism, a different value set, and agreement with the C
     reference. Returns a :class:`VerifyResult`; ``ok`` is the AND of the hard
     gates (determinism + fresh-seed + dual-oracle). The agent is never trusted --
     every output is graded against the judge's own NumPy/C references. ``rtol`` /
     ``atol`` default to the datatype's precision band (:func:`_resolve_tolerances`).
     """
     rtol, atol = _resolve_tolerances(rtol, atol, datatype)
+    reverify_seed = reverify_seed if reverify_seed is not None else secret_seed_first()
     spec = BenchSpec.load(task.kernel)
     binding = binding_from_spec(spec)
     device = task.residency == "device"
@@ -336,23 +363,27 @@ def independent_verify(submission: Submission,
                                    datatype=datatype,
                                    reverify_seed=int(reverify_seed))
 
-    public_seed = int(config.get("seeds.public_tests", 42))
+    # This gate decides whether a result is persisted, so it re-verifies what /submit graded.
+    public_seed = secret_seed_second()
     data = _data_seeded(task.kernel,
                         preset,
                         datatype,
                         public_seed,
                         fuzz_iteration=fuzz_iteration,
                         params_override=params_override)
-    # Same size (fuzz_iteration / params_override) but a different VALUE seed -> new
-    # VALUES: keeps the fresh-seed reverify's overfit-catching meaning under the sweep.
-    redata = _data_seeded(task.kernel,
-                          preset,
-                          datatype,
-                          int(reverify_seed),
-                          fuzz_iteration=fuzz_iteration,
-                          params_override=params_override)
+
+    # Same size (fuzz_iteration / params_override), different VALUES. Built only when the fresh
+    # leg is reached, so it is never live alongside the public leg's arrays.
+    def make_redata() -> Dict:
+        return _data_seeded(task.kernel,
+                            preset,
+                            datatype,
+                            int(reverify_seed),
+                            fuzz_iteration=fuzz_iteration,
+                            params_override=params_override)
+
     try:
-        np_public, np_re = verify_references(spec, task, binding, data, redata, timeout, memory_gb)
+        np_public, fresh = verify_references(spec, task, binding, data, make_redata, timeout, memory_gb)
     except RuntimeError as exc:  # C-only track: no reference, so nothing to verify against
         return VerifyResult(False, False, False, False, False, suspect, f"harden: {spec.short_name}: {exc}")
 
@@ -375,23 +406,29 @@ def independent_verify(submission: Submission,
                                                               workspace_bytes=submission.workspace_bytes)
                 return outs
 
-            o1, o2, ro = _run(data), _run(data), _run(redata)
+            # The two legs run in SEQUENCE, and the first one's arrays are released before the
+            # second allocates. Run together they held eight full-size sets -- two inputs, two
+            # references, four outputs -- and at XL a single set is ~3.9 GiB, which is what put
+            # this gate over the memory ceiling on the largest kernels. Sequenced, the peak is
+            # the public leg's four (data, np_public, o1, c_pub). Only OUTPUTS are ever
+            # duplicated, and only within the leg that compares them.
+            o1, o2 = _run(data), _run(data)
+            determinism_ok = _determinism_check(spec, o1, o2, np_public, rtol, atol, True)
+            o2 = None  # graded; the second run exists only to compare against the first
+
             c_pub = None
             if dual_oracle:
                 try:
                     c_pub, _, _, _ = _run_c_reference(spec, task, binding, data, [], repeat, timeout, memory_gb)
                 except RuntimeError:
                     c_pub = None  # C reference unavailable -> dual-oracle best-effort (recorded not-applied)
-            determinism_ok, reverify_ok, dual_oracle_ok, dual_oracle_applied = _verify_triad(spec,
-                                                                                             o1,
-                                                                                             o2,
-                                                                                             np_public,
-                                                                                             ro,
-                                                                                             np_re,
-                                                                                             c_pub,
-                                                                                             rtol,
-                                                                                             atol,
-                                                                                             bitwise=True)
+            dual_oracle_ok, dual_oracle_applied = _dual_oracle_check(spec, c_pub, o1, rtol, atol)
+            # Rebound, not `del`: the except handler below reads these names on a native crash.
+            c_pub = o1 = np_public = data = None
+
+            redata, np_re = fresh()
+            ro = _run(redata)
+            reverify_ok = _reverify_check(spec, np_re, ro, rtol, atol)
     except RuntimeError as exc:  # native crash / timeout during re-verify
         return VerifyResult(False, determinism_ok, reverify_ok, dual_oracle_ok, dual_oracle_applied, suspect,
                             f"harden: {exc}")
@@ -428,7 +465,7 @@ def measure_baselines(task: Task,
     spec = BenchSpec.load(task.kernel)
     baseline = resolve_baseline(baseline, spec)  # track sentinel -> concrete kind (+ validation)
     binding = binding_from_spec(spec)
-    data = _data_seeded(task.kernel, preset, datatype, int(config.get("seeds.public_tests", 42)))
+    data = _data_seeded(task.kernel, preset, datatype, secret_seed_first())  # advisory route: the iteration seed
     # Warm the references the SAME way the scored /submit path (score()) warms its baseline, so the
     # advisory /baseline number the agent aims at is measured under the same regime it is graded under.
     warmup = timing.warmup_count()
@@ -576,10 +613,12 @@ def score(submission: Submission,
           params_override: Optional[Dict] = None) -> Score:
     """Build, run, and grade ``submission`` for ``task``.
 
-    Two correctness gates: the PUBLIC run (the visible preset, seeded with
-    ``seeds.public_tests``) and the HELD-OUT hidden cases (seeded with
-    ``seeds.hidden_tests``, never seen by the agent). ``correct`` requires BOTH, so a
-    submission that overfits the public inputs is caught (``status="overfit"``).
+    Two correctness gates: the GRADED run and the HELD-OUT hidden cases. ``correct`` requires
+    BOTH. Neither is readable by the agent: the graded run takes its seed from the ROUTE --
+    :func:`secret_seed_first` for /score, :func:`secret_seed_second` for /submit -- and both live in the
+    .dockerignore'd hidden_tests package, as does the hidden cases' seed. Because the routes
+    grade different secrets, a submission fitted to whatever /score fed it fails the recorded
+    grade (``status="overfit"``) without any leg having to go looking for it.
 
     ``oracle`` (correctness reference) selects ``numpy`` (default, always available),
     ``c`` (the compiled NumpyToX C reference), or ``both``; ``baseline`` (speedup
@@ -614,7 +653,10 @@ def score(submission: Submission,
     oracle = resolve_oracle(oracle, spec)  # track sentinel / None -> concrete reference (+ validation)
     baseline = resolve_baseline(baseline, spec)  # track sentinel / None -> concrete kind (+ validation)
     binding = binding_from_spec(spec)
-    public_seed = int(config.get("seeds.public_tests", 42))
+    # One seed per route (`hidden` is the route flag); see hidden_tests.seeds for which is which.
+    # This is also the overfit gate: a submission tuned to what /score fed it fails the recorded
+    # grade, so submit needs no second leg to detect it.
+    public_seed = secret_seed_second() if hidden else secret_seed_first()
     # ``fuzz_iteration`` selects the seeded size/flag sample for preset="fuzzed"
     # (the per-iteration draw of the HPCAgent-Bench Score sweep); hidden cases keep their
     # own preset/seed below and are correctness-only, so they are left unfuzzed.
@@ -896,10 +938,17 @@ def score(submission: Submission,
     # Fail loudly when the configured timing backend needs more repeats than we ran, rather than
     # silently crediting an underpowered distributional test (min_of_k never raises; matches the
     # guard score_task_fuzzed already applies).
-    timing.validate_repeat(repeat)
+    # The ROUTE selects the backend, and `hidden` is the route flag (/score passes False).
+    # /score is the agent's fast local signal: few repeats, best-of-k, no significance gate --
+    # it records nothing, so an underpowered test there costs nothing. /submit writes the
+    # record and keeps the configured (significance-gated) backend at its full repeat count.
+    # Deriving it here rather than threading a second argument keeps the routes' one existing
+    # distinction as their only distinction.
+    backend = None if hidden else timing.LOCAL_BACKEND
+    timing.validate_repeat(repeat, backend)
     primary_samples = baseline_samples.get(primary, [])
     if native_samples and primary_samples:
-        reduced = timing.reduce(native_samples, primary_samples)
+        reduced = timing.reduce(native_samples, primary_samples, backend=backend)
         speedup = reduced.speedup
     else:
         speedup = speedups.get(primary, 0.0)
@@ -1046,13 +1095,15 @@ def mpi_cc_override() -> Optional[Dict[str, str]]:
 
 
 def _mpi_launch_cfg() -> _MpiLaunch:
-    return _MpiLaunch(launcher=list(config.get("mpi.launcher", ["mpiexec.mpich", "-n"])),
-                      mode=str(config.get("mpi.mode", "strong")),
-                      k_repeats=int(config.get("mpi.k_repeats", 5)),
-                      timeout=float(config.get("mpi.launch_timeout_s", 120)),
-                      env=dict(config.get("mpi.env", {}) or {}),
-                      seed=int(config.get("seeds.public_tests", 42)),
-                      default_location=str(config.get("mpi.residency", "host")))
+    return _MpiLaunch(
+        launcher=list(config.get("mpi.launcher", ["mpiexec.mpich", "-n"])),
+        mode=str(config.get("mpi.mode", "strong")),
+        k_repeats=int(config.get("mpi.k_repeats", 5)),
+        timeout=float(config.get("mpi.launch_timeout_s", 120)),
+        env=dict(config.get("mpi.env", {}) or {}),
+        # score_distributed takes no route flag, so this track has one seed: the recorded one.
+        seed=secret_seed_second(),
+        default_location=str(config.get("mpi.residency", "host")))
 
 
 def _build_run_mpi(task: Task, binding, submission: Submission, descriptor, cand_data,
@@ -1359,7 +1410,7 @@ def score_cells(submission: Submission,
                 baseline: str = "numpy",
                 mode: Mode = Mode.SINGLE_CORE,
                 verify: bool = True,
-                reverify_seed: int = 777,
+                reverify_seed: Optional[int] = None,
                 suspect_above: Optional[float] = None,
                 rtol: Optional[float] = None,
                 atol: Optional[float] = None) -> List[CellScore]:
@@ -1379,12 +1430,15 @@ def score_cells(submission: Submission,
     the configured timing backend. Returns one :class:`CellScore` per input cell."""
     rtol, atol = _resolve_tolerances(rtol, atol, datatype)
     spec = BenchSpec.load(task.kernel)
+    reverify_seed = reverify_seed if reverify_seed is not None else secret_seed_first()
     oracle = resolve_oracle(oracle, spec)  # track sentinel / None -> concrete reference (+ validation)
     baseline = resolve_baseline(baseline, spec)  # track sentinel / None -> concrete kind (+ validation)
     binding = binding_from_spec(spec)
     device = task.residency == "device"
     timeout = float(config.get("timeouts.kernel_s", 300))
-    public_seed = int(config.get("seeds.public_tests", 42))
+    # The offline sweep verb: grades on the recorded seed, so a sweep row and a judge row for
+    # the same kernel are the same measurement.
+    public_seed = secret_seed_second()
     # The compiled baseline (if any): (label, language, compiler, mode). c share the single-core
     # C build; a ``*-autopar`` kind is a SEPARATE multi-core build with a forced compiler. The
     # single-core C reference is also built whenever a compiled baseline is requested, so the

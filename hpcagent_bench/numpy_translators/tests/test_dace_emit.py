@@ -20,9 +20,9 @@ import pytest
 from _bench_yaml import bench_info_for, foundation_kernels, kir_for
 from numpyto_c.dace_emit import (DesugarChainedCompare, ResolveInferredReshape, ResolveShapeReads, _AnnotateEmptyDtype,
                                  _CopyScalarAlias, _DesugarChainedAssign, _DesugarTernary, _DesugarUnreplacedCalls,
-                                 _ResolveZeros, _SplitReassignedSize, _dace_dtype, _float_names, _inline_symbol_aliases,
-                                 _plan_size_promotion, _widen_int_seeds, emit_dace, copy_view_bindings,
-                                 mixed_view_names, shape_argument, version_reallocations,
+                                 _ResolveZeros, _RewriteFrameworkDtype, _SplitReassignedSize, _dace_dtype, _float_names,
+                                 _inline_symbol_aliases, _plan_size_promotion, _widen_int_seeds, emit_dace,
+                                 copy_view_bindings, mixed_view_names, shape_argument, version_reallocations,
                                  version_rebound_views)  # noqa: E402
 from numpyto_common.frontend import parse_kernel  # noqa: E402
 
@@ -275,12 +275,19 @@ def test_empty_like_is_not_touched():
     assert ast.dump(ast.parse(out)) == ast.dump(ast.parse(src))
 
 
-def test_gmres_bare_empty_gets_explicit_dtype_end_to_end():
+def test_gmres_workspace_allocation_carries_an_explicit_dtype_end_to_end():
     """Regression: the PRODUCTION path (``autogen._emit_dace`` calls ``parse_kernel`` only, never
     ``lower()``) left gmres's workspace allocation as a literal, un-harvested ``np.empty((N, m + 1))``
-    -- dace's frontend refused it outright. The end-to-end emit must carry an explicit dtype."""
+    -- dace's frontend refused it outright. The end-to-end emit must carry an explicit dtype.
+
+    The reference now names that dtype itself (``np.empty((n, m + 1), b.dtype)``, so the fp32 leg
+    stops allocating a float64 Krylov basis), which is why this no longer pins the ``dc_float`` the
+    emitter used to fill in -- the emitter's fill-in path is covered by the unit tests above, on a
+    synthetic bare allocation, since no corpus reference carries one any more. What is still
+    end-to-end is the property dace actually needs: the emitted allocation is not bare."""
     _, src = _emit("gmres")
-    assert "Q = np.empty((N, m + 1), dtype=dc_float)" in src
+    line = next(l for l in src.splitlines() if "Q = np.empty(" in l)
+    assert "(N, m + 1)," in line, f"allocation lost its explicit dtype: {line.strip()}"
 
 
 # --------------------------------------------------------------------------- #
@@ -297,6 +304,40 @@ def _transform(tf, src):
     tree = tf.visit(ast.parse(src).body[0])
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
+
+
+def test_framework_dtype_rebinding_is_dropped_not_renamed():
+    """A reference binds the precision globals at CALL time -- ``np_float = framework.np_float`` --
+    because a ``from ... import np_float`` snapshots the value at first import and a process that
+    runs fp64 then fp32 keeps the first one. Renaming that statement instead of dropping it emits
+    ``dc_float = framework.np_float`` into a generated module that has no ``framework`` and already
+    imports ``dc_float``, which made mandelbrot1/mandelbrot2 stop parsing."""
+    src = ("def k():\n"
+           "    np_float = framework.np_float\n"
+           "    np_complex = framework.np_complex\n"
+           "    Z = np.zeros(3, dtype=np_complex)\n"
+           "    return Z.astype(np_float)\n")
+    tf = _RewriteFrameworkDtype()
+    out = _transform(tf, src)
+    assert "framework" not in out
+    assert "dtype=dc_complex_float" in out and "astype(dc_float)" in out
+    assert tf.used_complex  # drives whether the generated module imports the complex global
+
+
+def test_framework_dtype_tuple_rebinding_is_dropped():
+    """The same statement written as one tuple assignment, which is how mandelbrot spells it."""
+    tf = _RewriteFrameworkDtype()
+    out = _transform(
+        tf, "def k():\n    np_float, np_complex = framework.np_float, framework.np_complex\n    return np_float\n")
+    assert "framework" not in out and "return dc_float" in out
+    assert tf.used_complex
+
+
+def test_an_ordinary_assignment_to_a_dtype_name_is_still_renamed():
+    """Anti-vacuity: only a rebinding READ OFF THE MODULE is dropped. Anything else that mentions
+    the precision globals must still be renamed, or a real computation would vanish."""
+    out = _transform(_RewriteFrameworkDtype(), "def k():\n    np_float = np.float32\n    return np_float\n")
+    assert "dc_float = np.float32" in out and "return dc_float" in out
 
 
 def test_desugar_ternary_assign_becomes_if_else():
@@ -796,12 +837,18 @@ def test_channel_flows_convergence_residual_is_seeded_as_a_float():
 def test_a_qualified_math_call_gets_the_module_import_it_names():
     """A reference that writes ``math.sqrt(x)`` reaches the frontend as a NAME lookup of ``math``.
     The name-import alone left it undefined and every such kernel died with
-    ``DaceSyntaxError: Use of undefined variable "math"`` -- the three WarpX ports did, in CI only,
-    because nothing else in the corpus qualifies its math calls."""
-    _, src = _emit("warpx_boris_push")
-    assert "math.sqrt(" in src, "the reference's qualified spelling is what this pins"
-    header = src.split("@dc.program")[0]
-    assert "import math\n" in header
+    ``DaceSyntaxError: Use of undefined variable "math"`` -- the three WarpX ports did, in CI only.
+
+    Those ports now spell it ``np.sqrt``: every reference uses the numpy ufunc, which preserves the
+    operand's precision where a ``math.`` call returns a python float computed in double. So no
+    emitted body carries a qualified call any more -- the corpus's one surviving ``math.erf``, in
+    gromacs_nbnxm, sits in a helper outside the translated subset. What is still worth pinning is
+    the emitter's side of that bug: it must write BOTH the module import (for a qualified call) and
+    the name imports (for a bare one), unconditionally, so the next reference that needs either
+    does not have to rediscover this."""
+    header = _emit("warpx_boris_push")[1].split("@dc.program")[0]
+    assert "import math\n" in header, "the module import a qualified call needs"
+    assert "from math import " in header, "the name imports a bare sqrt(x) needs"
 
 
 def test_an_int4_array_is_declared_as_its_storage_dtype():

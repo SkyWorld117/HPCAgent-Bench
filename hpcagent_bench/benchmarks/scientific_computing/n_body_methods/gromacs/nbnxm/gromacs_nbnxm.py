@@ -21,7 +21,6 @@ def initialize(
 ):
     """Manifest-compatible GROMACS NBNxM input generator."""
 
-    _ = datatype
     (
         x,
         q,
@@ -48,6 +47,7 @@ def initialize(
         seed=seed,
         table_size=table_size,
         include_exclusions=bool(include_exclusions),
+        datatype=datatype,
     )
     # cj_cluster/cj_excl carry a density/RNG-dependent pair count in their length -- a manifest
     # shape token nothing can pass (it is neither a parameter nor an input_arg). Every real read
@@ -60,8 +60,8 @@ def initialize(
         cj_cluster = np.concatenate([cj_cluster, np.zeros(n_pad, dtype=cj_cluster.dtype)])
         cj_excl = np.concatenate([cj_excl, np.zeros(n_pad, dtype=cj_excl.dtype)])
     # force/virial outputs are passed-in buffers (agentbench ABI); allocate them zeroed here.
-    f = np.zeros((x.shape[0], 3), dtype=np.float64)
-    fshift = np.zeros_like(shift_vec, dtype=np.float64)
+    f = np.zeros((x.shape[0], 3), dtype=x.dtype)
+    fshift = np.zeros_like(shift_vec)
     return (
         x,
         q,

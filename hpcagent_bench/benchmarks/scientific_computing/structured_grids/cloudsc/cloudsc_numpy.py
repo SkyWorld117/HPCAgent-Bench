@@ -11,7 +11,7 @@
 # them). `klev` is renamed `nlev` to match the hpcagent_bench manifest.
 
 import numpy as np
-from hpcagent_bench.frameworks.framework import np_float
+from hpcagent_bench.frameworks import framework
 nclv = 5
 ncldql = 1
 ncldqi = 2
@@ -120,6 +120,10 @@ yrecldp_rcl_cdenom2 = 103000000.0
 yrecldp_rcl_cdenom3 = 204.0
 
 def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdynl, pfcqlng, pfcqnng, pfcqrng, pfcqsng, pfhpsl, pfhpsn, pfplsl, pfplsn, pfsqif, pfsqitur, pfsqlf, pfsqltur, pfsqrf, pfsqsf, phrlw, phrsw, picrit_aer, plcrit_aer, plsm, plu, plude, pmfd, pmfu, pnice, pq, prainfrac_toprfz, pre_ice, psnde, psupsat, pt, pvervel, pvfa, pvfi, pvfl, tendency_loc_a, tendency_loc_cld, tendency_loc_q, tendency_loc_t, tendency_tmp_a, tendency_tmp_cld, tendency_tmp_q, tendency_tmp_t, kfdia, kidia, klon, nlev, ptsphy):
+    # Read off the framework module rather than imported by name: a `from ... import
+    # np_float` snapshots the value at first import, so a process that runs fp64 and then
+    # fp32 keeps computing in whichever precision it imported under.
+    np_float = framework.np_float
     zlcond1 = np.empty((klon,), dtype=np_float)
     zlcond2 = np.empty((klon,), dtype=np_float)
     zlevapl = np.empty((klon,), dtype=np_float)
@@ -309,20 +313,18 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia] = np.where(zneg_mask2, zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia] + zqx[jm - 1, jk - 1, kidia - 1:kfdia], zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia])
             zqx[jm - 1, jk - 1, kidia - 1:kfdia] = np.where(zneg_mask2, 0.0, zqx[jm - 1, jk - 1, kidia - 1:kfdia])
     zt = ztp1[:, kidia - 1:kfdia]
-    # _pwN / _pwNb / _pwiN (here and at every other '**' below): this numpy build's
-    # ndarray-power ufunc and its np.float64-scalar power take different code paths and
-    # can disagree by 1 ULP (confirmed: disabling AVX2/AVX512 via NPY_DISABLE_CPU_FEATURES
-    # makes them agree, and even a length-1 ndarray slice still diverges from a bare
-    # np.float64 scalar, so it is not a SIMD-batch-width effect). HEAD reads every field
-    # element-at-a-time (`zcovptot[jl - 1]` is a np.float64 scalar), so every '**' HEAD
-    # evaluates takes the scalar path; a vectorized array slice does not -- that 1-ULP
-    # drift is what made this port numerically differ from HEAD. Elementwise loops here
-    # keep every '**' on the scalar path so the port stays bit-exact.
+    # _pwN / _pwNb: every '**' below is an ARRAY power. This port was originally written with
+    # element-at-a-time loops here, because this numpy build's ndarray-power ufunc and its
+    # np.float64-scalar power take different code paths and can disagree by 1 ULP, and HEAD
+    # reads every field as a scalar so every '**' HEAD evaluates takes the scalar path. That
+    # bit-exactness was given up deliberately (2026-08-24) for a 4.6x speedup at nlev=137: the
+    # loops cost more than the fidelity was worth, and no exact vectorized substitute exists --
+    # even x*x diverges from a scalar x**2 on this build. Expect ~1e-12 relative drift against
+    # HEAD, growing with grid size, since the difference compounds through the nonlinear
+    # microphysics from level to level.
     _pw1b = (np.maximum(ydthf_rtice, np.minimum(ydthf_rtwat, zt)) - ydthf_rtice) * ydthf_rtwat_rtice_r
     _pw1 = np.empty((nlev, kfdia - kidia + 1), dtype=np_float)
-    for _pwi1 in range(nlev):
-        for _pwj1 in range(kfdia - kidia + 1):
-            _pw1[_pwi1, _pwj1] = _pw1b[_pwi1, _pwj1] ** 2
+    _pw1[:] = _pw1b ** 2
     zfoealfa[0:nlev, kidia - 1:kfdia] = np.minimum(1.0, _pw1)
     zfoeewmt[:, kidia - 1:kfdia] = np.minimum(ydthf_r2es * (zfoealfa[0:nlev, kidia - 1:kfdia] * np.exp(ydthf_r3les * (zt - ydcst_rtt) / (zt - ydthf_r4les)) + (1.0 - zfoealfa[0:nlev, kidia - 1:kfdia]) * np.exp(ydthf_r3ies * (zt - ydcst_rtt) / (zt - ydthf_r4ies))) / pap[:, kidia - 1:kfdia], 0.5)
     zqsmix[:, kidia - 1:kfdia] = zfoeewmt[:, kidia - 1:kfdia]
@@ -387,16 +389,14 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zdtgdpf[kidia - 1:kfdia] = ptsphy * ydcst_rg / (pap[jk - 1, kidia - 1:kfdia] - pap[jk - 2, kidia - 1:kfdia])
         _pw2b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les
         _pw2 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi2 in range(kfdia - kidia + 1):
-            _pw2[_pwi2] = _pw2b[_pwi2] ** 2
+        _pw2[:] = _pw2b ** 2
         zfacw_v = ydthf_r5les / _pw2
         zcor_v = 1.0 / (1.0 - ydcst_retv * zfoeeliqt[jk - 1, kidia - 1:kfdia])
         zdqsliqdt[kidia - 1:kfdia] = zfacw_v * zcor_v * zqsliq[jk - 1, kidia - 1:kfdia]
         zcorqsliq[kidia - 1:kfdia] = 1.0 + ydthf_ralvdcp * zdqsliqdt[kidia - 1:kfdia]
         _pw3b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies
         _pw3 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi3 in range(kfdia - kidia + 1):
-            _pw3[_pwi3] = _pw3b[_pwi3] ** 2
+        _pw3[:] = _pw3b ** 2
         zfaci_v = ydthf_r5ies / _pw3
         zcor_v = 1.0 / (1.0 - ydcst_retv * zfoeew[jk - 1, kidia - 1:kfdia])
         zdqsicedt[kidia - 1:kfdia] = zfaci_v * zcor_v * zqsice[jk - 1, kidia - 1:kfdia]
@@ -527,8 +527,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zqp = 1.0 / pap[jk - 1, kidia - 1:kfdia]
         _pw4b = (np.maximum(ydthf_rtice, np.minimum(ydthf_rtwat, ztp1[jk - 1, kidia - 1:kfdia])) - ydthf_rtice) * ydthf_rtwat_rtice_r
         _pw4 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi4 in range(kfdia - kidia + 1):
-            _pw4[_pwi4] = _pw4b[_pwi4] ** 2
+        _pw4[:] = _pw4b ** 2
         zalfa1 = np.minimum(1.0, _pw4)
         zqsat = ydthf_r2es * (zalfa1 * np.exp(ydthf_r3les * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt) / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les)) + (1.0 - zalfa1) * np.exp(ydthf_r3ies * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt) / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies))) * zqp
         zqsat = np.minimum(0.5, zqsat)
@@ -536,19 +535,16 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zqsat = zqsat * zcor
         _pw5b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les
         _pw5 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi5 in range(kfdia - kidia + 1):
-            _pw5[_pwi5] = _pw5b[_pwi5] ** 2
+        _pw5[:] = _pw5b ** 2
         _pw6b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies
         _pw6 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi6 in range(kfdia - kidia + 1):
-            _pw6[_pwi6] = _pw6b[_pwi6] ** 2
+        _pw6[:] = _pw6b ** 2
         zcond = (zqsmix[jk - 1, kidia - 1:kfdia] - zqsat) / (1.0 + zqsat * zcor * (zalfa1 * ydthf_r5alvcp * (1.0 / _pw5) + (1.0 - zalfa1) * ydthf_r5alscp * (1.0 / _pw6)))
         ztp1[jk - 1, kidia - 1:kfdia] = ztp1[jk - 1, kidia - 1:kfdia] + (zalfa1 * ydthf_ralvdcp + (1.0 - zalfa1) * ydthf_ralsdcp) * zcond
         zqsmix[jk - 1, kidia - 1:kfdia] = zqsmix[jk - 1, kidia - 1:kfdia] - zcond
         _pw7b = (np.maximum(ydthf_rtice, np.minimum(ydthf_rtwat, ztp1[jk - 1, kidia - 1:kfdia])) - ydthf_rtice) * ydthf_rtwat_rtice_r
         _pw7 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi7 in range(kfdia - kidia + 1):
-            _pw7[_pwi7] = _pw7b[_pwi7] ** 2
+        _pw7[:] = _pw7b ** 2
         zalfa1 = np.minimum(1.0, _pw7)
         zqsat = ydthf_r2es * (zalfa1 * np.exp(ydthf_r3les * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt) / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les)) + (1.0 - zalfa1) * np.exp(ydthf_r3ies * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt) / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies))) * zqp
         zqsat = np.minimum(0.5, zqsat)
@@ -556,12 +552,10 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zqsat = zqsat * zcor
         _pw8b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les
         _pw8 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi8 in range(kfdia - kidia + 1):
-            _pw8[_pwi8] = _pw8b[_pwi8] ** 2
+        _pw8[:] = _pw8b ** 2
         _pw9b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies
         _pw9 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi9 in range(kfdia - kidia + 1):
-            _pw9[_pwi9] = _pw9b[_pwi9] ** 2
+        _pw9[:] = _pw9b ** 2
         zcond1 = (zqsmix[jk - 1, kidia - 1:kfdia] - zqsat) / (1.0 + zqsat * zcor * (zalfa1 * ydthf_r5alvcp * (1.0 / _pw8) + (1.0 - zalfa1) * ydthf_r5alscp * (1.0 / _pw9)))
         ztp1[jk - 1, kidia - 1:kfdia] = ztp1[jk - 1, kidia - 1:kfdia] + (zalfa1 * ydthf_ralvdcp + (1.0 - zalfa1) * ydthf_ralsdcp) * zcond1
         zqsmix[jk - 1, kidia - 1:kfdia] = zqsmix[jk - 1, kidia - 1:kfdia] - zcond1
@@ -587,17 +581,14 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zcor = 1.0 / (1.0 - ydcst_retv * zqsmix[jk - 1, kidia - 1:kfdia])
         _pw10b = (np.maximum(ydthf_rtice, np.minimum(ydthf_rtwat, ztp1[jk - 1, kidia - 1:kfdia])) - ydthf_rtice) * ydthf_rtwat_rtice_r
         _pw10 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi10 in range(kfdia - kidia + 1):
-            _pw10[_pwi10] = _pw10b[_pwi10] ** 2
+        _pw10[:] = _pw10b ** 2
         zalfa1 = np.minimum(1.0, _pw10)
         _pw11b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les
         _pw11 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi11 in range(kfdia - kidia + 1):
-            _pw11[_pwi11] = _pw11b[_pwi11] ** 2
+        _pw11[:] = _pw11b ** 2
         _pw12b = ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4ies
         _pw12 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi12 in range(kfdia - kidia + 1):
-            _pw12[_pwi12] = _pw12b[_pwi12] ** 2
+        _pw12[:] = _pw12b ** 2
         zcdmax_high = (zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia] - zqsmix[jk - 1, kidia - 1:kfdia]) / (1.0 + zcor * zqsmix[jk - 1, kidia - 1:kfdia] * (zalfa1 * ydthf_r5alvcp * (1.0 / _pw11) + (1.0 - zalfa1) * ydthf_r5alscp * (1.0 / _pw12)))
         za_safe = np.where(za_col != 0.0, za_col, 1.0)
         zcdmax_low = (zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia] - za_col * zqsmix[jk - 1, kidia - 1:kfdia]) / za_safe
@@ -618,8 +609,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zsigk = pap[jk - 1, kidia - 1:kfdia] / paph[nlev, kidia - 1:kfdia]
         _pw13b = (zsigk - 0.8) / 0.2
         _pw13 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi13 in range(kfdia - kidia + 1):
-            _pw13[_pwi13] = _pw13b[_pwi13] ** 2
+        _pw13[:] = _pw13b ** 2
         zrhc = np.where(zsigk > 0.8, yrecldp_ramid + (1.0 - yrecldp_ramid) * _pw13, yrecldp_ramid)
         if yrecldp_nssopt == 0:
             zqe = (zqx[ncldqv - 1, jk - 1, kidia - 1:kfdia] - za[jk - 1, kidia - 1:kfdia] * zqsice[jk - 1, kidia - 1:kfdia]) / np.maximum(zepsec, 1.0 - za[jk - 1, kidia - 1:kfdia])
@@ -669,18 +659,15 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zbdd = ydcst_rv * ztp1[jk - 1, kidia - 1:kfdia] * pap[jk - 1, kidia - 1:kfdia] / (2.21 * zvpice)
             _pw14b = zicenuclei_new / zrho[kidia - 1:kfdia]
             _pw14 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi14 in range(kfdia - kidia + 1):
-                _pw14[_pwi14] = _pw14b[_pwi14] ** 0.666
+            _pw14[:] = _pw14b ** 0.666
             zcvds = 7.8 * _pw14 * (zvpliq - zvpice) / (8.87 * (zadd + zbdd) * zvpice)
             zice0 = np.maximum(zicecld[kidia - 1:kfdia], zicenuclei_new * yrecldp_riceinit / zrho[kidia - 1:kfdia])
             _pw15b = zice0
             _pw15 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi15 in range(kfdia - kidia + 1):
-                _pw15[_pwi15] = _pw15b[_pwi15] ** 0.666
+            _pw15[:] = _pw15b ** 0.666
             _pw16b = 0.666 * zcvds * ptsphy + _pw15
             _pw16 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi16 in range(kfdia - kidia + 1):
-                _pw16[_pwi16] = _pw16b[_pwi16] ** 1.5
+            _pw16[:] = _pw16b ** 1.5
             zinew = _pw16
             zdepos = np.maximum(za[jk - 1, kidia - 1:kfdia] * (zinew - zice0), 0.0)
             zdepos = np.minimum(zdepos, zqxfg[ncldql - 1, kidia - 1:kfdia])
@@ -703,45 +690,36 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zfacx1i = 1.0
             _pw17b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw17 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi17 in range(kfdia - kidia + 1):
-                _pw17[_pwi17] = _pw17b[_pwi17] ** 3
+            _pw17[:] = _pw17b ** 3
             zaplusb = yrecldp_rcl_apb1 * zvpice - yrecldp_rcl_apb2 * zvpice * ztp1[jk - 1, kidia - 1:kfdia] + pap[jk - 1, kidia - 1:kfdia] * yrecldp_rcl_apb3 * _pw17
             _pw18b = 1.0 / zrho[kidia - 1:kfdia]
             _pw18 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi18 in range(kfdia - kidia + 1):
-                _pw18[_pwi18] = _pw18b[_pwi18] ** 0.5
+            _pw18[:] = _pw18b ** 0.5
             zcorrfac = _pw18
             _pw19b = ztp1[jk - 1, kidia - 1:kfdia] / 273.0
             _pw19 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi19 in range(kfdia - kidia + 1):
-                _pw19[_pwi19] = _pw19b[_pwi19] ** 1.5
+            _pw19[:] = _pw19b ** 1.5
             zcorrfac2 = _pw19 * (393.0 / (ztp1[jk - 1, kidia - 1:kfdia] + 120.0))
             zpr02 = zrho[kidia - 1:kfdia] * zice0 * yrecldp_rcl_const1i / (ztcg * zfacx1i)
             _pw20b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw20 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi20 in range(kfdia - kidia + 1):
-                _pw20[_pwi20] = _pw20b[_pwi20] ** 2
+            _pw20[:] = _pw20b ** 2
             zterm1 = (zvpliq - zvpice) * _pw20 * zvpice * zcorrfac2 * ztcg * yrecldp_rcl_const2i * zfacx1i / (zrho[kidia - 1:kfdia] * zaplusb * zvpice)
             _pw21b = zpr02
             _pw21 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi21 in range(kfdia - kidia + 1):
-                _pw21[_pwi21] = _pw21b[_pwi21] ** yrecldp_rcl_const4i
+            _pw21[:] = _pw21b ** yrecldp_rcl_const4i
             _pw22b = zcorrfac2
             _pw22 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi22 in range(kfdia - kidia + 1):
-                _pw22[_pwi22] = _pw22b[_pwi22] ** 0.5
+            _pw22[:] = _pw22b ** 0.5
             _pw23b = zpr02
             _pw23 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi23 in range(kfdia - kidia + 1):
-                _pw23[_pwi23] = _pw23b[_pwi23] ** yrecldp_rcl_const5i
+            _pw23[:] = _pw23b ** yrecldp_rcl_const5i
             _pw24b = zrho[kidia - 1:kfdia]
             _pw24 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi24 in range(kfdia - kidia + 1):
-                _pw24[_pwi24] = _pw24b[_pwi24] ** 0.5
+            _pw24[:] = _pw24b ** 0.5
             _pw25b = zcorrfac
             _pw25 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi25 in range(kfdia - kidia + 1):
-                _pw25[_pwi25] = _pw25b[_pwi25] ** 0.5
+            _pw25[:] = _pw25b ** 0.5
             zterm2 = 0.65 * yrecldp_rcl_const6i * _pw21 + yrecldp_rcl_const3i * _pw25 * _pw24 * _pw23 / _pw22
             zdepos = np.maximum(za[jk - 1, kidia - 1:kfdia] * zterm1 * zterm2 * ptsphy, 0.0)
             zdepos = np.minimum(zdepos, zqxfg[ncldql - 1, kidia - 1:kfdia])
@@ -786,13 +764,11 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zlcrit[:] = picrit_aer[jk - 1, kidia - 1:kfdia]
             _pw26b = yrecldp_rnice / pnice[jk - 1, kidia - 1:kfdia]
             _pw26 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi26 in range(kfdia - kidia + 1):
-                _pw26[_pwi26] = _pw26b[_pwi26] ** 0.333
+            _pw26[:] = _pw26b ** 0.333
             zzco *= _pw26
         _pw27b = zicecld[kidia - 1:kfdia] / zlcrit
         _pw27 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi27 in range(kfdia - kidia + 1):
-            _pw27[_pwi27] = _pw27b[_pwi27] ** 2
+        _pw27[:] = _pw27b ** 2
         zsnowaut_new = zzco * (1.0 - np.exp(-_pw27))
         zsnowaut[kidia - 1:kfdia] = np.where(zice_mask, zsnowaut_new, zsnowaut[kidia - 1:kfdia])
         zsolqb[ncldqi - 1, ncldqs - 1, kidia - 1:kfdia] = np.where(zice_mask, zsolqb[ncldqi - 1, ncldqs - 1, kidia - 1:kfdia] + zsnowaut_new, zsolqb[ncldqi - 1, ncldqs - 1, kidia - 1:kfdia])
@@ -804,24 +780,21 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
                 zlcrit_d1[:] = plcrit_aer[jk - 1, kidia - 1:kfdia]
                 _pw28b = yrecldp_rccn / pccn[jk - 1, kidia - 1:kfdia]
                 _pw28 = np.empty(kfdia - kidia + 1, dtype=np_float)
-                for _pwi28 in range(kfdia - kidia + 1):
-                    _pw28[_pwi28] = _pw28b[_pwi28] ** 0.333
+                _pw28[:] = _pw28b ** 0.333
                 zzco_d1 *= _pw28
             zprecip_d1 = (zpfplsx[ncldqs - 1, jk - 1, kidia - 1:kfdia] + zpfplsx[ncldqr - 1, jk - 1, kidia - 1:kfdia]) / np.maximum(zepsec, zcovptot[kidia - 1:kfdia])
             zcfpr_d1 = 1.0 + yrecldp_rprc1 * np.sqrt(np.maximum(zprecip_d1, 0.0))
             if yrecldp_laerliqcoll:
                 _pw29b = yrecldp_rccn / pccn[jk - 1, kidia - 1:kfdia]
                 _pw29 = np.empty(kfdia - kidia + 1, dtype=np_float)
-                for _pwi29 in range(kfdia - kidia + 1):
-                    _pw29[_pwi29] = _pw29b[_pwi29] ** 0.333
+                _pw29[:] = _pw29b ** 0.333
                 zcfpr_d1 *= _pw29
             zzco_d1 *= zcfpr_d1
             zlcrit_d1 /= np.maximum(zcfpr_d1, zepsec)
             zbelow20 = zliqcld[kidia - 1:kfdia] / zlcrit_d1 < 20.0
             _pw30b = zliqcld[kidia - 1:kfdia] / zlcrit_d1
             _pw30 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi30 in range(kfdia - kidia + 1):
-                _pw30[_pwi30] = _pw30b[_pwi30] ** 2
+            _pw30[:] = _pw30b ** 2
             zrainaut_lo = zzco_d1 * (1.0 - np.exp(-_pw30))
             zrainaut1 = np.where(zbelow20, zrainaut_lo, zzco_d1)
             zrainaut[kidia - 1:kfdia] = np.where(zwarm_mask, zrainaut1, zrainaut[kidia - 1:kfdia])
@@ -837,19 +810,16 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zabove_crit = zliqcld_col > zlcrit2
             _pw31b = zconst
             _pw31 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi31 in range(kfdia - kidia + 1):
-                _pw31[_pwi31] = _pw31b[_pwi31] ** yrecldp_rcl_kkbaun
+            _pw31[:] = _pw31b ** yrecldp_rcl_kkbaun
             _pw32b = zliqcld_col
             _pw32 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi32 in range(kfdia - kidia + 1):
-                _pw32[_pwi32] = _pw32b[_pwi32] ** yrecldp_rcl_kkbauq
+            _pw32[:] = _pw32b ** yrecldp_rcl_kkbauq
             zrainaut_new = 1.5 * za[jk - 1, kidia - 1:kfdia] * ptsphy * yrecldp_rcl_kkaau * _pw32 * _pw31
             zrainaut_new = np.minimum(zrainaut_new, zqxfg[ncldql - 1, kidia - 1:kfdia])
             zrainaut_new = np.where(zrainaut_new < zepsec, 0.0, zrainaut_new)
             _pw33b = zliqcld_col * zraincld[kidia - 1:kfdia]
             _pw33 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi33 in range(kfdia - kidia + 1):
-                _pw33[_pwi33] = _pw33b[_pwi33] ** yrecldp_rcl_kkbac
+            _pw33[:] = _pw33b ** yrecldp_rcl_kkbac
             zrainacc_new = 2.0 * za[jk - 1, kidia - 1:kfdia] * ptsphy * yrecldp_rcl_kkaac * _pw33
             zrainacc_new = np.minimum(zrainacc_new, zqxfg[ncldql - 1, kidia - 1:kfdia])
             zrainacc_new = np.where(zrainacc_new < zepsec, 0.0, zrainacc_new)
@@ -871,14 +841,12 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zrime_outer = (ztp1[jk - 1, kidia - 1:kfdia] <= ydcst_rtt) & (zliqcld[kidia - 1:kfdia] > zepsec)
             _pw34b = yrecldp_rdensref / zrho[kidia - 1:kfdia]
             _pw34 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi34 in range(kfdia - kidia + 1):
-                _pw34[_pwi34] = _pw34b[_pwi34] ** 0.4
+            _pw34[:] = _pw34b ** 0.4
             zfallcorr_rime = _pw34
             zrime_mask = zrime_outer & (zsnowcld[kidia - 1:kfdia] > zepsec) & (zcovptot[kidia - 1:kfdia] > 0.01)
             _pw35b = zrho[kidia - 1:kfdia] * zsnowcld[kidia - 1:kfdia] * yrecldp_rcl_const1s
             _pw35 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi35 in range(kfdia - kidia + 1):
-                _pw35[_pwi35] = _pw35b[_pwi35] ** yrecldp_rcl_const8s
+            _pw35[:] = _pw35b ** yrecldp_rcl_const8s
             zsnowrime_new = 0.3 * zcovptot[kidia - 1:kfdia] * ptsphy * yrecldp_rcl_const7s * zfallcorr_rime * _pw35
             zsnowrime_new = np.minimum(zsnowrime_new, 1.0)
             zsnowrime[kidia - 1:kfdia] = np.where(zrime_mask, zsnowrime_new, zsnowrime[kidia - 1:kfdia])
@@ -916,14 +884,12 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
         zqxr_safe = np.where(zqx[ncldqr - 1, jk - 1, kidia - 1:kfdia] != 0.0, zqx[ncldqr - 1, jk - 1, kidia - 1:kfdia], 1.0)
         _pw36b = yrecldp_rcl_fac1 / (zrho_safe * zqxr_safe)
         _pw36 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi36 in range(kfdia - kidia + 1):
-            _pw36[_pwi36] = _pw36b[_pwi36] ** yrecldp_rcl_fac2
+        _pw36[:] = _pw36b ** yrecldp_rcl_fac2
         zlambda = _pw36
         ztemp = yrecldp_rcl_fzrab * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt)
         _pw37b = zlambda
         _pw37 = np.empty(kfdia - kidia + 1, dtype=np_float)
-        for _pwi37 in range(kfdia - kidia + 1):
-            _pw37[_pwi37] = _pw37b[_pwi37] ** yrecldp_rcl_const6r
+        _pw37[:] = _pw37b ** yrecldp_rcl_const6r
         zfrz_high = ptsphy * (yrecldp_rcl_const5r / zrho_safe) * (np.exp(ztemp) - 1.0) * _pw37
         zfrzmax_high = np.maximum(zfrz_high, 0.0)
         zcons1b = np.abs(ptsphy * (1.0 + 0.5 * (ydcst_rtt - ztp1[jk - 1, kidia - 1:kfdia])) / yrecldp_rtaumel)
@@ -952,8 +918,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zbeta1 = np.sqrt(pap[jk - 1, kidia - 1:kfdia] / paph[nlev, kidia - 1:kfdia]) / yrecldp_rvrfactor * zpreclr / np.maximum(zcovpclr[kidia - 1:kfdia], zepsec)
             _pw38b = np.maximum(zbeta1, 0.0)
             _pw38 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi38 in range(kfdia - kidia + 1):
-                _pw38[_pwi38] = _pw38b[_pwi38] ** 0.5777
+            _pw38[:] = _pw38b ** 0.5777
             zbeta_e1 = ydcst_rg * yrecldp_rpecons * 0.5 * _pw38
             zdenom_e1 = 1.0 + zbeta_e1 * ptsphy * zcorqsliq[kidia - 1:kfdia]
             zdpr = zcovpclr[kidia - 1:kfdia] * zbeta_e1 * (zqsliq[jk - 1, kidia - 1:kfdia] - zqe1) / zdenom_e1 * zdp[kidia - 1:kfdia] * zrg_r
@@ -975,25 +940,21 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zpreclr2 = zqxfg[ncldqr - 1, kidia - 1:kfdia] / zcovptot_safe2
             _pw39b = yrecldp_rdensref / zrho[kidia - 1:kfdia]
             _pw39 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi39 in range(kfdia - kidia + 1):
-                _pw39[_pwi39] = _pw39b[_pwi39] ** 0.4
+            _pw39[:] = _pw39b ** 0.4
             zfallcorr = _pw39
             zesatliq = ydcst_rv / ydcst_rd * (ydthf_r2es * np.exp(ydthf_r3les * (ztp1[jk - 1, kidia - 1:kfdia] - ydcst_rtt) / (ztp1[jk - 1, kidia - 1:kfdia] - ydthf_r4les)))
             zpreclr2_safe = np.where(zpreclr2 != 0.0, zpreclr2, 1.0)
             _pw40b = yrecldp_rcl_fac1 / (zrho[kidia - 1:kfdia] * zpreclr2_safe)
             _pw40 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi40 in range(kfdia - kidia + 1):
-                _pw40[_pwi40] = _pw40b[_pwi40] ** yrecldp_rcl_fac2
+            _pw40[:] = _pw40b ** yrecldp_rcl_fac2
             zlambda2 = _pw40
             _pw41b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw41 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi41 in range(kfdia - kidia + 1):
-                _pw41[_pwi41] = _pw41b[_pwi41] ** 3
+            _pw41[:] = _pw41b ** 3
             zevap_denom = yrecldp_rcl_cdenom1 * zesatliq - yrecldp_rcl_cdenom2 * ztp1[jk - 1, kidia - 1:kfdia] * zesatliq + yrecldp_rcl_cdenom3 * _pw41 * pap[jk - 1, kidia - 1:kfdia]
             _pw42b = ztp1[jk - 1, kidia - 1:kfdia] / 273.0
             _pw42 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi42 in range(kfdia - kidia + 1):
-                _pw42[_pwi42] = _pw42b[_pwi42] ** 1.5
+            _pw42[:] = _pw42b ** 1.5
             zcorr2 = _pw42 * 393.0 / (ztp1[jk - 1, kidia - 1:kfdia] + 120.0)
             zka = yrecldp_rcl_ka273 * zcorr2
             zsubsat2 = np.maximum(zzrh2 * zqsliq[jk - 1, kidia - 1:kfdia] - zqe2, 0.0)
@@ -1001,24 +962,19 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zqsliq_safe = np.where(zqsliq[jk - 1, kidia - 1:kfdia] != 0.0, zqsliq[jk - 1, kidia - 1:kfdia], 1.0)
             _pw43b = zlambda2
             _pw43 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi43 in range(kfdia - kidia + 1):
-                _pw43[_pwi43] = _pw43b[_pwi43] ** yrecldp_rcl_const4r
+            _pw43[:] = _pw43b ** yrecldp_rcl_const4r
             _pw44b = zrho[kidia - 1:kfdia] * zfallcorr
             _pw44 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi44 in range(kfdia - kidia + 1):
-                _pw44[_pwi44] = _pw44b[_pwi44] ** 0.5
+            _pw44[:] = _pw44b ** 0.5
             _pw45b = zcorr2
             _pw45 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi45 in range(kfdia - kidia + 1):
-                _pw45[_pwi45] = _pw45b[_pwi45] ** 0.5
+            _pw45[:] = _pw45b ** 0.5
             _pw46b = zlambda2
             _pw46 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi46 in range(kfdia - kidia + 1):
-                _pw46[_pwi46] = _pw46b[_pwi46] ** yrecldp_rcl_const3r
+            _pw46[:] = _pw46b ** yrecldp_rcl_const3r
             _pw47b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw47 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi47 in range(kfdia - kidia + 1):
-                _pw47[_pwi47] = _pw47b[_pwi47] ** 2
+            _pw47[:] = _pw47b ** 2
             zbeta2 = 0.5 / zqsliq_safe * _pw47 * zesatliq * yrecldp_rcl_const1r * (zcorr2 / zevap_denom_safe) * (0.78 / _pw43 + yrecldp_rcl_const2r * _pw44 / (_pw45 * _pw46))
             zdenom2 = 1.0 + zbeta2 * ptsphy
             zdpevap2 = zcovpclr[kidia - 1:kfdia] * zbeta2 * ptsphy * zsubsat2 / zdenom2
@@ -1042,8 +998,7 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zbeta1s1 = np.sqrt(pap[jk - 1, kidia - 1:kfdia] / paph[nlev, kidia - 1:kfdia]) / yrecldp_rvrfactor * zpreclrs1 / np.maximum(zcovpclr[kidia - 1:kfdia], zepsec)
             _pw48b = np.maximum(zbeta1s1, 0.0)
             _pw48 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi48 in range(kfdia - kidia + 1):
-                _pw48[_pwi48] = _pw48b[_pwi48] ** 0.5777
+            _pw48[:] = _pw48b ** 0.5777
             zbetas1 = ydcst_rg * yrecldp_rpecons * _pw48
             zdenoms1 = 1.0 + zbetas1 * ptsphy * zcorqsice[kidia - 1:kfdia]
             zdprs1 = zcovpclr[kidia - 1:kfdia] * zbetas1 * (zqsice[jk - 1, kidia - 1:kfdia] - zqes1) / zdenoms1 * zdp[kidia - 1:kfdia] * zrg_r
@@ -1068,46 +1023,37 @@ def cloudsc(ktype, ldcum, pa, pap, paph, pccn, pclv, pcovptot, pdyna, pdyni, pdy
             zfacx1ss2 = 1.0
             _pw49b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw49 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi49 in range(kfdia - kidia + 1):
-                _pw49[_pwi49] = _pw49b[_pwi49] ** 3
+            _pw49[:] = _pw49b ** 3
             zaplusbs2 = yrecldp_rcl_apb1 * zvpices2 - yrecldp_rcl_apb2 * zvpices2 * ztp1[jk - 1, kidia - 1:kfdia] + pap[jk - 1, kidia - 1:kfdia] * yrecldp_rcl_apb3 * _pw49
             _pw50b = 1.0 / zrho[kidia - 1:kfdia]
             _pw50 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi50 in range(kfdia - kidia + 1):
-                _pw50[_pwi50] = _pw50b[_pwi50] ** 0.5
+            _pw50[:] = _pw50b ** 0.5
             zcorrfacs2 = _pw50
             _pw51b = ztp1[jk - 1, kidia - 1:kfdia] / 273.0
             _pw51 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi51 in range(kfdia - kidia + 1):
-                _pw51[_pwi51] = _pw51b[_pwi51] ** 1.5
+            _pw51[:] = _pw51b ** 1.5
             zcorrfac2s2 = _pw51 * (393.0 / (ztp1[jk - 1, kidia - 1:kfdia] + 120.0))
             zpr02s2 = zrho[kidia - 1:kfdia] * zpreclrs2 * yrecldp_rcl_const1s / (ztcgs2 * zfacx1ss2)
             zqsice_safe2 = np.where(zqsice[jk - 1, kidia - 1:kfdia] != 0.0, zqsice[jk - 1, kidia - 1:kfdia], 1.0)
             _pw52b = ztp1[jk - 1, kidia - 1:kfdia]
             _pw52 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi52 in range(kfdia - kidia + 1):
-                _pw52[_pwi52] = _pw52b[_pwi52] ** 2
+            _pw52[:] = _pw52b ** 2
             zterm1s2 = (zqsice[jk - 1, kidia - 1:kfdia] - zqes2) * _pw52 * zvpices2 * zcorrfac2s2 * ztcgs2 * yrecldp_rcl_const2s * zfacx1ss2 / (zrho[kidia - 1:kfdia] * zaplusbs2 * zqsice_safe2)
             _pw53b = zpr02s2
             _pw53 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi53 in range(kfdia - kidia + 1):
-                _pw53[_pwi53] = _pw53b[_pwi53] ** yrecldp_rcl_const4s
+            _pw53[:] = _pw53b ** yrecldp_rcl_const4s
             _pw54b = zcorrfac2s2
             _pw54 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi54 in range(kfdia - kidia + 1):
-                _pw54[_pwi54] = _pw54b[_pwi54] ** 0.5
+            _pw54[:] = _pw54b ** 0.5
             _pw55b = zpr02s2
             _pw55 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi55 in range(kfdia - kidia + 1):
-                _pw55[_pwi55] = _pw55b[_pwi55] ** yrecldp_rcl_const5s
+            _pw55[:] = _pw55b ** yrecldp_rcl_const5s
             _pw56b = zrho[kidia - 1:kfdia]
             _pw56 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi56 in range(kfdia - kidia + 1):
-                _pw56[_pwi56] = _pw56b[_pwi56] ** 0.5
+            _pw56[:] = _pw56b ** 0.5
             _pw57b = zcorrfacs2
             _pw57 = np.empty(kfdia - kidia + 1, dtype=np_float)
-            for _pwi57 in range(kfdia - kidia + 1):
-                _pw57[_pwi57] = _pw57b[_pwi57] ** 0.5
+            _pw57[:] = _pw57b ** 0.5
             zterm2s2 = 0.65 * yrecldp_rcl_const6s * _pw53 + yrecldp_rcl_const3s * _pw57 * _pw56 * _pw55 / _pw54
             zdpevaps2 = np.maximum(zcovpclr[kidia - 1:kfdia] * zterm1s2 * zterm2s2 * ptsphy, 0.0)
             zevaps2 = np.minimum(zdpevaps2, zevaplimice[kidia - 1:kfdia])

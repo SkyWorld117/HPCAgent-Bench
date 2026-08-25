@@ -17,6 +17,7 @@ init:
     idx:
       shape: (N,3)
       dtype: int64
+      index_array: true
     w: (N,3)
     out: (N,)
 output_args:

@@ -94,6 +94,28 @@ CREATE TABLE IF NOT EXISTS completions (
 );
 """
 
+#: The graded SOURCE, content-addressed beside the prompts and completions. Without it a campaign
+#: is not reproducible: a ``submissions`` row says a kernel scored 3.4x and the bytes that did it
+#: live only in the agent's run directory, which is on a purging scratch filesystem. Stored for
+#: EVERY grade, pass or fail, because the failures are what a post-hoc triage has to read.
+#:
+#: A row log keyed like ``completions``, not a column on ``submissions``/``attempts``: this schema
+#: is never ALTERed (see :func:`_ensure_schema`), so a new table is additive on an existing DB
+#: while a new column would silently not appear. It joins to either table on
+#: ``(run_id, benchmark, ts)`` -- the same stamp :func:`prepare_row` puts on both.
+_SOURCES_DDL = """
+CREATE TABLE IF NOT EXISTS sources (
+    id        INTEGER PRIMARY KEY,
+    hash      TEXT NOT NULL,               -- sha256 hex of the source bytes == file name
+    run_id    TEXT NOT NULL,
+    ts        INTEGER NOT NULL,            -- epoch ms (UTC); == the graded row's ts (the join key)
+    benchmark TEXT NOT NULL,
+    language  TEXT,                        -- what the agent actually DELIVERED
+    n_bytes   INTEGER NOT NULL,
+    path      TEXT NOT NULL                -- source file, RELATIVE to the store root (portable)
+);
+"""
+
 #: One row per INDEPENDENTLY-VERIFIED-correct submission (the leaderboard). A row
 #: existing already MEANS it passed build + correct (public+hidden) + the
 #: independent re-verify, so the per-row verification flags are redundant and not
@@ -233,6 +255,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_calls_prompt ON calls(prompt_hash)",
     # the replay lookup: every reply of one run on one kernel, in round order
     "CREATE INDEX IF NOT EXISTS ix_compl_run ON completions(run_id, benchmark, round)",
+    # the reproducibility lookup: the source behind one graded row
+    "CREATE INDEX IF NOT EXISTS ix_sources_row ON sources(run_id, benchmark, ts)",
 )
 
 #: Rank-identity variables a launcher exports, in preference order. ``HPCAGENT_BENCH_DB_SHARD`` is
@@ -457,6 +481,29 @@ def store_prompt(conn: sqlite3.Connection,
     return digest
 
 
+def store_source(conn: sqlite3.Connection,
+                 source: str,
+                 benchmark: str,
+                 *,
+                 run_id: str,
+                 ts: int,
+                 language: Optional[str] = None,
+                 store_dir: Optional[str] = None) -> str:
+    """Log the source bytes behind one graded row; return their hash.
+
+    Shares the prompt store rather than owning one: the name is a sha256, so the three kinds of
+    blob cannot collide, and the existing shard merge (:func:`_merge_prompt_store`) already carries
+    them. Rows are appended, never deduped -- two kernels graded on identical text are two grades --
+    but the FILE dedups, so an agent resubmitting a near-identical body costs one row, not one copy.
+    """
+    digest, rel, data = store_blob(source, store_dir)
+    conn.execute(
+        """INSERT INTO sources(hash, run_id, ts, benchmark, language, n_bytes, path)
+           VALUES (?,?,?,?,?,?,?)""", (digest, run_id, int(ts), benchmark, language, len(data), rel))
+    conn.commit()
+    return digest
+
+
 def connect(path: Optional[str] = None) -> sqlite3.Connection:
     """Open the results DB: a 30 s busy timeout (the judge service is threaded, so
     concurrent ``/submit`` writers must not lose a row to ``SQLITE_BUSY``), WAL so
@@ -479,6 +526,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     cur.execute(_BENCHMARKS_DDL)
     cur.execute(_PROMPTS_DDL)
     cur.execute(_COMPLETIONS_DDL)
+    cur.execute(_SOURCES_DDL)
     cur.execute(_SUBMISSIONS_DDL)
     cur.execute(_ATTEMPTS_DDL)
     cur.execute(_CALLS_DDL)
@@ -732,6 +780,16 @@ def record(score: Score,
         language = submission.language
         spec, ts, cpu, sha, execution, prompt_hash = prepare_row(conn, task, prompt, prompt_hash, variant, language,
                                                                  source_mode, path)
+
+        # Before the verdict branches, so an UNGRADEABLE body is kept as well as a winning one.
+        if submission.source:
+            store_source(conn,
+                         submission.source,
+                         spec.short_name,
+                         run_id=run_id,
+                         ts=ts,
+                         language=language,
+                         store_dir=str(prompt_store_dir(path)))
 
         verified = bool(score.build_ok and score.correct and (verify is None or verify.ok))
         if verified:

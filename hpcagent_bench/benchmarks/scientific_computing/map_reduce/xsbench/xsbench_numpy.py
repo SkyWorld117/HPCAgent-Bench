@@ -167,7 +167,7 @@ def _production_index_grid(egrid: np.ndarray, nuclide_grid: np.ndarray) -> np.nd
     index_grid = np.zeros((egrid.shape[0], n_isotopes), dtype=np.int32)
 
     idx_low = np.zeros(n_isotopes, dtype=np.int32)
-    energy_high = nuclide_grid[:, 1, ENERGY].astype(np.float64).copy()
+    energy_high = nuclide_grid[:, 1, ENERGY].copy()
 
     for e_idx, unionized_energy in enumerate(egrid):
         energy = float(unionized_energy)
@@ -307,7 +307,7 @@ def calculate_macro_xs_unionized(
     n_isotopes = int(nuclide_grid.shape[0])
     n_gridpoints = int(nuclide_grid.shape[1])
 
-    macro_xs_vector = np.zeros(NUM_XS_CHANNELS, dtype=np.float64)
+    macro_xs_vector = np.zeros(NUM_XS_CHANNELS, dtype=nuclide_grid.dtype)
 
     idx = grid_search(egrid, p_energy)
 
@@ -342,7 +342,7 @@ def xsbench_kernel(
 ) -> np.ndarray:
     """Functional wrapper: allocates the output buffer, runs the lookup kernel, and returns it (see xsbench())."""
 
-    out = np.zeros((int(p_energy_samples.shape[0]), NUM_XS_CHANNELS), dtype=np.float64)
+    out = np.zeros((int(p_energy_samples.shape[0]), NUM_XS_CHANNELS), dtype=p_energy_samples.dtype)
     xsbench(
         p_energy_samples,
         mat_samples,
@@ -364,6 +364,7 @@ def generate_random_xsbench_inputs(
     n_materials: int = 3,
     max_num_nucs: int = 3,
     seed: int = 7,
+    datatype: type = np.float64,
 ) -> tuple[np.ndarray, ...]:
     """Generates deterministic, production-shaped XSBench inputs via the original LCG stream + H-M materials."""
 
@@ -380,7 +381,7 @@ def generate_random_xsbench_inputs(
 
     seed = int(seed)
 
-    p_energy_samples = np.zeros(n_samples, dtype=np.float64)
+    p_energy_samples = np.zeros(n_samples, dtype=datatype)
     mat_samples = np.zeros(n_samples, dtype=np.int32)
     for sample_idx in range(n_samples):
         sample_seed = _fast_forward_lcg(STARTING_SEED + seed, 2 * sample_idx)
@@ -395,13 +396,13 @@ def generate_random_xsbench_inputs(
         max_num_nucs=max_num_nucs,
     )
 
-    concs = np.zeros((n_materials, max_num_nucs), dtype=np.float64)
+    concs = np.zeros((n_materials, max_num_nucs), dtype=datatype)
     conc_seed = (STARTING_SEED * STARTING_SEED + seed) % LCG_M
     for mat_idx in range(n_materials):
         for j in range(int(num_nucs[mat_idx])):
             concs[mat_idx, j], conc_seed = _lcg_random_double(conc_seed)
 
-    nuclide_grid = np.zeros((n_isotopes, n_gridpoints, 6), dtype=np.float64)
+    nuclide_grid = np.zeros((n_isotopes, n_gridpoints, 6), dtype=datatype)
     grid_seed = (42 + seed) % LCG_M
     for nuc in range(n_isotopes):
         for grid_idx in range(n_gridpoints):
@@ -411,7 +412,7 @@ def generate_random_xsbench_inputs(
         order = np.argsort(nuclide_grid[nuc, :, ENERGY], kind="quicksort")
         nuclide_grid[nuc, :, :] = nuclide_grid[nuc, order, :]
 
-    egrid = np.sort(nuclide_grid[:, :, ENERGY].reshape(-1)).astype(np.float64)
+    egrid = np.sort(nuclide_grid[:, :, ENERGY].reshape(-1))
     index_grid = _production_index_grid(egrid, nuclide_grid)
 
     return (

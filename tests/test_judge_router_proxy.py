@@ -136,7 +136,6 @@ def test_grading_routes_forward_verbatim(client, route, upstream_path):
 
 
 @pytest.mark.parametrize("route", [
-    "/task/loop_level_reasoning/argmax_value/argmax_value",
     "/baseline/loop_level_reasoning/argmax_value/argmax_value",
 ])
 def test_read_routes_keep_path_style_kernel_keys(client, route):
@@ -148,7 +147,7 @@ def test_read_routes_keep_path_style_kernel_keys(client, route):
     assert StubJudge.calls == [{"method": "GET", "path": route, "query": "language=fortran&rank=3", "body": {}}]
 
 
-@pytest.mark.parametrize("route", ["/task/gemm", "/baseline/gemm"])
+@pytest.mark.parametrize("route", ["/baseline/gemm"])
 def test_read_routes_forward_as_a_get(client, route):
     """The agent's contract and its target time are READ through this router. A GET the router does
     not serve is a 404 the agent cannot recover from -- it never sees the spec it must implement."""
@@ -162,9 +161,9 @@ def test_read_routes_forward_as_a_get(client, route):
 def test_an_unknown_kernel_stays_the_judges_404(client):
     """The kernel key is the judge's to know; the router forwards it and relays the refusal."""
     StubJudge.reply = (404, {"error": "no task for 'nope': unknown benchmark"})
-    response = client.get("/task/nope?rank=3")
+    response = client.get("/baseline/nope?rank=3")
     assert response.status_code == 404
-    assert StubJudge.calls[0]["path"] == "/task/nope"
+    assert StubJudge.calls[0]["path"] == "/baseline/nope"
 
 
 def test_submit_withholds_the_hidden_seed_verdict(client):
@@ -355,4 +354,4 @@ def test_health_reports_the_upstream_it_forwards_to(client, upstream):
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["judge_upstream_url"] == upstream
-    assert set(body["proxied"]) == {"task", "baseline", "submit", "score", "bench", "verify", "profile"}
+    assert set(body["proxied"]) == {"baseline", "submit", "score", "bench", "verify", "profile"}

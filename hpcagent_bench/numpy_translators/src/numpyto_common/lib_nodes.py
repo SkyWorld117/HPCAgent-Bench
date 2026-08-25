@@ -282,8 +282,15 @@ def _chained_base_shape(node: ast.expr, shape_table):
     non-Name base or a Slice/Ellipsis/newaxis inner index."""
     if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)):
         return None
-    if not all(_is_scalar_axis(e) for e in _slice_axes(node)):
-        return None
+    # A bare Name axis is scalar ONLY when it is not a known array: ``x[aj]`` with aj an index
+    # ARRAY is a gather, which KEEPS the axis (broadcast to aj's shape) instead of dropping it.
+    # Treating it as a scalar shortened the residual shape, and an outer subscript
+    # (``x[aj][:, None, :, :]``) then ran off the end and gave up on the whole extent.
+    for axis in _slice_axes(node):
+        if not _is_scalar_axis(axis):
+            return None
+        if isinstance(axis, ast.Name) and shape_table.get(axis.id):
+            return None
     return _operand_token_shape(node, shape_table)
 
 
@@ -813,11 +820,13 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # the source-axis pointer.
             src_axis += 1
         if idx_array_extents:
-            # Broadcast the index extents together (numpy advanced index).
+            # Broadcast the index extents together (numpy advanced index). Picking the
+            # LONGEST is not the numpy rule and is wrong whenever the ranks tie:
+            # ``nbfp[ti[None, :, None], tj[:, None, :], 0]`` with ti (1, I, 1) and tj (P, 1, J)
+            # is (P, I, J), not the first operand's (1, I, 1).
             group = idx_array_extents[0]
-            for s in idx_array_extents[1:]:
-                if len(s) > len(group):
-                    group = s
+            for other in idx_array_extents[1:]:
+                group = _broadcast_extents(group, other)
             ext[idx_group_pos:idx_group_pos] = list(group)
         # Append any trailing axes that the Subscript didn't index --
         # numpy implicitly takes the full extent for omitted trailing
@@ -1037,6 +1046,11 @@ def _advanced_index_rank(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]
             n = sum(1 for a in _slice_axes(expr) if isinstance(a, ast.Slice))
             return n or None
         return None
+    if isinstance(expr, ast.Name):
+        # A bare index ARRAY is an advanced index of its own rank. Only the sliced spelling was
+        # recognised, so an OFFSET gather (``coulomb_table_f[ri + 1]``) read as a scalar axis.
+        shape = shape_table.get(expr.id)
+        return len(shape) if shape else None
     if isinstance(expr, ast.BinOp):
         return (_advanced_index_rank(expr.left, shape_table) or _advanced_index_rank(expr.right, shape_table))
     if isinstance(expr, ast.UnaryOp):

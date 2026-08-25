@@ -107,11 +107,11 @@ def resolve_ranges(parameters: Dict[str, Any],
                    config_names: FrozenSet[str] = NO_CONFIG_NAMES) -> Dict[str, Any]:
     """Per-param fuzz spec: each value is a ``[lo, hi]`` range or a fixed scalar.
 
-    Prefers an explicit ``fuzzed`` preset; otherwise the default range is ANCHORED
-    ON ``XL`` -- ``[XL * fuzz.xl_lo_mult, XL * fuzz.xl_hi_mult]``, 0.85 and 1.15 by
-    default -- per integer size param. Falls back to ``L``, then to the first
-    declared preset, when a manifest has no ``XL``. Non-integer / size-1 params are
-    kept fixed.
+    Prefers an explicit ``fuzzed`` preset; otherwise the default range is ANCHORED on the rung
+    ``fuzz.anchor`` names (XL unless a ``<rung>+fuzz`` token said otherwise) --
+    ``[anchor * fuzz.xl_lo_mult, anchor * fuzz.xl_hi_mult]`` -- per integer size param. Falls
+    back to ``XL``, then ``L``, then to the first declared preset, when a manifest does not
+    declare the anchor rung. Non-integer / size-1 params are kept fixed.
 
     ``config_names`` names the kernel's DECLARED config knobs (a manifest's
     ``config:`` block -- :class:`hpcagent_bench.spec.ConfigKnob` -- surfaced by
@@ -137,10 +137,17 @@ def resolve_ranges(parameters: Dict[str, Any],
     # land far below XL and the timed problem is too small for the thing being measured to show:
     # at preset S this corpus times 512-element kernels, where an OpenMP fork/join costs more than
     # the kernel and a correct parallelisation scores ~1.0. XL is the size the manifests declare as
-    # the production shape, so every timed draw sits within +-15% of it and stays a real workload.
-    base = (parameters.get("XL") or parameters.get("L") or next(iter(parameters.values())))
-    lo_m = float(config.get("fuzz.xl_lo_mult", 0.85))
-    hi_m = float(config.get("fuzz.xl_hi_mult", 1.15))
+    # the production shape. Timed draws take the upper half of the band (large_shapes), so they
+    # sit in [0.75, 1.00] x anchor -- a real workload, and never above the track ceiling.
+    # `+fuzz` is a MODIFIER on a rung (spec.parse_preset), so the draw is anchored on the rung
+    # the caller asked for: XL+fuzz draws around XL, M+fuzz around M. resolve_preset sets
+    # fuzz.anchor for every token, so this never reads a stale rung from an earlier call.
+    anchor = str(config.get("fuzz.anchor", "XL"))
+    base = (parameters.get(anchor) or parameters.get("XL") or parameters.get("L") or next(iter(parameters.values())))
+    # Defaults track config.yaml. They used to read 0.85/1.15, which silently restored the band
+    # that put every draw above 1.00x through the track ceiling whenever the key was absent.
+    lo_m = float(config.get("fuzz.xl_lo_mult", 0.50))
+    hi_m = float(config.get("fuzz.xl_hi_mult", 1.00))
     out: Dict[str, Any] = {}
     for name, value in base.items():
         if name in config_names:
@@ -381,6 +388,16 @@ def sample_params(parameters: Dict[str, Any],
 def iterations() -> int:
     """Configured number of fuzz iterations (``fuzz.iterations``)."""
     return int(config.get("fuzz.iterations", 20))
+
+
+def correctness_iterations() -> int:
+    """Fuzz draws per config in the AGENT correctness gate (``fuzz.correctness_iterations``).
+
+    Distinct from :func:`iterations`, which also sizes the ``run`` verb's framework sweep and
+    harbor_grade's default ``--k``. Those produce framework-comparison numbers, so the agent
+    gate's cost/coverage dial must not move them. Falls back to :func:`iterations` when unset."""
+    configured = config.get("fuzz.correctness_iterations")
+    return int(configured) if configured is not None else iterations()
 
 
 # --------------------------------------------------------------------------- #

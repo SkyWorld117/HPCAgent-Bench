@@ -40,6 +40,7 @@ init:
     ip:
       shape: (LEN_2D,)
       dtype: int32
+      index_array: true
     sum_out: (1,)
 output_args:
 - sum_out

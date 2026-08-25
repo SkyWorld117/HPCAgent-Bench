@@ -377,6 +377,9 @@ def _dtype_kind(value: ast.AST, dtypes: Dict[str, str]) -> Optional[str]:
         return _dtype_kind(value.value, dtypes)  # indexing preserves dtype
     if isinstance(value, ast.Attribute) and value.attr == "T":
         return _dtype_kind(value.value, dtypes)  # a transpose is a permuted view, same dtype
+    if isinstance(value, ast.Attribute) and value.attr in ("real", "imag"):
+        inner = _dtype_kind(value.value, dtypes)  # the ATTRIBUTE spelling of the same measurement
+        return "float" if inner == "complex" else inner
     if isinstance(value, ast.Call):
         # ``np.linalg`` first: it is a TWO-level attribute, so the single-level ``_np_attr`` below
         # reads it as nothing and every value derived from a factorisation would go unknown.
@@ -396,6 +399,12 @@ def _dtype_kind(value: ast.AST, dtypes: Dict[str, str]) -> Optional[str]:
         if attr in _SHAPE_CTORS:
             kw = {k.arg: k.value for k in value.keywords}
             dt = kw.get("dtype") or (value.args[1] if len(value.args) > 1 else None)
+            # ``np.zeros(shape, x.dtype)`` says "whatever x is" -- the commonest way a lowering
+            # writes a temp that must match its operand. Read through it rather than giving up:
+            # unknown here defaults the temp to float64, which SILENTLY drops the imaginary part
+            # of a complex operand it was meant to mirror.
+            if isinstance(dt, ast.Attribute) and dt.attr == "dtype":
+                return _dtype_kind(dt.value, dtypes)
             return _dtype_arg_kind(dt) if dt is not None else "float"  # default float64
         if attr in _LIKE_CTORS and value.args:
             return _dtype_kind(value.args[0], dtypes)
@@ -403,7 +412,20 @@ def _dtype_kind(value: ast.AST, dtypes: Dict[str, str]) -> Optional[str]:
             return _dtype_kind(value.args[0], dtypes)
         if attr in ("where", "minimum", "maximum", "clip") and len(value.args) >= 2:
             return _promote_kind(_dtype_kind(value.args[-2], dtypes), _dtype_kind(value.args[-1], dtypes))
-        if attr in ("abs", "sqrt", "exp", "sin", "cos", "conj", "real", "imag", "sum", "prod") and value.args:
+        # These MEASURE a complex value; they do not carry it. ``np.real(z)`` is a real number
+        # whatever ``z`` was, and typing it complex is how a magnitude ends up in a complex buffer
+        # that the backend then compares with ``>`` (gfortran: "COMPLEX quantities cannot be
+        # compared"). A real operand passes its own kind through unchanged.
+        if attr in ("real", "imag", "abs", "absolute", "angle") and value.args:
+            inner = _dtype_kind(value.args[0], dtypes)
+            return "float" if inner == "complex" else inner
+        # ``conjugate`` and ``transpose`` are the spelled-out forms of ``conj`` and ``.T``, both of
+        # which are already here. Missing them left every value reached through a
+        # ``np.conjugate(np.transpose(x))`` mirror UNKNOWN, and unknown is not merely a missed
+        # optimisation here: ``np.linalg.cholesky`` picks its real or its Hermitian factorisation
+        # from this answer, so a complex operand it could not type got the real one and lost the
+        # imaginary part.
+        if attr in ("sqrt", "exp", "sin", "cos", "conj", "conjugate", "sum", "prod", "transpose") and value.args:
             return _dtype_kind(value.args[0], dtypes)
     return None
 

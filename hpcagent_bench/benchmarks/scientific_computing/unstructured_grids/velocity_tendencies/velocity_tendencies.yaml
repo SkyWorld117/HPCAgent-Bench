@@ -151,21 +151,21 @@ init:
   - nblks_v
   arrays:
     p_patch_cells_area: "(nproma, nblks_c)"
-    p_patch_cells_neighbor_idx: {shape: "(nproma, nblks_c, 3)", dtype: int32}
-    p_patch_cells_neighbor_blk: {shape: "(nproma, nblks_c, 3)", dtype: int32}
-    p_patch_cells_edge_idx: {shape: "(nproma, nblks_c, 3)", dtype: int32}
-    p_patch_cells_edge_blk: {shape: "(nproma, nblks_c, 3)", dtype: int32}
+    p_patch_cells_neighbor_idx: {shape: "(nproma, nblks_c, 3)", dtype: int32, index_array: true}
+    p_patch_cells_neighbor_blk: {shape: "(nproma, nblks_c, 3)", dtype: int32, index_array: true}
+    p_patch_cells_edge_idx: {shape: "(nproma, nblks_c, 3)", dtype: int32, index_array: true}
+    p_patch_cells_edge_blk: {shape: "(nproma, nblks_c, 3)", dtype: int32, index_array: true}
     p_patch_cells_start_index: {shape: "(33,)", dtype: int32}
     p_patch_cells_end_index: {shape: "(33,)", dtype: int32}
     p_patch_cells_start_block: {shape: "(33,)", dtype: int32}
     p_patch_cells_end_block: {shape: "(33,)", dtype: int32}
     p_patch_cells_decomp_info_owner_mask: {shape: "(nproma, nblks_c)", dtype: int8}
-    p_patch_edges_cell_idx: {shape: "(nproma, nblks_e, 2)", dtype: int32}
-    p_patch_edges_cell_blk: {shape: "(nproma, nblks_e, 2)", dtype: int32}
-    p_patch_edges_vertex_idx: {shape: "(nproma, nblks_e, 4)", dtype: int32}
-    p_patch_edges_vertex_blk: {shape: "(nproma, nblks_e, 4)", dtype: int32}
-    p_patch_edges_quad_idx: {shape: "(nproma, nblks_e, 4)", dtype: int32}
-    p_patch_edges_quad_blk: {shape: "(nproma, nblks_e, 4)", dtype: int32}
+    p_patch_edges_cell_idx: {shape: "(nproma, nblks_e, 2)", dtype: int32, index_array: true}
+    p_patch_edges_cell_blk: {shape: "(nproma, nblks_e, 2)", dtype: int32, index_array: true}
+    p_patch_edges_vertex_idx: {shape: "(nproma, nblks_e, 4)", dtype: int32, index_array: true}
+    p_patch_edges_vertex_blk: {shape: "(nproma, nblks_e, 4)", dtype: int32, index_array: true}
+    p_patch_edges_quad_idx: {shape: "(nproma, nblks_e, 4)", dtype: int32, index_array: true}
+    p_patch_edges_quad_blk: {shape: "(nproma, nblks_e, 4)", dtype: int32, index_array: true}
     p_patch_edges_tangent_orientation: "(nproma, nblks_e)"
     p_patch_edges_inv_primal_edge_length: "(nproma, nblks_e)"
     p_patch_edges_inv_dual_edge_length: "(nproma, nblks_e)"
@@ -177,10 +177,10 @@ init:
     p_patch_edges_end_index: {shape: "(33,)", dtype: int32}
     p_patch_edges_start_block: {shape: "(33,)", dtype: int32}
     p_patch_edges_end_block: {shape: "(33,)", dtype: int32}
-    p_patch_verts_cell_idx: {shape: "(nproma, nblks_v, 6)", dtype: int32}
-    p_patch_verts_cell_blk: {shape: "(nproma, nblks_v, 6)", dtype: int32}
-    p_patch_verts_edge_idx: {shape: "(nproma, nblks_v, 6)", dtype: int32}
-    p_patch_verts_edge_blk: {shape: "(nproma, nblks_v, 6)", dtype: int32}
+    p_patch_verts_cell_idx: {shape: "(nproma, nblks_v, 6)", dtype: int32, index_array: true}
+    p_patch_verts_cell_blk: {shape: "(nproma, nblks_v, 6)", dtype: int32, index_array: true}
+    p_patch_verts_edge_idx: {shape: "(nproma, nblks_v, 6)", dtype: int32, index_array: true}
+    p_patch_verts_edge_blk: {shape: "(nproma, nblks_v, 6)", dtype: int32, index_array: true}
     p_patch_verts_start_index: {shape: "(33,)", dtype: int32}
     p_patch_verts_end_index: {shape: "(33,)", dtype: int32}
     p_patch_verts_start_block: {shape: "(33,)", dtype: int32}

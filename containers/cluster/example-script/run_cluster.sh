@@ -86,12 +86,33 @@ detect_cores_per_socket() {
     printf '%s\n' "${n}"
 }
 GRADE_CPUS="${GRADE_CPUS:-$(detect_cores_per_socket)}"
+# Judges per NODE. GRADE_CPUS is already cores-per-SOCKET, so one judge per socket is what makes
+# a judge node fully used: at --ntasks-per-node=1 a judge claimed GRADE_CPUS of the node's cores
+# and the other sockets sat idle, which is why an arm needed a dozen judge nodes to keep 40 agents
+# fed. Each task binds one socket (--cpus-per-task=GRADE_CPUS --hint=nomultithread), so the four
+# do not share cores and a grade is timed at the same width whichever judge ran it.
+detect_sockets() {
+    local n
+    n="$(lscpu -p=SOCKET 2>/dev/null | grep -v '^#' | sort -u | wc -l)" || true
+    [[ "${n}" =~ ^[1-9][0-9]*$ ]] || n=1
+    printf '%s\n' "${n}"
+}
+JUDGES_PER_NODE="${JUDGES_PER_NODE:-$(detect_sockets)}"
+# Never more judges than the node has devices to give them one each -- past that the slices below
+# would name GPUs the node does not have, and two judges sharing a device is the contended timing
+# the whole split exists to avoid. GPUS_PER_NODE is set above, so this clamp sees both.
+(( JUDGES_PER_NODE <= GPUS_PER_NODE )) || JUDGES_PER_NODE="${GPUS_PER_NODE}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_MASTER_PORT="${VLLM_MASTER_PORT:-29500}"
 JUDGE_PORT="${JUDGE_PORT:-8800}"
-# The benchmark judge the router forwards grading to. One port up, because the router owns
-# JUDGE_PORT on the same node.
-JUDGE_UPSTREAM_PORT="${JUDGE_UPSTREAM_PORT:-$((JUDGE_PORT + 1))}"
+# Port pair per judge, strided by its slot on the node: judge i owns JUDGE_PORT + 2i (router) and
+# JUDGE_PORT + 2i + 1 (the benchmark judge it forwards grading to). The stride is what lets several
+# judges share a node -- a fixed +1 upstream collided with the NEXT judge's router the moment
+# JUDGES_PER_NODE went above one. A configured JUDGE_UPSTREAM_PORT is therefore ignored: the pair
+# is derived, so the two can never be set into a collision.
+judge_router_port() { printf '%s\n' "$((JUDGE_PORT + 2 * ${1:-0}))"; }
+judge_upstream_port() { printf '%s\n' "$((JUDGE_PORT + 2 * ${1:-0} + 1))"; }
+JUDGE_UPSTREAM_PORT="$(judge_upstream_port 0)"
 JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS="${JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS:-300}"
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 INFERENCE_CE_ENV="${INFERENCE_CE_ENV:-rocm723-vllm-0.23.0-pytorch211-ofi}"
@@ -117,7 +138,7 @@ SHARED_HOST_DIR="${SHARED_HOST_DIR:-${RUN_DIR}/shared}"
 SHARED_MOUNT="/shared"
 
 export INFERENCE_NODES AGENT_NODES JUDGE_NODES GPUS_PER_NODE INFERENCE_MODE HPCAGENT_BENCH_NCORES
-export VLLM_PORT VLLM_MASTER_PORT JUDGE_PORT LITELLM_PORT
+export VLLM_PORT VLLM_MASTER_PORT JUDGE_PORT JUDGES_PER_NODE LITELLM_PORT
 export JUDGE_UPSTREAM_PORT JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS
 export HPCAGENT_BENCH_REPO RUN_DIR SCRIPT_DIR SHARED_HOST_DIR SHARED_MOUNT
 export HPCAGENT_BENCH_SHARED_DIR="${SHARED_MOUNT}"
@@ -326,6 +347,26 @@ PY
 run_judge_node() {
     require_modern_python judge
     local judge_rank="${SLURM_PROCID:-0}"
+    # Slot on THIS node. SLURM_LOCALID is 0..JUDGES_PER_NODE-1 per node, which is what selects the
+    # port pair and the GPU; SLURM_PROCID is the global rank, which is the judge's identity.
+    local judge_slot="${SLURM_LOCALID:-0}"
+    JUDGE_PORT="$(judge_router_port "${judge_slot}")"
+    JUDGE_UPSTREAM_PORT="$(judge_upstream_port "${judge_slot}")"
+    # The node's GPUs SPLIT between its judges, not handed whole to each. That count is the judge's
+    # device-slot pool -- how many grades it runs at once -- and native_call.grading_cpus divides
+    # this task's cores by the same number, so it also sets how wide each grade is timed. At one
+    # judge per node every judge claimed every GPU, so their pools overlapped and two grades could
+    # land on one device: contended timings, the one thing the pool exists to prevent. Derived
+    # here rather than configured, because a .env that disagrees with JUDGES_PER_NODE is exactly
+    # that overlap written down. It OVERRIDES any HPCAGENT_BENCH_JUDGE_GPUS_PER_NODE the .env set.
+    local gpus_per_judge=$(( GPUS_PER_NODE / JUDGES_PER_NODE ))
+    (( gpus_per_judge >= 1 )) || gpus_per_judge=1
+    export HPCAGENT_BENCH_JUDGE_GPUS_PER_NODE="${gpus_per_judge}"
+    # This judge's contiguous slice of the node's devices, so no two judges see the same one.
+    local first_gpu=$(( judge_slot * gpus_per_judge ))
+    local visible
+    visible="$(seq -s, "${first_gpu}" $(( first_gpu + gpus_per_judge - 1 )))"
+    export ROCR_VISIBLE_DEVICES="${visible}"
     local log_dir="${RUN_DIR}/judge"
     local rank_dir="${RUN_DIR}/judge/rank-${judge_rank}"
     # Not local: cleanup_judge runs from the EXIT trap after this function has returned, when
@@ -658,7 +699,14 @@ role_srun() {
     srun_args=(--nodes="${nodes}" --ntasks="${nodes}" --ntasks-per-node=1
         --nodelist="${nodelist}" --exclusive --kill-on-bad-exit=1 --export=ALL)
     if [[ "${role_flag}" == "--judge-node" ]]; then
-        srun_args+=(--cpus-per-task="${GRADE_CPUS}" --hint=nomultithread)
+        # One task per socket, each bound to GRADE_CPUS physical cores. --ntasks is overridden
+        # here (role_srun's default is one per node) so SLURM_PROCID stays globally unique across
+        # the step -- it is the judge's --rank, and the agent list below is built in the same
+        # node-major order, so the two cannot drift.
+        srun_args=(--nodes="${nodes}" --ntasks="$((nodes * JUDGES_PER_NODE))"
+            --ntasks-per-node="${JUDGES_PER_NODE}" --nodelist="${nodelist}" --exclusive
+            --kill-on-bad-exit=1 --export=ALL
+            --cpus-per-task="${GRADE_CPUS}" --hint=nomultithread)
     else
         # --exclusive gives the JOB the node; it does not give the STEP the node's CPUs. An srun
         # step without --cpus-per-task claims ONE, and every vLLM worker in 605443 came up pinned

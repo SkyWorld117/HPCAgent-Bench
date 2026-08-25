@@ -218,7 +218,9 @@ def test_the_driver_hands_each_agent_its_identity_in_the_environment(tmp_path, m
     node_dir = tmp_path / "node-0"
     node_dir.mkdir()
     problem = {"id": 5, "kernel": "gemm", "language": "c", "task": "optimize gemm"}
-    assert agent_driver().run_agent(problem, 1, node_dir, ["http://127.0.0.1:8800"], 5) == 0
+    # Worker 1 of 2: the trailing count is the node's worker total, which run_agent needs only to
+    # deal CPUs out between the agents, and 1-of-1 would contradict the worker index above.
+    assert agent_driver().run_agent(problem, 1, node_dir, ["http://127.0.0.1:8800"], 5, 2) == 0
     log = (node_dir / "problem-5-worker-1" / "claude.log").read_text()
     assert "OPTARENA_RUN_ID=llr-any.n0.p5.w1" in log
     assert "OPTARENA_OPTIMIZER=optarena-vllm" in log

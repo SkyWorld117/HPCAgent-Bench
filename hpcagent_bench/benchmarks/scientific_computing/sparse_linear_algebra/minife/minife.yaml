@@ -44,6 +44,7 @@ init:
     cols:
       shape: (27 * (nx + 1) * (ny + 1) * (nz + 1),)
       dtype: int64
+      index_array: true
     values:
       shape: (27 * (nx + 1) * (ny + 1) * (nz + 1),)
       dtype: float64

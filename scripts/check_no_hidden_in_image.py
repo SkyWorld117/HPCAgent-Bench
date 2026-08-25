@@ -83,6 +83,24 @@ def find_container_files(root: Path) -> list[Path]:
     return sorted(set(found))
 
 
+def read_scan_text(path: Path) -> str:
+    """Read a candidate container file as text, tolerating bytes that are not UTF-8.
+
+    This scanner walks whatever is in the working tree, which on a build machine includes
+    untracked binary debris -- image artifacts, core dumps, half-written outputs. A bare
+    ``read_text`` raised ``UnicodeDecodeError`` on the first such file and took the whole CI gate
+    down with it, turning a leak check into a flake.
+
+    ``errors="replace"`` rather than skipping the file: a secret embedded in a mostly-binary blob
+    still has to be caught, and undecodable bytes cannot spell the paths this scans for anyway.
+    An unreadable file (permissions, a race with the writer) scans as empty -- it cannot be a
+    container recipe that ships anything."""
+    try:
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def check_dockerignore(root: Path, violations: list[str]) -> None:
     """(a) ``.dockerignore`` must list the hidden-tests exclusion."""
     path = root / ".dockerignore"
@@ -91,7 +109,7 @@ def check_dockerignore(root: Path, violations: list[str]) -> None:
         return
     entries = {
         line.strip().rstrip("/")
-        for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")
+        for line in read_scan_text(path).splitlines() if line.strip() and not line.lstrip().startswith("#")
     }
     if HIDDEN_REL_PATH not in entries:
         violations.append(f".dockerignore missing required entry '{HIDDEN_REL_PATH}/' "
@@ -105,7 +123,7 @@ DOCKERFILE_COPY = re.compile(r"^\s*(COPY|ADD)\b", re.IGNORECASE)
 
 def scan_dockerfile(path: Path, violations: list[str]) -> None:
     """Reject COPY/ADD of any hidden_tests path in a Dockerfile."""
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for lineno, raw in enumerate(read_scan_text(path).splitlines(), 1):
         line = raw.split("#", 1)[0]
         if DOCKERFILE_COPY.match(line) and HIDDEN_DIRNAME in line:
             violations.append(f"{path}:{lineno}: COPY/ADD includes '{HIDDEN_DIRNAME}': {raw.strip()}")
@@ -136,7 +154,7 @@ def scan_def(path: Path, violations: list[str]) -> None:
 
     The trusted judge image (carrying ``TRUSTED_JUDGE_MARKER``) is exempt: it is
     the scorer, never handed to an agent, and legitimately holds the answers."""
-    text = path.read_text(encoding="utf-8")
+    text = read_scan_text(path)
     if TRUSTED_JUDGE_MARKER in text:
         return
     in_files = False
@@ -166,17 +184,22 @@ def static_checks(root: Path) -> list[str]:
     return violations
 
 
+#: Judge-only seed keys that must never carry a value in a SHIPPED config.yaml. `secret_shape`
+#: selects the timed shape; the two secret seeds ARE the graded inputs, so a submission that can
+#: read either can regenerate what it is graded on. They live in harness/hidden_tests/seeds.py
+#: (a .dockerignore'd path) precisely so that they can be fixed and reproducible without being
+#: readable -- this scan is what keeps that true.
+SECRET_SEED_KEYS = ("secret_shape", "secret_first", "secret_second")
+
+
 def _config_ships_secret(config_path: Path) -> bool:
-    """True if a shipped ``config.yaml`` carries a populated ``seeds.secret_shape``
-    (the judge-only timed-shape seed of ``perf.mode=secret_1shape``). A cheap line
-    scan -- no yaml dependency -- treating ``null``/``~``/empty as redacted."""
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
+    """True if a shipped ``config.yaml`` populates any key in :data:`SECRET_SEED_KEYS`.
+
+    A cheap line scan -- no yaml dependency -- treating ``null``/``~``/empty as redacted."""
+    text = read_scan_text(config_path)
     for raw in text.splitlines():
         line = raw.split("#", 1)[0]
-        if "secret_shape" in line and ":" in line:
+        if ":" in line and any(line.split(":", 1)[0].strip() == key for key in SECRET_SEED_KEYS):
             value = line.split(":", 1)[1].strip()
             if value and value.lower() not in ("null", "~", "''", '""'):
                 return True

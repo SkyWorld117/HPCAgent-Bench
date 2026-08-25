@@ -1,6 +1,6 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Biconjugate Gradient (BiCG) Method
-module_name: bicg
+module_name: sp_bicg
 kind: microkernel
 level: 2
 parameters:

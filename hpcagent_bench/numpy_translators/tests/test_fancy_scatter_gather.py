@@ -204,3 +204,34 @@ def test_roll_sliced_self_assign():
                shapes={"buf": "(R,C,D)"},
                backends=_ALL))
     assert ok, res
+
+
+# --------------------------------------------------------------------------- #
+# Chained gather: associativity does NOT hold for an advanced index            #
+# --------------------------------------------------------------------------- #
+
+
+def test_chained_gather_is_not_flattened_into_one_subscript():
+    """``A[idx][j] == A[idx[j]]``, NOT ``A[idx, j]``.
+
+    Flattening it produced a subscript with more indices than the base has axes, and the
+    scalarizer then handed the outer iterators to the wrong axes.
+    """
+    import ast as _ast
+
+    from numpyto_common.lowering import _ChainedSubscriptFlattener
+
+    tree = _ast.parse("y = x[aj][:, None, :, :]")
+    _ChainedSubscriptFlattener({"x": ("n", "3"), "aj": ("p", "j")}).visit(tree)
+    assert _ast.unparse(tree).strip() == "y = x[aj][:, None, :, :]"
+
+
+def test_chained_scalar_index_is_still_flattened():
+    """A genuinely scalar inner index keeps the existing collapse: ``psi[f][..., 0]``."""
+    import ast as _ast
+
+    from numpyto_common.lowering import _ChainedSubscriptFlattener
+
+    tree = _ast.parse("y = psi[f][..., 0]")
+    _ChainedSubscriptFlattener({"psi": ("F", "X", "Y", "K")}).visit(tree)
+    assert _ast.unparse(tree).strip() == "y = psi[f, ..., 0]"

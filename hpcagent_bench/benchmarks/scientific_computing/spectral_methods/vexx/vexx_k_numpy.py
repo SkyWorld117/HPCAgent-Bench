@@ -1,8 +1,19 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """NumPy port of QE's exx_bp::vexx_bp_k band-parallel exact-exchange kernel (GPL v2+); all Fortran config paths ported."""
+import math
+
 import numpy as np
-from scipy.special import erf as _erf
+
+
+def _erf(x):
+    """Elementwise ``erf``. numpy ships no ufunc for it and this corpus does not depend on scipy,
+    so the value comes from the stdlib's scalar one, which agrees with scipy's to 2.2e-16 in fp64
+    and bit-for-bit in fp32. ``frompyfunc`` returns an object array; the cast both narrows it back
+    and keeps the kernel computing in the precision it was handed."""
+    x = np.asarray(x)
+    return np.frompyfunc(math.erf, 1, 1)(x).astype(x.dtype, copy=False)
+
 
 _E2 = 2.0
 _FPI = 4.0 * np.pi
@@ -65,11 +76,11 @@ def _vcut_init(a, cutoff, security=6.0):
 
     # --- table nodes q_i = b.(i1,i2,i3), only inside the cutoff sphere ---
     idx = (np.stack(np.meshgrid(np.arange(-n1, n1 + 1), np.arange(-n2, n2 + 1), np.arange(-n3, n3 + 1), indexing="ij"),
-                    axis=-1).reshape(-1, 3).astype(np.float64))
+                    axis=-1).reshape(-1, 3).astype(b.dtype))
     Q = idx @ b.T  # (Nq,3)  q = b.idx
     q2 = np.sum(Q**2, axis=1)
     inside = q2 <= cutoff**2
-    corrected = np.zeros((2 * n1 + 1, 2 * n2 + 1, 2 * n3 + 1))
+    corrected = np.zeros((2 * n1 + 1, 2 * n2 + 1, 2 * n3 + 1), b.dtype)
     Qin = Q[inside]
     # short-range (reciprocal): e2 2pi/sigma^2 at q->0 else e2 4pi/q^2 (1-exp(-q^2/2sigma^2))
     q2in = q2[inside]
@@ -142,7 +153,7 @@ def _g2_convolution(g,
             onall &= np.abs(x - np.rint(x)) < eps
         gf = np.where(onall, 0.0, grid_factor)
     else:
-        gf = np.ones(ngm)
+        gf = np.ones(ngm, g.dtype)
     nonsing = qq > eps_qdiv
     qqn = np.where(nonsing, qq, 1.0)  # guard the divide
     if gau_scrlen > 0.0:
@@ -395,8 +406,8 @@ def vexx_all_paths(psi,
     omega_inv = 1.0 / omega
     nqs_inv = 1.0 / nqs
     eg = my_egrp_id
-    at_ = np.eye(3) if at is None else np.asarray(at)
-    vcut_a_ = np.eye(3) if vcut_a is None else np.asarray(vcut_a)
+    at_ = np.eye(3, dtype=g.dtype) if at is None else np.asarray(at)
+    vcut_a_ = np.eye(3, dtype=g.dtype) if vcut_a is None else np.asarray(vcut_a)
 
     def invfft(col):  # G/recip -> real space (normalised)
         return np.fft.ifftn(col.reshape(grid, order="F"), axes=(0, 1, 2)).reshape(nrxxs, order="F")
@@ -404,11 +415,11 @@ def vexx_all_paths(psi,
     def fwfft(col):  # real -> G/recip space (unnormalised)
         return np.fft.fftn(col.reshape(grid, order="F"), axes=(0, 1, 2)).reshape(nrxxs, order="F")
 
-    nl0 = nl[:ngm] - 1  # G-sphere -> FFT grid (0-based)
-    gki = igk_exx[:n, current_k - 1] - 1  # wavefunction G-index -> G-sphere
-    nlg = nl[gki] - 1  # wavefunction G -> FFT grid
-    ijtoh0 = ijtoh - 1
-    ofsbeta0 = ofsbeta - 1
+    nl0 = nl[:ngm]  # G-sphere -> FFT grid (0-based)
+    gki = igk_exx[:n, current_k - 1]  # wavefunction G-index -> G-sphere
+    nlg = nl[gki]  # wavefunction G -> FFT grid
+    ijtoh0 = ijtoh
+    ofsbeta0 = ofsbeta
 
     my_n = int(nibands[eg])
     # local working exxbuff (rotated for negrp>1); shape (nrxxs*npol, nbnd, nks)
@@ -435,19 +446,19 @@ def vexx_all_paths(psi,
         coulomb_fac = np.array(coulomb_fac_q[:ngm, :nqs], dtype=np.float64)
         coulomb_done = np.ones(nqs, dtype=bool)
     else:
-        coulomb_fac = np.zeros((ngm, nqs), dtype=np.float64)
+        coulomb_fac = np.zeros((ngm, nqs), dtype=g.dtype)
         coulomb_done = np.zeros(nqs, dtype=bool)
 
     # ---- main loop over q-points ------------------------------------------
     for iq in range(1, nqs + 1):
         ikq = int(index_xkq[current_ik - 1, iq - 1])
-        ik = int(index_xk[ikq - 1])
-        xkq = xkq_collect[:, ikq - 1]
+        ik = int(index_xk[ikq])
+        xkq = xkq_collect[:, ikq]
         fac = _g2_convolution_all(coulomb_fac, coulomb_done, iq, ngm, g, xk[:, current_k - 1], xkq, tpiba2, exxdiv,
                                   eps_qdiv, gau_scrlen, erf_scrlen, erfc_scrlen, yukawa, x_gamma_extrapolation,
                                   grid_factor, at_, nq1, nq2, nq3, eps_gcv, use_coulomb_vcut_spheric, vcut_a_,
                                   use_coulomb_vcut_ws, vcut_cutoff, vcut_corrected)
-        facb = np.zeros(nrxxs)
+        facb = np.zeros(nrxxs, fac.dtype)
         facb[nl0] = fac  # Coulomb factor on the FFT grid
 
         # per-q US augmentation data (qvan2); falls back to q-independent synthetic args when not supplied.
@@ -492,40 +503,40 @@ def vexx_all_paths(psi,
                         # ---- rhoc = conj(phi) * psi / omega ----
                         rhoc = np.zeros(nrxxs, dtype=np.complex128)
                         for ip in range(npol):
-                            phi_c = exxbuff_w[ip * nrxxs:ip * nrxxs + nrxxs, buf, ikq - 1]
+                            phi_c = exxbuff_w[ip * nrxxs:ip * nrxxs + nrxxs, buf, ikq]
                             rhoc += np.conj(phi_c) * temppsic[:, ip, ii]
                         rhoc *= omega_inv
                         # ---- US real-space augmentation (tqr) on rho ----
                         if okvan and tqr:
-                            _addusxx_r(rhoc, becxx[:, jbnd - 1, ikq - 1], becpsi[:, ibnd - 1], tabxx_box, tabxx_qr,
+                            _addusxx_r(rhoc, becxx[:, jbnd - 1, ikq], becpsi[:, ibnd - 1], tabxx_box, tabxx_qr,
                                        ijtoh0, nat, nh, ofsbeta0)
                         rhocg = fwfft(rhoc)
                         # ---- US G-space augmentation ----
                         if okvan and not tqr:
-                            _addusxx_g(rhocg, nl0, qgm_use, becxx[:, jbnd - 1, ikq - 1], becpsi[:, ibnd - 1], ijtoh0,
+                            _addusxx_g(rhocg, nl0, qgm_use, becxx[:, jbnd - 1, ikq], becpsi[:, ibnd - 1], ijtoh0,
                                        nat, nh, ofsbeta0, eigqts_use, sfac_use)
                         # ---- vc = facb * rhoc * occ / nqs ----
-                        vc = facb * rhocg * (x_occupation[jbnd - 1, ik - 1] * nqs_inv)
+                        vc = facb * rhocg * (x_occupation[jbnd - 1, ik] * nqs_inv)
                         # ---- US G-space non-local potential ----
                         if okvan and not tqr:
-                            _newdxx_g(vc, nl0, qgm_use, becxx[:, jbnd - 1, ikq - 1], deexx[:, ii], ijtoh0, nat, nh,
+                            _newdxx_g(vc, nl0, qgm_use, becxx[:, jbnd - 1, ikq], deexx[:, ii], ijtoh0, nat, nh,
                                       ofsbeta0, eigqts_use, sfac_use, omega)
                         vcr = invfft(vc)
                         # ---- US real-space non-local potential (tqr) ----
                         if okvan and tqr:
-                            _newdxx_r(vcr, becxx[:, jbnd - 1, ikq - 1], deexx[:, ii], tabxx_box, tabxx_qr, ijtoh0, nat,
+                            _newdxx_r(vcr, becxx[:, jbnd - 1, ikq], deexx[:, ii], tabxx_box, tabxx_qr, ijtoh0, nat,
                                       nh, ofsbeta0, omega, nrxxs)
                         # ---- PAW Fock-kernel contraction ----
                         if okpaw:
-                            _paw_newdxx(x_occupation[jbnd - 1, ik - 1] * nqs_inv, becxx[:, jbnd - 1, ikq - 1],
+                            _paw_newdxx(x_occupation[jbnd - 1, ik] * nqs_inv, becxx[:, jbnd - 1, ikq],
                                         becpsi[:, ibnd - 1], deexx[:, ii], ke, nat, nh, ofsbeta0)
                         # ---- result += vc * phi ----
                         for ip in range(npol):
-                            phi_c = exxbuff_w[ip * nrxxs:ip * nrxxs + nrxxs, buf, ikq - 1]
+                            phi_c = exxbuff_w[ip * nrxxs:ip * nrxxs + nrxxs, buf, ikq]
                             result[:, ip, ii] += vcr * phi_c
             # circular-shift the band-group's exxbuff slab left (MPI exchange).
             if negrp > 1:
-                exxbuff_w[:, :, ikq - 1] = np.roll(exxbuff_w[:, :, ikq - 1], -1, axis=1)
+                exxbuff_w[:, :, ikq] = np.roll(exxbuff_w[:, :, ikq], -1, axis=1)
 
     # ---- finalize: result(r) -> G-sphere, accumulate onto hpsi ------------
     for ii in range(my_n):
@@ -567,7 +578,7 @@ def vexx(psi, hpsi, exxbuff, x_occupation, coulomb_fac, dfftt_nl, igk_exx, index
         return np.fft.fftn(col.reshape((n1, n2, n3, -1)), axes=(0, 1, 2)).reshape(nrxxs, -1)[:, 0]
 
     nl = dfftt_nl[:ngm] - 1  # G-sphere -> FFT grid (0-based)
-    gki = igk_exx[:n, current_k - 1] - 1  # wavefunction G-index -> G-sphere
+    gki = igk_exx[:n, current_k - 1]  # wavefunction G-index -> G-sphere
     nlg = dfftt_nl[gki] - 1  # wavefunction G -> FFT grid
 
     # ---- setup: each of my bands psi_i scattered to the grid, to real space ---
@@ -591,8 +602,8 @@ def vexx(psi, hpsi, exxbuff, x_occupation, coulomb_fac, dfftt_nl, igk_exx, index
     all_end_tmp = int(all_end[wegrp - 1])
     for iq in range(1, nqs + 1):
         ikq = int(index_xkq[current_ik - 1, iq - 1])
-        ik = int(index_xk[ikq - 1])
-        xkq = xkq_collect[:, ikq - 1]
+        ik = int(index_xk[ikq])
+        xkq = xkq_collect[:, ikq]
         # bare Coulomb v(G) = 4pi e2/|q+G|^2 (G->0 term is -exxdiv); vectorized over the G-sphere so jax parallelizes it.
         qq = np.zeros(ngm)
         for d in range(3):
@@ -630,12 +641,12 @@ def vexx(psi, hpsi, exxbuff, x_occupation, coulomb_fac, dfftt_nl, igk_exx, index
                     continue
                 for jbnd in range(jstart, jend + 1):
                     buf = jbnd - all_start_tmp + iexx_start - 1  # exxbuff col (0-based)
-                    phi = exxbuff[:, buf, ikq - 1]  # (nrxxs,)
+                    phi = exxbuff[:, buf, ikq]  # (nrxxs,)
                     # rhoc = conj(phi) * psi_i / omega ; -> G-space
                     rhoc = np.conj(phi) * temppsic[:, ii] * omega_inv
                     rhocg = fwfft(rhoc)
                     # vc = facb * rhocg * occ / nqs ; -> real space
-                    vc = facb * rhocg * (x_occupation[jbnd - 1, ik - 1] * nqs_inv)
+                    vc = facb * rhocg * (x_occupation[jbnd - 1, ik] * nqs_inv)
                     vcr = invfft(vc)
                     result[:, ii] += vcr * phi
 
