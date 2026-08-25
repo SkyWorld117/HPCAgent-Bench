@@ -12,7 +12,7 @@ subroutine tsvc_2_vag_fp64(a, b, ip, LEN_1D) bind(C, name="tsvc_2_vag_fp64")
     integer(c_int64_t) :: i
 
     do i = 0, (LEN_1D) - 1
-        a((i) + 1) = b((INT(ip((i) + 1), c_int64_t)) + 1)
+        a((i) + 1) = b(INT(ip((i) + 1), c_int64_t))
     end do
 
 end subroutine tsvc_2_vag_fp64
