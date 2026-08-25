@@ -81,23 +81,18 @@ do i = 1, n
 end do
 ```
 
-The wrong version builds clean and returns the TRANSPOSE. When the array is square no shape
-check can catch it, and the usual symptom is `numeric mismatch` on every input.
+The wrong version builds clean and returns the TRANSPOSE, which no shape check catches on a
+square array. It has a second, quieter symptom: where the stencil's offsets are SYMMETRIC in the
+two axes -- elementwise, a diagonal `(-1, -1)` carry, a whole-array max or sum -- transposing the
+code transposes the answer too and it compares EQUAL, graded correct and 2x to 6x slower for
+striding the long way through memory. So `numeric mismatch` proves a transpose; passing does not
+rule one out.
 
-It has a second, quieter symptom. If the stencil's offsets are SYMMETRIC in the two axes -- a
-pure elementwise update, a diagonal `(-1, -1)` carry, a box of corners, a whole-array max or
-sum -- then transposing the code transposes the answer too, and the answer compares EQUAL. The
-run is graded correct and is 2x to 6x slower, because every access now strides the long way
-through memory. So `numeric mismatch` proves a transpose, but passing does not rule one out:
-on a symmetric stencil the only evidence is the speed.
 Note where the recurrence lands: correct code carries it along the SECOND subscript, so the
-independent loop is the FIRST subscript -- which is also the contiguous one, and therefore the
-one to make innermost and vectorize.
-
-Which the `! CORRECT` block above has NOT done: it is correct, not yet fast. `i` is the
-contiguous, independent axis and it sits on the outside. Correctness first, then INTERCHANGE --
-swap the two `do` lines so `i` is innermost. The swap is legal exactly because `i` is the
-independent axis; `j` carries the recurrence and must stay outer.
+independent loop is the FIRST subscript -- also the contiguous one, so also the one to make
+innermost. Which the `! CORRECT` block has NOT done: `i` is that axis and it sits outside.
+Correctness first, then INTERCHANGE -- legal exactly because `i` is independent while `j` carries
+the recurrence and must stay outer.
 
 **A 2D kernel that builds clean and scores `numeric mismatch` is a transposed subscript until
 proven otherwise -- and so is one that grades correct but will not go faster.** Check that
@@ -118,8 +113,6 @@ side effects inside.
 
 ## Writing fast Fortran
 
-- **Column-major: first index fastest, so it belongs innermost** -- the same reversal the
-  translation section above makes a correctness gate, now also the fast loop order.
 - Dummy arguments cannot alias: `restrict` for free. `pointer`/`target` gives that back -- plain
   arrays, integer indices.
 - **Scalars, never length-1 arrays or sections**: a scalar is a register.
