@@ -1465,17 +1465,32 @@ def _materialize_const_arrays(tree: ast.Module, fn: ast.FunctionDef, input_args:
 
 
 class _PruneSparseDispatch(ast.NodeTransformer):
-    """Drop a scipy-sparse dispatch branch. The static dense backends only
-    handle dense arrays, so ``sp.issparse(x)`` / ``scipy.sparse.issparse(x)``
-    is statically False; ``if sp.issparse(A) and sp.issparse(B): <sparse>`` is
-    therefore dead code (banded_mmt). Removing it leaves the dense path. Only a
-    POSITIVE issparse test is folded -- a bare ``issparse(...)`` call or an
-    ``and`` chain containing one (both False) -- so a ``not issparse`` (dense)
-    guard is never mis-pruned."""
+    """Drop a sparse dispatch branch. The static dense backends only handle dense arrays, so a test
+    asking "is this operand sparse?" is statically False and the path it guards is dead code
+    (banded_mmt). Removing it leaves the dense path.
+
+    Two spellings ask that question. ``sp.issparse(x)`` / ``scipy.sparse.issparse(x)`` is the one
+    scipy gives; ``not isinstance(x, np.ndarray)`` is what a reference writes instead, because a
+    reference imports numpy and nothing else. Both are folded, and only in the POSITIVE direction --
+    a bare ``issparse(...)`` or ``not isinstance(...)``, or an ``and`` chain containing one -- so
+    the opposite (dense) guard, ``not issparse(x)`` or a bare ``isinstance(x, np.ndarray)``, is
+    never mis-pruned.
+    """
+
+    @staticmethod
+    def _asks_if_sparse(test: ast.expr) -> bool:
+        """``test`` is one of the two ways to ask whether an operand is sparse."""
+        if isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and test.func.attr == "issparse":
+            return True
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = test.operand
+            return (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "isinstance"
+                    and len(inner.args) == 2 and _names_ndarray(inner.args[1]))
+        return False
 
     @staticmethod
     def _statically_false(test: ast.expr) -> bool:
-        if (isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and test.func.attr == "issparse"):
+        if _PruneSparseDispatch._asks_if_sparse(test):
             return True
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
             return any(_PruneSparseDispatch._statically_false(v) for v in test.values)
@@ -1486,6 +1501,13 @@ class _PruneSparseDispatch(ast.NodeTransformer):
         if self._statically_false(node.test):
             return node.orelse  # drop the dead (sparse) branch, keep else/[]
         return node
+
+
+def _names_ndarray(node: ast.expr) -> bool:
+    """``np.ndarray``, or a tuple of types containing it."""
+    if isinstance(node, ast.Tuple):
+        return any(_names_ndarray(e) for e in node.elts)
+    return isinstance(node, ast.Attribute) and node.attr == "ndarray"
 
 
 class _FoldParamNoneGuard(ast.NodeTransformer):
