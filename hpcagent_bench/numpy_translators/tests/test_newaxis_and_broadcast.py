@@ -221,3 +221,48 @@ def test_extent_of_reduction_argument_drops_axis():
     extent so the expander can compute the result rank."""
     ext = _iter_extent_of(_expr("A"), {"A": ("N", "M")})
     assert _unparse_ext(ext) == ("N", "M")
+
+
+# --------------------------------------------------------------------------- #
+# F. Advanced (gather) indexing under a newaxis                                #
+# --------------------------------------------------------------------------- #
+
+_GATHER_SHAPES = {
+    "x": ("n_atoms", "3"),
+    "aj": ("pairs", "UNROLLJ"),
+    "nbfp": ("nt", "nt", "2"),
+    "type_i": ("UNROLLI", ),
+    "type_j": ("pairs", "UNROLLJ"),
+    "psi": ("F", "X", "Y", "K"),
+    "table": ("n", ),
+    "ri": ("pairs", "UNROLLI", "UNROLLJ"),
+}
+
+
+def test_chained_gather_keeps_its_axis_under_a_newaxis():
+    """``x[aj][:, None, :, :]``: the gather KEEPS an axis per index dim, so the residual
+    base is (pairs, UNROLLJ, 3) and the newaxis inserts a unit axis into it."""
+    ext = _iter_extent_of(_expr("x[aj][:, None, :, :]"), _GATHER_SHAPES)
+    assert _unparse_ext(ext) == ("pairs", "1", "UNROLLJ", "3")
+
+
+def test_chained_scalar_index_still_drops_its_axis():
+    """The scalar-chain case the gather rule must not break: ``psi[f]`` drops axis 0."""
+    ext = _iter_extent_of(_expr("psi[f][..., 0]"), _GATHER_SHAPES)
+    assert _unparse_ext(ext) == ("X", "Y")
+
+
+def test_multiple_index_arrays_broadcast_rather_than_take_the_longest():
+    """Two rank-3 index arrays broadcast: (1, I, 1) with (P, 1, J) is (P, I, J).
+
+    Taking the longest is only right when the ranks differ; on a tie it silently kept the
+    first operand's size-1 axes.
+    """
+    ext = _iter_extent_of(_expr("nbfp[type_i[None, :, None], type_j[:, None, :], 0]"), _GATHER_SHAPES)
+    assert _unparse_ext(ext) == ("pairs", "UNROLLI", "UNROLLJ")
+
+
+def test_gather_index_may_be_an_expression_not_only_a_name():
+    """``table[ri + 1]`` is a gather: its extent is the INDEX's, not the table's."""
+    ext = _iter_extent_of(_expr("table[ri + 1]"), _GATHER_SHAPES)
+    assert _unparse_ext(ext) == ("pairs", "UNROLLI", "UNROLLJ")

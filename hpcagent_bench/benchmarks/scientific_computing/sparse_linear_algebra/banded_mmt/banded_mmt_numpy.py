@@ -10,8 +10,8 @@ def banded_mmt(A, a_lbound: int, a_ubound: int, B, b_lbound: int, b_ubound: int,
         ret_out[:] = (A @ B @ A.T).toarray()
         return
     N = ret_out.shape[0]
-    A_dense = np.zeros((N, N))
-    B_dense = np.zeros((N, N))
+    A_dense = np.zeros((N, N), ret_out.dtype)
+    B_dense = np.zeros((N, N), ret_out.dtype)
     for i in range(N):
         a_start = max(i - a_lbound, 0)
         a_stop = min(N, i + a_ubound + 1)

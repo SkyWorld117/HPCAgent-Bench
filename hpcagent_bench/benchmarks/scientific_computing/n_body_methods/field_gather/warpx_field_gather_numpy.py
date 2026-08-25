@@ -146,10 +146,10 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
         else:
             x = (xp - xyzmin[0]) * dinv[0]
 
-        sx_node = np.zeros((o + 1, n))
-        sx_cell = np.zeros((o + 1, n))
-        sx_node_g = np.zeros((og + 1, n))
-        sx_cell_g = np.zeros((og + 1, n))
+        sx_node = np.zeros((o + 1, n), dtype=xp.dtype)
+        sx_cell = np.zeros((o + 1, n), dtype=xp.dtype)
+        sx_node_g = np.zeros((og + 1, n), dtype=xp.dtype)
+        sx_cell_g = np.zeros((og + 1, n), dtype=xp.dtype)
         # Pre-declared buffers, written into (not rebound) inside the runtime
         # branch: a name reassigned to a freshly allocated array inside
         # conditional control flow is not a decidable single buffer for the
@@ -166,17 +166,17 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
             j_node_v[:] = compute_shape_factor_into(sx_node_g, og, x)
         if ex_type[0] == CELL or by_type[0] == CELL or bz_type[0] == CELL:
             j_cell_v[:] = compute_shape_factor_into(sx_cell_g, og, x - 0.5)
-        sx_ex = np.zeros((og + 1, n))
+        sx_ex = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sx_ex, ex_type[0] == NODE, sx_node_g, sx_cell_g, og + 1)
-        sx_ey = np.zeros((o + 1, n))
+        sx_ey = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sx_ey, ey_type[0] == NODE, sx_node, sx_cell, o + 1)
-        sx_ez = np.zeros((o + 1, n))
+        sx_ez = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sx_ez, ez_type[0] == NODE, sx_node, sx_cell, o + 1)
-        sx_bx = np.zeros((o + 1, n))
+        sx_bx = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sx_bx, bx_type[0] == NODE, sx_node, sx_cell, o + 1)
-        sx_by = np.zeros((og + 1, n))
+        sx_by = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sx_by, by_type[0] == NODE, sx_node_g, sx_cell_g, og + 1)
-        sx_bz = np.zeros((og + 1, n))
+        sx_bz = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sx_bz, bz_type[0] == NODE, sx_node_g, sx_cell_g, og + 1)
         # np.where, not a bare ternary: it selects ELEMENT-WISE into ONE new
         # buffer, so the static emitter sees a single decidable array rather
@@ -197,10 +197,10 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
     # ------------------------------------------------------------------ y dir
     if geom == GEOM_3D:
         y = (yp - xyzmin[1]) * dinv[1]
-        sy_node = np.zeros((o + 1, n))
-        sy_cell = np.zeros((o + 1, n))
-        sy_node_v = np.zeros((og + 1, n))
-        sy_cell_v = np.zeros((og + 1, n))
+        sy_node = np.zeros((o + 1, n), dtype=xp.dtype)
+        sy_cell = np.zeros((o + 1, n), dtype=xp.dtype)
+        sy_node_v = np.zeros((og + 1, n), dtype=xp.dtype)
+        sy_cell_v = np.zeros((og + 1, n), dtype=xp.dtype)
         k_node = np.zeros(n, dtype=np.int64)
         k_cell = np.zeros(n, dtype=np.int64)
         k_node_v = np.zeros(n, dtype=np.int64)
@@ -213,17 +213,17 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
             k_node_v[:] = compute_shape_factor_into(sy_node_v, og, y)
         if ey_type[1] == CELL or bx_type[1] == CELL or bz_type[1] == CELL:
             k_cell_v[:] = compute_shape_factor_into(sy_cell_v, og, y - 0.5)
-        sy_ex = np.zeros((o + 1, n))
+        sy_ex = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sy_ex, ex_type[1] == NODE, sy_node, sy_cell, o + 1)
-        sy_ey = np.zeros((og + 1, n))
+        sy_ey = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sy_ey, ey_type[1] == NODE, sy_node_v, sy_cell_v, og + 1)
-        sy_ez = np.zeros((o + 1, n))
+        sy_ez = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sy_ez, ez_type[1] == NODE, sy_node, sy_cell, o + 1)
-        sy_bx = np.zeros((og + 1, n))
+        sy_bx = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sy_bx, bx_type[1] == NODE, sy_node_v, sy_cell_v, og + 1)
-        sy_by = np.zeros((o + 1, n))
+        sy_by = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sy_by, by_type[1] == NODE, sy_node, sy_cell, o + 1)
-        sy_bz = np.zeros((og + 1, n))
+        sy_bz = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sy_bz, bz_type[1] == NODE, sy_node_v, sy_cell_v, og + 1)
         k_ex = np.zeros(n, dtype=np.int64)
         k_ex[:] = np.where(ex_type[1] == NODE, k_node, k_cell)
@@ -241,10 +241,10 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
     # ------------------------------------------------------------------ z dir
     if (geom != GEOM_RCYLINDER and geom != GEOM_RSPHERE):
         z = (zp - xyzmin[2]) * dinv[2]
-        sz_node = np.zeros((o + 1, n))
-        sz_cell = np.zeros((o + 1, n))
-        sz_node_v = np.zeros((og + 1, n))
-        sz_cell_v = np.zeros((og + 1, n))
+        sz_node = np.zeros((o + 1, n), dtype=xp.dtype)
+        sz_cell = np.zeros((o + 1, n), dtype=xp.dtype)
+        sz_node_v = np.zeros((og + 1, n), dtype=xp.dtype)
+        sz_cell_v = np.zeros((og + 1, n), dtype=xp.dtype)
         l_node = np.zeros(n, dtype=np.int64)
         l_cell = np.zeros(n, dtype=np.int64)
         l_node_v = np.zeros(n, dtype=np.int64)
@@ -257,17 +257,17 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
             l_node_v[:] = compute_shape_factor_into(sz_node_v, og, z)
         if ez_type[zdir] == CELL or bx_type[zdir] == CELL or by_type[zdir] == CELL:
             l_cell_v[:] = compute_shape_factor_into(sz_cell_v, og, z - 0.5)
-        sz_ex = np.zeros((o + 1, n))
+        sz_ex = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sz_ex, ex_type[zdir] == NODE, sz_node, sz_cell, o + 1)
-        sz_ey = np.zeros((o + 1, n))
+        sz_ey = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sz_ey, ey_type[zdir] == NODE, sz_node, sz_cell, o + 1)
-        sz_ez = np.zeros((og + 1, n))
+        sz_ez = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sz_ez, ez_type[zdir] == NODE, sz_node_v, sz_cell_v, og + 1)
-        sz_bx = np.zeros((og + 1, n))
+        sz_bx = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sz_bx, bx_type[zdir] == NODE, sz_node_v, sz_cell_v, og + 1)
-        sz_by = np.zeros((og + 1, n))
+        sz_by = np.zeros((og + 1, n), dtype=xp.dtype)
         _copy_sel(sz_by, by_type[zdir] == NODE, sz_node_v, sz_cell_v, og + 1)
-        sz_bz = np.zeros((o + 1, n))
+        sz_bz = np.zeros((o + 1, n), dtype=xp.dtype)
         _copy_sel(sz_bz, bz_type[zdir] == NODE, sz_node, sz_cell, o + 1)
         l_ex = np.zeros(n, dtype=np.int64)
         l_ex[:] = np.where(ex_type[zdir] == NODE, l_node, l_cell)
@@ -312,10 +312,10 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                 Byp += sx_by[ix] * sz_by[iz] * by_arr[lox + j_by + ix, loy + l_by + iz, 0, 0]
 
     elif geom == GEOM_RZ:
-        Erp = np.zeros(n)
-        Ethetap = np.zeros(n)
-        Brp = np.zeros(n)
-        Bthetap = np.zeros(n)
+        Erp = np.zeros(n, dtype=xp.dtype)
+        Ethetap = np.zeros(n, dtype=xp.dtype)
+        Brp = np.zeros(n, dtype=xp.dtype)
+        Bthetap = np.zeros(n, dtype=xp.dtype)
         for iz in range(o + 1):
             for ix in range(o + 1):
                 Ethetap += sx_ey[ix] * sz_ey[iz] * ey_arr[lox + j_ey + ix, loy + l_ey + iz, 0, 0]
@@ -376,10 +376,10 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
         Byp += costheta * Bthetap + sintheta * Brp
 
     elif geom == GEOM_RCYLINDER:
-        Erp = np.zeros(n)
-        Ethetap = np.zeros(n)
-        Brp = np.zeros(n)
-        Bthetap = np.zeros(n)
+        Erp = np.zeros(n, dtype=xp.dtype)
+        Ethetap = np.zeros(n, dtype=xp.dtype)
+        Brp = np.zeros(n, dtype=xp.dtype)
+        Bthetap = np.zeros(n, dtype=xp.dtype)
         for ix in range(o + 1):
             Ethetap += sx_ey[ix] * ey_arr[lox + j_ey + ix, 0, 0, 0]
         for ix in range(og + 1):
@@ -399,12 +399,12 @@ def _gather_shape_n(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
         Byp += costheta * Bthetap + sintheta * Brp
 
     elif geom == GEOM_RSPHERE:
-        Erp = np.zeros(n)
-        Ethetap = np.zeros(n)
-        Ephip = np.zeros(n)
-        Brp = np.zeros(n)
-        Bthetap = np.zeros(n)
-        Bphip = np.zeros(n)
+        Erp = np.zeros(n, dtype=xp.dtype)
+        Ethetap = np.zeros(n, dtype=xp.dtype)
+        Ephip = np.zeros(n, dtype=xp.dtype)
+        Brp = np.zeros(n, dtype=xp.dtype)
+        Bthetap = np.zeros(n, dtype=xp.dtype)
+        Bphip = np.zeros(n, dtype=xp.dtype)
         for ix in range(o + 1):
             Ethetap += sx_ey[ix] * ey_arr[lox + j_ey + ix, 0, 0, 0]
         for ix in range(og + 1):

@@ -29,7 +29,8 @@ qualifiers, per-species dispatch, I/O, MPI) is intentionally omitted -- only the
 per-particle momentum-update math is retained, evaluated in a serial loop over
 the particle arrays.
 """
-import math
+
+import numpy as np
 
 # --- MomentumPushType (Source/Utils/WarpXAlgorithmSelection.H, AMREX_ENUM order)
 FULL = 0
@@ -61,7 +62,7 @@ def _update_momentum_boris(ux, uy, uz, Ex, Ey, Ez, Bx, By, Bz, q, m, dt, momentu
 
     # Compute temporary gamma factor
     inv_c2 = INV_C2
-    inv_gamma = 1.0 / math.sqrt(1.0 + (ux * ux + uy * uy + uz * uz) * inv_c2)
+    inv_gamma = 1.0 / np.sqrt(1.0 + (ux * ux + uy * uy + uz * uz) * inv_c2)
 
     # Magnetic rotation -- compute temporary variables
     tx = econst * inv_gamma * Bx
@@ -75,7 +76,7 @@ def _update_momentum_boris(ux, uy, uz, Ex, Ey, Ez, Bx, By, Bz, q, m, dt, momentu
         # a single rotation by alpha:
         #   |t_half|/|t_full| = (sqrt(1 + |t_full|^2) - 1) / |t_full|^2.
         tsq = tx * tx + ty * ty + tz * tz
-        factor = (math.sqrt(1.0 + tsq) - 1.0) / tsq if tsq > 0.0 else 0.5
+        factor = (np.sqrt(1.0 + tsq) - 1.0) / tsq if tsq > 0.0 else 0.5
         tx *= factor
         ty *= factor
         tz *= factor

@@ -30,10 +30,12 @@ def kernel(X, W, Xrot, evals):
     # Fix the eigenvector sign gauge (largest-magnitude component made positive) so the
     # rotated block is deterministic -- eigh returns each column only up to a sign, which
     # differs between LAPACK builds and would otherwise flip whole columns of Xrot.
+    # Per-column argmax + gather + broadcast sign flip replaces the k-iteration Python loop.
     absU = np.abs(U)
-    for j in range(U.shape[1]):
-        if U[np.argmax(absU[:, j]), j] < 0.0:
-            U[:, j] = -U[:, j]
+    row_idx = np.argmax(absU, axis=0)
+    peak = U[row_idx, np.arange(U.shape[1])]
+    sign = np.where(peak < 0.0, -1.0, 1.0)
+    U = U * sign
     C = Linv.T @ U  # generalized eigenvectors
     Xrot[:] = X @ C  # rotate the block into Ritz vectors
     evals[:] = w

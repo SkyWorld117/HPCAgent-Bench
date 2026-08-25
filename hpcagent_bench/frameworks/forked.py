@@ -20,6 +20,34 @@ _DRAIN_S = 5.0
 #: unbounded wait on a child that never runs is worse than a slightly wrong clock.
 ARM_GRACE_S = 30.0
 
+#: How long a SIGTERMed child has to exit before the parent escalates to SIGKILL.
+TERM_GRACE_S = 5.0
+
+#: Extra time granted to a child the kernel says is DUMPING CORE. Its cause is already decided --
+#: it took a fatal signal and the kernel is writing the image -- so a SIGKILL here does not stop a
+#: hung child, it relabels a crash as a kill and the caller records the wrong cause. On a distro
+#: whose ``core_pattern`` pipes to a helper the dump costs a second even on an idle box (measured:
+#: 1.1s for a 20MB python child), and the helper is itself a process that has to be scheduled, so
+#: on a loaded runner it is the SIGTERM grace that runs out first. A dump terminates on its own;
+#: this only has to be longer than one takes.
+COREDUMP_GRACE_S = 60.0
+
+
+def is_core_dumping(pid: int) -> bool:
+    """True when the kernel reports ``pid`` is writing a core image (Linux >= 4.15).
+
+    False everywhere the answer is not knowable -- another OS, a reaped pid, a hidepid mount --
+    which is the pre-existing behaviour: escalate.
+    """
+    try:
+        with open(f"/proc/{pid}/status", "r") as fh:
+            for line in fh:
+                if line.startswith("CoreDumping:"):
+                    return line.split(":", 1)[1].strip() == "1"
+    except OSError:
+        return False
+    return False
+
 
 @dataclass
 class RunResult:
@@ -128,7 +156,9 @@ def run_forked(fn: Callable,
             if result_item is not None:
                 break  # child actually finished (payload already drained) -- not a timeout
             p.terminate()  # SIGTERM
-            p.join(5.0)
+            p.join(TERM_GRACE_S)
+            if p.is_alive() and p.pid is not None and is_core_dumping(p.pid):
+                p.join(COREDUMP_GRACE_S)  # already dying of its own signal -- wait, do not relabel it
             if p.is_alive():  # a child that ignores/blocks SIGTERM would hang the
                 p.kill()  # parent on an unbounded join -- escalate to SIGKILL
                 p.join()
@@ -138,6 +168,9 @@ def run_forked(fn: Callable,
             # and terminate() -- a segfaulting vendor runtime on a loaded box is exactly that race.
             # Reporting it as TIMEOUT hides the cause the caller is trying to attribute, so the
             # exit code decides: anything other than the signal we just sent is the child's own.
+            # Losing that race was never about the DEADLINE (widened 0.5s -> 2s, and CI went red
+            # again): the child dies on time and the kernel then takes a second or more to reap it
+            # through the core_pattern helper, which is charged against the grace above.
             ec = p.exitcode
             if ec is not None and ec < 0 and -ec not in (signal.SIGTERM, signal.SIGKILL):
                 break

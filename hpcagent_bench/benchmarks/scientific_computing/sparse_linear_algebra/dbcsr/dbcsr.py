@@ -116,12 +116,12 @@ def _add_shared_work_pairs(
             b_pairs.add((int(k), int(rng.integers(0, n_n))))
 
 
-def _make_block_payload(shape, rng):
+def _make_block_payload(shape, rng, dtype=np.float64):
     # DBCSR blocks are dense payloads inside sparse block matrices. Use a
     # centered finite distribution so accumulation tests exercise signs and
     # cancellation rather than only positive products.
-    block = rng.normal(0.0, 0.5, size=shape).astype(np.float64)
-    return np.ascontiguousarray(block, dtype=np.float64)
+    block = rng.normal(0.0, 0.5, size=shape).astype(dtype)
+    return np.ascontiguousarray(block, dtype=dtype)
 
 
 def validate_dbcsr_inputs(
@@ -180,8 +180,10 @@ def validate_dbcsr_inputs(
             expected_shape = (int(row_sizes[row]), int(col_sizes[col]))
             if block.shape != expected_shape:
                 raise ValueError(f"{name} block payload shape mismatch")
-            if block.dtype != np.float64:
-                raise ValueError(f"{name} block payloads must have dtype float64")
+            # Any float dtype: the payloads follow the run precision, so pinning float64 here
+            # would reject every fp32 run rather than catch a malformed input.
+            if not np.issubdtype(block.dtype, np.floating):
+                raise ValueError(f"{name} block payloads must have a floating dtype")
             if not block.flags.c_contiguous:
                 raise ValueError(f"{name} block payloads must be C-contiguous")
             if not np.isfinite(block).all():
@@ -200,6 +202,7 @@ def generate_random_dbcsr_inputs(
     density=0.25,
     seed=0,
     sparsity_pattern="structured",
+    dtype=np.float64,
 ):
     """
     Generate DBCSR-like sparse block input.
@@ -252,13 +255,13 @@ def generate_random_dbcsr_inputs(
 
     for block_id, (i, k) in enumerate(sorted(a_pairs)):
         a_blocks[block_id] = _make_block_payload(
-            (int(m_sizes[i]), int(k_sizes[k])), rng
+            (int(m_sizes[i]), int(k_sizes[k])), rng, dtype
         )
         a_entries.append([i, k, block_id])
 
     for block_id, (k, j) in enumerate(sorted(b_pairs)):
         b_blocks[block_id] = _make_block_payload(
-            (int(k_sizes[k]), int(n_sizes[j])), rng
+            (int(k_sizes[k]), int(n_sizes[j])), rng, dtype
         )
         b_entries.append([k, j, block_id])
 
@@ -271,15 +274,15 @@ def generate_random_dbcsr_inputs(
     return a_index, b_index, a_blocks, b_blocks, m_sizes, n_sizes, k_sizes
 
 
-def _pack_block_dict(blocks, block_size, max_blocks=None):
+def _pack_block_dict(blocks, block_size, max_blocks=None, dtype=np.float64):
     n_blocks = len(blocks) if max_blocks is None else int(max_blocks)
-    packed = np.zeros((n_blocks, int(block_size), int(block_size)), dtype=np.float64)
+    packed = np.zeros((n_blocks, int(block_size), int(block_size)), dtype=dtype)
     for block_id in range(len(blocks)):
-        block = np.asarray(blocks[block_id], dtype=np.float64)
+        block = np.asarray(blocks[block_id], dtype=dtype)
         rows = block.shape[0]
         cols = block.shape[1]
         packed[block_id, :rows, :cols] = block
-    return np.ascontiguousarray(packed, dtype=np.float64)
+    return np.ascontiguousarray(packed, dtype=dtype)
 
 
 def _pad_block_index(index, max_blocks):
@@ -300,7 +303,6 @@ def initialize(
 ):
     """Manifest-compatible DBCSR input generator."""
 
-    _ = datatype
     a_index, b_index, a_blocks, b_blocks, m_sizes, n_sizes, k_sizes = (
         generate_random_dbcsr_inputs(
             n_block_rows=n_block_rows,
@@ -310,16 +312,17 @@ def initialize(
             density=density,
             seed=seed,
             sparsity_pattern="structured",
+            dtype=datatype,
         )
     )
     max_a_blocks = int(n_block_rows) * int(n_block_inner)
     max_b_blocks = int(n_block_inner) * int(n_block_cols)
-    C = np.zeros((int(np.sum(m_sizes)), int(np.sum(n_sizes))), dtype=np.float64)
+    C = np.zeros((int(np.sum(m_sizes)), int(np.sum(n_sizes))), dtype=datatype)
     return (
         _pad_block_index(a_index, max_a_blocks),
         _pad_block_index(b_index, max_b_blocks),
-        _pack_block_dict(a_blocks, block_size, max_a_blocks),
-        _pack_block_dict(b_blocks, block_size, max_b_blocks),
+        _pack_block_dict(a_blocks, block_size, max_a_blocks, datatype),
+        _pack_block_dict(b_blocks, block_size, max_b_blocks, datatype),
         m_sizes,
         n_sizes,
         k_sizes,

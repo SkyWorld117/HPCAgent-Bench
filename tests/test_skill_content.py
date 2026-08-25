@@ -761,6 +761,15 @@ def test_no_fortran_page_teaches_a_2023_spelling() -> None:
 #: shorten a page rather than raise this again.
 SKILL_PACKET_BUDGET_CHARS = 24_000
 
+#: Fortran is the one language allowed past it, and only by what its extra failure modes cost.
+#: numpy is row-major / 0-based / half-open and Fortran is column-major / 1-based / INCLUSIVE; all
+#: three differ, none of them raise, and a transposed subscript builds clean and returns the
+#: transpose -- which on a symmetric stencil grades CORRECT and merely runs 2x-6x slower. C and C++
+#: pay for none of that, so the page that heads it off has no counterpart in their packets. The
+#: ceiling is set just above what that page and its two siblings currently cost: it still ratchets,
+#: it just ratchets at the size the language actually needs.
+PER_LANGUAGE_BUDGET_CHARS = {"fortran": 21_000}
+
 
 @pytest.mark.parametrize("language", ["c", "cpp", "fortran"])
 def test_the_skills_packet_for_one_language_stays_inside_its_budget(language: str) -> None:
@@ -778,7 +787,8 @@ def test_the_skills_packet_for_one_language_stays_inside_its_budget(language: st
     wanted = [LANGUAGE_SKILL[language]] + [n for n in sorted(MODEL_SKILL_LANGUAGES) if model_skill_applies(n, task)]
     sizes = {name: len(by_name[name].body) for name in wanted if name in by_name}
     total = sum(sizes.values())
-    assert total <= SKILL_PACKET_BUDGET_CHARS, (f"the {language} skills packet is {total} chars, over the "
-                                                f"{SKILL_PACKET_BUDGET_CHARS} budget: {sizes}. The packet is charged "
-                                                f"once per agent TURN (~72x per kernel, measured), so this is score, "
-                                                f"not style -- cut a page or shorten one rather than raising this.")
+    budget = PER_LANGUAGE_BUDGET_CHARS.get(language, SKILL_PACKET_BUDGET_CHARS)
+    assert total <= budget, (f"the {language} skills packet is {total} chars, over the "
+                             f"{budget} budget: {sizes}. The packet is charged "
+                             f"once per agent TURN (~72x per kernel, measured), so this is score, "
+                             f"not style -- cut a page or shorten one rather than raising this.")

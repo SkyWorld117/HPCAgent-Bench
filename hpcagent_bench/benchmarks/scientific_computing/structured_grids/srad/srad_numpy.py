@@ -63,6 +63,7 @@ def generate_random_srad_inputs(
     lam=RODINIA_DEFAULT_LAMBDA,
     seed=RODINIA_DEFAULT_SEED,
     roi_bounds=None,
+    dtype=np.float64,
 ):
     """Generate deterministic Rodinia-style SRAD v2 inputs.
 
@@ -89,17 +90,17 @@ def generate_random_srad_inputs(
         r1, r2, c1, c2 = (int(v) for v in roi_bounds)
 
     rng = np.random.default_rng(seed)
-    I = np.ascontiguousarray(rng.random((rows, cols), dtype=np.float64))
-    J = np.ascontiguousarray(np.exp(I), dtype=np.float64)
+    I = np.ascontiguousarray(rng.random((rows, cols), dtype=np.float64).astype(dtype))
+    J = np.ascontiguousarray(np.exp(I), dtype=dtype)
 
     iN, iS, jW, jE = _make_neighbor_indices(rows, cols)
     work_shape = (rows, cols)
 
-    dN = np.zeros(work_shape, dtype=np.float64)
-    dS = np.zeros(work_shape, dtype=np.float64)
-    dW = np.zeros(work_shape, dtype=np.float64)
-    dE = np.zeros(work_shape, dtype=np.float64)
-    c = np.zeros(work_shape, dtype=np.float64)
+    dN = np.zeros(work_shape, dtype=dtype)
+    dS = np.zeros(work_shape, dtype=dtype)
+    dW = np.zeros(work_shape, dtype=dtype)
+    dE = np.zeros(work_shape, dtype=dtype)
+    c = np.zeros(work_shape, dtype=dtype)
     validate_srad_inputs(I, J, iN, iS, jW, jE, lam, niter, r1, r2, c1, c2, dN, dS, dW, dE, c)
     return I, J, iN, iS, jW, jE, lam, niter, r1, r2, c1, c2, dN, dS, dW, dE, c
 
@@ -129,10 +130,10 @@ def validate_srad_inputs(
         raise ValueError("I must be a 2D ndarray")
     if not isinstance(J, np.ndarray) or J.ndim != 2:
         raise ValueError("J must be a 2D ndarray")
-    if I.dtype != np.float64 or not I.flags.c_contiguous:
-        raise ValueError("I must be C-contiguous float64")
-    if J.dtype != np.float64 or not J.flags.c_contiguous:
-        raise ValueError("J must be C-contiguous float64")
+    if not np.issubdtype(I.dtype, np.floating) or not I.flags.c_contiguous:
+        raise ValueError("I must be C-contiguous and floating")
+    if not np.issubdtype(J.dtype, np.floating) or not J.flags.c_contiguous:
+        raise ValueError("J must be C-contiguous and floating")
     if I.shape != J.shape:
         raise ValueError("I and J must have the same shape")
     if not np.isfinite(I).all() or np.any(I < 0.0) or np.any(I > 1.0):
@@ -173,8 +174,10 @@ def validate_srad_inputs(
     ):
         if not isinstance(arr, np.ndarray):
             raise ValueError(f"{name} must be an ndarray")
-        if arr.dtype != np.float64 or not arr.flags.c_contiguous:
-            raise ValueError(f"{name} must be C-contiguous float64")
+        # Any float dtype: the work arrays follow the run precision, so pinning float64
+        # would reject every fp32 run rather than catch a malformed input.
+        if not np.issubdtype(arr.dtype, np.floating) or not arr.flags.c_contiguous:
+            raise ValueError(f"{name} must be C-contiguous and floating")
         if arr.shape != J.shape:
             raise ValueError(f"{name} must have the same shape as J")
         if not np.isfinite(arr).all():

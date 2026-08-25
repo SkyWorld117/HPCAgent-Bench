@@ -172,6 +172,60 @@ class _AnnotateEmptyDtype(ast.NodeTransformer):
         return node
 
 
+#: Value each numpy allocator fills with, for a re-allocation that has to become an in-place fill.
+#: ``full`` carries its own; ``empty`` has none, so its statement is dropped rather than rewritten.
+_REALLOC_FILL = {"zeros": "0", "ones": "1", "empty": None, "full": None}
+
+
+def _alloc_shape_tokens(call: ast.Call) -> Optional[List[str]]:
+    """The shape a numpy allocator call names, whitespace-normalized; ``None`` if it names none."""
+    if not call.args:
+        return None
+    first = call.args[0]
+    elts = first.elts if isinstance(first, (ast.Tuple, ast.List)) else [first]
+    return [ast.unparse(e).replace(" ", "") for e in elts]
+
+
+class _FillOutputParamRealloc(ast.NodeTransformer):
+    """Rewrite a re-allocation of an OUTPUT PARAMETER into an in-place fill of it.
+
+    A numpy reference RETURNS what it allocates -- nbody's ``KE = np.zeros(Nt + 1)`` ends in
+    ``return KE, PE`` -- but the emitted program takes the same names as parameters, because that
+    is how the native backends hand a promoted return back. The allocation then rebinds the name
+    to a fresh transient and the caller's array is never written: dace answered
+    ``Missing program argument "KE"`` and, once passed, would have graded untouched zeros.
+
+    Only a SHAPE-MATCHING allocation is rewritten. A local that merely shares the name and has a
+    different extent is a different container, and filling the parameter with it would be a
+    miscompile rather than the missed write it replaces.
+    """
+
+    def __init__(self, shapes: Dict[str, List[str]]):
+        self.shapes = shapes
+
+    def visit_Assign(self, node: ast.Assign):
+        self.generic_visit(node)
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            return node
+        want = self.shapes.get(node.targets[0].id)
+        if want is None or not isinstance(node.value, ast.Call):
+            return node
+        func = node.value.func
+        if not (isinstance(func, ast.Attribute) and func.attr in _REALLOC_FILL and isinstance(func.value, ast.Name)
+                and func.value.id in ("np", "numpy")):
+            return node
+        if _alloc_shape_tokens(node.value) != want:
+            return node
+        fill = _REALLOC_FILL[func.attr]
+        if func.attr == "full":
+            if len(node.value.args) < 2:
+                return node
+            fill = ast.unparse(node.value.args[1])
+        if fill is None:
+            return None  # np.empty promises nothing: the parameter the caller passed already is it
+        return ast.parse(f"{node.targets[0].id}[:] = {fill}").body[0]
+
+
 #: numpy dtype tag -> dace type expression (floats route through the precision-driven globals).
 _DTYPE_TO_DACE = {
     "float64": "dc_float",
@@ -239,6 +293,26 @@ class _RewriteFrameworkDtype(ast.NodeTransformer):
         if mapped == "dc_complex_float":
             self.used_complex = True
         return ast.copy_location(ast.Name(id=mapped, ctx=node.ctx), node)
+
+    def visit_Assign(self, node: ast.Assign):
+        """Drop a reference's call-time rebinding of the precision globals.
+
+        A reference reads them off the framework module (``np_float = framework.np_float``) rather
+        than importing the names, because a ``from ... import np_float`` snapshots the value at
+        first import and a process that runs two precisions keeps the first one. Renaming that
+        statement's target would emit ``dc_float = framework.np_float`` into a module that has no
+        ``framework`` and already imports ``dc_float`` -- so the whole assignment goes."""
+        targets = []
+        for t in node.targets:
+            targets.extend(t.elts if isinstance(t, ast.Tuple) else [t])
+        if not targets or not all(isinstance(t, ast.Name) and t.id in _FRAMEWORK_DTYPE_TO_DACE for t in targets):
+            return self.generic_visit(node)
+        values = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
+        if not all(isinstance(v, ast.Attribute) and v.attr in _FRAMEWORK_DTYPE_TO_DACE for v in values):
+            return self.generic_visit(node)
+        if any(_FRAMEWORK_DTYPE_TO_DACE[t.id] == "dc_complex_float" for t in targets):
+            self.used_complex = True
+        return None
 
 
 class _TernaryValueHoister(ast.NodeTransformer):
@@ -1754,6 +1828,9 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # np.empty's dace replacement has no dtype default (unlike zeros/ones/full): a bare call means
     # numpy's own float64 default, so fill in the precision-driven float global explicitly.
     fn_ast = _AnnotateEmptyDtype(_dace_dtype(default_dtype)).visit(fn_ast)
+    # A promoted return is a PARAMETER here; re-allocating it in the body would leave it unwritten.
+    out_params = {a: [t.replace(" ", "") for t in arr_shapes[a]] for a in kir.input_args if a in arrays}
+    fn_ast = _FillOutputParamRealloc(out_params).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # dace has no runtime .shape: rewrite arr.shape[k] to the symbolic dim and drop redundant/illegal symbol recomputes.
     # Tuple assignment first, so the shape passes below see the subscript spelling they resolve.

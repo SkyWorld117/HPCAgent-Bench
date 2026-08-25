@@ -443,6 +443,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     fn = _find_function(tree, func_name)
     if fn is None:
         raise ValueError(f"{numpy_py}: no function named {func_name!r}")
+    _strip_framework_dtype_rebinding(fn)
     # Inline top-level helpers ABOVE the kernel whose body is a single
     # ``return expr`` by substituting the call with that expression (params
     # renamed to the call's args) -- lets NumpyToC handle e.g. nussinov's
@@ -1800,6 +1801,31 @@ def _synthesize_return_temps(fn: ast.FunctionDef):
         fn.body = original_body
 
     return names, _revert
+
+
+def _strip_framework_dtype_rebinding(fn: ast.FunctionDef) -> None:
+    """Drop a reference's call-time rebinding of the framework precision globals.
+
+    A reference that follows the run precision reads it off the module inside the kernel
+    (``np_float = framework.np_float``) rather than importing the name, because a
+    ``from ... import np_float`` snapshots the value at first import and a process that runs fp64
+    and then fp32 keeps whichever it imported under. That statement carries no runtime meaning for
+    a translated backend -- ``np_float`` is resolved as a dtype NAME by ``_NP_DTYPE_NAMES`` and
+    narrowed by the precision pass -- and every emitter that tried to translate it as an ordinary
+    assignment died on the attribute access (``NotImplementedError: expression Attribute``).
+    """
+    keep = []
+    for stmt in fn.body:
+        if isinstance(stmt, ast.Assign):
+            targets = []
+            for t in stmt.targets:
+                targets.extend(t.elts if isinstance(t, ast.Tuple) else [t])
+            values = stmt.value.elts if isinstance(stmt.value, ast.Tuple) else [stmt.value]
+            if (targets and all(isinstance(t, ast.Name) and t.id in _FRAMEWORK_DTYPE_ALIASES for t in targets)
+                    and all(isinstance(v, ast.Attribute) and v.attr in _FRAMEWORK_DTYPE_ALIASES for v in values)):
+                continue
+        keep.append(stmt)
+    fn.body = keep
 
 
 def _strip_trailing_return(fn: ast.FunctionDef) -> None:
@@ -4042,6 +4068,9 @@ _NP_DTYPE_NAMES: Dict[str, str] = {
     "np_float": "float64",
     "np_complex": "complex128",
 }
+
+#: The same two aliases, as the set of names a reference may rebind off the framework module.
+_FRAMEWORK_DTYPE_ALIASES = frozenset(("np_float", "np_complex"))
 
 
 def _dtype_from_constructor(rhs: ast.AST) -> Optional[str]:

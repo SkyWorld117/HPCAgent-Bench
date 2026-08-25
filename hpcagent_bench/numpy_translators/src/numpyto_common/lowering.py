@@ -1493,6 +1493,13 @@ _NP_ELEMENTWISE: Set[str] = {
     "logical_and",
     "logical_or",
     "logical_not",
+    # Complex accessors are elementwise like any other ufunc. Left out, ``rhoc += np.conj(phi_c) *
+    # temppsic[:, ip, ii]`` scalarised the sibling operand and left ``phi_c`` a bare POINTER, which
+    # the C backend then passed to ``__npb_conj(double _Complex)`` (vexx_k, incompatible argument).
+    "conj",
+    "conjugate",
+    "real",
+    "imag",
 }
 
 # Every unary libm intrinsic is elementwise by construction, so take them from the table that
@@ -2457,6 +2464,11 @@ class _ChainedSubscriptFlattener(ast.NodeTransformer):
     Runs before the ellipsis/scalarize passes so they only ever see a subscript
     whose base is a Name."""
 
+    def __init__(self, shape_table: Optional[Dict[str, Tuple[str, ...]]] = None):
+        #: Known array shapes, used only to tell a scalar index Name from an index ARRAY.
+        #: Empty means "assume every bare Name is a scalar", the pre-gather-aware behaviour.
+        self.shape_table = shape_table or {}
+
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
         self.generic_visit(node)  # collapse nested chains bottom-up first
         inner = node.value
@@ -2464,6 +2476,13 @@ class _ChainedSubscriptFlattener(ast.NodeTransformer):
             return node
         inner_elts = list(inner.slice.elts) if isinstance(inner.slice, ast.Tuple) else [inner.slice]
         if not all(_is_scalar_index(e) for e in inner_elts):
+            return node
+        # A bare Name that is a known ARRAY is an advanced index, and numpy basic-index
+        # associativity does not hold for one: ``A[idx][j] == A[idx[j]]``, NOT ``A[idx, j]``.
+        # Collapsing it produced a subscript with more indices than the base has axes, and the
+        # scalarizer then handed the outer iterators to the wrong axes -- ``x[aj][:, None, :, :]``
+        # came out as ``x[aj[si0, si1], si2, :, :]``.
+        if any(isinstance(e, ast.Name) and self.shape_table.get(e.id) for e in inner_elts):
             return node
         outer_elts = list(node.slice.elts) if isinstance(node.slice, ast.Tuple) else [node.slice]
         combined = inner_elts + outer_elts
@@ -3000,6 +3019,18 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         # subscriptified too -- otherwise it stays a whole-array operand inside
         # the per-element store (ICON ddt_vn_cor's ``clin * (-ft_e)``).
         node.operand = self._maybe_subscriptify(self.visit(node.operand))
+        return node
+
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        # Same rule as BinOp: ``(cj_list == ci_sh)[:, None, None]`` left ``cj_list`` a whole-array
+        # operand inside a per-element store, which C++ rejects outright as a pointer/integer
+        # comparison and C compiles into a silent pointer compare.
+        node.left = self._maybe_subscriptify(self.visit(node.left))
+        node.comparators = [self._maybe_subscriptify(self.visit(c)) for c in node.comparators]
+        return node
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        node.values = [self._maybe_subscriptify(self.visit(v)) for v in node.values]
         return node
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -4827,8 +4858,17 @@ def _is_bool_expr(node: ast.AST, local_dtypes: Dict[str, str]) -> bool:
         return _is_bool_expr(node.operand, local_dtypes)
     if isinstance(node, ast.Name):
         return local_dtypes.get(node.id) in ("bool", "bool_")
-    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-        return local_dtypes.get(node.value.id) in ("bool", "bool_")
+    if isinstance(node, ast.Subscript):
+        if isinstance(node.value, ast.Name):
+            return local_dtypes.get(node.value.id) in ("bool", "bool_")
+        # A broadcast-reshaped COMPARISON is still boolean: ``(cj_list == ci_sh)[:, None, None]``.
+        # Reading only the Name form declared such a local real and then assigned a LOGICAL into
+        # it. Deliberately narrow -- a chained subscript of a bool ARRAY is left alone, because
+        # cloudsc's int-as-bool locals are read back through ``INT()`` and retyping them logical
+        # breaks that intrinsic.
+        if isinstance(node.value, (ast.Compare, ast.BoolOp)):
+            return True
+        return False
     return False
 
 
@@ -4938,9 +4978,27 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         idx = (ast.Name(id=iters[0], ctx=ast.Load())
                if len(iters) == 1 else ast.Tuple(elts=[ast.Name(id=i, ctx=ast.Load()) for i in iters], ctx=ast.Load()))
         lhs_sub = ast.Subscript(value=ast.Name(id=target.id, ctx=ast.Load()), slice=idx, ctx=ast.Store())
-        # Replace any Name(value) whose shape matches with a per-element
-        # subscript; scalars pass through.
-        rhs = _SubscriptifyNames(self.shape_table, iters).visit(copy.deepcopy(value))
+        # A slice- or newaxis-bearing RHS (``delta = xi[None, :, None, :] - x[aj][:, None, :, :]``)
+        # has no Name to subscriptify: the operands are already Subscripts, and left alone they
+        # reach the emitter as whole-array slices. Scalarise them against the nest first, with the
+        # same rewriter a sliced LHS uses -- the target is a fresh full-extent local, so every axis
+        # is a full slice starting at 0.
+        rhs = copy.deepcopy(value)
+        if any(isinstance(n, ast.Slice) or _is_newaxis(n) for n in ast.walk(rhs)):
+            iter_nodes = [ast.Name(id=i, ctx=ast.Load()) for i in iters]
+            full_dims = [ast.Slice(lower=None, upper=None, step=None) for _ in iters]
+            zero_ranges = [(_const(0), _const(0)) for _ in iters]
+            rewriter = _SliceToScalarRewriter(self.shape_table, iter_nodes, zero_ranges, target.id, full_dims)
+            rhs = rewriter.visit(rhs)
+            # Its own ``_maybe_subscriptify`` at the TOP level only, exactly as the sliced-LHS
+            # driver does. ``_SubscriptifyNames`` must NOT follow it: that walker rewrites every
+            # bare array Name it meets, including the base of a subscript this pass has already
+            # scalarised, which chained ``nbfp[i, j, k]`` onto ``nbfp[ti[..], tj[..], 0]``.
+            rhs = rewriter._maybe_subscriptify(rhs)
+        else:
+            # Replace any Name(value) whose shape matches with a per-element
+            # subscript; scalars pass through.
+            rhs = _SubscriptifyNames(self.shape_table, iters).visit(rhs)
         if op is None:
             body = [ast.Assign(targets=[lhs_sub], value=rhs)]
         else:
@@ -5726,8 +5784,18 @@ class _SubscriptifyNames(ast.NodeTransformer):
             # iter (the bug otherwise: generic_visit would emit
             # ``arr[iter][idx[iter]]``). The index array's rank consumes the
             # right-aligned iters. edge_laplacian's ``x[src]`` / ``x[dst]``.
+            # The index may be a bare Name OR any array-valued EXPRESSION over one
+            # (``coulomb_table_f[ri + 1]``). Only the Name form was recognised, so an
+            # offset gather fell through to generic_visit, which subscripted the BASE and
+            # emitted ``coulomb_table_f[iter][ri[iters] + 1]``.
+            idx_shape = None
             if isinstance(sl, ast.Name) and self.shape_table.get(sl.id):
                 idx_shape = self.shape_table[sl.id]
+            elif not isinstance(sl, (ast.Slice, ast.Tuple)) and not _is_newaxis(sl):
+                idx_ext = _iter_extent_of(sl, self.shape_table)
+                if idx_ext is not None and not extent_is_scalar(idx_ext):
+                    idx_shape = tuple(ast.unparse(e) for e in idx_ext)
+            if idx_shape is not None:
                 src_shape = self.shape_table.get(node.value.id)
                 # numpy basic fancy indexing ``arr[idx]`` with a single index
                 # array ``idx`` (rank r) gathers along ``arr``'s LEADING axis:
@@ -5741,10 +5809,11 @@ class _SubscriptifyNames(ast.NodeTransformer):
                 result_rank = r + n_trailing
                 if result_rank <= len(self.iters):
                     offset = len(self.iters) - result_rank
-                    idx_iters = [ast.Name(id=self.iters[offset + i], ctx=ast.Load()) for i in range(r)]
+                    idx_iters = [self.iters[offset + i] for i in range(r)]
                     trail_iters = [ast.Name(id=self.iters[offset + r + i], ctx=ast.Load()) for i in range(n_trailing)]
-                    gslot = (idx_iters[0] if len(idx_iters) == 1 else ast.Tuple(elts=idx_iters, ctx=ast.Load()))
-                    gathered = ast.Subscript(value=sl, slice=gslot, ctx=ast.Load())
+                    # Scalarise the index EXPRESSION at its own iters; for a bare Name this is
+                    # exactly the ``sl[idx_iters]`` the Name-only path built.
+                    gathered = _SubscriptifyNames(self.shape_table, idx_iters).visit(copy.deepcopy(sl))
                     full = [gathered] + trail_iters
                     slot = (full[0] if len(full) == 1 else ast.Tuple(elts=full, ctx=ast.Load()))
                     return ast.Subscript(value=node.value, slice=slot, ctx=ast.Load())
@@ -6639,7 +6708,7 @@ def _lp_normalize_index_access(ctx: LoweringContext) -> None:
     which at this point holds only the declared arrays."""
     tree = ctx.tree
     shapes = ctx.lib_shape_table
-    _ChainedSubscriptFlattener().visit(tree)
+    _ChainedSubscriptFlattener(shapes).visit(tree)
     _EllipsisExpander(shapes).visit(tree)
     _PadImplicitTrailingSlices(shapes).visit(tree)
     # Re-fold ``<array-expr>.shape`` / ``.shape[k]`` now that every post-inline

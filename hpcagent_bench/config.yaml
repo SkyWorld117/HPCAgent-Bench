@@ -496,3 +496,11 @@ oracle:
                               # up (minutes + multi-GB) and cannot compile in any sane
                               # budget -> pythran is an unsupported skip here. Fail fast.
                               # Native C/C++/Fortran compile in ~3s, so 45s is ample.
+    gromacs_nbnxm:
+      compile_timeout_s: 30   # same pythran blowup as cloudsc, from the vectorized NBNXM
+                              # tap: the (pairs, 4, 4) block form is one branchy function
+                              # full of array temporaries, and pythran's type inference
+                              # does not terminate in any usable budget (measured: still
+                              # running past 120s, against 0.7s for gcc). pythran is an
+                              # unsupported skip here; C/C++/Fortran all compile in under
+                              # a second, so 30s is ample for the backends that do work.
