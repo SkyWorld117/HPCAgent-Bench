@@ -16,16 +16,6 @@ def smith_waterman(a, b, gap, H, match=2, mismatch=-1):
     sub = np.where(a[:, np.newaxis] == b[np.newaxis, :], match, mismatch)
 
     # H is caller-allocated and zero-initialized (zero boundaries -> local alignment).
-    # H[i,j] only reads antidiagonal d-1 (top, left) and d-2 (diag), where d = i+j -- every cell
-    # on one antidiagonal is mutually independent, so sweep antidiagonals and vectorize each one.
-    for d in range(2, M + N + 1):
-        i_lo = max(1, d - N)
-        i_hi = min(M, d - 1)
-        if i_lo > i_hi:
-            continue
-        i = np.arange(i_lo, i_hi + 1)
-        j = d - i
-        diag = H[i - 1, j - 1] + sub[i - 1, j - 1]
-        top = H[i - 1, j] - gap
-        left = H[i, j - 1] - gap
-        H[i, j] = np.maximum(np.maximum(np.maximum(diag, top), left), 0)
+    for i in range(1, M + 1):
+        for j in range(1, N + 1):
+            H[i, j] = max(0, H[i - 1, j - 1] + sub[i - 1, j - 1], H[i - 1, j] - gap, H[i, j - 1] - gap)

@@ -1,3 +1,17 @@
+# Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# HotSpot 3D transient thermal simulation (Rodinia ``hotspot3D``): a 3-D
+# structured-grid stencil integrating the chip temperature from a per-cell power
+# map, exchanging heat with the six axis neighbors and the ambient. Neumann
+# (insulated) boundaries are imposed by clamping the neighbor shifts.
+#
+# In-place: the temperature volume ``T`` is a caller-allocated output buffer
+# seeded with the initial temperature and updated across ``niter`` steps. Each
+# step's neighbour shifts are taken from the current ``T`` into local temporaries
+# before the whole-grid RHS is written back into ``T[:]`` (NumPy evaluates the
+# RHS into a scratch array first, so the self-referential update stays correct).
+
 import numpy as np
 
 
