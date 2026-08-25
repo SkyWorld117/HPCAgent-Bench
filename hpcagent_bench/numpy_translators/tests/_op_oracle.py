@@ -73,6 +73,7 @@ def _emit_native(npy: pathlib.Path, bi: pathlib.Path, out: pathlib.Path, base: s
     from numpyto_c.emit import emit_c, emit_cpp, emit_cpp_isopar
     from numpyto_c.bindings import emit_binding
     from numpyto_fortran.emit import emit_fortran
+    from numpyto_fortran.intrinsics import renders_natively as fortran_renders_natively
     out.mkdir(parents=True, exist_ok=True)
     kir = lower(parse_kernel(npy, bi))
     (out / f"{base}.c").write_text(emit_c(kir, fn_name=base))
@@ -80,7 +81,7 @@ def _emit_native(npy: pathlib.Path, bi: pathlib.Path, out: pathlib.Path, base: s
     emit_binding(kir, out / f"{base}_binding.json", base_name=base)
     if isopar:
         (out / f"{base}_isopar.cpp").write_text(emit_cpp_isopar(kir, fn_name=base))
-    fkir = lower(parse_kernel(npy, bi))
+    fkir = lower(parse_kernel(npy, bi), native_call=fortran_renders_natively)
     (out / f"{base}.f90").write_text(emit_fortran(fkir, fn_name=base))
     return True
 

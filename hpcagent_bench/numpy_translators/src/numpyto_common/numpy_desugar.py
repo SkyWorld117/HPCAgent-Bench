@@ -211,6 +211,17 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
             # index the fall-through below assumes. How many axes it drops depends on what the
             # sequence holds, which is not visible here; reporting ``base - 1`` invented a rank.
             return None
+        # A single Name index is USUALLY a scalar (a loop iterator), which drops one axis. But it may
+        # be an index ARRAY or a boolean MASK -- azimint's ``bin_id = bin_id[valid]`` -- and calling
+        # that rank 0 made the scatter desugar see no driver axis and leave ``np.add.at`` standing.
+        # Report a rank only where the array and mask readings AGREE; where they differ, say nothing
+        # rather than invent one (see _drop_rank_conflicts for what a wrong rank costs).
+        if isinstance(sl, ast.Name):
+            idx_rank = ranks.get(sl.id)
+            if idx_rank is not None and idx_rank >= 1:
+                as_gather = base - 1 + idx_rank  # integer index array
+                as_mask = base - idx_rank + 1  # boolean mask consumes idx_rank axes, yields one
+                return as_gather if as_gather == as_mask else None
         return base - 1  # single integer/Name index
     if isinstance(value, ast.Call):
         if isinstance(value.func, ast.Name) and value.func.id == "abs" and value.args:
@@ -1816,8 +1827,14 @@ class _AddAtInline(ast.NodeTransformer):
             rhs = "1"
         else:
             tv = f"{p}_v"
-            pre.append(f"{tv} = np.ascontiguousarray({ast.unparse(vals)})")
             vr = expr_rank(vals, self.ranks)
+            if vr == 0:
+                # A SCALAR value stays a scalar: ``np.ascontiguousarray(1)`` is a 0-d ARRAY, and
+                # pythran then has no ``double += 0-d array``. The materialisation exists for a lazy
+                # numpy_expr operand, which a scalar is not.
+                tv = ast.unparse(vals)
+            else:
+                pre.append(f"{tv} = np.ascontiguousarray({ast.unparse(vals)})")
             if vr and vr not in (0, driver_rank):
                 # vals broadcasts against the index shape; only a scalar or a
                 # driver-shaped vals is unambiguous. Anything else would need
@@ -1832,6 +1849,76 @@ class _AddAtInline(ast.NodeTransformer):
         lines.append(f"{deepen}{A}[{', '.join(idx_exprs)}] {_AT_OPS[op]} {rhs}")
         self.changed = True
         return [ast.copy_location(s, node) for s in ast.parse("\n".join(lines)).body]
+
+
+class _SpliceErrstate(ast.NodeTransformer):
+    """``with np.errstate(<flags>): <body>`` -> ``<body>``.
+
+    ``errstate`` changes how numpy REPORTS an invalid operation (warn / raise / ignore); it never
+    changes the value produced -- azimint's empty bin still divides 0 by 0 and still yields nan.
+    The native backends do not report at all, so the context is already what ``ignore`` asks for,
+    and pythran refuses the statement outright ("With statements not supported").
+
+    Only ``np.errstate`` is spliced. Any other context manager is left standing: a ``with`` that
+    owns a resource is not a no-op, and silently dropping it would be a different program.
+    """
+
+    def __init__(self) -> None:
+        self.changed = False
+
+    def visit_With(self, node: ast.With) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.items) != 1 or node.items[0].optional_vars is not None:
+            return node
+        call = node.items[0].context_expr
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "errstate"
+                and isinstance(call.func.value, ast.Name) and call.func.value.id in ("np", "numpy")):
+            return node
+        self.changed = True
+        return node.body
+
+
+class _SearchsortedMaterialize(ast.NodeTransformer):
+    """``np.searchsorted(<expr>, v)`` -> ``np.searchsorted(np.ascontiguousarray(<expr>), v)``.
+
+    pythran keeps ``rmax * np.arange(npt + 1) / npt`` as a lazy ``numpy_expr`` whose iterator is
+    forward-only, and searchsorted needs to walk it backwards -- the g++ error is a missing
+    ``operator--`` on a numpy_expr_iterator, several template layers deep and nowhere near the line
+    that caused it. Materialising the sorted operand is a no-op for an array that is already
+    contiguous, which is what the other backends see.
+    """
+
+    def __init__(self) -> None:
+        self.changed = False
+        self._ctr = 0
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        calls = [
+            n for n in ast.walk(node.value) if isinstance(n, ast.Call) and _np_attr(n) == "searchsorted" and n.args
+        ]
+        if not calls:
+            return node
+        pre: List[ast.stmt] = []
+        for call in calls:
+            # A NAME is not enough: pythran binds a name to the lazy expression itself, so
+            # ``edges = rmax * np.arange(n) / npt`` stays an unmaterialised numpy_expr at the use.
+            tmp = f"__ss{self._ctr}"
+            self._ctr += 1
+            pre.append(
+                ast.Assign(targets=[ast.Name(id=tmp, ctx=ast.Store())],
+                           value=ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
+                                                             attr="ascontiguousarray",
+                                                             ctx=ast.Load()),
+                                          args=[call.args[0]],
+                                          keywords=[])))
+            call.args[0] = ast.Name(id=tmp, ctx=ast.Load())
+        self.changed = True
+        out = pre + [node]
+        for stmt in out:
+            ast.copy_location(stmt, node)
+            ast.fix_missing_locations(stmt)
+        return out
 
 
 class _HistogramHoister(ast.NodeTransformer):
@@ -4724,6 +4811,9 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
         consts = _const_name_values(fn)
         passes = [
             _DropGuards(),
+            # First: it splices statements OUT of a ``with`` body, and every pass below walks only
+            # this scope's top-level statements.
+            _SpliceErrstate(),
             _ConstComprehensionFold(consts),
             _ListCompUnroll(consts),
             # Before every temp-minting pass below: an ``or`` clones its if-body, and two
@@ -4752,6 +4842,7 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
             _UfuncOuterInline(ranks),
             _MaskedAssignToLoop(ranks, dtypes),
             _AddAtInline(ranks),
+            _SearchsortedMaterialize(),
             _HistogramInline(ranks),
             _RepeatAxisInline(ranks),
             _ReshapeContiguousInline(noncontig),
