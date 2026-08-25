@@ -40,8 +40,9 @@ from numpyto_common.lib_nodes import (_const_int, _is_full_slice_elt, _iter_exte
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
-                                          _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS, _eigh_alias_names,
-                                          _kind_of_dtype_str, expr_rank, rank_table, rewrite_curve_fit)
+                                          _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS,
+                                          _eigh_alias_names, _kind_of_dtype_str, expr_rank, rank_table,
+                                          rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -72,6 +73,13 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     * ``np.expand_dims(x, axis=k)`` -> ``x[:, ..., None, ...]`` and
       ``np.swapaxes(x, i, j)`` -> ``np.transpose(x, <perm>)`` -- both are pure index rewrites
       onto forms the pipeline already lowers.
+    * ``[K] * <extent>`` -> ``np.full((<extent>,), K)`` -- a Python list used as a fixed-size
+      buffer, which is an array everywhere but the spelling.
+    * ``with np.errstate(...):`` -> its body, spliced. The context manager only sets what numpy
+      REPORTS for an invalid operation; the value it produces is unchanged.
+    * ``top = slice(0, nlev)`` used as ``A[i, top, b]`` -> ``A[i, 0:nlev, b]`` -- a slice OBJECT is
+      not a value any backend has, and left standing it also reads as a scalar index, which silently
+      drops an axis from every shape derived through it.
     """
     _UfuncReduceToReducer().visit(fn)  # np.add.reduce -> np.sum before the elementwise-ufunc desugars
     _NewaxisToNone().visit(fn)
@@ -81,7 +89,210 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     _ElementalUfuncToPrimitive().visit(fn)
     _DropValidationGuards().visit(fn)
     _FoldStaticNoneBranches().visit(fn)
+    _ListRepeatToFull().visit(fn)
+    _SpliceErrstate().visit(fn)
+    _FoldSliceLocals().apply(fn)
     ast.fix_missing_locations(fn)
+
+
+class _FoldSliceLocals:
+    """Inline a local bound to a ``slice(...)`` object into the subscripts that use it.
+
+    ICON's velocity_tendencies names its level windows (``top = slice(0, nlev)``, ``rest =
+    slice(1, nlev)``) and indexes with them. Nothing downstream models a slice OBJECT: the sizer
+    reads the Name in an index slot as a scalar index and drops that axis, so ``gat``'s rank-3
+    gather was recorded rank 2 and the shape derived from it disagreed with the buffer allocated
+    for the same variable -- surfacing as a re-binding refusal several statements later, nowhere
+    near the cause.
+
+    The walk is ORDERED, not name-global: each block carries the bindings live at its entry, and a
+    use is rewritten with the window bound before it. A binding made inside a nested block does not
+    escape that block, and a use that PRECEDES every binding is left alone -- inside a loop body that
+    use reads the previous iteration's window, which is not this pass's to decide. Bindings left
+    with no reader are dropped: the backends have no slice object, so a survivor emits as a call to
+    an undeclared ``slice``.
+    """
+
+    def apply(self, fn: ast.FunctionDef) -> None:
+        folded = self._walk(fn.body, {})
+        if folded:
+            _drop_dead_slice_bindings(fn, folded)
+
+    def _walk(self, body: List[ast.stmt], live: Dict[str, ast.Slice]) -> Set[str]:
+        """Rewrite ``body`` in order against ``live``; return every name folded anywhere below."""
+        folded: Set[str] = set()
+        for stmt in body:
+            binding = None
+            if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and _slice_call_args(stmt.value) is not None):
+                binding = (stmt.targets[0].id, _slice_from_call(stmt.value))
+            else:
+                folded |= self._rewrite_uses(stmt, live)
+            nested_blocks = [
+                vars(stmt).get(field) for field in ("body", "orelse", "finalbody")
+                if isinstance(vars(stmt).get(field), list)
+            ]
+            for nested in nested_blocks:
+                folded |= self._walk(nested, dict(live))
+            # A window bound inside a branch or loop body may or may not be the one live after it,
+            # so forget the name entirely rather than fold the enclosing binding into a use the
+            # inner one would have owned.
+            for nested in nested_blocks:
+                for name in _slice_bound_names(nested):
+                    live.pop(name, None)
+            if binding is not None:
+                live[binding[0]] = binding[1]
+        return folded
+
+    def _rewrite_uses(self, stmt: ast.stmt, live: Dict[str, ast.Slice]) -> Set[str]:
+        """Substitute every live window into this statement's own index slots."""
+        folded: Set[str] = set()
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Subscript):
+                continue
+            slots = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            new_slots = []
+            for slot in slots:
+                if isinstance(slot, ast.Name) and slot.id in live:
+                    folded.add(slot.id)
+                    new_slots.append(ast.copy_location(copy.deepcopy(live[slot.id]), slot))
+                else:
+                    new_slots.append(slot)
+            if isinstance(node.slice, ast.Tuple):
+                node.slice.elts = new_slots
+            else:
+                node.slice = new_slots[0]
+        return folded
+
+
+def _slice_bound_names(body: List[ast.stmt]) -> Set[str]:
+    """Every name bound to a ``slice(...)`` anywhere inside ``body``, nested blocks included."""
+    out: Set[str] = set()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and _slice_call_args(node.value) is not None):
+                out.add(node.targets[0].id)
+    return out
+
+
+def _slice_call_args(value: ast.AST) -> Optional[List[ast.expr]]:
+    """The argument list of a builtin ``slice(...)`` call, else ``None``."""
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "slice"
+            and not value.keywords and 1 <= len(value.args) <= 3):
+        return list(value.args)
+    return None
+
+
+def _slice_from_call(call: ast.Call) -> ast.Slice:
+    """``slice(stop)`` / ``slice(start, stop[, step])`` -> the equivalent ``ast.Slice``."""
+    args = list(call.args)
+    none_const = lambda e: isinstance(e, ast.Constant) and e.value is None
+    if len(args) == 1:
+        lower, upper, step = None, args[0], None
+    else:
+        lower, upper = args[0], args[1]
+        step = args[2] if len(args) > 2 else None
+    drop = lambda e: None if e is None or none_const(e) else e
+    return ast.Slice(lower=drop(lower), upper=drop(upper), step=drop(step))
+
+
+def _drop_dead_slice_bindings(fn: ast.FunctionDef, folds: Set[str]) -> None:
+    """Remove ``name = slice(...)`` statements whose name no longer has a Load use.
+
+    A surviving binding is not harmless: the backends have no slice object at all, so it would be
+    emitted as an unsupported call rather than quietly ignored.
+    """
+    live = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in folds}
+
+    def prune(body: List[ast.stmt]) -> List[ast.stmt]:
+        out: List[ast.stmt] = []
+        for stmt in body:
+            for field in ("body", "orelse", "finalbody"):
+                if hasattr(stmt, field):
+                    setattr(stmt, field, prune(getattr(stmt, field)))
+            if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id in folds and stmt.targets[0].id not in live
+                    and _slice_call_args(stmt.value) is not None):
+                continue
+            out.append(stmt)
+        return out
+
+    fn.body = prune(fn.body)
+
+
+class _ListRepeatToFull(ast.NodeTransformer):
+    """``[K] * <extent>`` -> ``np.full((<extent>,), K)``.
+
+    A kernel whose state is a fixed-size stack writes it as a Python list (nqueens' ``cols = [0] *
+    (N + 1)``) because that is what carries plain ints without boxing every element as a numpy
+    scalar. Nothing is done to it that an array cannot do -- it is only sized once and indexed --
+    but the backends have no ``List`` expression at all, so the kernel was refused outright.
+
+    Only the single-element repeat is rewritten. A longer literal (``[a, b] * n``) is a REPEATING
+    pattern, not a fill, and a list the body appends to or pops from is a different data structure
+    that happens to share the syntax -- neither is claimed here.
+    """
+
+    def __init__(self) -> None:
+        self.mutated: FrozenSet[str] = frozenset()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        self.mutated = _list_mutated_names(node)
+        self.generic_visit(node)
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            return node
+        if node.targets[0].id in self.mutated:
+            return node
+        fill = _single_element_repeat(node.value)
+        if fill is None:
+            return node
+        elt, count = fill
+        # numpy types the fill from the value, so an int fill is an INTEGER buffer. Left implicit
+        # the backends default it to double, and nqueens' bitmask stack came out as ``double | int``
+        # -- rejected by gcc, and meaningless if it had compiled.
+        dtype = "int64" if isinstance(elt.value, int) else "float64"
+        node.value = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()), attr="full", ctx=ast.Load()),
+                              args=[ast.Tuple(elts=[count], ctx=ast.Load()), elt],
+                              keywords=[
+                                  ast.keyword(arg="dtype",
+                                              value=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
+                                                                  attr=dtype,
+                                                                  ctx=ast.Load()))
+                              ])
+        return node
+
+
+def _single_element_repeat(value: ast.expr) -> Optional[Tuple[ast.expr, ast.expr]]:
+    """``([K] | (K,)) * <extent>`` -> ``(K, <extent>)``, else ``None``. ``K`` must be a numeric
+    literal: a repeat of a mutable or symbolic element is not a fill."""
+    if not (isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mult)):
+        return None
+    for seq, count in ((value.left, value.right), (value.right, value.left)):
+        if not isinstance(seq, (ast.List, ast.Tuple)) or len(seq.elts) != 1:
+            continue
+        elt = seq.elts[0]
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, (int, float)) and not isinstance(elt.value, bool):
+            return elt, count
+    return None
+
+
+def _list_mutated_names(fn: ast.FunctionDef) -> FrozenSet[str]:
+    """Names the body treats as a growable list -- ``append`` / ``pop`` / ``insert`` / ``extend``
+    / ``remove``, or a target of ``+=``. An array cannot stand in for any of those."""
+    names: Set[str] = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "pop", "insert", "extend", "remove")
+                and isinstance(node.func.value, ast.Name)):
+            names.add(node.func.value.id)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return frozenset(names)
 
 
 class _AxisReshapeToIndexing(ast.NodeTransformer):
@@ -604,10 +815,6 @@ def parse_kernel(numpy_py: pathlib.Path,
         # and a slice bound all pick the loop nest, none buildable from a runtime scalar.
         _FoldConstantSymbols(_structural_constants(parameters, _init_scalars, shapes_raw,
                                                    runtime_args=input_args)).apply(target)
-        # A runtime argument keeps its name everywhere it can be evaluated at runtime, and folds only
-        # in a slice STEP, the one structural slot with no runtime form.
-        _FoldStructuralUses(_structural_constants(parameters, _init_scalars, shapes_raw,
-                                                  keep_only=input_args)).apply(target)
         ast.fix_missing_locations(target)
         # expand_dims/swapaxes first: they become plain indexing, which the tuple pass can then rank.
         _AxisReshapeToIndexing(rank_table(target, _declared_ranks(shapes_raw)), _scalar_names).visit(target)
@@ -3020,59 +3227,6 @@ AXIS_POSITION: Dict[str, int] = {
 }
 
 
-class _FoldStructuralUses(ast.NodeTransformer):
-    """Fold a RUNTIME argument's constant value into a slice STEP, the one slot with no runtime form.
-
-    ``max_iter`` and ``stride`` are declared the same way -- an ``init.scalars`` default that is also
-    an ABI argument -- so no rule about the DECLARATION can separate them. The USE does: gmres
-    computes ``m = min(max_iter, N)``, a plain expression a runtime value evaluates fine, and folding
-    it pins the iteration count to the manifest. ``_slice_step_const`` has no such form for a step --
-    it reads a non-literal one as 1 and the stride is silently lost -- so a literal is the only thing
-    emittable there.
-
-    The AXIS slot is NOT folded, even though it picks the nest just as hard. It has a runtime form:
-    :func:`_specialize_runtime_axis` emits one nest per axis of the operand and chooses between them
-    at run time. Folding it instead produced a signature that took ``dim`` and ignored it -- the
-    caller promised a knob the code had baked in -- for fourteen kernels. An axis that cannot
-    dispatch meets the refusal downstream; it is never quietly pinned to the manifest.
-    """
-
-    def __init__(self, const_syms: Dict[str, int]) -> None:
-        self.const_syms = const_syms
-        self.rebound: FrozenSet[str] = frozenset()
-
-    def apply(self, fn: ast.FunctionDef) -> None:
-        self.rebound = _rebound_names(fn)
-        self.visit(fn)
-
-    def _fold(self, node: Optional[ast.expr]) -> Optional[ast.expr]:
-        """The manifest value, but only for a name that still HOLDS it.
-
-        Once the body reassigns the name, the manifest default is no longer what the slot reads, and
-        substituting it is a wrong stride THAT STILL COMPILES. When the name is genuinely runtime the
-        honest outcome is the refusal downstream, not a fold.
-        """
-        if isinstance(node, ast.Name) and node.id in self.const_syms and node.id not in self.rebound:
-            return ast.copy_location(ast.Constant(value=self.const_syms[node.id]), node)
-        return node
-
-    def visit_Slice(self, node: ast.Slice) -> ast.AST:
-        """A slice STEP picks the nest, and unlike an axis it has no run-time form to pick it with.
-
-        A helper that slices with a stride (``padded[:, :, ky:ky + (oh - 1) * stride + 1:stride]``)
-        inlines into the body with whatever the call site passed. ``_slice_step_const`` returns
-        ``None`` for a non-literal step and every consumer reads that as step 1, so the stride is
-        silently gone; the literal is the only emittable value, and ``_reject_unsupported_slices``
-        refuses the name otherwise. Bounds are NOT folded: they are ordinary integer expressions a
-        runtime value evaluates fine, and the trip count comes from the target's extent.
-
-        A name the body REBINDS is left alone -- see :meth:`_fold`.
-        """
-        self.generic_visit(node)
-        node.step = self._fold(node.step)
-        return node
-
-
 def _preset_constant_symbols(parameters: Dict, scalars: Dict) -> Dict[str, int]:
     """Symbols with the SAME integer value in every preset. Only those may be folded into a
     structural position: one artifact serves all presets, so a symbol that varies across them would
@@ -3089,11 +3243,7 @@ def _preset_constant_symbols(parameters: Dict, scalars: Dict) -> Dict[str, int]:
     return {name: values[0] for name, values in per_name.items() if len(set(values)) == 1 and values[0] is not None}
 
 
-def _structural_constants(parameters: Dict,
-                          scalars: Dict,
-                          shapes_raw: Dict,
-                          runtime_args=(),
-                          keep_only=None) -> Dict[str, int]:
+def _structural_constants(parameters: Dict, scalars: Dict, shapes_raw: Dict, runtime_args=()) -> Dict[str, int]:
     """Preset-constant integers that CANNOT be a size, so folding them into the body is safe.
 
     "Cannot be a size" is decided structurally: the name is absent from every ``init.shapes``
@@ -3108,8 +3258,7 @@ def _structural_constants(parameters: Dict,
     it turned the derived symbol ``m = min(max_iter, N)`` into ``min(100, N)``, pinning the iteration
     count to the manifest's value for every run. When such a name is an AXIS,
     :func:`_specialize_runtime_axis` emits the nest for each axis and picks at run time; when it is a
-    slice STEP, :class:`_FoldStructuralUses` folds it (``keep_only``), which is sound only for a
-    kernel whose manifest does not offer the step as an argument at all.
+    slice STEP it is carried symbolically (``lo + pos * step``), so neither slot needs the fold.
     """
     extent_names: Set[str] = set()
     for shape in (shapes_raw or {}).values():
@@ -3119,11 +3268,10 @@ def _structural_constants(parameters: Dict,
             continue
         extent_names.update(n.id for n in ast.walk(parsed) if isinstance(n, ast.Name))
     runtime = frozenset(runtime_args)
-    wanted = None if keep_only is None else frozenset(keep_only)
     return {
         name: value
         for name, value in _preset_constant_symbols(parameters, scalars).items()
-        if name not in extent_names and name not in runtime and (wanted is None or name in wanted)
+        if name not in extent_names and name not in runtime
     }
 
 
@@ -3218,18 +3366,27 @@ def _reject_symbolic_axis(fn: ast.FunctionDef) -> None:
 def _reject_unsupported_slices(fn: ast.FunctionDef) -> None:
     """Refuse the two slice forms the index lowering silently ignores.
 
-    * a NON-LITERAL step: ``_slice_step_const`` returns ``None`` for it and for "no step at all",
-      and every consumer reads that as step 1 -- ``x[::s]`` emitted a contiguous copy, stride gone.
+    * an UNBOUNDED non-literal step: ``x[::s]`` emitted a contiguous copy, stride gone. A BOUNDED
+      one (``x[lo:hi:s]``, the conv/pool tap) is lowered instead -- see below.
     * a NEGATIVE lower bound: it is added to the iterator verbatim rather than resolved against the
       axis length, so ``x[-3:]`` emitted ``x[i - 3]`` and read before the buffer. (A negative UPPER
       bound is fine: it only shortens the trip count, which comes from the target's extent.)
+
+    Why the bound decides it. A symbolic step's SIGN is unknown at emit time, and the two signs
+    index in opposite directions, so lowering has to pick one. With an upper bound present the
+    choice is forced rather than assumed: under a negative step numpy flips the bound defaults, so
+    ``lo:hi:k`` with ``lo < hi`` yields an EMPTY axis and the assignment consuming it already fails
+    in numpy. Only the positive stride has a run to preserve, and that is what is emitted. Without
+    an upper bound both signs produce a full-length axis and a forward index would silently be the
+    wrong one, so that form keeps the refusal.
     """
     for node in ast.walk(fn):
         if not isinstance(node, ast.Slice):
             continue
-        if node.step is not None and not _is_literal_axis(node.step):
-            raise NotImplementedError(f"slice step {ast.unparse(node.step)!r} must be a compile-time integer; "
-                                      f"a symbolic step is read as 1 and the stride is lost")
+        if node.step is not None and not _is_literal_axis(node.step) and node.upper is None:
+            raise NotImplementedError(f"slice step {ast.unparse(node.step)!r} needs an upper bound or a "
+                                      f"compile-time integer; an unbounded symbolic step has no known "
+                                      f"direction and would be emitted as a forward stride")
         if isinstance(node.lower, ast.UnaryOp) and isinstance(node.lower.op, ast.USub):
             raise NotImplementedError(f"negative slice start {ast.unparse(node.lower)!r} is not resolved against "
                                       f"the axis length; write it as an explicit extent instead")
@@ -4551,6 +4708,14 @@ def _names_used_as_int(tree: ast.AST) -> Set[str]:
             collect(node.right)
         elif isinstance(node, ast.UnaryOp):
             collect(node.operand)
+        elif isinstance(node, ast.Slice):
+            # Every part of a slice is an integer position in numpy, the STEP included. It reaches
+            # here only once the step survives as an expression (a runtime conv/pool stride); left
+            # out, the scalar defaults to double and the emitted read is ``x[i * (double)stride]``,
+            # which C rejects as a non-integer subscript and gfortran as a REAL array index.
+            collect(node.lower)
+            collect(node.upper)
+            collect(node.step)
         elif isinstance(node, ast.Subscript):
             # Nested subscripts (``A[B[i]]``) -- the inner subscript
             # produces an int, so its base and slice both promote.

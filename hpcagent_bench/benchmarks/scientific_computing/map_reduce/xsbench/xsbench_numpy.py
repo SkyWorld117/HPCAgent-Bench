@@ -440,22 +440,36 @@ def xsbench(
 ):
     """Manifest-compatible entry point; writes per-sample macro cross sections into out in place."""
 
-    n_samples = int(p_energy_samples.shape[0])
+    n_gridpoints_total = egrid.shape[0]
+    max_num_nucs = mats.shape[1]
 
-    for s in range(n_samples):
-        p_energy = float(p_energy_samples[s])
-        mat = int(mat_samples[s])
+    # grid_search: binary search for the largest grid index with egrid[idx] <= p_energy,
+    # clamped so idx+1 stays in bounds -- equivalent closed form via searchsorted.
+    idx = np.searchsorted(egrid, p_energy_samples, side="right") - 1
+    idx = np.clip(idx, 0, n_gridpoints_total - 2)
 
-        out[s, :] = calculate_macro_xs_unionized(
-            p_energy,
-            mat,
-            num_nucs,
-            concs,
-            egrid,
-            index_grid,
-            nuclide_grid,
-            mats,
-        )
+    mat = mat_samples
+    nuc = mats[mat]  # [n_samples, max_num_nucs]
+    conc = concs[mat]  # [n_samples, max_num_nucs]
+
+    j_range = np.arange(max_num_nucs)
+    valid = j_range[None, :] < num_nucs[mat][:, None]
+    weight = np.where(valid, conc, 0.0)
+
+    grid_idx = index_grid[idx[:, None], nuc]  # [n_samples, max_num_nucs]
+    n_gridpoints = nuclide_grid.shape[1]
+    low_idx = np.where(grid_idx == n_gridpoints - 1, grid_idx - 1, grid_idx)
+
+    low = nuclide_grid[nuc, low_idx]  # [n_samples, max_num_nucs, 6]
+    high = nuclide_grid[nuc, low_idx + 1]
+
+    f = (high[..., ENERGY] - p_energy_samples[:, None]) / (high[..., ENERGY] - low[..., ENERGY])
+
+    high_xs = high[..., 1:1 + NUM_XS_CHANNELS]
+    low_xs = low[..., 1:1 + NUM_XS_CHANNELS]
+    xs_vector = high_xs - f[..., None] * (high_xs - low_xs)
+
+    out[:, :] = np.sum(xs_vector * weight[..., None], axis=1)
 
 
 __all__ = [

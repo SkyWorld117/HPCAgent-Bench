@@ -378,6 +378,7 @@ class _CBodyEmitter(BaseEmitter):
 
     _STMT_TERM = ";"
     _KW_BREAK = "break;"
+    _COMMENT = ("/*", "*/")
     _KW_CONTINUE = "continue;"
 
     def __init__(self, kir: KernelIR, multidim_arrays: Optional[Set[str]] = None):
@@ -431,9 +432,19 @@ class _CBodyEmitter(BaseEmitter):
 
     # ----- statement-level ------------------------------------------------
 
+    def numpy_note(self, node: ast.stmt, indent: str) -> str:
+        """No provenance note in the ISO-parallel C++ form.
+
+        The note exists because a loop nest is anonymous where a Fortran intrinsic names itself.
+        ``cpp_isopar`` spells the same operation as a named ``<algorithm>`` / ``<numeric>`` call --
+        ``std::reduce``, ``std::transform_reduce`` -- so the name is already the documentation and
+        the comment is noise. Plain C keeps it: it has no named form to fall back on.
+        """
+        return "" if self.isopar else super().numpy_note(node, indent)
+
     def emit_block(self, stmts: List[ast.stmt], indent: str) -> str:
         """The base walk, plus (pluto only) a ``#pragma scop`` around each scopable run of the block."""
-        texts = [t for t in (self.emit_stmt(s, indent) for s in stmts) if t]
+        texts = [t for t in (self.emit_stmt_with_note(s, indent) for s in stmts) if t]
         if not self.pluto:
             return "\n".join(texts)
         return pluto_scop_regions(texts, indent, self._pluto_unscopable)

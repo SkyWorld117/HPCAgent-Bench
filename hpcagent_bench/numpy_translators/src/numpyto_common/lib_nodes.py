@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common import dtypes
+from numpyto_common.ir import tag_numpy_origin
 
 
 def _name(n: str) -> ast.Name:
@@ -176,6 +177,45 @@ def _slice_step_const(sl: ast.Slice) -> Optional[int]:
     return v if v not in (None, 0) else None
 
 
+def _slice_step_expr(sl: ast.Slice) -> Optional[ast.expr]:
+    """A slice's step when it is SYMBOLIC -- an expression rather than a literal.
+
+    ``None`` for no step and for a literal one; :func:`_slice_step_const` answers that question.
+    The value is a runtime stride the kernel takes across the ABI (a conv/pool ``stride``), so it
+    cannot be folded to a literal and the loop nest has to carry it.
+
+    Only a BOUNDED slice reaches here (see ``_reject_unsupported_slices``), and that is what makes
+    the positive-stride lowering ``start + pos * step`` sound without knowing the sign: under a
+    negative step numpy flips the bound defaults, so ``lo:hi:k`` with ``lo < hi`` is EMPTY, and the
+    assignment consuming it already fails in numpy. There is no correct run to preserve.
+    """
+    step = sl.step
+    if step is None or _const_int(step) is not None:
+        return None
+    return step
+
+
+def _slice_step_any(sl: ast.Slice):
+    """A slice's step as a literal ``int``, as an ``ast.expr`` when it is symbolic, or ``None``.
+
+    The one accessor the index and extent builders share, so a symbolic stride can never reach one
+    of them while the other still reads the slice as contiguous -- the two must walk the same run.
+    """
+    const = _slice_step_const(sl)
+    return const if const is not None else _slice_step_expr(sl)
+
+
+def _step_is_negative(step) -> bool:
+    """``step`` is a literal negative stride -- the numpy reverse. A symbolic step is never this:
+    it is emitted as a positive stride, which is the only sign a bounded slice can carry."""
+    return isinstance(step, int) and step < 0
+
+
+def _step_node(step) -> ast.expr:
+    """``step`` as an expression, whether it arrived as a literal int or already as one."""
+    return _const(step) if isinstance(step, int) else step
+
+
 def _is_shape_scalar(node: ast.AST) -> bool:
     """``True`` for a ``.shape`` read -- ``A.shape`` (a tuple of dimensions) or
     ``A.shape[i]`` (one dimension). Both are INTEGER-valued regardless of ``A``'s
@@ -233,43 +273,16 @@ def _is_scalar_axis(elt: ast.expr) -> bool:
 def _operand_token_shape(node: ast.expr, shape_table):
     """Residual shape TOKENS (not AST nodes -- stays consistent with the shape
     table) of an einsum/contraction operand. Bare ``Name(A)`` -> A's declared
-    shape. ``Subscript(A, ...)`` -> A's shape with scalar-indexed axes dropped
-    and Slice/trailing axes kept, e.g. ``psi[f]`` on ``(F, X, Y, Z, K)`` ->
-    ``(X, Y, Z, K)``. ``None`` if unresolvable (unknown base, or an Ellipsis
-    with ambiguous axis count)."""
+    shape. Anything else (a Subscript slice/index chain, a matmul, a
+    shape-preserving call...) routes through the general ``_iter_extent_of``
+    sizer, which already knows a partial slice's actual bound (``a[k:k+H]``
+    -> ``H``, not the base axis's full extent) alongside every other form it
+    resolves. ``None`` if unresolvable."""
     nm = _name_id(node)
     if nm:
         return shape_table.get(nm)
-    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-        base = shape_table.get(node.value.id)
-        if base is None:
-            return None
-        sl = node.slice
-        elts = list(sl.elts) if isinstance(sl, ast.Tuple) else [sl]
-        # Explicit (non-special) axes consumed; Ellipsis fills the rest.
-        n_src = sum(1 for e in elts if not _is_special_axis(e))
-        kept: List[str] = []
-        axis = 0
-        for elt in elts:
-            if isinstance(elt, ast.Constant) and elt.value is None:
-                kept.append("1")  # newaxis -- inserted size-1 result axis
-                continue
-            if isinstance(elt, ast.Constant) and elt.value is Ellipsis:
-                for _ in range(max(len(base) - n_src, 0)):
-                    if axis >= len(base):
-                        return None
-                    kept.append(base[axis])
-                    axis += 1
-                continue
-            if axis >= len(base):
-                return None
-            if isinstance(elt, ast.Slice):
-                kept.append(base[axis])
-            # else: scalar index (int / Name / Constant) drops this axis
-            axis += 1
-        kept.extend(base[axis:])  # trailing un-indexed axes are full slices
-        return tuple(kept)
-    return None
+    ext = _iter_extent_of(node, shape_table)
+    return tuple(ast.unparse(e) for e in ext) if ext is not None else None
 
 
 def _chained_base_shape(node: ast.expr, shape_table):
@@ -308,13 +321,15 @@ def _contraction_result_extent(expr: ast.Call, shape_table):
             return None
         operand_nodes = expr.args[1:]
     else:
-        # tensordot / inner: build the equivalent spec from operand ranks.
+        # tensordot / inner: build the equivalent spec from operand ranks. Operands need not be
+        # bare Names -- ``_operand_token_shape`` resolves a slice/index-chain's residual rank too
+        # (conv2d's tensordot contracts a sliced 4-D input against a partially-indexed
+        # ``weights[ki, kj]``).
         a, b = expr.args[0], expr.args[1]
-        if not (isinstance(a, ast.Name) and isinstance(b, ast.Name)):
+        shape_a, shape_b = _operand_token_shape(a, shape_table), _operand_token_shape(b, shape_table)
+        if not shape_a or not shape_b:
             return None
-        ra, rb = len(shape_table.get(a.id, ())), len(shape_table.get(b.id, ()))
-        if not ra or not rb:
-            return None
+        ra, rb = len(shape_a), len(shape_b)
         letters = "abcdefghijklmnopqrstuvwxyz"
         if attr == "inner":
             a_spec, b_spec = list(letters[:ra]), list(letters[ra:ra + rb])
@@ -324,7 +339,10 @@ def _contraction_result_extent(expr: ast.Call, shape_table):
         else:  # tensordot default axes=2
             kwargs = expr.keywords
             axes_node = expr.args[2] if len(expr.args) > 2 else _axes_kwarg(kwargs)
-            a_ax, b_ax = _tensordot_axes(axes_node, ra, rb)
+            try:
+                a_ax, b_ax = _tensordot_axes(axes_node, ra, rb)
+            except NotImplementedError:
+                return None  # sizer contract: an unresolved extent is None, never an exception
             a_spec = list(letters[:ra])
             b_spec = [None] * rb
             nxt = ra
@@ -558,6 +576,19 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                 out = list(base)
                 out[i], out[j] = out[j], out[i]
                 return tuple(out)
+            if attr == "moveaxis" and len(expr.args) >= 3:
+                # numpy's own algorithm: drop the source axis, reinsert it at the destination among
+                # what is left. Without this the sizer returns None, the hoister declines, and the
+                # call survives to the emitter as an unsupported ``np.moveaxis``.
+                base = _iter_extent_of(expr.args[0], shape_table)
+                if base is None:
+                    return None
+                src = _const_axis(expr.args[1], len(base))
+                dst = _const_axis(expr.args[2], len(base))
+                if src is None or dst is None:
+                    return None
+                rest = [e for n, e in enumerate(base) if n != src]
+                return tuple(rest[:dst] + [base[src]] + rest[dst:])
             if attr == "expand_dims" and expr.args:
                 base = _iter_extent_of(expr.args[0], shape_table)
                 if base is None:
@@ -776,15 +807,24 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                 # Strided slice ``a[lo:hi:k]`` has ``ceil((hi - lo) / k)``
                 # elements (== ``len(range(lo, hi, k))``). dwt2d's Haar
                 # ``b[:, 0::2]`` over an even axis ``s`` -> ``s // 2``.
-                step = _slice_step_const(ax)
-                if step is not None and step < 0 and (ax.lower is not None or ax.upper is not None):
+                step = _slice_step_any(ax)
+                if _step_is_negative(step) and (ax.lower is not None or ax.upper is not None):
                     # A BOUNDED reverse slice (``a[lo::-1]``/``a[:hi:-1]``): numpy flips
                     # the bound defaults under a negative step, so ``raw = hi - lo`` is
                     # NOT the element count and the ceil below would over-count, reading
                     # OOB. Only full-axis reverse (``a[::-k]``) is reliably counted --
                     # bail on the bounded form.
                     return None
-                if step is not None and step != 1:
+                if isinstance(step, ast.expr):
+                    # Symbolic stride: ceil(raw / step) with the divisor carried as an expression.
+                    # No abs() -- a bounded slice's step is positive or the numpy source is empty.
+                    ext.append(
+                        ast.BinOp(left=ast.BinOp(left=ast.BinOp(left=raw, op=ast.Add(), right=step),
+                                                 op=ast.Sub(),
+                                                 right=_const(1)),
+                                  op=ast.FloorDiv(),
+                                  right=step))
+                elif step is not None and step != 1:
                     # Element count is ceil(raw / |step|) -- a full-axis negative step
                     # (reverse) spans the same number of elements as its positive
                     # magnitude.
@@ -1058,28 +1098,33 @@ def _advanced_index_rank(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]
     return None
 
 
-def _slice_start(ax: ast.Slice, axis_len: Optional[ast.expr], step: Optional[int]) -> Optional[ast.expr]:
+def _slice_start(ax: ast.Slice, axis_len: Optional[ast.expr], step) -> Optional[ast.expr]:
     """First SOURCE index a slice reads. ``lower`` when given (negative resolved
     against ``axis_len``), else 0 -- except under a NEGATIVE step, where numpy
     flips the default and starts at the last element ``axis_len - 1``
     (``a[::-1]``). A reverse slice over an untracked axis cannot be indexed at
     all; refuse loudly rather than emit the forward ``a[i]`` that would silently
-    drop the reversal (mirrors lowering's slice-assign rewriters)."""
+    drop the reversal (mirrors lowering's slice-assign rewriters).
+
+    ``step`` is a literal int or a symbolic step expression; only a literal can be the reverse."""
     if ax.lower is not None:
         return _resolve_negative(ax.lower, axis_len)
-    if step is not None and step < 0:
+    if _step_is_negative(step):
         if axis_len is None:
             raise NotImplementedError("reverse slice needs a known axis length (shape untracked)")
         return ast.BinOp(left=axis_len, op=ast.Sub(), right=_const(1))
     return _const(0)
 
 
-def _strided_index(ivar: ast.expr, start: Optional[ast.expr], step: Optional[int]) -> ast.expr:
+def _strided_index(ivar: ast.expr, start: Optional[ast.expr], step) -> ast.expr:
     """Source index of result position ``ivar`` within a slice ``[start::step]``:
     ``start + ivar * step``. Must stay in lockstep with :func:`_iter_extent_of`,
     which counts ``ceil(extent / |step|)`` elements -- an index that ignored
-    ``step`` would walk a DIFFERENT (contiguous) run of the same length."""
-    pos: ast.expr = ivar if step in (None, 1) else ast.BinOp(left=ivar, op=ast.Mult(), right=_const(step))
+    ``step`` would walk a DIFFERENT (contiguous) run of the same length.
+
+    ``step`` is a literal int or a symbolic step expression; both multiply the position."""
+    unit = step is None or (isinstance(step, int) and step == 1)
+    pos: ast.expr = ivar if unit else ast.BinOp(left=ivar, op=ast.Mult(), right=_step_node(step))
     if isinstance(start, ast.Constant) and start.value == 0:
         return pos
     return ast.BinOp(left=pos, op=ast.Add(), right=start)
@@ -1128,7 +1173,7 @@ def _scalarize_at_iters(expr: ast.expr, iters: List[ast.expr], shape_table: Dict
                 continue
             if isinstance(ax, ast.Slice):
                 axis_len = (_const_or_name(shape[src_axis]) if shape and src_axis < len(shape) else None)
-                step = _slice_step_const(ax)
+                step = _slice_step_any(ax)
                 lo = _slice_start(ax, axis_len, step)
                 if iter_idx >= len(iters):
                     return expr  # not enough iters supplied
@@ -1958,8 +2003,15 @@ def _read_fft_axes(args, kwargs, rank: int, is_n: bool) -> List[int]:
     two axes. Negative axes wrap modulo ``rank``."""
 
     def _norm(a):
+        # An axis outside the rank means the rank we resolved is not the operand's real rank -- vexx
+        # reshapes through a ``.ndim``-conditional tuple that never folds, so the spilled operand is
+        # recorded rank 1 and ``axes=(0, 1, 2)`` indexed past the iterator list. Declining is the
+        # sizer's contract; the IndexError it used to raise escaped as a crash.
         a = int(a)
-        return a + rank if a < 0 else a
+        pos = a + rank if a < 0 else a
+        if not 0 <= pos < rank:
+            raise NotImplementedError(f"np.fft.*: axis {a} is outside the operand rank {rank}")
+        return pos
 
     if is_n:
         spec = _kwarg_or_pos(args, kwargs, 2, "axes")
@@ -2133,6 +2185,54 @@ def expand_copy(target: ast.expr, args: List[ast.expr], shape_table: Dict[str, T
     sub_dst = ast.Subscript(value=_name(target.id), slice=idx, ctx=ast.Store())
     body = [ast.Assign(targets=[sub_dst], value=sub_src)]
     return [_alloc_marker(target.id)] + _wrap_for_loops(iters, shape, body)
+
+
+def expand_bincount(target: ast.expr,
+                    args: List[ast.expr],
+                    shape_table: Dict[str, Tuple[str, ...]],
+                    kwargs=None) -> List[ast.stmt]:
+    """``out = np.bincount(idx, weights=w, minlength=M)`` -> zero ``M`` slots, then scatter-add.
+
+    numpy sizes the result ``max(minlength, idx.max() + 1)``, and the second term is data. ``M`` is
+    the only sound choice here: every corpus caller assigns the result into a buffer of exactly that
+    extent, so an index at or past ``M`` would make numpy return a LONGER array and the assignment
+    itself would raise. Without ``minlength`` the extent is genuinely undecidable, so decline.
+
+    Duplicate indices ACCUMULATE (this is the histogram, not a fancy store), which is why the body
+    is ``+=`` and not a last-write-wins store.
+    """
+    if not args:
+        raise NotImplementedError("np.bincount needs an index operand")
+    idx = args[0]
+    weights = _kwarg_or_pos(args, kwargs, 1, "weights")
+    minlength = _kwarg_or_pos(args, kwargs, 2, "minlength")
+    if minlength is None:
+        raise NotImplementedError("np.bincount without minlength has a data-dependent extent")
+    ext = _iter_extent_of(idx, shape_table)
+    if (not ext or len(ext) != 1) and weights is not None:
+        # spmv builds its index as ``np.repeat(np.arange(M), np.diff(A_indptr))`` -- a data-dependent
+        # extent the sizer cannot resolve. numpy REQUIRES weights and index to be the same length, so
+        # the weights' extent is that length, and it resolves (it is the declared nnz buffer).
+        ext = _iter_extent_of(weights, shape_table)
+    if not ext or len(ext) != 1:
+        raise NotImplementedError("np.bincount needs a rank-1 index operand of known extent")
+    out_len = ast.unparse(minlength)
+    shape_table.setdefault(target.id, (out_len, ))
+    zero_it = "__bcz0"
+    zero_body = [
+        ast.Assign(targets=[ast.Subscript(value=_name(target.id), slice=_name(zero_it), ctx=ast.Store())],
+                   value=_const(0.0))
+    ]
+    acc_it = "__bc0"
+    idx_k = _scalarize_at_iters(idx, [_name(acc_it)], shape_table)
+    val_k = (_const(1.0) if weights is None else _scalarize_at_iters(weights, [_name(acc_it)], shape_table))
+    acc_body = [
+        ast.AugAssign(target=ast.Subscript(value=_name(target.id), slice=idx_k, ctx=ast.Store()),
+                      op=ast.Add(),
+                      value=val_k)
+    ]
+    return ([_alloc_marker(target.id)] + _wrap_for_loops([zero_it], [_const_or_name(out_len)], zero_body) +
+            _wrap_for_loops([acc_it], list(ext), acc_body))
 
 
 def expand_outer(target: ast.expr,
@@ -2517,6 +2617,32 @@ def expand_swapaxes(target: ast.expr,
         raise NotImplementedError("np.swapaxes: axes must be constant ints in range")
     perm = list(range(rank))
     perm[i], perm[j] = perm[j], perm[i]
+    perm_tuple = ast.Tuple(elts=[_const(p) for p in perm], ctx=ast.Load())
+    return expand_transpose(target, [a, perm_tuple], shape_table)
+
+
+def expand_moveaxis(target: ast.expr,
+                    args: List[ast.expr],
+                    shape_table: Dict[str, Tuple[str, ...]],
+                    kwargs=None) -> List[ast.stmt]:
+    """``out = np.moveaxis(a, source, destination)`` -> ``np.transpose(a, perm)`` with
+    ``perm`` numpy's own algorithm (drop axis ``source``, reinsert it at ``destination``
+    among the rest). Reuses the transpose loop-lowering like ``expand_swapaxes``.
+    Scalar ``source``/``destination`` only (constant ints); the tuple form of the numpy
+    API is rare enough in this corpus to decline rather than support here."""
+    if not args_one_name(args):
+        raise NotImplementedError("np.moveaxis needs a Name first arg")
+    a = args[0]
+    shape = shape_table.get(a.id)
+    if not shape:
+        raise NotImplementedError("np.moveaxis: source shape unknown")
+    rank = len(shape)
+    src = _const_axis(_kwarg_or_pos(args, kwargs, 1, "source"), rank)
+    dst = _const_axis(_kwarg_or_pos(args, kwargs, 2, "destination"), rank)
+    if src is None or dst is None:
+        raise NotImplementedError("np.moveaxis: source/destination must be constant ints in range")
+    perm = [n for n in range(rank) if n != src]
+    perm.insert(dst, src)
     perm_tuple = ast.Tuple(elts=[_const(p) for p in perm], ctx=ast.Load())
     return expand_transpose(target, [a, perm_tuple], shape_table)
 
@@ -3643,14 +3769,28 @@ def expand_einsum(target: ast.expr,
 def expand_tensordot(target: ast.expr,
                      args: List[ast.expr],
                      shape_table: Dict[str, Tuple[str, ...]],
-                     kwargs=None) -> List[ast.stmt]:
+                     kwargs=None,
+                     local_dtypes=None,
+                     fresh_local_allocs=None) -> List[ast.stmt]:
     """``np.tensordot(a, b, axes)`` -> an equivalent einsum.
 
     ``axes`` is an int K (contract the last K axes of ``a`` with the first K
-    of ``b``) or a pair of axis lists. Default ``axes=2``."""
+    of ``b``) or a pair of axis lists. Default ``axes=2``.
+
+    A non-Name operand (conv2d's sliced ``input[:, ki:ki+H_out, kj:kj+W_out,
+    :]`` and partially-indexed ``weights[ki, kj]``) is spilled into a fresh
+    scratch buffer first, the same ``_materialize_operands`` pattern
+    :func:`expand_einsum` uses -- under a distinct ``__td_`` prefix so its
+    temps/copy-iterators cannot collide with einsum's own ``__es_`` spill
+    once the mapped call below runs.
+    """
     if len(args) < 2:
         raise NotImplementedError("tensordot needs 2 array args")
-    a, b = args[0], args[1]
+    prelude, (a, b) = _materialize_operands(args[:2],
+                                            shape_table,
+                                            "__td_",
+                                            local_dtypes=local_dtypes,
+                                            fresh_local_allocs=fresh_local_allocs)
     if not (isinstance(a, ast.Name) and isinstance(b, ast.Name)):
         raise NotImplementedError("tensordot operands must be bare Names")
     ra = len(shape_table.get(a.id, ()))
@@ -3673,7 +3813,8 @@ def expand_tensordot(target: ast.expr,
     out_spec = [c for i, c in enumerate(a_spec) if i not in a_ax] + \
                [c for i, c in enumerate(b_spec) if i not in b_ax]
     spec = f"{''.join(a_spec)},{''.join(b_spec)}->{''.join(out_spec)}"
-    return expand_einsum(target, [_const(spec), a, b], shape_table)
+    return prelude + expand_einsum(
+        target, [_const(spec), a, b], shape_table, local_dtypes=local_dtypes, fresh_local_allocs=fresh_local_allocs)
 
 
 def _axes_kwarg(kwargs):
@@ -3684,20 +3825,51 @@ def _axes_kwarg(kwargs):
 
 
 def _tensordot_axes(node: ast.expr, ra: int, rb: int):
-    """Resolve tensordot ``axes`` into ``(a_axes, b_axes)`` index lists."""
+    """Resolve tensordot ``axes`` into ``(a_axes, b_axes)``, normalised against each operand's rank.
+
+    An axis past the operand's rank means the rank we resolved is not the rank the kernel meant --
+    cp2k_grid_integrate contracts axis 3 of a ``np.where`` result whose recorded shape is rank 3,
+    because the broadcast against a 4-D operand was never folded into it. Declining is the only
+    sound answer: a spec built from a wrong rank contracts the wrong axes and still emits.
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, int):
         k = node.value
+        if k > ra or k > rb:
+            raise NotImplementedError(f"tensordot axes={k} exceeds operand rank ({ra}, {rb})")
         return list(range(ra - k, ra)), list(range(k))
     if isinstance(node, (ast.Tuple, ast.List)) and len(node.elts) == 2:
 
-        def _axis_list(e):
-            if isinstance(e, ast.Constant):
-                return [e.value]
-            if isinstance(e, (ast.Tuple, ast.List)):
-                return [x.value for x in e.elts]
-            raise NotImplementedError("tensordot axes entries must be literals")
+        def _axis_literal(x):
+            # A negative axis parses as UnaryOp(USub), not Constant -- reading ``.value`` off it
+            # raised AttributeError out of the sizer, the same escaped-exception class as the
+            # out-of-range index below.
+            try:
+                value = ast.literal_eval(x)
+            except (ValueError, SyntaxError, TypeError):
+                raise NotImplementedError("tensordot axes entries must be integer literals")
+            return value
 
-        return _axis_list(node.elts[0]), _axis_list(node.elts[1])
+        def _axis_list(e):
+            if isinstance(e, (ast.Tuple, ast.List)):
+                return [_axis_literal(x) for x in e.elts]
+            return [_axis_literal(e)]
+
+        def _normalised(axes, rank, side):
+            out = []
+            for ax in axes:
+                if not isinstance(ax, int):
+                    raise NotImplementedError("tensordot axes entries must be integer literals")
+                pos = ax + rank if ax < 0 else ax
+                if not 0 <= pos < rank:
+                    raise NotImplementedError(f"tensordot {side} axis {ax} is outside rank {rank}")
+                out.append(pos)
+            return out
+
+        a_ax = _normalised(_axis_list(node.elts[0]), ra, "a")
+        b_ax = _normalised(_axis_list(node.elts[1]), rb, "b")
+        if len(a_ax) != len(b_ax):
+            raise NotImplementedError("tensordot axis lists must have equal length")
+        return a_ax, b_ax
     raise NotImplementedError("tensordot axes must be an int or a 2-tuple of axis lists")
 
 
@@ -4616,10 +4788,92 @@ def expand_reshape(target: ast.expr,
     return [current]
 
 
+def _diff_operand(expr: ast.expr) -> Optional[ast.Name]:
+    """``np.diff(p)`` -> ``p``, else ``None``.
+
+    The one per-element ``np.repeat`` count form whose SUM telescopes without
+    touching data: ``sum(np.diff(p)) == p[-1] - p[0]``. ``n``/``axis`` kwargs
+    change which sum telescopes (or whether it does at all), so only the bare
+    single-arg call is recognised.
+    """
+    if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
+            and isinstance(expr.func.value, ast.Name) and expr.func.value.id == "np" and expr.func.attr == "diff"):
+        return None
+    if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Name) or expr.keywords:
+        return None
+    return expr.args[0]
+
+
+def _expand_repeat_prefix_sum(target: ast.expr, a: ast.Name, a_shape: Tuple[str, ...], k_arg: ast.expr,
+                              shape_table: Dict[str, Tuple[str,
+                                                           ...]], local_dtypes, fresh_local_allocs) -> List[ast.stmt]:
+    """Per-element ``np.repeat`` count -- the destination offset is the
+    RUNNING prefix sum of the counts, not ``outer * K`` (that formula reads
+    the count array as a scalar multiplier and is wrong the moment two counts
+    differ; it also silently skips a zero count instead of writing nothing)::
+
+        pos = 0
+        for i in range(<source extent>):
+            for r in range(counts[i]):
+                out[pos] = src[i]
+                pos += 1
+
+    Only a 1-D source is supported -- there is no per-axis running offset
+    here for the axis-aware case. ``counts`` must be ``np.diff(p)`` so its
+    sum (the result extent) telescopes to ``p[-1] - p[0]``; any other
+    per-element form has a data-dependent sum with no static extent and is
+    refused rather than guessed (an under-sized buffer is a heap overflow).
+    ``np.diff`` is never materialised: ``counts[i]`` is expressed inline as
+    ``p[i + 1] - p[i]``, so no auxiliary array is allocated at all.
+    """
+    if len(a_shape) != 1:
+        raise NotImplementedError("np.repeat with a per-element count needs a 1-D source")
+    diff_src = _diff_operand(k_arg)
+    if diff_src is None:
+        raise NotImplementedError("np.repeat with a per-element count needs a derivable sum "
+                                  f"(got {ast.unparse(k_arg)}); only np.diff(p) telescopes to p[-1] - p[0]")
+    p_shape = shape_table.get(diff_src.id)
+    if not p_shape or len(p_shape) != 1:
+        raise NotImplementedError("np.repeat: np.diff operand shape unknown")
+    last_idx = ast.BinOp(left=_const_or_name(p_shape[0]), op=ast.Sub(), right=_const(1))
+    total = ast.BinOp(left=ast.Subscript(value=copy.deepcopy(diff_src), slice=last_idx, ctx=ast.Load()),
+                      op=ast.Sub(),
+                      right=ast.Subscript(value=copy.deepcopy(diff_src), slice=_const(0), ctx=ast.Load()))
+    extent_tok = ast.unparse(total)
+    shape_table[target.id] = (extent_tok, )
+    if fresh_local_allocs is not None:
+        fresh_local_allocs[target.id] = (extent_tok, )
+    pos, src_iter, cnt_iter = "__rep_pos0", "__rep_i0", "__rep_r0"
+    if local_dtypes is not None:
+        local_dtypes[pos] = "int64"
+    count_at_i = ast.BinOp(left=ast.Subscript(value=copy.deepcopy(diff_src),
+                                              slice=ast.BinOp(left=_name(src_iter), op=ast.Add(), right=_const(1)),
+                                              ctx=ast.Load()),
+                           op=ast.Sub(),
+                           right=ast.Subscript(value=copy.deepcopy(diff_src), slice=_name(src_iter), ctx=ast.Load()))
+    body = [
+        ast.Assign(targets=[ast.Subscript(value=_name(target.id), slice=_name(pos), ctx=ast.Store())],
+                   value=ast.Subscript(value=copy.deepcopy(a), slice=_name(src_iter), ctx=ast.Load())),
+        ast.AugAssign(target=_store(pos), op=ast.Add(), value=_const(1)),
+    ]
+    inner_loop = ast.For(target=_store(cnt_iter),
+                         iter=ast.Call(func=_name("range"), args=[count_at_i], keywords=[]),
+                         body=body,
+                         orelse=[])
+    outer_loop = ast.For(target=_store(src_iter),
+                         iter=ast.Call(func=_name("range"), args=[_const_or_name(a_shape[0])], keywords=[]),
+                         body=[inner_loop],
+                         orelse=[])
+    init_pos = ast.Assign(targets=[_store(pos)], value=_const(0))
+    return [_alloc_marker(target.id), init_pos, outer_loop]
+
+
 def expand_repeat(target: ast.expr,
                   args: List[ast.expr],
                   shape_table: Dict[str, Tuple[str, ...]],
-                  kwargs=None) -> List[ast.stmt]:
+                  kwargs=None,
+                  local_dtypes=None,
+                  fresh_local_allocs=None) -> List[ast.stmt]:
     """``out = np.repeat(A, K, axis=N)`` -> tile-and-write loop nest. Source
     ``A`` of shape ``(s0, ..., sN, ..., sM-1)`` becomes ``out`` of shape
     ``(s0, ..., sN*K, ..., sM-1)``. Per-element::
@@ -4644,6 +4898,11 @@ def expand_repeat(target: ast.expr,
     if len(args) < 2:
         raise NotImplementedError("np.repeat needs repetitions arg")
     k_arg = args[1]
+    # A PER-ELEMENT repeat count (``np.repeat(np.arange(M), np.diff(A_indptr))``) is a different
+    # lowering: the destination offset is a prefix sum of the counts, not ``outer * K`` (that
+    # formula reads the count array as a scalar multiplier and computes the wrong offsets).
+    if _iter_extent_of(k_arg, shape_table) is not None:
+        return _expand_repeat_prefix_sum(target, a, a_shape, k_arg, shape_table, local_dtypes, fresh_local_allocs)
     # ``axis`` -- positional [2] or kwarg. An ABSENT axis means numpy's flat repeat; an axis that is
     # merely unreadable must NOT fall into that branch, because flat repeat is a different output
     # shape and a different loop nest, not a degraded version of the same one.
@@ -6039,10 +6298,18 @@ NP_CALL_EXPANDERS: Dict[Tuple[str, str], Callable] = {
     expand_copy,
     ("np", "ascontiguousarray"):
     expand_copy,
+    # ``np.array(<array expr>)`` is the same materialising copy. The literal-list and 0-d scalar
+    # forms never reach here: the frontend rewrites both before lowering runs.
+    ("np", "array"):
+    expand_copy,
+    ("np", "bincount"):
+    expand_bincount,
     ("np", "reshape"):
     expand_reshape,
     ("np", "swapaxes"):
     expand_swapaxes,
+    ("np", "moveaxis"):
+    expand_moveaxis,
     ("np", "expand_dims"):
     expand_expand_dims,
     ("np", "squeeze"):
@@ -7294,7 +7561,19 @@ class _CallHoister(ast.NodeTransformer):
         return None
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
-        self.generic_visit(node)
+        # ``np.repeat(src, np.diff(p))``: the count's telescoping sum (see
+        # expand_repeat / _diff_operand) needs the ORIGINAL ``np.diff`` call
+        # form. A plain ``generic_visit`` would recurse into it first -- ``np.diff``
+        # is itself a registered call, so it would get hoisted into an opaque
+        # ``__cb<n>`` temp before the repeat expander ever ran, losing the one
+        # piece of syntax that proves the sum is derivable. Visit every other
+        # child normally and leave that one argument untouched.
+        if (self._key_of(node) == ("np", "repeat") and len(node.args) >= 2 and _diff_operand(node.args[1]) is not None):
+            node.func = self.visit(node.func)
+            node.args = [(a if i == 1 else self.visit(a)) for i, a in enumerate(node.args)]
+            node.keywords = [self.visit(kw) for kw in node.keywords]
+        else:
+            self.generic_visit(node)
         # Hoist any matmul subexpressions inside the call args first:
         # ``np.maximum(input @ w1 + b1, 0)`` -> ``__mm1 = input @ w1; ...;
         # np.maximum(__mm1 + b1, 0)``, so the elementwise expander sees a bare
@@ -7322,7 +7601,7 @@ class _CallHoister(ast.NodeTransformer):
                      for k in {
                          "sum", "max", "min", "mean", "prod", "std", "var", "median", "any", "all", "count_nonzero",
                          "argmax", "argmin", "repeat", "transpose", "reshape", "triu", "tril", "flip", "roll", "copy",
-                         "cumsum", "cumprod", "swapaxes", "expand_dims", "squeeze"
+                         "array", "bincount", "cumsum", "cumprod", "swapaxes", "expand_dims", "squeeze", "moveaxis"
                      }}
                     | {("np", "fft.fftn"), ("np", "fft.ifftn"), ("np", "fft.fft"), ("np", "fft.ifft")}) and node.args
                 and not isinstance(node.args[0], ast.Name)):
@@ -7431,7 +7710,9 @@ class _CallHoister(ast.NodeTransformer):
             # / ``transpose`` / ``flip``) inherit the source array's
             # dtype: ``Xiv = np.reshape(Xi, (xn * yn,))`` where ``Xi``
             # is int64 must keep Xiv as int64, not the default double.
-            SHAPE_PRESERVING = {"reshape", "repeat", "copy", "asarray", "ascontiguousarray", "transpose", "flip"}
+            SHAPE_PRESERVING = {
+                "reshape", "repeat", "copy", "array", "asarray", "ascontiguousarray", "transpose", "flip"
+            }
             if (key[1] in SHAPE_PRESERVING and node.args and temp not in self.local_dtypes):
                 first = node.args[0]
                 if isinstance(first, ast.Name):
@@ -7490,6 +7771,12 @@ class _CallHoister(ast.NodeTransformer):
             ext = _iter_extent_of(call, self.shape_table)
             if ext is not None:
                 return tuple(self._extent_to_shape_token(e) for e in ext)
+        # ``np.bincount(idx, weights=w, minlength=M)`` -> a rank-1 result of exactly M slots (see
+        # expand_bincount for why the data-dependent upper term is not the extent).
+        if op == "bincount" and args:
+            minlength = _kwarg_or_pos(args, keywords or [], 2, "minlength")
+            if minlength is not None:
+                return (self._extent_to_shape_token(minlength), )
         # ``np.pad`` -> source shape with each axis grown by ``2 * pad_width``.
         if op == "pad" and args:
             call = _attr_call("np", "pad", list(args))
@@ -7564,12 +7851,12 @@ class _CallHoister(ast.NodeTransformer):
             shape = self.shape_table.get(args[0].id)
             if shape:
                 return tuple(shape)
-        # ``swapaxes`` / ``expand_dims`` / ``squeeze`` -- the operand's extent with axes swapped or a
-        # unit axis inserted / dropped. ``_iter_extent_of`` already computes all three, so route to
+        # ``swapaxes`` / ``expand_dims`` / ``squeeze`` / ``moveaxis`` -- the operand's extent with axes
+        # swapped, moved, or a unit axis inserted / dropped. ``_iter_extent_of`` already computes all three, so route to
         # it rather than restating the axis arithmetic; without a branch here they fall through to
         # the elementwise case, which skips them (they are NON_ELEMENTWISE), and the None return
         # silently DECLINES to hoist -- leaving ``q @ np.swapaxes(k, -1, -2)`` for the emitter.
-        if op in {"swapaxes", "expand_dims", "squeeze"} and args:
+        if op in {"swapaxes", "expand_dims", "squeeze", "moveaxis"} and args:
             call = _attr_call("np", op, list(args))
             call.keywords = list(keywords or [])
             ext = _iter_extent_of(call, self.shape_table)
@@ -7805,7 +8092,9 @@ NON_ELEMENTWISE_SHAPE_OPS: Set[str] = set(_REDUCTION_NAMES) | {
 
 ELEMENTWISE_SHAPE_OPS: FrozenSet[str] = frozenset(
     name for module, name in NP_CALL_EXPANDERS
-    if module == "np" and "." not in name and name not in NON_ELEMENTWISE_SHAPE_OPS) | {"copy", "where", "clip"}
+    if module == "np" and "." not in name and name not in NON_ELEMENTWISE_SHAPE_OPS) | {
+        "copy", "array", "where", "clip"
+    }
 
 _SLICE_TARGET_EXPANDERS = {("np", "cumsum"), ("np", "cumprod")}
 
@@ -8017,8 +8306,18 @@ class LibNodeRewriter(ast.NodeTransformer):
                  known_arrays: Optional[Set[str]] = None,
                  local_dtypes: Optional[Dict[str, str]] = None,
                  sparse: Optional[Dict[str, object]] = None,
-                 dim_aliases: Optional[Dict[str, str]] = None):
+                 dim_aliases: Optional[Dict[str, str]] = None,
+                 native_call: Optional[Callable[[Tuple[str, str], ast.Call, Dict, Dict], bool]] = None,
+                 native_dtypes: Optional[Dict[str, str]] = None):
         self.shape_table = shape_table
+        #: Target's "I render this numpy call myself" predicate. A call it claims is left
+        #: UNEXPANDED so the emitter can use its own intrinsic -- Fortran's SUM/MAXVAL/NORM2 --
+        #: instead of the loop nest every target would otherwise get. Default: claims nothing.
+        self.native_call = native_call
+        #: name -> element dtype, for the same predicate. Separate from ``local_dtypes``, which
+        #: deliberately tags only integers: the predicate needs POSITIVE evidence of a float, and
+        #: "untagged" there means "not an integer", which a boolean mask also satisfies.
+        self.native_dtypes = native_dtypes or {}
         #: Dimension local -> its definition in parameter terms, threaded to the matmul hoister so
         #: a contraction dim spelled two ways still matches. See :func:`dims_agree`.
         self.dim_aliases: Dict[str, str] = dim_aliases or {}
@@ -8170,6 +8469,9 @@ class LibNodeRewriter(ast.NodeTransformer):
         return None
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        # Captured BEFORE any rewriting: once the RHS is hoisted its arguments are temps, and the
+        # note is meant to read as the numpy the kernel was written in.
+        numpy_text = ast.unparse(node.value)
         self.generic_visit(node)
         # ``D[:] = np.repeat(...)``/``D[:, :] = np.transpose(...)``: canonicalise
         # the slice-LHS-with-call form to ``D = call(...)`` so the registered
@@ -8215,6 +8517,8 @@ class LibNodeRewriter(ast.NodeTransformer):
             if isinstance(node.value, ast.Call):
                 key = self._lookup(node.value)
                 expander = NP_CALL_EXPANDERS.get(key) if key else None
+                if expander is not None and self._target_renders(key, node.value):
+                    return node
                 if expander is not None:
                     try:
                         expanded = _call_expander(expander,
@@ -8249,6 +8553,7 @@ class LibNodeRewriter(ast.NodeTransformer):
                         if (key == ("np", "arange") and target.id not in self.local_dtypes
                                 and all(_is_integer_expr(a, self.local_dtypes) for a in node.value.args)):
                             self.local_dtypes[target.id] = "int64"
+                        tag_numpy_origin(expanded, numpy_text)
                         return prelude + expanded
                     except NotImplementedError:
                         pass
@@ -8278,6 +8583,16 @@ class LibNodeRewriter(ast.NodeTransformer):
             return prelude + [node]
         return node
 
+    def _target_renders(self, key, call: ast.Call) -> bool:
+        """The target claims this call as its own intrinsic, so leave it unexpanded.
+
+        The shape table goes with it: the claim has to be decidable here, because past this point
+        the loop nest the call would have become no longer exists to fall back to.
+        """
+        if self.native_call is None or key is None:
+            return False
+        return self.native_call(key, call, self.shape_table, self.native_dtypes)
+
     def _lower_prelude_calls(self, prelude: List[ast.stmt]) -> List[ast.stmt]:
         """Recursively lower any registered-call assigns inside the prelude
         that the call-hoister produced. The hoister synthesises ``__cb<n> =
@@ -8291,17 +8606,23 @@ class LibNodeRewriter(ast.NodeTransformer):
                     and isinstance(stmt.value, ast.Call)):
                 key = self._lookup(stmt.value)
                 expander = NP_CALL_EXPANDERS.get(key) if key else None
+                if expander is not None and self._target_renders(key, stmt.value):
+                    out.append(stmt)
+                    continue
                 if expander is not None:
                     try:
-                        out.extend(
-                            _call_expander(expander,
-                                           stmt.targets[0],
-                                           stmt.value.args,
-                                           stmt.value.keywords,
-                                           self.shape_table,
-                                           local_dtypes=self.local_dtypes,
-                                           fresh_local_allocs=self.fresh_local_allocs,
-                                           dim_aliases=self.dim_aliases))
+                        expanded = _call_expander(expander,
+                                                  stmt.targets[0],
+                                                  stmt.value.args,
+                                                  stmt.value.keywords,
+                                                  self.shape_table,
+                                                  local_dtypes=self.local_dtypes,
+                                                  fresh_local_allocs=self.fresh_local_allocs,
+                                                  dim_aliases=self.dim_aliases)
+                        # Same note as the direct path: the hoister split ``out = f(np.sum(a))`` into
+                        # a temp assign, and it is THIS statement that becomes the loop nest.
+                        tag_numpy_origin(expanded, ast.unparse(stmt.value))
+                        out.extend(expanded)
                         # Integer-iota arange in the prelude (hoisted ``__cb =
                         # np.arange(1, 1025)``) keeps an int64 dtype so a derived
                         # gather index stays integer (fft_3d).
