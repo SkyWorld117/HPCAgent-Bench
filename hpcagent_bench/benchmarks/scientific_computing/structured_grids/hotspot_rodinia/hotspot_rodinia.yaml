@@ -13,8 +13,8 @@
 # and tests/ports/hotspot_rodinia/.
 name: HotSpot (Rodinia)
 short_name: hotspot_rodinia
-kind: microapp
-level: 3
+kind: microkernel
+level: 2
 parameters:
   S:
     N: 256
