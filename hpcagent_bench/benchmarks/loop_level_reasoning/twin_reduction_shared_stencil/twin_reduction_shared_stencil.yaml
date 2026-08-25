@@ -18,6 +18,7 @@ init:
     idx:
       shape: (N,3)
       dtype: int64
+      index_array: true
     gfac: (N,3)
     div_mass: (N,)
     div_theta: (N,)

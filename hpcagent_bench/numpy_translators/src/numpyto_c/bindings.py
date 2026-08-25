@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from numpyto_common.ir import KernelIR
 from numpyto_common import dtypes
+from numpyto_common.naming import entry_symbol
 
 
 def _ptr_kind(dtype: str) -> str:
@@ -34,22 +35,25 @@ def _arg_entry(name: str, sym_by_name, arr_by_name, sca_by_name) -> Dict[str, An
     return {"name": name, "kind": _scalar_kind(sca_by_name[name].dtype)}
 
 
-def emit_binding(kir: KernelIR, out_path: pathlib.Path, base_name: str = None) -> Dict[str, Any]:
+def emit_binding(kir: KernelIR, out_path: pathlib.Path, base_name: str = None, symbol: str = None) -> Dict[str, Any]:
     """Write ``<out_path>`` (the C-ABI arg list + symbol/source names per language) and return it."""
     sym_by_name = {s.name: s for s in kir.symbols}
     arr_by_name = {a.name: a for a in kir.arrays}
     sca_by_name = {s.name: s for s in kir.scalars}
     args: List[Dict[str, Any]] = [_arg_entry(name, sym_by_name, arr_by_name, sca_by_name) for name in kir.param_order()]
-    # base_name must match the emitted file/symbol exactly; falls back if omitted.
+    # base_name must match the emitted FILE stem exactly; symbol is the exported entry point,
+    # which is that stem lowercased (Fortran folds case -- see naming.entry_symbol). Both fall
+    # back if omitted.
     base = base_name or kir.short_name or kir.kernel_name
+    sym = symbol or entry_symbol(base)
     payload = {
         "kernel": base,
         "abi": "c",
         "args": args,
         "symbols": {
-            "c": base,
-            "cpp": base,
-            "fortran": base,
+            "c": sym,
+            "cpp": sym,
+            "fortran": sym,
         },
         "sources": {
             "c": f"{base}.c",
@@ -62,7 +66,10 @@ def emit_binding(kir: KernelIR, out_path: pathlib.Path, base_name: str = None) -
     return payload
 
 
-def emit_pluto_binding(kir: KernelIR, out_path: pathlib.Path, base_name: str = None) -> Dict[str, Any]:
+def emit_pluto_binding(kir: KernelIR,
+                       out_path: pathlib.Path,
+                       base_name: str = None,
+                       symbol: str = None) -> Dict[str, Any]:
     """Binding for the Pluto backend: same schema as :func:`emit_binding`, args ordered symbols/arrays/scalars."""
     sym_by_name = {s.name: s for s in kir.symbols}
     arr_by_name = {a.name: a for a in kir.arrays}
@@ -72,12 +79,13 @@ def emit_pluto_binding(kir: KernelIR, out_path: pathlib.Path, base_name: str = N
                [n for n in order if n in sca_by_name])
     args = [_arg_entry(n, sym_by_name, arr_by_name, sca_by_name) for n in grouped]
     base = base_name or kir.short_name or kir.kernel_name
+    sym = symbol or entry_symbol(base)
     payload = {
         "kernel": base,
         "abi": "c",
         "args": args,
         "symbols": {
-            "c": base
+            "c": sym
         },
         "sources": {
             "c": f"{base}_pluto.c"

@@ -24,6 +24,7 @@ init:
     idx:
       shape: (LEN_1D,)
       dtype: int64
+      index_array: true
     dst: (LEN_1D,)
 output_args:
 - dst

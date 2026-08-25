@@ -94,6 +94,10 @@ class ArrayDesc:
     dtype: str
     shape: Tuple[str, ...]
     is_output: bool = False
+    #: This array's ELEMENTS are subscripts into another array (``init.arrays[name].index_array``
+    #: in bench_info). The values reaching the kernel are already in the TARGET language's base,
+    #: so a 1-based backend must NOT add its usual ``+ 1`` when it uses one as a subscript.
+    is_index: bool = False
 
     def __post_init__(self) -> None:
         # Same storage contract :class:`ScalarDesc` honours, for the same reason: normalise the

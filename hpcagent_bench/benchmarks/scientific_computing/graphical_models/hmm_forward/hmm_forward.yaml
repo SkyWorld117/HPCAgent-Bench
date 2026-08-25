@@ -44,6 +44,7 @@ init:
     obs:
       shape: (T,)
       dtype: int64
+      index_array: true
     loglik:
       shape: (1,)
       dtype: float64

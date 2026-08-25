@@ -16,6 +16,7 @@ init:
     ip:
       shape: (N,)
       dtype: int64
+      index_array: true
     a: (N,)
     b: (N,)
 output_args:

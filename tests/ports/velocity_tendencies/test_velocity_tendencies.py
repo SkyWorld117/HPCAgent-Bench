@@ -20,6 +20,9 @@ _BENCH = _HERE.parents[
     2] / "hpcagent_bench" / "benchmarks" / "scientific_computing" / "unstructured_grids" / "velocity_tendencies"
 sys.path.insert(0, str(_BENCH))
 
+from hpcagent_bench.spec import BenchSpec  # noqa: E402
+from hpcagent_bench.support.bindings.contract import index_base  # noqa: E402
+
 pytestmark = pytest.mark.skipif(shutil.which("gfortran") is None, reason="gfortran not on PATH")
 
 # --- I/O contract (matches velocity_full_caller.f90 run_velocity_flat_c) -----
@@ -106,6 +109,21 @@ _OUTPUT_NAMES = (
     'z_vt_ie',
     'p_diag_max_vcfl_dyn',
 )
+
+# --- the index base seam ----------------------------------------------------
+# The vendored baseline is ICON's own Fortran, so its connectivity tables are 1-based; the numpy
+# reference is the corpus-wide 0-based truth. hpcagent_bench reconciles the two at the ABI seam
+# (native_call.call_with), and for the ctypes path THIS TEST is that seam -- so it rebases here.
+# The names come from the manifest rather than being restated, so tagging or untagging a table
+# cannot leave the test disagreeing with the contract it is meant to pin.
+_INDEX_TABLES = tuple(sorted(BenchSpec.load("velocity_tendencies").init.index_arrays))
+_FORTRAN_BASE = index_base("fortran")
+
+
+def _rebase(bufs, delta):
+    """Shift every declared index table by ``delta``, in place."""
+    for name in _INDEX_TABLES:
+        bufs[name] += delta
 
 
 def _allocate(nproma, nlev, nlevp1, nblks_c, nblks_e, nblks_v):
@@ -241,8 +259,10 @@ def test_numpy_matches_fortran_baseline(caller_lib, grid, cfg):
     init(*[ctypes.c_int(v) for v in (seed, nproma, nlev, nlevp1, nblks_c, nblks_e, nblks_v)],
          *[bufs[k].ctypes.data for k in _INIT_ARRAY_ORDER])
 
-    # Snapshot for the numpy run BEFORE Fortran mutates the buffers in place.
+    # Snapshot for the numpy run BEFORE Fortran mutates the buffers in place. init_inputs_random_c
+    # is ICON's own Fortran, so it fills the connectivity in Fortran's base; numpy wants 0-based.
     bufs_np = {k: v.copy(order='F') for k, v in bufs.items()}
+    _rebase(bufs_np, -_FORTRAN_BASE)
 
     zr = {k: np.zeros(bufs['p_diag_vt'].shape if k != 'z_vt_ie' else (nproma, nlevp1, nblks_e), order='F') for k in _Z}
     nrd = np.full(10, nrdmax, dtype=np.int32, order='F')
@@ -334,6 +354,8 @@ def test_initialize_numpy_matches_fortran(caller_lib, grid, cfg, seed):
     zr = {k: np.asfortranarray(gen[k]) for k in _Z}
     bufs_np = {k: v.copy(order='F') for k, v in bufs.items()}
     znp = {k: v.copy(order='F') for k, v in zr.items()}
+    # initialize() is the 0-based truth; only the Fortran side is rebased, after the numpy copy.
+    _rebase(bufs, _FORTRAN_BASE)
 
     nrd = np.full(10, nrdmax, dtype=np.int32, order='F')
     nfl = np.full(10, nflat, dtype=np.int32, order='F')
@@ -376,19 +398,20 @@ def test_initialize_preconditions(seed):
     nproma, nlev, nblks_c, nblks_e, nblks_v = 32, 20, 12, 18, 8
     gen = _gen_inputs(nproma, nlev, nblks_c, nblks_e, nblks_v, seed)
 
-    # connectivity in range: idx in 1..nproma, blk in 1..(target nblks), per neighbour table.
+    # connectivity in range, in the numpy reference's own base: idx in 0..nproma-1, blk in
+    # 0..(target nblks)-1, per neighbour table. A 1-based language gets the shift at the ABI seam.
     for name, tgt in (("p_patch_cells_neighbor_idx", nproma), ("p_patch_cells_edge_idx", nproma),
                       ("p_patch_edges_cell_idx", nproma), ("p_patch_edges_vertex_idx", nproma),
                       ("p_patch_edges_quad_idx", nproma), ("p_patch_verts_cell_idx", nproma), ("p_patch_verts_edge_idx",
                                                                                                nproma)):
         a = gen[name]
-        assert a.min() >= 1 and a.max() <= tgt, name
+        assert a.min() >= 0 and a.max() < tgt, name
     for name, tgt in (("p_patch_cells_neighbor_blk", nblks_c), ("p_patch_cells_edge_blk", nblks_e),
                       ("p_patch_edges_cell_blk", nblks_c), ("p_patch_edges_vertex_blk", nblks_v),
                       ("p_patch_edges_quad_blk", nblks_e), ("p_patch_verts_cell_blk",
                                                             nblks_c), ("p_patch_verts_edge_blk", nblks_e)):
         a = gen[name]
-        assert a.min() >= 1 and a.max() <= tgt, name
+        assert a.min() >= 0 and a.max() < tgt, name
 
     assert gen["p_patch_cells_area"].min() > 0
     assert gen["p_patch_edges_area_edge"].min() > 0

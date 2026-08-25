@@ -66,7 +66,10 @@ def initialize(ngrid, nvec, npol=1, uspp=False, lrot=False, nks=1, current_k=1,
                     # Fortran column-major grid index (matches QE dffts%nl storage)
                     nl_list.append(np.ravel_multi_index((hx % n1, hy % n2, hz % n3), grid, order="F"))
     mill = np.asarray(mill, dtype=np.float64)               # (ngm, 3)
-    nl = np.asarray(nl_list, dtype=np.int64) + 1            # 1-based grid index
+    # 0-based, like every index array in this corpus: the kernel subscripts it directly.
+    # QE stores this G -> FFT map 1-based upstream; the port carries the map, not the
+    # numbering, and a 1-based language gets the +1 every subscript already gets.
+    nl = np.asarray(nl_list, dtype=np.int64)                # 0-based grid index
     ngm = mill.shape[0]
     npw = ngm                                              # all G active at every k
     npwx = ngm

@@ -20,6 +20,7 @@ init:
     idx:
       shape: (LEN_1D,)
       dtype: int64
+      index_array: true
 output_args:
 - b
 - e

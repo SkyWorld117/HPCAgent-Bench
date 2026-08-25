@@ -715,6 +715,7 @@ def parse_kernel(numpy_py: pathlib.Path,
     # ``legacy_shapes`` was harvested above (reused here); recover dtypes
     # likewise before the 1-D fallback.
     legacy_dtypes = _dtypes_from_initialize(numpy_py, info)
+    index_names = declared_index_arrays(info.get("init", {}) or {})
     # The DECLARED dtypes (``init.arrays[<name>].dtype``, plus ``init.dtypes``
     # for the names that are not arrays) win over the initialize-harvest, so a
     # kernel like stockham_fft that allocates the output via
@@ -741,6 +742,7 @@ def parse_kernel(numpy_py: pathlib.Path,
                         dtype=returned_dtypes.get(arg, _default_array_dtype()),
                         shape=returned_shapes[arg],
                         is_output=True,
+                        is_index=arg in index_names,
                     ))
                 continue
             shape_expr = shapes_raw.get(arg)
@@ -757,6 +759,7 @@ def parse_kernel(numpy_py: pathlib.Path,
                     dtype=legacy_dtypes.get(arg, _default_array_dtype()),
                     shape=_parse_shape_expression(shape_expr),
                     is_output=arg in output_args,
+                    is_index=arg in index_names,
                 ))
         elif arg in preset_symbols and arg not in _float_preset_names and arg not in _bool_preset_names:
             symbols.append(SymbolDesc(name=arg))
@@ -856,6 +859,17 @@ def declared_shapes(init: Dict) -> Dict[str, str]:
     for name, shape in (init.get("shapes") or {}).items():
         out.setdefault(name, shape)
     return out
+
+
+def declared_index_arrays(init: Dict) -> Set[str]:
+    """Names an ``init`` block declares as index arrays (``init.arrays[name].index_array: true``).
+
+    Read the same way as :func:`declared_shapes` and for the same reason: the declaration lives on
+    the array's own entry, so a reader that goes looking anywhere else silently sees none of them
+    -- and "no index arrays" is not an error here, it is a 1-based backend quietly adding its
+    ``+ 1`` on top of an already-1-based value."""
+    arrays = init.get("arrays") or {}
+    return {name for name, entry in arrays.items() if not isinstance(entry, str) and bool(entry.get("index_array"))}
 
 
 def declared_dtypes(init: Dict) -> Dict[str, str]:
@@ -2458,7 +2472,7 @@ def _infer_param_desc(arg: ast.AST, pname: str, arr_by, sca_by, sym_by, fn=None)
     if isinstance(arg, ast.Name):
         if arg.id in arr_by:
             a = arr_by[arg.id]
-            return ("array", ArrayDesc(name=pname, dtype=a.dtype, shape=a.shape, is_output=False))
+            return ("array", ArrayDesc(name=pname, dtype=a.dtype, shape=a.shape, is_output=False, is_index=a.is_index))
         if arg.id in sca_by:
             return ("scalar", ScalarDesc(name=pname, dtype=sca_by[arg.id].dtype))
         if arg.id in sym_by:

@@ -41,13 +41,13 @@ says why.
    whichever order you write it -- and when the array is SQUARE, `x(n, n)`, the signature
    tells you nothing at all. Transliterating `x[j,i]` to `x(j,i)` computes the TRANSPOSE:
    same shape, clean build, wrong numbers on every input, forever.
-2. **Indices start at 1.** `for i in range(n)` is `do i = 1, n`, and every subscript carried
-   over from a numpy index needs its `+ 1`.
+2. **Arrays are 1-based.** Write Fortran, not transliterated Python: `for i in range(n)` is
+   `do i = 1, n` indexing `a(i)`. Keeping the reference's 0-based counter with the offset on the
+   subscript (`do i = 0, n - 1` ... `a(i + 1)`) reads the same elements and scores the same.
 3. **`do` bounds are INCLUSIVE.** `range(1, n)` stops at `n - 1`; `do j = 1, n` runs THROUGH
    `n`. Half-open to inclusive is `do j = 1, n - 1`.
 
-Safest transliteration keeps the reference's own 0-based counters and offsets at the
-subscript -- `do i = 0, n - 1` ... `a(i + 1)` -- so bounds stay comparable line by line.
+Only conversion 1 changes the answer -- spend the attention on the axis order.
 
 ### The whole mapping, on one 2D loop nest
 
@@ -60,11 +60,18 @@ def demo(dst, src, n):             # dst, src are (n, n)
             dst[j, i] = dst[j - 1, i] * 0.5 + src[j, i]
 ```
 
-Element by element, `dst[j, i]` is `dst(i + 1, j + 1)`. Keep the reference's own 0-based
-counters and put the offset on the subscript; `range(1, n)` becomes the inclusive `1, n - 1`:
+Element by element, `dst[j, i]` is `dst(i + 1, j + 1)` -- the AXES swap. Both spellings below
+are correct and score identically; they differ only in where the offset sits.
 
 ```fortran
-! CORRECT
+! CORRECT -- idiomatic 1-based, inclusive bounds
+do i = 1, n
+  do j = 2, n
+    dst(i, j) = dst(i, j - 1) * 0.5d0 + src(i, j)
+  end do
+end do
+
+! CORRECT -- the reference's own 0-based counters, offset at the subscript
 do i = 0, n - 1
   do j = 1, n - 1
     dst(i + 1, j + 1) = dst(i + 1, (j - 1) + 1) * 0.5d0 + src(i + 1, j + 1)
@@ -136,55 +143,27 @@ side effects inside.
 
 ## The intrinsics, and the numpy each one replaces
 
-The reference is numpy. Most numpy one-liners have an exact Fortran intrinsic, and writing the
-loop by hand instead costs correctness (the 1-based / column-major traps below) before it costs
-speed. Every reduction takes an optional `dim=` (reduce along ONE axis, like numpy's `axis=`) and
-most take `mask=` (reduce only where true).
+The reference is numpy, and most numpy one-liners have an exact Fortran intrinsic. Reductions take
+`dim=` (ONE axis, like numpy's `axis=`, counting the first subscript as 1) and most take `mask=`.
 
 | numpy | Fortran | notes |
 |---|---|---|
-| `a.sum()`, `a.sum(axis=0)` | `sum(a)`, `sum(a, dim=1)` | `dim` is 1-based and counts the FIRST subscript as 1 |
-| `a.prod()` | `product(a)` | |
+| `a.sum(axis=0)` | `sum(a, dim=1)` | `dim` is 1-based; same shape for `product`, `maxval`, `minval`, `count`, `any`, `all` |
 | `a.max()` / `a.min()` | `maxval(a)` / `minval(a)` | `mask=` restricts it |
-| `a.argmax()` | `maxloc(a, dim=1)` | see the two traps below |
-| `a.argmin()` | `minloc(a, dim=1)` | |
+| `a.argmax()` / `a.argmin()` | `maxloc(a, dim=1)` / `minloc(a, dim=1)` | without `dim=` the result is a rank-1 ARRAY, not a scalar |
 | `np.flatnonzero(a == v)[0]` | `findloc(a, v, dim=1)` | `back=.true.` for the LAST match; 0 when absent |
 | `np.count_nonzero(m)` | `count(m)` | `m` must be LOGICAL, not integer |
-| `m.any()` / `m.all()` | `any(m)` / `all(m)` | |
-| `np.where(m, x, y)` | `merge(x, y, m)` | elemental; evaluates BOTH sides |
-| `a[m]` | `pack(a, m)` | rank-1 result, allocates |
-| `np.put(out, idx, v)` | `unpack(v, m, field)` | inverse of `pack` |
-| `np.broadcast_to` / `np.repeat` | `spread(a, dim, n)` | adds a dimension |
-| `a.T` | `transpose(a)` | rank 2 only |
-| `a.reshape(...)` | `reshape(a, [n, m])` | fills COLUMN-major -- see below |
-| `np.roll(a, k)` | `cshift(a, k)` | `eoshift` shifts in `boundary=` instead of wrapping |
+| `np.where(m, x, y)` | `merge(x, y, m)` | elemental: BOTH sides evaluated, so it cannot guard a divide-by-zero |
 | `np.dot(u, v)` | `dot_product(u, v)` | |
-| `a @ b` | `matmul(a, b)` | NOT a BLAS call -- see below |
-| `np.linalg.norm(a)` | `norm2(a)` | computes `sqrt(sum(a*a))` without the overflow |
+| `a @ b` | `matmul(a, b)` | plain O(n**3) inline, NOT `dgemm` on this build line |
+| `a[m]`, `a.T`, `a.reshape(..)`, `np.roll(a, k)` | `pack`, `transpose`, `reshape`, `cshift` | each ALLOCATES a temporary; `reshape` fills COLUMN-major |
 
-**`maxloc`/`minloc` have two traps, both silent.** They return a rank-1 ARRAY of subscripts, so
-`maxloc(v)` is an array of size 1 and only `maxloc(v, dim=1)` is the scalar you want. And the
-subscript is 1-BASED, so it is `numpy_argmax + 1` -- writing it straight into an output the
-reference filled with an argmax gives every element off by one, on every input.
+An index array you are GIVEN arrives 1-based: numpy's `a[ip[j]]` is `a(ip(j))`, no `+ 1` on the
+value. The harness rebases the table on the way in so a gather reads the way Fortran reads. Its
+OWN subscript is ordinary and still follows rule 2.
 
-**`reshape` fills column-major.** `np.reshape` defaults to C order, so a transliterated reshape
-permutes the data. numpy's own `order='F'` is the one that matches.
-
-**`merge` is not a short-circuit.** It is elemental: both `tsource` and `fsource` are evaluated
-everywhere, so it cannot guard a division by zero or an out-of-range subscript the way a Python
-conditional expression can. That is also why it is fast -- it is a select, not a branch.
-
-**`matmul` is not automatically fast.** gfortran expands it inline as a plain O(n**3) loop nest,
-about what a reasonable hand-written nest gives; it becomes a BLAS `dgemm` only under
-`-fexternal-blas` with a BLAS linked, which is not this build line. So treat it as correct and
-tidy rather than as a free win, and if a matmul is the hot loop, blocking it by hand is a real
-option here in a way it would not be against a tuned library.
-
-**`pack`, `unpack`, `spread`, `reshape`, `transpose` and `cshift` allocate.** Each materializes a
-whole temporary array. In a hot loop that is a full pass of memory traffic per call, which can
-cost more than the loop it replaced -- so prefer them at the OUTER level, or where they remove a
-pass rather than add one. The reductions (`sum`, `count`, `maxval`, ...) and the elemental
-`merge` do not allocate.
+An index you OUTPUT is 0-based -- nothing rebases it on the way out, so hand back the reference's
+numbering: `out_index(1) = maxloc(v, dim=1) - 1`.
 
 ## Workflow
 

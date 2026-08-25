@@ -47,6 +47,7 @@ init:
     neigh:
       shape: (ncells, 4)
       dtype: int64
+      index_array: true
     normals:
       shape: (ncells, 4, 3)
     res_density:

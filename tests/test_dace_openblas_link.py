@@ -10,6 +10,7 @@ reached ``cblas_dgemm`` and that ``ldd`` resolves the intended library.
 """
 import ctypes
 import ctypes.util
+import hashlib
 import importlib.util
 import json
 import os
@@ -53,8 +54,28 @@ def cache_root() -> pathlib.Path:
     return pathlib.Path(os.environ.get(CACHE_ENV_VAR, pathlib.Path.home() / ".cache" / "optarena-blas"))
 
 
+def toolchain() -> tuple:
+    """``(cc, fc)`` this build must use -- resolved, never hardcoded, honouring ``CC``/``FC``."""
+    return shutil.which(os.environ.get("CC", "gcc")), shutil.which(os.environ.get("FC", "gfortran"))
+
+
+def toolchain_id() -> str:
+    """Short fingerprint of the compiler the cached build was made with.
+
+    OpenBLAS's ``getarch`` probe writes its OWN ``Makefile.conf`` on the first ``make``, compiler
+    and link flags baked in, and every later ``make`` reuses it -- so a tree built once on a host
+    that resolved the system gcc keeps linking against it even after the environment is fixed
+    (gate 607164 lost 19 of 20 failures to exactly that). Key the prefix on the compiler and a
+    toolchain change gets a fresh tree instead of a silently wrong one.
+    """
+    cc, _ = toolchain()
+    banner = subprocess.run([cc, "--version"], capture_output=True, text=True).stdout if cc else ""
+    stamp = f"{pathlib.Path(cc).resolve() if cc else 'none'}\n{banner.splitlines()[0] if banner else ''}"
+    return hashlib.sha256(stamp.encode()).hexdigest()[:12]
+
+
 def openmp_prefix() -> pathlib.Path:
-    return cache_root() / "openblas-openmp"
+    return cache_root() / f"openblas-openmp-{toolchain_id()}"
 
 
 def built_library() -> pathlib.Path:
@@ -79,7 +100,11 @@ def build_openblas_openmp() -> pathlib.Path:
         source.parent.mkdir(parents=True, exist_ok=True)
         run_step(["git", "clone", "--depth", "1", "--branch", OPENBLAS_TAG, OPENBLAS_REPO, str(source)], CLONE_TIMEOUT)
     # Runners are uarch-heterogeneous; gcc-13 fails the autodetected AVX512 kernels. Pin AVX2.
-    run_step(["make", "-C", str(source), "USE_OPENMP=1", "TARGET=HASWELL", f"-j{BUILD_JOBS}"], BUILD_TIMEOUT)
+    # Name the compilers rather than letting getarch pick: the prefix is keyed on CC, so a build
+    # that resolved something else would file itself under a fingerprint it does not match.
+    cc, fc = toolchain()
+    run_step(["make", "-C",
+              str(source), f"CC={cc}", f"FC={fc}", "USE_OPENMP=1", "TARGET=HASWELL", f"-j{BUILD_JOBS}"], BUILD_TIMEOUT)
     run_step(["make", "-C", str(source), f"PREFIX={openmp_prefix() / 'install'}", "install"], CLONE_TIMEOUT)
     assert library.exists(), f"OpenBLAS {OPENBLAS_TAG} reported an install but {library} is missing"
     return library

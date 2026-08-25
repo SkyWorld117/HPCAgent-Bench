@@ -112,9 +112,9 @@ def velocity_tendencies(
     vn = p_prog_vn  # (nproma, nlev,   nblks_e)
     w = p_prog_w  # (nproma, nlevp1, nblks_c)
 
-    # ---- gather helper: A[idx[:,:,n]-1, jk, blk[:,:,n]-1] -> (nproma, nblks)
+    # ---- gather helper: A[idx[:,:,n], jk, blk[:,:,n]] -> (nproma, nblks)
     def gat(A, idx, blk, n, jk):
-        return A[idx[:, :, n] - 1, jk, blk[:, :, n] - 1]
+        return A[idx[:, :, n], jk, blk[:, :, n]]
 
     # ===== z_w_v = cells2verts_scalar_ri(w, cells_aw_verts) (6 cells/vertex) ==
     vci = p_patch_verts_cell_idx  # (nproma, nblks_v, 6)

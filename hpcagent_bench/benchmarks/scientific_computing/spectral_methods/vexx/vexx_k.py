@@ -180,8 +180,11 @@ def initialize(ngrid,
                     nl_list.append(np.ravel_multi_index((hx % n1, hy % n2, hz % n3), grid))
                     nlm_list.append(np.ravel_multi_index(((-hx) % n1, (-hy) % n2, (-hz) % n3), grid))
     mill = np.array(mill_list, dtype=np.int64).T  # (3, ngm) Miller indices
-    nl = (np.array(nl_list, dtype=np.int32) + 1)  # 1-based (Fortran nl)
-    nlm = (np.array(nlm_list, dtype=np.int32) + 1)
+    # 0-based, like every index array in this corpus. QE numbers these tables 1-based
+    # upstream; the port carries the map, not the numbering, and a 1-based language gets
+    # the +1 every subscript already gets when the reference is lowered to it.
+    nl = np.array(nl_list, dtype=np.int32)
+    nlm = np.array(nlm_list, dtype=np.int32)
     ngm = nl.shape[0]  # G-vectors on the EXX grid
     npw = ngm  # plane waves at this k (npw <= ngm)
     n = ngm  # wavefunction G count
@@ -206,9 +209,9 @@ def initialize(ngrid,
     x_occupation = rng.uniform(0.0, occ_hi, size=(nbnd, nks)).astype(np.float64)
 
     # 1-based index tables: igk_exx maps wavefunction-G -> G-sphere; index_xk/index_xkq/xkq_collect are the (k,q)->k+q maps for a single gamma point.
-    igk_exx = np.tile(np.arange(1, npwx + 1, dtype=np.int32)[:, None], (1, nks))
-    index_xk = np.ones(nks, dtype=np.int32)
-    index_xkq = np.ones((nks, 1), dtype=np.int32)  # nqs = 1
+    igk_exx = np.tile(np.arange(0, npwx, dtype=np.int32)[:, None], (1, nks))
+    index_xk = np.zeros(nks, dtype=np.int32)
+    index_xkq = np.zeros((nks, 1), dtype=np.int32)  # nqs = 1
     xk = np.zeros((3, nks), dtype=np.float64)
     xkq_collect = np.zeros((3, nks), dtype=np.float64)
 
@@ -240,16 +243,16 @@ def initialize(ngrid,
     nat = _NAT
     nh = _NH
     nkb = nat * nh
-    ofsbeta = np.array([na * nh + 1 for na in range(nat)], dtype=np.int32)
+    ofsbeta = np.array([na * nh for na in range(nat)], dtype=np.int32)
     # ijtoh: (ih,jh) -> packed upper-triangle Q-function index, symmetric since Q_ij = Q_ji.
     nij = nh * (nh + 1) // 2
     ijtoh = np.zeros((nh, nh), dtype=np.int32)
     k = 0
     for ih in range(nh):
         for jh in range(ih, nh):
-            k += 1
             ijtoh[ih, jh] = k
             ijtoh[jh, ih] = k
+            k += 1
     # qgm: synthetic small/smooth Q-functions (NOT true qvan2); US/PAW Fock isn't Hermitian here, validated by execution + divergence-from-NC instead.
     qgm = ((rng.standard_normal((ngm, nij)) + 1j * rng.standard_normal((ngm, nij))) * 0.05).astype(np.complex128)
     # eigqts/sfac: per-atom structure-factor phases exp(-i G.tau).

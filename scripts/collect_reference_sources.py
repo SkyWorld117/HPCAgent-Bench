@@ -58,6 +58,18 @@ from hpcagent_bench.spec import KERNELS, BenchSpec
 # ---------------------------------------------------------------------------
 WORK_ROOT: pathlib.Path = paths.ROOT.parent
 
+
+def repo_relative(path: pathlib.Path) -> str:
+    """``path`` as a repo-relative string when it is inside the checkout, else unchanged.
+
+    The skip report is COMMITTED (REFERENCE_SOURCES.md), so an absolute path in it re-writes the
+    file on every checkout that lives somewhere else and reads as a diff nobody made."""
+    try:
+        return str(path.relative_to(paths.ROOT))
+    except ValueError:
+        return str(path)
+
+
 #: The fixed attribution wording (per-line, comment prefix added per language).
 HEADER_TEMPLATE = (
     "Adapted from {upstream}.",
@@ -456,7 +468,8 @@ def handle_kernelbench(specs: List[BenchSpec], roots: Roots) -> FamilyResult:
         for spec in specs:
             res.skips.append(
                 SkipItem(
-                    "kernelbench", spec.module_name, f"submodule not checked out at {roots.kernelbench}; "
+                    "kernelbench", spec.module_name,
+                    f"submodule not checked out at {repo_relative(roots.kernelbench)}; "
                     f"run: git submodule update --init --recursive"))
         return res
     sources = kernelbench_sources(roots.kernelbench)
