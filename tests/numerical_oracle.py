@@ -784,7 +784,7 @@ def run_kernel(short: str,
         # ISO standard-algorithm C++: a second emit of the same kernel, opt-in only.
         if only_backends is not None and ISOPAR in only_backends:
             status[ISOPAR] = ("skip:native-emit" if native_emit_error is not None else _run_isopar(
-                short, info, tdp, fptype, emit_prec, binding, by, syms, expected, compare, rtol, atol))
+                short, info, tdp, fptype, emit_prec, binding, by, syms, expected, compare, rtol, atol, index_names))
         # DaCe: the generated *_dace.py lowered, compiled and run, opt-in only. Independent of the
         # native emit -- a kernel the C target cannot express still has a DaCe column to grade.
         if only_backends is not None and DACE in only_backends:
@@ -1302,7 +1302,8 @@ def _run_dace_backend(short, info, by, syms, expected, compare, rtol, atol) -> s
     return "FAIL:crash:" + (proc.stderr or proc.stdout)[-160:].replace("\n", " ")
 
 
-def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected, compare, rtol, atol) -> str:
+def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected, compare, rtol, atol,
+                index_names) -> str:
     """ISO standard-algorithm backend: emit ``<base>_isopar.cpp``, compile it as ordinary C++, and
     call it through the SAME binding as ``cpp`` -- the variant keeps the symbol and the ABI, only the
     body's spelling changes. ``par_unseq`` licenses reassociation, which is why this is graded on the
@@ -1324,7 +1325,7 @@ def _run_isopar(short, info, tdp, fptype, emit_prec, binding, by, syms, expected
     if c.returncode:
         return "FAIL:compile" + _diag(c)
     try:
-        return _invoke_isolated("cpp", binding, so, by, syms, expected, compare, rtol, atol)
+        return _invoke_isolated("cpp", binding, so, by, syms, expected, compare, rtol, atol, index_names)
     except Exception as exc:  # noqa: BLE001
         return f"FAIL:{type(exc).__name__}"
 

@@ -155,7 +155,7 @@ def _validate_native(src, x, expected, out_shape, shapes, syms):
         so = d / f"l_{b}.so"
         cc = subprocess.run(no.COMPILE[b] + [str(d / f"f{ext}"), "-o", str(so)], capture_output=True, text=True)
         assert cc.returncode == 0, f"{b} compile: {cc.stderr[-200:]}"
-        st = no._invoke_isolated(b, binding, so, by, syms, exp, ["ret_arr0"], 1e-9, 1e-9)
+        st = no._invoke_isolated(b, binding, so, by, syms, exp, ["ret_arr0"], 1e-9, 1e-9, frozenset())
         assert st == "ok", f"{b}: {st}"
 
 
