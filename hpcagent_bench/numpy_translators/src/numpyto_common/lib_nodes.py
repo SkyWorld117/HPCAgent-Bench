@@ -488,12 +488,22 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
         # shape-propagation caller (gem's ``r = np.sqrt(np.sum(d * d, axis=2))``,
         # force_lj, kmeans).
         if _is_reduction_call(expr):
-            if not expr.args:
+            # The METHOD spelling carries its operand in the RECEIVER, not in ``args[0]``:
+            # ``m.any(axis=-1)`` resolved to None where ``np.any(m, axis=-1)`` resolved fine, so
+            # every shape built on one silently fell back to a broadcast partner's extent --
+            # cp2k_density_matrix_trs4's ``c_pos`` came out (nnz, 1) instead of (nnz, fanout), and
+            # the scatter that reads it then ran over a third of the contributions.
+            method_form = (isinstance(expr.func, ast.Attribute)
+                           and not (isinstance(expr.func.value, ast.Name) and expr.func.value.id in ("np", "numpy")))
+            # ``_read_axis_keepdims`` reads the axis from positional slot 1, so the method's args are
+            # shifted by one to put them in the vocabulary it expects.
+            red_args = ([expr.func.value] + list(expr.args)) if method_form else list(expr.args)
+            if not red_args:
                 return None
-            axes, keepdims = _read_axis_keepdims(expr.args, expr.keywords)
+            axes, keepdims = _read_axis_keepdims(red_args, expr.keywords)
             if axes is None:
                 return None
-            base = _iter_extent_of(expr.args[0], shape_table)
+            base = _iter_extent_of(red_args[0], shape_table)
             if base is None:
                 return None
             n = len(base)
@@ -729,6 +739,16 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                 out = [_const_or_name(t) for t in shapes[0]]
                 out.insert(axis, _const(len(names)))
                 return tuple(out)
+        # A BINARY ufunc BROADCASTS its operands; the first-arg rule below is only right when one
+        # operand carries the whole extent. ``np.equal(a[:, None, :], b[:, :, None])`` -- what the
+        # frontend rewrites ``a[:, None, :] == b[:, :, None]`` into -- came back with the LEFT
+        # side's (N, 1, F) rather than (N, F, F), so cp2k_density_matrix_trs4's match plane was
+        # declared a third of its size and every reduction over it ran short. The Compare spelling
+        # already broadcast; the function spelling now agrees with it.
+        if isinstance(expr.func, ast.Attribute) and expr.func.attr in _BROADCASTING_UFUNCS and len(expr.args) >= 2:
+            ext = _broadcast_children(list(expr.args), shape_table)
+            if ext is not None:
+                return ext
         # Elementwise/unary math functions (abs, sqrt, exp, sin, cos, log, ...)
         # preserve the operand's iter extent -- pick the first arg that resolves.
         for arg in expr.args:
@@ -1045,6 +1065,17 @@ def _all_integer_operands(args: List[ast.expr], local_dtypes: Optional[Dict[str,
 #: integer, not the double default: a double temp rounds every value above 2**53
 #: (``np.power(3, 39)`` came back 11 short). ``divide`` is NOT here -- it always
 #: returns float, and its cast is applied in :func:`expand_divide`.
+#: numpy ufuncs whose result extent is the BROADCAST of their operands, not the first one's. Only
+#: functions whose every argument is an OPERAND belong here: a call whose second positional slot is
+#: an axis, a shape or a tolerance must keep the first-arg rule, or that slot's extent would be
+#: folded into the result.
+_BROADCASTING_UFUNCS: Set[str] = {
+    "add", "subtract", "multiply", "divide", "true_divide", "floor_divide", "power", "float_power", "mod", "remainder",
+    "fmod", "maximum", "minimum", "fmax", "fmin", "hypot", "arctan2", "logaddexp", "logaddexp2", "copysign",
+    "nextafter", "heaviside", "less", "less_equal", "greater", "greater_equal", "equal", "not_equal", "logical_and",
+    "logical_or", "logical_xor", "bitwise_and", "bitwise_or", "bitwise_xor", "left_shift", "right_shift"
+}
+
 _INT_PRESERVING_ELEMENTWISE: Set[str] = {"add", "subtract", "multiply", "power", "maximum", "minimum"}
 
 
@@ -1835,7 +1866,11 @@ def _expand_arg_reduction(target, args, shape_table, kwargs, op: str):
         out_sub = ast.Subscript(value=_name(target.id), slice=out_elts[0], ctx=ast.Store())
     else:
         out_sub = ast.Subscript(value=_name(target.id), slice=ast.Tuple(elts=out_elts, ctx=ast.Load()), ctx=ast.Store())
-    best_val = "__ar_val"
+    # The running-best temp is named after its TARGET. A fixed name collided across two argmax
+    # expansions in one kernel, and when the two operands had different dtypes the second
+    # expansion's temp inherited the first's declared type -- cp2k_density_matrix_trs4 compared an
+    # integer temp with .eqv. because the other argmax in the same body ran over a boolean plane.
+    best_val = f"__ar_val_{target.id}" if isinstance(target, ast.Name) else "__ar_val"
     init_stmts: List[ast.stmt] = [
         ast.Assign(targets=[_store(best_val)], value=init_val),
         ast.Assign(targets=[out_sub], value=_const(0)),
@@ -8342,6 +8377,21 @@ _ELEMENT_WRITE_EXPANDERS = {
     # went through a NULL pointer.
     ("np", "maximum.accumulate"),
     ("np", "minimum.accumulate"),
+    # Same shape again: the tile-and-write nest replaces the Assign that carried the marker, so a
+    # fresh ``row_of = np.repeat(...)`` was emitted with no declaration at all.
+    ("np", "repeat"),
+    # An AXIS reduction writes one element per kept-axes position, so its fresh LHS is an array and
+    # needs the marker like any other element-write. Without it the Fortran backend declared
+    # ``valid = match.any(axis=-1)`` allocatable -- its extent names a computed scalar -- and then
+    # had no site to allocate it at, so the reduction's first store went into an unallocated array.
+    ("np", "sum"),
+    ("np", "prod"),
+    ("np", "mean"),
+    ("np", "any"),
+    ("np", "all"),
+    ("np", "count_nonzero"),
+    ("np", "argmax"),
+    ("np", "argmin"),
     ("np", "roll"),
     ("np", "tril"),
     ("np", "pad"),
@@ -8886,3 +8936,9 @@ class LibNodeRewriter(ast.NodeTransformer):
         if prelude:
             return prelude + [node]
         return node
+
+
+#: Public name for the extent oracle. The Fortran intrinsic gate has to ask the same question
+#: lowering asks -- what rank does this operand actually have -- and a backend reaching across for a
+#: leading-underscore name would be reaching for something this module never promised to keep.
+iter_extent_of = _iter_extent_of

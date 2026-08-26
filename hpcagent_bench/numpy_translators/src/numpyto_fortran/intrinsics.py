@@ -16,9 +16,9 @@ numpy's, and a wrong ``dim`` is a silently wrong answer rather than a refusal. `
 are held back for the neighbouring reason -- ``MAXLOC`` is 1-based where numpy is 0-based.
 """
 import ast
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from numpyto_common.lib_nodes import shape_exprs_equal
+from numpyto_common.lib_nodes import iter_extent_of, shape_exprs_equal
 
 #: ``(module, attr)`` keys whose Fortran intrinsic reduces the whole array to a scalar AND agrees
 #: with numpy on a FLOATING operand. The set is short on purpose -- each name kept out is a
@@ -152,6 +152,29 @@ def operand_is_float(call: ast.Call, dtypes: Dict[str, str]) -> bool:
     return all(_slot_is_float(call.args[i], dtypes) for i in slots)
 
 
+def conformable_operands(args: List[ast.expr], shapes: Dict[str, Tuple[str, ...]]) -> bool:
+    """True when every array operand already has the SAME rank, with no broadcasting anywhere.
+
+    Fortran's elementwise intrinsics demand CONFORMANCE; they do not broadcast. An operand that
+    reaches its rank by broadcasting -- ``keep[:, None, None]`` against a rank-3 block buffer --
+    has no MERGE spelling at all, and emitting one wrote the mask's single axis into the third
+    subscript slot. A newaxis is the reliable signal, since the extent it inserts is a legitimate
+    rank on paper; a rank the shape table cannot resolve declines too, rather than guess.
+    """
+    ranks: Set[int] = set()
+    for arg in args:
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Constant) and sub.value is None:
+                return False
+        if isinstance(arg, ast.Constant):
+            continue  # a scalar branch conforms with anything
+        ext = iter_extent_of(arg, shapes)
+        if ext is None:
+            return False
+        ranks.add(len(ext))
+    return len(ranks) <= 1
+
+
 def renders_natively(key: Tuple[str, str], call: ast.Call, shapes: Dict[str, Tuple[str, ...]],
                      dtypes: Dict[str, str]) -> bool:
     """True when Fortran has an intrinsic for ``call`` and lowering should leave it alone.
@@ -184,7 +207,7 @@ def renders_natively(key: Tuple[str, str], call: ast.Call, shapes: Dict[str, Tup
     if not operand_is_float(call, dtypes):
         return False
     if key in ELEMENTWISE_INTRINSICS and len(call.args) == 3 and not call.keywords:
-        return True
+        return conformable_operands(call.args, shapes)
     if key in WHOLE_ARRAY_REDUCTIONS and len(call.args) == 1 and not call.keywords:
         return True
     if key not in AXIS_REDUCTIONS:

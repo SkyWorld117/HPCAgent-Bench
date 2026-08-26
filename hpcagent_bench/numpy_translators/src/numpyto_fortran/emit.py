@@ -3439,20 +3439,47 @@ def _emit_fortran_helper(hkir: KernelIR, parent: Optional["_FortranBodyEmitter"]
     default_real = f"real({rk})"
     ldt = hkir.local_dtypes
     param_set = set(hkir.input_args)
+    # A local array's bound may name a scalar the helper COMPUTES rather than one it is passed
+    # (``oh = (h + 2 * padding - 1) // stride + 1``). Fortran evaluates an automatic array's bounds
+    # on entry to the scope, before any of the body runs, so such an array is sized from an
+    # undefined value -- and the declaration also precedes the integer's own, which implicitly types
+    # it REAL and fails the build outright. Same rule and same machinery as the top-level kernel:
+    # declare it allocatable and allocate at its marker site, which follows the assignment.
+    allowed_bound_names: Set[str] = set()
+    for sym in hkir.symbols:
+        allowed_bound_names.add(sym.name)
+    for sca in hkir.scalars:
+        if sca.dtype in ("int", "int32", "int64"):
+            allowed_bound_names.add(sca.name)
     local_arr_decls: List[str] = []
+    helper_inline_alloc: Dict[str, Tuple[List[str], str]] = {}
     for lname, lshape in hkir.zeros_locals.items():
         if lname in param_set:
             continue
         rev = [_to_fortran_shape_token(s) for s in reversed(lshape)] if lshape else ["1"]
         dt = ldt.get(lname)
         ftype = _fortran_type(dt) if dt else default_real
-        local_arr_decls.append(f"{ftype} :: {lname}({', '.join(rev)})")
+        if any(_shape_token_uses_unknown(tok, allowed_bound_names) for tok in rev):
+            colons = ", ".join(":" for _ in rev)
+            local_arr_decls.append(f"{ftype}, allocatable :: {lname}({colons})")
+            helper_inline_alloc[lname] = (rev, ftype)
+        else:
+            local_arr_decls.append(f"{ftype} :: {lname}({', '.join(rev)})")
     implicit = _collect_implicit_locals(hkir)
     local_decls = local_arr_decls + [f"{ft} :: {nm}" for nm, ft in implicit]
     iter_vars = _collect_for_targets(hkir.tree.body)
     iter_decls = [f"{_fortran_type('int')} :: " + ", ".join(sorted(iter_vars))] if iter_vars else []
     be = _FortranBodyEmitter(hkir)
     be.return_mode = ret_name
+    be.inline_alloc_locals = helper_inline_alloc
+    # The same name -> int-kind map the top-level kernel builds. Without it a helper's implicit
+    # integer local is untyped here, so ``(h + 2 * padding - 1) // stride`` took the REAL floor-div
+    # path: a real-valued bound assigned to an integer, which is a deleted feature as a DO end
+    # expression and a silent truncation everywhere else.
+    be._int_kinds = {
+        nm: ("int64" if ft == "integer(c_int64_t)" else "int32")
+        for nm, ft in implicit if ft.startswith("integer(c_int")
+    }
     body = be.emit_block(hkir.tree.body, indent="            ")
     if parent is not None:
         # The shared procedures a helper body needs are emitted ONCE, by the host, and reached by

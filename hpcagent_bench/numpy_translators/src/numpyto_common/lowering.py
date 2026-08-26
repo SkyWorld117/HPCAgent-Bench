@@ -775,20 +775,42 @@ class _ScatterAtRewriter(ast.NodeTransformer):
         # peeled back to its 2-D base) suffixes one iter per axis.
         iters = ([f"__sat{self._n}"] if len(bound) == 1 else [f"__sat{self._n}_{d}" for d in range(len(bound))])
         iter_nodes = [ast.Name(id=i, ctx=ast.Load()) for i in iters]
+        # A scatter whose target rows are BLOCKS rather than scalars: the index picks ONE leading
+        # axis and every remaining axis belongs to the target and the value alike. Iterated over the
+        # index alone, the body is a whole-block assignment that the emitters scalarise from the
+        # TARGET's shape, which leaves the value operand as a bare pointer with no subscript --
+        # cp2k_density_matrix_trs4's (nnz * fanout, bs, bs) contribution buffer. Extending the nest
+        # over the trailing axes keeps both sides at the same rank.
+        trail: Tuple[str, ...] = ()
+        if isinstance(target, ast.Name):
+            tshape = tuple(self.shapes.get(target.id) or ())
+            val_ext = _iter_extent_of(self._peel_flatten(vals), self.shapes)
+            if len(tshape) > 1 and val_ext is not None and len(val_ext) == len(bound) + len(tshape) - 1:
+                trail = tuple(str(t) for t in tshape[1:])
+        trail_iters = [f"__sat{self._n}_t{d}" for d in range(len(trail))]
+        trail_nodes = [ast.Name(id=i, ctx=ast.Load()) for i in trail_iters]
         idx_k = _scalarize_at_iters(idx_peeled, iter_nodes, self.shapes)
-        val_k = self._val_at(vals, iter_nodes)
+        val_k = self._val_at(vals, iter_nodes + trail_nodes)
+
+        def _cell(ctx: ast.expr_context) -> ast.expr:
+            base = self._write_through_target(target, idx_k, ctx)
+            if not trail_nodes:
+                return base
+            lead = list(base.slice.elts) if isinstance(base.slice, ast.Tuple) else [base.slice]
+            elts = [copy.deepcopy(e) for e in lead] + [copy.deepcopy(t) for t in trail_nodes]
+            return ast.Subscript(value=ast.Name(id=base.value.id, ctx=ast.Load()),
+                                 slice=ast.Tuple(elts=elts, ctx=ast.Load()),
+                                 ctx=ctx)
+
         if op in self._AUG:
-            lhs = self._write_through_target(target, idx_k, ast.Store())
-            stmt: ast.stmt = ast.AugAssign(target=lhs, op=self._AUG[op](), value=val_k)
+            stmt: ast.stmt = ast.AugAssign(target=_cell(ast.Store()), op=self._AUG[op](), value=val_k)
         else:  # maximum / minimum -> t[i] = fn(t[i], v)
-            lhs = self._write_through_target(target, idx_k, ast.Store())
-            cur = self._write_through_target(target, idx_k, ast.Load())
-            stmt = ast.Assign(targets=[lhs],
+            stmt = ast.Assign(targets=[_cell(ast.Store())],
                               value=ast.Call(func=ast.Name(id=self._FOLD[op], ctx=ast.Load()),
-                                             args=[cur, val_k],
+                                             args=[_cell(ast.Load()), val_k],
                                              keywords=[]))
         body: List[ast.stmt] = [stmt]
-        for it, ext in zip(reversed(iters), reversed(bound)):  # nest deepest-last
+        for it, ext in zip(reversed(iters + trail_iters), reversed(tuple(bound) + trail)):  # nest deepest-last
             body = [
                 ast.For(target=ast.Name(id=it, ctx=ast.Store()),
                         iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()),
