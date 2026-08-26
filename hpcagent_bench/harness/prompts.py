@@ -403,6 +403,11 @@ ALWAYS_INLINE_MANUALS = frozenset({
     # optimizing agent's prompt at all; listed here so the size gate does not silently absorb it
     # into the instrument set while that decision is still open.
     "pytorch-to-numpy",
+    # DRAFT (docs/skills_draft): a REPO-TOOL page. Nothing in this module selects it, so shipping it
+    # under hpcagent_bench/skills would put 100 lines in EVERY prompt for a subcommand no prompt
+    # mentions. It stays drafted until an MPR task axis exists to gate it on; listed here so the
+    # size gate does not absorb it into the instrument set meanwhile.
+    "mpr",
 })
 
 #: Submission language -> the page that governs writing it.
