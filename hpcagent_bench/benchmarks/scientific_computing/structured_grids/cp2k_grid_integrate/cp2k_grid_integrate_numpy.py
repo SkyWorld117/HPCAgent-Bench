@@ -129,15 +129,22 @@ def cp2k_grid_integrate(
                 product_center = rp2
 
             dr = dh[idir, idir]
+            # The extent is NAMED, not read back off the array: ``rel.size`` on a local built by
+            # ``np.arange`` is an attribute of a value, and the loop bounds below need an extent.
+            nrel = 2 * span + 1
             rel = np.arange(-span, span + 1)
             displacement = (center + rel).astype(zeta.dtype) * dr - product_center
             # power_icoef = gaussian * displacement**icoef, built by the same repeated multiply
             # as the scalar loop: np.cumprod is a strict left-to-right scan, not a reassociated
             # reduction, so this is bit-identical -- the closed-form ``**`` power is not.
-            seed = np.empty((lp + 1, rel.size), dtype=zeta.dtype)
+            seed = np.empty((lp + 1, nrel), dtype=zeta.dtype)
             seed[0] = np.exp(-zetp * displacement * displacement)
             seed[1:] = displacement
-            pol[idir][:lp + 1, rel + MAX_CUBE_RADIUS] = np.cumprod(seed, axis=0)
+            # The scan is materialised into its own local before the scatter: left inside the
+            # store, the scatter is scalarised first and the cumprod reaches the emitter with a
+            # single-element operand, which is no scan at all.
+            scan = np.cumprod(seed, axis=0)
+            pol[idir][:lp + 1, rel + MAX_CUBE_RADIUS] = scan
 
         radius2 = radius[task] * radius[task]
         axis_rel = []

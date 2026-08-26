@@ -401,8 +401,12 @@ def _select(cond_node, node_arr, cell_arr):
     """``(type == NODE) ? node : cell`` for a whole shape-factor buffer at once.
     ``cond_node`` is a scalar type-selector (the same for every particle and
     every tap row), so the row-at-a-time copy the reference does is one
-    array-wide select."""
-    return node_arr if cond_node else cell_arr
+    array-wide select.
+
+    Spelled as ``np.where`` rather than a Python conditional expression: both arms always have the
+    same shape, and the conditional form leaves the result's rank undecidable, which costs every
+    later ``sf.shape[0]`` its extent."""
+    return np.where(cond_node, node_arr, cell_arr)
 
 
 def _tap1(vec, sf, base_idx):
@@ -410,7 +414,11 @@ def _tap1(vec, sf, base_idx):
     ``vec``: 1-D grid line (view). ``sf``: (ntaps, n) shape factors.
     ``base_idx``: (n,) leftmost per-particle grid index (lo already added)."""
     taps = np.arange(sf.shape[0])
-    gathered = vec[base_idx[None, :] + taps[:, None]]  # (ntaps, n)
+    # The index array is NAMED rather than spelled inside the subscript: a gather whose index is a
+    # broadcast BinOp of two newaxis reads leaves the newaxes for the emitter to resolve, and they
+    # do not survive scalarisation.
+    rows = base_idx[None, :] + taps[:, None]  # (ntaps, n)
+    gathered = vec[rows]
     return np.sum(sf * gathered, axis=0)
 
 
