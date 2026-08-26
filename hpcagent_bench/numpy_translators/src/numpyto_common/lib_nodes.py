@@ -677,7 +677,8 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                     off = abs(kc)
                 side = (base[0] if off == 0 else ast.BinOp(left=base[0], op=ast.Add(), right=_const(off)))
                 return (side, copy.deepcopy(side))
-            # ``np.cumsum``/``np.cumprod``: a prefix scan is shape-preserving along its
+            # ``np.cumsum``/``np.cumprod`` and the ``maximum``/``minimum.accumulate`` running
+            # extremes: a prefix scan is shape-preserving along its
             # axis, so the result takes the operand's extent. Skipping this leaves a
             # fresh LHS (histogram_equalization's ``cdf = np.cumsum(hist)``) unsized,
             # so ``_ELEMENT_WRITE_EXPANDERS`` (gated on the target already having a
@@ -685,7 +686,11 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # pointer (SIGSEGV). numpy flattens an axis-less scan over an N-D operand,
             # which the cumulative expander rejects -- leave unresolved rather than
             # claim a wrong shape.
-            if attr in ("cumsum", "cumprod") and expr.args:
+            # ``np.searchsorted(a, v)`` returns one index per element of ``v``, so the result takes
+            # the VALUES operand's extent, not the sorted array's.
+            if attr == "searchsorted" and len(expr.args) >= 2:
+                return _iter_extent_of(expr.args[1], shape_table)
+            if attr in ("cumsum", "cumprod", "maximum.accumulate", "minimum.accumulate") and expr.args:
                 base = _iter_extent_of(expr.args[0], shape_table)
                 if base is None:
                     return None
@@ -3993,6 +3998,22 @@ def _pad_mode_str(args: List[ast.expr], kwargs) -> str:
     return "constant"
 
 
+def _pad_fill(kwargs) -> ast.expr:
+    """``np.pad``'s ``constant_values``, or numpy's own default of 0.
+
+    A per-axis sequence is refused rather than guessed. Not cosmetic: max_filter pads its tail with
+    ``-inf`` precisely so the running maximum never sees it, and filling zeros there instead
+    returned a too-large maximum on every trailing block -- a wrong answer, not a refusal.
+    """
+    for keyword in (kwargs or []):
+        if keyword.arg != "constant_values":
+            continue
+        if isinstance(keyword.value, (ast.Tuple, ast.List)):
+            raise NotImplementedError("np.pad: per-axis constant_values unsupported")
+        return copy.deepcopy(keyword.value)
+    return _const(0.0)
+
+
 def expand_pad(target: ast.expr,
                args: List[ast.expr],
                shape_table: Dict[str, Tuple[str, ...]],
@@ -4047,9 +4068,9 @@ def expand_pad(target: ast.expr,
         return ast.Subscript(value=_name(base_name), slice=sl, ctx=ast.Load())
 
     if mode == "constant":
-        # Zero the whole padded buffer, then copy the interior shifted by before.
+        # Fill the whole padded buffer with the pad value, then copy the interior shifted by before.
         zero_iters = [f"__pz{k}" for k in range(rank)]
-        zero_body = [ast.Assign(targets=[_store_target([_name(v) for v in zero_iters])], value=_const(0.0))]
+        zero_body = [ast.Assign(targets=[_store_target([_name(v) for v in zero_iters])], value=_pad_fill(kwargs))]
         stmts = _wrap_for_loops(zero_iters, out_bounds, zero_body)
         cp_iters = [f"__pc{k}" for k in range(rank)]
         dst_idx = [ast.BinOp(left=_name(cp_iters[k]), op=ast.Add(), right=_before(k)) for k in range(rank)]
@@ -4480,6 +4501,67 @@ def expand_sort(target, args, shape_table, kwargs=None) -> List[ast.stmt]:
     copy_loops = _wrap_for_loops([it], [shape[0]], copy_body)
     sort = _make_sort_routine(out, _const_or_name(shape[0]), "__srt")
     return [*copy_loops, *sort]
+
+
+def expand_searchsorted(target, args, shape_table, kwargs=None, local_dtypes=None) -> List[ast.stmt]:
+    """``np.searchsorted(a, v, side=...)`` -> a binary search per element of ``v``.
+
+    ``a`` is a sorted 1-D array; the result is an int64 array shaped like ``v``, holding for each
+    element the index where it would be inserted to keep ``a`` sorted. ``side='left'`` counts the
+    entries STRICTLY below the value, ``side='right'`` counts those at or below it -- one comparison
+    apart, and the difference is exactly what a bin lookup's ``- 1`` relies on.
+
+    A binary search, not a scan: numpy's is O(log n) per element and the corpus calls this with a
+    grid of tens of thousands of edges. A linear count would return the same indices and turn the
+    kernel's complexity class into something the reference never had.
+    """
+    if len(args) < 2 or not isinstance(args[0], ast.Name):
+        raise NotImplementedError("np.searchsorted needs a bare-Name sorted array and a values operand")
+    if not isinstance(target, ast.Name):
+        raise NotImplementedError("np.searchsorted target must be a bare Name")
+    sorted_shape = shape_table.get(args[0].id)
+    if sorted_shape is None or len(sorted_shape) != 1:
+        raise NotImplementedError("np.searchsorted: the sorted operand must be a 1-D array of known shape")
+    values_shape = _iter_extent_of(args[1], shape_table)
+    if values_shape is None:
+        raise NotImplementedError("np.searchsorted: shape of the values operand unknown")
+    side_node = _kwarg_or_pos(args, kwargs or [], 2, "side")
+    side = "left" if side_node is None else (side_node.value if isinstance(side_node, ast.Constant) else None)
+    if side not in ("left", "right"):
+        raise NotImplementedError("np.searchsorted: side must be the literal 'left' or 'right'")
+    if local_dtypes is not None:
+        local_dtypes.setdefault(target.id, "int64")
+    shape_table.setdefault(target.id, tuple(ast.unparse(e) for e in values_shape))
+
+    iters = [f"__ss{k}" for k in range(len(values_shape))]
+    index = _name(iters[0]) if len(iters) == 1 else ast.Tuple(elts=[_name(v) for v in iters], ctx=ast.Load())
+    value = _scalarize_at_iters(copy.deepcopy(args[1]), [_name(v) for v in iters], shape_table)
+    lo, hi, mid = "__ss_lo", "__ss_hi", "__ss_mid"
+    # ``a[mid] <= v`` for side='right', ``a[mid] < v`` for side='left': the first is the count of
+    # entries at or below the value, the second the count strictly below it.
+    below = ast.Compare(left=ast.Subscript(value=_name(args[0].id), slice=_name(mid), ctx=ast.Load()),
+                        ops=[ast.LtE() if side == "right" else ast.Lt()],
+                        comparators=[value])
+    search = [
+        ast.Assign(targets=[_store(lo)], value=_const(0)),
+        ast.Assign(targets=[_store(hi)], value=_const_or_name(sorted_shape[0])),
+        ast.While(test=ast.Compare(left=_name(lo), ops=[ast.Lt()], comparators=[_name(hi)]),
+                  body=[
+                      ast.Assign(targets=[_store(mid)],
+                                 value=ast.BinOp(left=ast.BinOp(left=_name(lo), op=ast.Add(), right=_name(hi)),
+                                                 op=ast.FloorDiv(),
+                                                 right=_const(2))),
+                      ast.If(test=below,
+                             body=[
+                                 ast.Assign(targets=[_store(lo)],
+                                            value=ast.BinOp(left=_name(mid), op=ast.Add(), right=_const(1)))
+                             ],
+                             orelse=[ast.Assign(targets=[_store(hi)], value=_name(mid))]),
+                  ],
+                  orelse=[]),
+        ast.Assign(targets=[ast.Subscript(value=_name(target.id), slice=index, ctx=ast.Store())], value=_name(lo)),
+    ]
+    return _wrap_for_loops(iters, list(values_shape), search)
 
 
 def _flat_index(iters: List[str], shape) -> ast.expr:
@@ -6203,6 +6285,8 @@ NP_CALL_EXPANDERS: Dict[Tuple[str, str], Callable] = {
     # np.maximum/minimum.accumulate: a DaCe Scan re-emits cummax/cummin as these
     # (there's no np.cummax). ufunc.reduce forms are normalized to np.sum/...
     # upstream in native_desugar (_UfuncReduceToReducer), so they never reach here.
+    ("np", "searchsorted"):
+    expand_searchsorted,
     ("np", "maximum.accumulate"):
     expand_cummax,
     ("np", "minimum.accumulate"):
@@ -6654,10 +6738,29 @@ def sympify_shape(text: str):
     One shape token is compared against many others, so without this the same string is re-parsed
     once per PAIR. Keyed on the string and never on a sympy object: sympy equality is structural
     and would collapse distinct tokens onto one entry.
+
+    Every non-call identifier is bound to a Symbol first. Bare ``sympify`` resolves a name against
+    sympy's own namespace, where ``N`` is the numeric-evaluation FUNCTION, ``S`` the singleton
+    registry, and ``E``/``I``/``O``/``Q``/``pi``/``beta``/``gamma``/``zeta`` are constants or
+    functions -- so ``N`` came back uncomparable and every extent naming it answered "not equal"
+    however plainly equal it was. Those are ordinary dimension names in this corpus.
+
+    The symbols are integral and non-negative because an extent is: without that, a pooled
+    ``(2 * oh) // 2`` stays a ``floor`` sympy cannot cancel against ``oh``, and the two agreeing
+    extents read as two different shapes. The assumption only lets sympy PROVE equalities that
+    already hold for the integer extents these symbols stand for.
     """
     import sympy  # Deferred: sympy costs ~100s of ms to import and most kernels never reach here.
+    # An unresolved ``A.shape[i]`` is not sympy syntax, so the whole token used to fail to parse and
+    # every compare naming one answered False. It is a fixed extent, not arithmetic: fold it to an
+    # atom. Both sides mangle the same way, so the surrounding arithmetic still cancels.
+    text = SHAPE_READ_RE.sub(lambda m: f"__shp_{m.group(1)}_{m.group(2)}", text)
+    names = {}
+    for m in DIM_IDENT_RE.finditer(text):
+        if text[m.end():m.end() + 1] != "(":  # a call target is a function, not a dimension
+            names[m.group()] = sympy.Symbol(m.group(), integer=True, nonnegative=True)
     try:
-        return sympy.sympify(text)
+        return sympy.sympify(text, locals=names)
     except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
         return None
 
@@ -6949,6 +7052,76 @@ def _hoist_matmul(matmul: ast.BinOp,
                     orelse=[])
         ]
         return temp, stmts
+    # BATCHED scalarised form -- the batched counterpart of the 2-D x 2-D branch above. The
+    # bare-Name batched path further down reads both operands' declared shapes, so it declines the
+    # moment one is an expression: conv_transpose2d's ``xg_flat @ wg[:, :, ky, kx]`` is
+    # (n, h*w, in_per_group) @ (in_per_group, out_per_group), and declining it left the contraction
+    # to slice fusion, which refuses. Extents come from ``_iter_extent_of`` here, which reads
+    # through the slice, so the operand's spelling stops mattering.
+    if (l_ext is not None and r_ext is not None and max(len(l_ext), len(r_ext)) >= 3
+            and min(len(l_ext), len(r_ext)) >= 2
+            and not (isinstance(matmul.left, ast.Name) and isinstance(matmul.right, ast.Name))):
+        # Both operands batched must agree on the batch RANK: numpy would broadcast a mismatch,
+        # and the bare-Name path below does not model that either. Refuse rather than guess.
+        if len(l_ext) >= 3 and len(r_ext) >= 3 and len(l_ext) != len(r_ext):
+            return None, []
+        temp_counter[0] += 1
+        temp = f"__mm{temp_counter[0]}"
+        ctr = temp_counter[0]
+        batch_ext = (l_ext if len(l_ext) >= len(r_ext) else r_ext)[:-2]
+        batched = matmul.left if len(l_ext) >= len(r_ext) else matmul.right
+        m_extent, k_extent = l_ext[-2], l_ext[-1]
+        n_extent = r_ext[-1]
+        # Declare the temp from STATIC axis tokens where they exist, so the function-scope
+        # declaration never names a loop variable (same rule as the branches above).
+        shape = tuple(
+            _static_shape_of(batched, axis, shape_table) or _call_to_str(ext) for axis, ext in enumerate(batch_ext)) + (
+                _static_shape_of(matmul.left,
+                                 len(l_ext) - 2, shape_table)
+                or _call_to_str(m_extent), _static_shape_of(matmul.right,
+                                                            len(r_ext) - 1, shape_table) or _call_to_str(n_extent))
+        temp_arrays[temp] = shape
+        shape_table[temp] = shape
+        batch_iters = [_name(f"__mmb{ctr}_{i}") for i in range(len(batch_ext))]
+        i_iter = _name(f"__mmi{ctr}")
+        j_iter = _name(f"__mmj{ctr}")
+        l_iter = _name(f"__mml{ctr}")
+        left_iters = ([*batch_iters] if len(l_ext) >= 3 else []) + [i_iter, l_iter]
+        right_iters = ([*batch_iters] if len(r_ext) >= 3 else []) + [l_iter, j_iter]
+        sa = _scalarize_at_iters(matmul.left, left_iters, shape_table)
+        sb = _scalarize_at_iters(matmul.right, right_iters, shape_table)
+        out_sub = ast.Tuple(elts=[*batch_iters, i_iter, j_iter], ctx=ast.Load())
+        out_ref = lambda ctx: ast.Subscript(value=_name(temp), slice=copy.deepcopy(out_sub), ctx=ctx)
+        body: List[ast.stmt] = [
+            ast.For(target=_store(j_iter.id),
+                    iter=ast.Call(func=_name("range"), args=[n_extent], keywords=[]),
+                    body=[
+                        ast.Assign(targets=[out_ref(ast.Store())], value=_const(0.0)),
+                        ast.For(target=_store(l_iter.id),
+                                iter=ast.Call(func=_name("range"), args=[k_extent], keywords=[]),
+                                body=[
+                                    ast.AugAssign(target=out_ref(ast.Store()),
+                                                  op=ast.Add(),
+                                                  value=ast.BinOp(left=sa, op=ast.Mult(), right=sb))
+                                ],
+                                orelse=[]),
+                    ],
+                    orelse=[])
+        ]
+        body = [
+            ast.For(target=_store(i_iter.id),
+                    iter=ast.Call(func=_name("range"), args=[m_extent], keywords=[]),
+                    body=body,
+                    orelse=[])
+        ]
+        for iter_node, ext in zip(reversed(batch_iters), reversed(batch_ext)):
+            body = [
+                ast.For(target=_store(iter_node.id),
+                        iter=ast.Call(func=_name("range"), args=[ext], keywords=[]),
+                        body=body,
+                        orelse=[])
+            ]
+        return temp, body
     if not (isinstance(matmul.left, ast.Name) and isinstance(matmul.right, ast.Name)):
         return None, []
     a_name, b_name = matmul.left.id, matmul.right.id
@@ -7725,6 +7898,12 @@ class _CallHoister(ast.NodeTransformer):
             if (key[1] in _INT_PRESERVING_ELEMENTWISE and temp not in self.local_dtypes
                     and _all_integer_operands(node.args, self.local_dtypes)):
                 self.local_dtypes[temp] = "int64"
+            # ``np.where`` promotes its two VALUE operands and ignores the condition's dtype, so an
+            # integer select stays integer -- the last hop of bitonic_sort's comparator network,
+            # whose int64 payload was otherwise handed back through a float temp.
+            if (key[1] == "where" and len(node.args) == 3 and temp not in self.local_dtypes
+                    and _all_integer_operands(node.args[1:], self.local_dtypes)):
+                self.local_dtypes[temp] = "int64"
         else:
             self.scalar_temps[temp] = True
             if self._infer_complex(node):
@@ -7777,6 +7956,12 @@ class _CallHoister(ast.NodeTransformer):
             minlength = _kwarg_or_pos(args, keywords or [], 2, "minlength")
             if minlength is not None:
                 return (self._extent_to_shape_token(minlength), )
+        # ``np.searchsorted(a, v)`` -> one index per element of the VALUES operand, so the temp
+        # takes ``v``'s extent and not the sorted array's.
+        if op == "searchsorted" and len(args) >= 2:
+            ext = _iter_extent_of(args[1], self.shape_table)
+            if ext is not None:
+                return tuple(self._extent_to_shape_token(e) for e in ext)
         # ``np.pad`` -> source shape with each axis grown by ``2 * pad_width``.
         if op == "pad" and args:
             call = _attr_call("np", "pad", list(args))
@@ -8151,6 +8336,12 @@ _ELEMENT_WRITE_EXPANDERS = {
     ("np", "fft.fftfreq"),
     ("np", "cumsum"),
     ("np", "cumprod"),
+    ("np", "searchsorted"),
+    # Same shape as cumsum/cumprod -- a running max/min bound to a fresh local. Left out, the
+    # expander consumed the Assign that carried the allocation marker and the scan's first store
+    # went through a NULL pointer.
+    ("np", "maximum.accumulate"),
+    ("np", "minimum.accumulate"),
     ("np", "roll"),
     ("np", "tril"),
     ("np", "pad"),
@@ -8534,8 +8725,13 @@ class LibNodeRewriter(ast.NodeTransformer):
                         # dangling without a decl -- register a fresh-local
                         # allocation now so the emitter sees the shape downstream.
                         if (key in _ELEMENT_WRITE_EXPANDERS and target.id in self.shape_table
-                                and target.id not in self.known_arrays and target.id not in self.fresh_local_allocs):
-                            self.fresh_local_allocs[target.id] = tuple(self.shape_table[target.id])
+                                and target.id not in self.known_arrays):
+                            # Not gated on the local being UNREGISTERED: a temp the call-hoister
+                            # already spilled is registered as an array temp but still carries no
+                            # allocation SITE, and the expander has just consumed the assignment
+                            # that would have carried one. max_filter's hoisted running-max scan
+                            # wrote its first element through a NULL pointer that way.
+                            self.fresh_local_allocs.setdefault(target.id, tuple(self.shape_table[target.id]))
                             # ...and mark the allocation SITE. Registering the shape only gets the
                             # local DECLARED; a local whose extent depends on a body-computed scalar
                             # (histogram_equalization's ``cdf = np.cumsum(hist)``, shape ``(nbins,)``
@@ -8622,6 +8818,16 @@ class LibNodeRewriter(ast.NodeTransformer):
                         # Same note as the direct path: the hoister split ``out = f(np.sum(a))`` into
                         # a temp assign, and it is THIS statement that becomes the loop nest.
                         tag_numpy_origin(expanded, ast.unparse(stmt.value))
+                        # ...and the same auto-alloc. An expander that consumes the assign leaves
+                        # its target with no allocation SITE, and a hoisted temp whose extent
+                        # depends on a body-computed scalar is declared NULL at function top and
+                        # malloc'd at its marker. Without one, max_filter's hoisted running-max
+                        # scan wrote its first element through that NULL.
+                        spilled = stmt.targets[0].id
+                        if (key in _ELEMENT_WRITE_EXPANDERS and spilled in self.shape_table
+                                and spilled not in self.known_arrays):
+                            self.fresh_local_allocs.setdefault(spilled, tuple(self.shape_table[spilled]))
+                            out.append(_alloc_marker(spilled))
                         out.extend(expanded)
                         # Integer-iota arange in the prelude (hoisted ``__cb =
                         # np.arange(1, 1025)``) keeps an int64 dtype so a derived

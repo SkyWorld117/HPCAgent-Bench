@@ -18,6 +18,8 @@ are held back for the neighbouring reason -- ``MAXLOC`` is 1-based where numpy i
 import ast
 from typing import Dict, Optional, Tuple
 
+from numpyto_common.lib_nodes import shape_exprs_equal
+
 #: ``(module, attr)`` keys whose Fortran intrinsic reduces the whole array to a scalar AND agrees
 #: with numpy on a FLOATING operand. The set is short on purpose -- each name kept out is a
 #: measured disagreement, not an unwritten rendering:
@@ -38,6 +40,55 @@ WHOLE_ARRAY_REDUCTIONS = frozenset({
 #: branches, which is what ``np.where`` does too -- so unlike a guarded division, the eager form is
 #: the faithful one here.
 ELEMENTWISE_INTRINSICS = frozenset({("np", "where")})
+
+#: Ops whose Fortran intrinsic RESHAPES rather than reduces. ``RESHAPE`` is exact here for one
+#: reason: the emitter declares every array with REVERSED dims, so Fortran's column-major ravel IS
+#: numpy's C-order ravel, and ``RESHAPE`` ravels the source and fills the result in that same order.
+#: ``order="F"`` is therefore NOT expressible -- numpy would ravel along the reversed axis order --
+#: and neither is an inferred ``-1``, which Fortran has no spelling for.
+SHAPE_INTRINSICS = frozenset({("np", "reshape")})
+
+
+def reshape_dims(call: ast.Call) -> Optional[Tuple[ast.expr, ...]]:
+    """``call``'s newshape as explicit extent expressions, or ``None`` when RESHAPE cannot take it.
+
+    ``RESHAPE`` needs every extent spelled out, so an inferred ``-1`` declines. ``order`` declines
+    unless it is the C default: the reversed-dims identity above holds for C order only.
+    """
+    if len(call.args) != 2:
+        return None
+    for kw in call.keywords:
+        if kw.arg != "order":
+            return None
+        if not (isinstance(kw.value, ast.Constant) and str(kw.value.value).upper() == "C"):
+            return None
+    shape = call.args[1]
+    if not isinstance(shape, (ast.Tuple, ast.List)):
+        return None
+    if not all(_is_extent_expr(e) for e in shape.elts):
+        return None
+    return tuple(shape.elts)
+
+
+#: Arithmetic an extent may be built from. A newshape is routinely ``(n * out_l, c_per_group * k)``,
+#: so restricting this to bare names would decline nearly every real reshape.
+_EXTENT_OPS = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div, ast.Mod)
+
+
+def _is_extent_expr(node: ast.expr) -> bool:
+    """An extent Fortran can spell: non-negative integer arithmetic over symbols.
+
+    A negative literal is numpy's "infer this axis", which has no Fortran spelling -- and it arrives
+    as ``UnaryOp(USub, Constant)``, so no unary form is admitted at all.
+    """
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int) and not isinstance(node.value, bool) and node.value >= 0
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, _EXTENT_OPS):
+        return _is_extent_expr(node.left) and _is_extent_expr(node.right)
+    return False
+
 
 #: ``(module, attr)`` keys whose Fortran intrinsic also takes a ``dim=``, reducing ONE axis.
 #: ``norm`` is absent: Fortran has no per-axis 2-norm, and ``median`` has no intrinsic at all.
@@ -114,6 +165,22 @@ def renders_natively(key: Tuple[str, str], call: ast.Call, shapes: Dict[str, Tup
     ``norm``'s ``ord`` each ask for something the whole-array intrinsic does not answer, and numpy
     takes the axis positionally too -- so for those keys a second argument of any kind declines.
     """
+    # The float gate belongs to the REDUCTIONS: they are the ones that disagree with numpy off the
+    # floating types (integer overflow, LOGICAL operands, integer division in mean). RESHAPE only
+    # moves elements and is exact for every type, so demanding a known float dtype there declines
+    # the intermediates the whole corpus reshapes -- 175 of them in efficientnet_b0 alone.
+    if key in SHAPE_INTRINSICS:
+        dims = reshape_dims(call)
+        if dims is None or not isinstance(call.args[0], ast.Name):
+            return False
+        src = shapes.get(call.args[0].id)
+        if not src:
+            return False
+        # RESHAPE REQUIRES the counts to match (there is no PAD here); the loop nest merely indexes,
+        # so a corpus whose declared extents disagree has to keep the nest rather than fail to build.
+        want = " * ".join(f"({ast.unparse(d)})" for d in dims)
+        have = " * ".join(f"({t})" for t in src)
+        return want == have or shape_exprs_equal(want, have)
     if not operand_is_float(call, dtypes):
         return False
     if key in ELEMENTWISE_INTRINSICS and len(call.args) == 3 and not call.keywords:

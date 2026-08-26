@@ -229,6 +229,8 @@ class TupleDesugar:
         #: Declared array -> rank, so ``x.ndim`` is a literal and the broadcast shapes built from it
         #: (``(1,) * (x.ndim - 2)``) have a compile-time length.
         self.ranks: Dict[str, int] = dict(ranks or {})
+        #: Counter for the locals :meth:`capture_self_reference` mints.
+        self.aliases = 0
 
     # -- kinds ------------------------------------------------------------- #
     def kind(self, node: ast.AST, env: Env) -> Optional[str]:
@@ -299,7 +301,36 @@ class TupleDesugar:
         # ``tuple(...)``/``list(...)``), same trip-count requirement as the wrapped form.
         if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
             return self.unroll(node, env)
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+            sliced = self.slice_of(node, env)
+            if sliced is not None:
+                return sliced
         return self.shape_tuple(node)
+
+    def slice_of(self, node: ast.Subscript, env: Env) -> Optional[List[ast.expr]]:
+        """``x.shape[2:]`` -- a SLICE of a compile-time tuple is still one.
+
+        The ports spell "the trailing axes" this way, and group-norm's
+        ``x.reshape((n, g, c // g) + x.shape[2:])`` is the live case: without this the concat could
+        not collapse, so ``y`` had no compile-time rank and the next line's ``y.ndim`` never folded
+        either -- which surfaces much later as "axis must be a compile-time integer".
+
+        Every present bound must fold to an int; the length is what has to be compile-time, not the
+        extents, which stay symbolic.
+        """
+        elements = self.tuple_of(node.value, env)
+        if elements is None:
+            return None
+        bounds: List[Optional[int]] = []
+        for part in (node.slice.lower, node.slice.upper, node.slice.step):
+            if part is None:
+                bounds.append(None)
+                continue
+            folded = const_int(self.fold(copy.deepcopy(part), env))
+            if folded is None:
+                return None
+            bounds.append(folded)
+        return [copy.deepcopy(e) for e in elements[slice(*bounds)]]
 
     def shape_tuple(self, node: ast.AST) -> Optional[List[ast.expr]]:
         """``x.shape`` -> per-axis ``x.shape[i]``, once the rank is known. Length compile-time,
@@ -371,6 +402,11 @@ class TupleDesugar:
             return self.loop(stmt, env)
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
             return self.assign(stmt, env, linear)
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0],
+                                                                                  (ast.Tuple, ast.List)):
+            unpacked = self.unpack(stmt, env, linear)
+            if unpacked is not None:
+                return unpacked
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Subscript):
             element = self.assign_element(stmt, env, linear)
             if element is not None:
@@ -390,10 +426,11 @@ class TupleDesugar:
         # Recording a binding is only sound where the assignment dominates every later read of the
         # name in this list -- true down a straight line, false across loop iterations.
         if elts is not None and linear:
+            elts, captured = self.capture_self_reference(name, elts, stmt, env)
             env.tuples[name] = elts
             env.bound.add(name)
             self.ranks.pop(name, None)  # now a tuple, so any array rank it carried is stale
-            return []
+            return captured
         env.invalidate([name])
         if not isinstance(stmt.value, ast.Constant) or stmt.value.value is not None:
             env.bound.add(name)
@@ -402,6 +439,48 @@ class TupleDesugar:
             env.kinds[name] = value_kind
         self.track_rank(name, stmt.value, linear)
         return [stmt]
+
+    def capture_self_reference(self, name: str, elements: List[ast.expr], at: ast.stmt,
+                               env: Env) -> Tuple[List[ast.expr], List[ast.stmt]]:
+        """``x = (x, x)`` -- what every port's ``_as_tuple(x, 2)`` folds to. Its elements mean x's
+        PREVIOUS value, but recording them as they stand leaves the name denoting both that value
+        and the tuple, so a later read of an element folds straight back into the tuple. Capture the
+        old value in a fresh local and point the elements at that instead.
+        """
+        reads_itself = any(
+            isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load) for e in elements
+            for n in ast.walk(e))
+        if not reads_itself:
+            return elements, []
+        self.aliases += 1
+        alias = f"__ta{self.aliases}_{name}"
+        captured = [_substitute(copy.deepcopy(e), name, ast.Name(id=alias, ctx=ast.Load())) for e in elements]
+        bind = ast.copy_location(
+            ast.Assign(targets=[ast.Name(id=alias, ctx=ast.Store())], value=ast.Name(id=name, ctx=ast.Load())), at)
+        env.bound.add(alias)
+        if name in env.kinds:
+            env.kinds[alias] = env.kinds[name]
+        return captured, [bind]
+
+    def unpack(self, stmt: ast.Assign, env: Env, linear: bool) -> Optional[List[ast.stmt]]:
+        """``oh, ow = output_size`` -> one binding per name, folded like any other assignment.
+
+        Neither backend has a tuple to unpack, and the adaptive-pool ports spell their output size
+        this way. Returns ``None`` -- leaving the statement exactly as it is -- when the right-hand
+        side is not a compile-time tuple of matching length, which is the only case where splitting
+        it would be a guess.
+        """
+        targets = stmt.targets[0].elts
+        if not all(isinstance(t, ast.Name) for t in targets):
+            return None
+        elements = self.tuple_of(self.fold(stmt.value, env), env)
+        if elements is None or len(elements) != len(targets):
+            return None
+        out: List[ast.stmt] = []
+        for target, value in zip(targets, elements):
+            one = ast.copy_location(ast.Assign(targets=[target], value=copy.deepcopy(value)), stmt)
+            out.extend(self.assign(one, env, linear))
+        return out
 
     def assign_element(self, stmt: ast.Assign, env: Env, linear: bool) -> Optional[List[ast.stmt]]:
         """``slices[k] = <index>`` on a bound index list -> rebind the list, emit nothing.
@@ -423,11 +502,20 @@ class TupleDesugar:
     def track_rank(self, name: str, value: ast.expr, linear: bool) -> None:
         """Record the target's rank from the ALREADY-FOLDED RHS. Folding is what makes it knowable:
         ``y = x.reshape((n, g, c // g) + x.shape[2:])`` has no compile-time rank until the concat
-        collapses, and without ``y``'s rank the next line's ``y.ndim`` never folds either."""
-        if not linear:
-            self.ranks.pop(name, None)
-            return
+        collapses, and without ``y``'s rank the next line's ``y.ndim`` never folds either.
+
+        A rebinding inside a branch or loop (``linear=False``) may or may not run, so the name
+        afterwards holds either value -- but if BOTH readings have the same rank, that IS the rank.
+        Dropping it unconditionally is what lost max-pool's accumulator: ``out`` is allocated rank 4
+        and then rebound as ``out = np.maximum(out, ...)`` inside the tap loops, which cost every
+        LATER statement its rank, and group-norm's ``tuple(range(2, y.ndim))`` two helpers on could
+        no longer fold.
+        """
         rank = expr_rank(value, self.ranks)
+        if not linear:
+            if rank is None or self.ranks.get(name) != rank:
+                self.ranks.pop(name, None)
+            return
         if rank is None:
             self.ranks.pop(name, None)
         else:
@@ -585,13 +673,18 @@ class _Folder(ast.NodeTransformer):
             if decided is not None:
                 return ast.copy_location(ast.Constant(value=decided is isinstance(node.ops[0], ast.Is)), node)
             return node
-        if isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+        decide = _EXACT_COMPARE.get(type(node.ops[0]))
+        if decide is not None:
             lv, rv = const_value(left), const_value(right)
-            # Literal-vs-literal only, and only for types whose equality is exact -- a float compare
-            # folded here would bake in a rounding decision the backend might make differently.
-            if lv is not NO_VALUE and rv is not NO_VALUE and isinstance(lv, (str, bool, int)) and isinstance(
-                    rv, (str, bool, int)):
-                return ast.copy_location(ast.Constant(value=(lv == rv) is isinstance(node.ops[0], ast.Eq)), node)
+            # Literal-vs-literal only, and only for types whose comparison is exact -- a float
+            # compare folded here would bake in a rounding decision the backend might make
+            # differently. Ordering counts: a padding folded to its manifest value leaves
+            # ``if 3 > 0:`` guarding a rebinding, and an unfolded guard is a second buffer shape.
+            if lv is not NO_VALUE and rv is not NO_VALUE and isinstance(lv,
+                                                                        (bool, int)) and isinstance(rv, (bool, int)):
+                return ast.copy_location(ast.Constant(value=decide(lv, rv)), node)
+            if isinstance(node.ops[0], (ast.Eq, ast.NotEq)) and isinstance(lv, str) and isinstance(rv, str):
+                return ast.copy_location(ast.Constant(value=decide(lv, rv)), node)
         return node
 
     def _is_none(self, left: ast.expr, right: ast.expr) -> Optional[bool]:
@@ -610,6 +703,17 @@ class _Folder(ast.NodeTransformer):
         taken = static_bool(node.test)
         return node if taken is None else (node.body if taken else node.orelse)
 
+
+#: Comparisons folded on literal operands, by operator. Exact for integers, bools and (equality
+#: only) strings; ordering on floats is deliberately absent.
+_EXACT_COMPARE = {
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b,
+    ast.GtE: lambda a, b: a >= b,
+}
 
 #: Integer operations folded on literal operands. Integers only -- a float fold would bake in a
 #: rounding decision the backend is entitled to make differently.
@@ -673,6 +777,12 @@ def desugar_tuples(fn: ast.FunctionDef,
                    arrays: FrozenSet[str] = frozenset(),
                    ranks: Optional[Dict[str, int]] = None) -> None:
     """Fold every compile-time tuple out of ``fn`` in place (see the module docstring)."""
+    # The marker guards ONE run against re-entering a tuple that run just materialised. Left
+    # standing it also freezes that tuple's ELEMENTS against the next run, and this pass runs a
+    # second time once helper calls are spliced -- which is how a ``np.full`` shape kept an
+    # unfolded ``padding[0]`` while the statement beside it folded the same read away.
+    for node in ast.walk(fn):
+        vars(node).pop(FOLDED_TUPLE, None)
     interp = TupleDesugar(int_scalars, float_scalars, arrays, ranks)
     env = Env(bound=set(int_scalars) | set(float_scalars) | set(arrays))
     fn.body = interp.run(fn.body, env)
