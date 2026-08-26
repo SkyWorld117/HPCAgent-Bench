@@ -228,13 +228,13 @@ def _emit_signature(kir: KernelIR, fn_name: str, order: Optional[List[str]] = No
     sca_by_name = {s.name: s for s in kir.scalars}
     for name in (kir.param_order() if order is None else order):
         if name in sym_by_name:
-            parts.append(f"{dtypes.c_type('int')} {name}")  # int64_t (canonical)
+            parts.append(f"const {dtypes.c_type('int')} {name}")  # int64_t (canonical), const (Sec. 5)
         elif name in arr_by_name:
             parts.append(_array_signature(arr_by_name[name]))
         elif name in sca_by_name:
             sca = sca_by_name[name]
             c_ty = _c_type(sca.dtype)
-            parts.append(f"{c_ty} {name}")
+            parts.append(f"const {c_ty} {name}")
         else:
             raise ValueError(f"unknown parameter {name!r} in kernel {kir.kernel_name}")
     return f"void {fn_name}({', '.join(parts)})"
