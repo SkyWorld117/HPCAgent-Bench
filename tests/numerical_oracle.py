@@ -798,7 +798,7 @@ def run_kernel(short: str,
             # rather than double-count it.
             status[PLUTO] = ("skip:native-emit" if native_emit_error is not None else _run_pluto(
                 tdp, short, fptype, binding, by, syms, expected, compare, rtol, atol, status.get("c"), REPO /
-                "hpcagent_bench" / "benchmarks" / info["relative_path"], info["module_name"]))
+                "hpcagent_bench" / "benchmarks" / info["relative_path"], info["module_name"], index_names))
         # Python/JIT backends: skip cleanly when the dependency is absent, else emit+run+compare.
         for pb in PY_BACKENDS:
             if only_backends is not None and pb not in only_backends:
@@ -1179,7 +1179,8 @@ def _pluto_reject_reason(stderr: str) -> str:
     return ""
 
 
-def _run_pluto(tdp, short, fptype, binding, by, syms, expected, compare, rtol, atol, c_status, bench_dir, base) -> str:
+def _run_pluto(tdp, short, fptype, binding, by, syms, expected, compare, rtol, atol, c_status, bench_dir, base,
+               index_names) -> str:
     """Pluto backend: transform the emitted scop with ``polycc``, compile, and call through the C
     binding. Best effort: a polycc-tiled miscompile against a bit-exact ``c`` result is classified as
     ``skip:unsupported:pluto-miscompile`` (a pluto/pet tool bug), not our FAIL; if ``c`` itself is not
@@ -1241,7 +1242,12 @@ def _run_pluto(tdp, short, fptype, binding, by, syms, expected, compare, rtol, a
         try:
             result = _invoke_isolated("c", pluto_binding, so, by, syms, expected, compare, rtol, atol, index_names)
         except Exception as exc:  # noqa: BLE001
-            result = f"FAIL:{type(exc).__name__}"
+            # An exception ESCAPING the invoke is a defect in this harness, not in what polycc
+            # produced -- the invoke reports a run failure as a status string. Reported under its
+            # own prefix so the miscompile reclassification below cannot launder it into
+            # "pluto-miscompile", which is what hid an undefined ``index_names`` here: every pluto
+            # grade in the corpus came back blaming polycc for our own NameError.
+            return f"FAIL:oracle:{type(exc).__name__}: {str(exc)[:120]}"
     if result.startswith("FAIL:") and c_status == "ok":
         return f"skip:unsupported:pluto-miscompile:{result.removeprefix('FAIL:')}"
     return result
