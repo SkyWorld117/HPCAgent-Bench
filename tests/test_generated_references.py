@@ -292,7 +292,14 @@ def test_every_emitted_scalar_parameter_is_const(emitted):
     """abi_contract.md Sec. 5: every scalar input is const. Fortran says it as ``value,
     intent(in)`` and the stub the agent fills in (support/bindings/stubs.py) says it as ``const``,
     so a C emitter that drops the qualifier hands the agent a reference and a stub that disagree
-    on the one line the agent copies."""
+    on the one line the agent copies.
+
+    ONE exception, and it must be earned: a kernel may reuse a by-value parameter as a local and
+    assign to it (spmv recomputes ``M``), which C rejects on a const parameter and Fortran rejects
+    on an ``intent(in)`` dummy. Both backends drop the qualifier for exactly those, and top-level
+    const on a by-value parameter is not part of C's function type, so the ABI is unchanged. The
+    exception is checked rather than trusted: the body has to actually contain the assignment.
+    """
     bad = []
     for key, _spec in foundation_specs():
         for language in ("c", "cpp"):
@@ -302,7 +309,10 @@ def test_every_emitted_scalar_parameter_is_const(emitted):
             signature = parse_signature(source, language)
             if signature is None:
                 continue
-            loose = [a["name"] for a in signature["args"] if not a["ptr"] and not a["const"]]
-            if loose:
-                bad.append(f"{key} ({language}): by-value scalars without const {loose}")
+            for arg in signature["args"]:
+                if arg["ptr"] or arg["const"]:
+                    continue
+                if not re.search(rf"^\s*{re.escape(arg['name'])}\s*[-+*/]?=[^=]", source, re.M):
+                    bad.append(f"{key} ({language}): by-value scalar {arg['name']!r} is not const "
+                               f"and the body never assigns it")
     assert not bad, "scalar parameters off Sec. 5: " + "; ".join(bad[:10])
