@@ -31,7 +31,7 @@ import os
 import pathlib
 import re
 from functools import lru_cache
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from numpyto_common import dtypes
 
@@ -2970,20 +2970,81 @@ class _ReplaceStmts(ast.NodeTransformer):
         return repl
 
 
-def _desugar_helper_tuples(hfn: ast.FunctionDef, arrays: List[ArrayDesc], scalars: List[ScalarDesc]) -> None:
+def _desugar_helper_tuples(hfn: ast.FunctionDef,
+                           arrays: List[ArrayDesc],
+                           scalars: List[ScalarDesc],
+                           symbols: Sequence[SymbolDesc] = ()) -> None:
     """Run :func:`desugar_tuples` on a helper that survived inlining, against ITS OWN param ranks.
 
     The kernel body gets this pass once, inside ``parse_kernel`` (ranks from its declared array
     args). A helper built here by :func:`_build_helper_kirs` is a second, separate ``KernelIR`` --
     without its own call, ``axes = tuple(range(2, x.ndim))`` (the instance-norm idiom) never folds
     and reaches the structural-axis guard below as a runtime ``Call``, not a literal tuple.
+
+    ``symbols`` (always integer, see :class:`SymbolDesc`) count as int scalars too: a call-site
+    argument classified as a size symbol rather than a plain scalar (``_as_tuple(pool_kernel_size,
+    3)`` where the sizer reads ``pool_kernel_size`` as a dimension) otherwise has no known KIND, so
+    ``isinstance(value, tuple)`` cannot decide and the dead guard branch survives -- which then
+    disqualifies the pure-tuple-return shape :func:`_pure_tuple_return` looks for.
     """
     ranks = {a.name: len(a.shape) for a in arrays}
     # ScalarDesc.dtype is already canonicalized (see ScalarDesc.__post_init__), so a plain name-shape
     # check is exact here -- same split the emitters use, not a guess.
-    int_scalars = frozenset(s.name for s in scalars if dtypes.is_integer(s.dtype))
+    int_scalars = frozenset(s.name for s in scalars if dtypes.is_integer(s.dtype)) | frozenset(s.name for s in symbols)
     float_scalars = frozenset(s.name for s in scalars if s.dtype.startswith("float"))
     desugar_tuples(hfn, int_scalars=int_scalars, float_scalars=float_scalars, arrays=frozenset(ranks), ranks=ranks)
+
+
+def _fold_call_arg_constant(arg: ast.expr,
+                            arrays: List[ArrayDesc],
+                            scalars: List[ScalarDesc],
+                            symbols: Sequence[SymbolDesc] = ()) -> Optional[ast.Constant]:
+    """``arg`` reduced to a literal against the kernel's own rank/scalar tables, or ``None``.
+
+    A call-site argument is not always spelled as a bare literal -- ``_as_tuple(v, x.ndim - 2)``
+    picks its count off the operand's rank, same as the ``(1,) * (x.ndim - 2)`` broadcast idiom
+    :mod:`tuple_desugar` already folds. Reuses that SAME fold (via :func:`_desugar_helper_tuples`
+    on a throwaway one-line probe) rather than a second constant-arithmetic implementation.
+    """
+    probe = ast.parse("def __probe():\n return __ARG__\n").body[0]
+    probe.body[0].value = copy.deepcopy(arg)
+    ast.fix_missing_locations(probe)
+    _desugar_helper_tuples(probe, arrays, scalars, symbols)
+    folded = probe.body[0].value
+    return folded if isinstance(folded, ast.Constant) else None
+
+
+def _pure_tuple_return(hfn: ast.FunctionDef) -> Optional[ast.Tuple]:
+    """The ``Tuple`` a fully-folded helper body unconditionally returns, or ``None``.
+
+    ``_as_tuple(value, dims)``'s body folds (once ``dims`` is substituted, see the scalar branch
+    of :func:`_build_helper_kirs`) to exactly ``return (value, value)`` -- a helper whose only
+    content is a fixed-length tuple assembled at compile time. Such a helper has no C/Fortran ABI
+    at all (there is no tuple return value); the correct lowering is not to emit it as a function,
+    but to splice its result into each call site, same as a Form-1 inlined helper.
+    """
+    if len(hfn.body) == 1 and isinstance(hfn.body[0], ast.Return) and isinstance(hfn.body[0].value, ast.Tuple):
+        return hfn.body[0].value
+    return None
+
+
+class _InlineTupleHelperCalls(ast.NodeTransformer):
+    """Replace every call to one pure-tuple-returning helper with its templated result, each
+    parameter substituted by THAT call's own argument expression."""
+
+    def __init__(self, name: str, pnames: List[str], template: ast.Tuple) -> None:
+        self.name = name
+        self.pnames = pnames
+        self.template = template
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if not (isinstance(node.func, ast.Name) and node.func.id == self.name and not node.keywords
+                and len(node.args) == len(self.pnames)):
+            return node
+        substituted = copy.deepcopy(self.template)
+        _substitute_names(substituted, dict(zip(self.pnames, node.args)))
+        return ast.copy_location(substituted, node)
 
 
 def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: KernelIR) -> List[KernelIR]:
@@ -3038,7 +3099,28 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         native_desugar(hfn)
 
         if hret_shape is None:
-            # SCALAR (by-value) return -- params inferred straight from the call.
+            # SCALAR (by-value) return -- params inferred straight from the call. A compile-time
+            # call-site arg is substituted into the body first, same as the array-return branch
+            # below: ``_as_tuple(value, dims)``'s ``dims`` is a compile-time constant at every
+            # call site (a literal, or an expression like ``x.ndim - 2`` that folds to one against
+            # the kernel's own rank table), but is left a plain parameter Name unless substituted
+            # here, and ``tuple(value for _ in range(dims))`` cannot resolve its trip count off a
+            # Name. Params are NOT dropped afterwards (unlike the array branch): this call site is
+            # a real ``ast.Call`` sitting wherever the kernel body already put it, not one this
+            # function rewrites, so the signature must keep every argument slot the call passes.
+            call_consts = {}
+            for pn, a in zip(pnames, call.args):
+                if isinstance(a, ast.Constant):
+                    call_consts[pn] = a
+                    continue
+                folded = _fold_call_arg_constant(a, parent.arrays, parent.scalars, parent.symbols)
+                if folded is not None:
+                    call_consts[pn] = folded
+            if call_consts:
+                _substitute_names(hfn, call_consts)
+                _FoldStaticNoneBranches().visit(hfn)
+                hfn.body = _drop_unreachable_after_return(hfn.body)
+                ast.fix_missing_locations(hfn)
             arrays, scalars, symbols = _infer_helper_params(pnames, call.args, arr_by, sca_by, sym_by, kernel_fn)
             # Fold this helper's OWN compile-time tuples (``tuple(range(2, x.ndim))`` and the
             # rest of tuple_desugar.py) against ITS param ranks, same as the kernel body got at
@@ -3046,7 +3128,35 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
             # KernelIR and never went through that call. Must run BEFORE the structural-axis
             # guards below: an unfolded ``axes = tuple(range(2, x.ndim))`` is still a runtime
             # Call at that point, which is exactly the "symbolic axis" the guard exists to catch.
-            _desugar_helper_tuples(hfn, arrays, scalars)
+            _desugar_helper_tuples(hfn, arrays, scalars, symbols)
+            # A helper whose folded body is nothing but ``return (a, b, ...)`` has no C/Fortran
+            # ABI -- there is no tuple return value -- so it is not emitted as a function at all.
+            # Splice its (per-call-substituted) result into every call site instead, then re-run
+            # the kernel's own tuple fold so a use like ``stride[0]`` resolves against the spliced
+            # elements exactly as it would against a source-level ``stride = (s, s)``. Declines
+            # (keeps the function) when some call site does not match this helper's arity /
+            # keyword shape -- that call still needs a real function to reach, so nothing here
+            # may delete it.
+            tuple_template = _pure_tuple_return(hfn)
+            if tuple_template is not None:
+                calls = [
+                    n for n in ast.walk(kernel_fn)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == hdef.name
+                ]
+                # A SIBLING helper calling this one keeps its own ``ast.Call`` in a tree this
+                # splice never visits, so dropping the function below would leave that call with
+                # nothing to reach. Decline instead -- the helper stays a real function.
+                sibling_calls = any(
+                    isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == hdef.name
+                    for other in helper_defs if other is not hdef for n in ast.walk(other))
+                if calls and not sibling_calls and all(not c.keywords and len(c.args) == len(pnames) for c in calls):
+                    _InlineTupleHelperCalls(hdef.name, pnames, tuple_template).visit(kernel_fn)
+                    ast.fix_missing_locations(kernel_fn)
+                    _desugar_helper_tuples(kernel_fn, parent.arrays, parent.scalars, parent.symbols)
+                    _reject_symbolic_axis(kernel_fn)
+                    _reject_unsupported_slices(kernel_fn)
+                    ast.fix_missing_locations(kernel_fn)
+                    continue
             # A helper that survives inlining is emitted as its OWN kernel and lowered through the
             # same expanders, so it needs the same structural guards the kernel body gets. Without
             # them a symbolic axis inside a helper reached lowering and was read as "no axis" --
@@ -3095,7 +3205,7 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         # See the scalar-return branch above: fold this helper's own compile-time tuples against
         # its param ranks BEFORE the structural-axis guards, and before ``hret`` (not yet a real
         # body reference) is appended to ``arrays`` below.
-        _desugar_helper_tuples(hfn, arrays, scalars)
+        _desugar_helper_tuples(hfn, arrays, scalars, symbols)
         _reject_symbolic_axis(hfn)
         _reject_unsupported_slices(hfn)
         _mark_written_outputs(hfn, arrays)

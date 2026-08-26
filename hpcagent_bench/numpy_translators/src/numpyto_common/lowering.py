@@ -2913,6 +2913,285 @@ def _fold_subarray_aliases(tree: ast.AST, array_shapes: Dict[str, List[str]]) ->
     ast.fix_missing_locations(tree)
 
 
+def _view_scale(step: Optional[ast.expr], factor: ast.expr) -> ast.expr:
+    """``step * factor``, or a bare copy of ``factor`` when ``step`` is the implicit 1."""
+    if step is None or (isinstance(step, ast.Constant) and step.value == 1):
+        return copy.deepcopy(factor)
+    return ast.BinOp(left=copy.deepcopy(step), op=ast.Mult(), right=copy.deepcopy(factor))
+
+
+def _view_offset(start: Optional[ast.expr], step: Optional[ast.expr], index: ast.expr) -> ast.expr:
+    """``start + step * index``, dropping the ``start`` term when it is the implicit 0."""
+    scaled = _view_scale(step, index)
+    if start is None or (isinstance(start, ast.Constant) and start.value == 0):
+        return scaled
+    return ast.BinOp(left=copy.deepcopy(start), op=ast.Add(), right=scaled)
+
+
+def _compose_kept_axis(view_slice: ast.Slice, use_dim: ast.expr) -> ast.expr:
+    """Compose one KEPT (Slice) view axis with the use-site index/slice landing on it.
+
+    ``view_slice`` is the view's own ``start:stop:step`` on the underlying base axis
+    (any part possibly ``None``, meaning the numpy default). A further slice
+    ``a:b:c`` on the view axis composes to ``(start+step*a):(start+step*b):(step*c)``
+    on the base axis; a bare use ``:`` reuses the view's own bound on that side
+    unchanged. A scalar use index ``j`` composes to the single point
+    ``start + step*j`` -- numpy squeeze then drops the axis, same as it would for a
+    direct integer index into the base array.
+    """
+    vstart, vstop, vstep = view_slice.lower, view_slice.upper, view_slice.step
+    if isinstance(use_dim, ast.Slice):
+        ustart, ustop, ustep = use_dim.lower, use_dim.upper, use_dim.step
+        new_lower = copy.deepcopy(vstart) if ustart is None else _view_offset(vstart, vstep, ustart)
+        new_upper = copy.deepcopy(vstop) if ustop is None else _view_offset(vstart, vstep, ustop)
+        new_step = copy.deepcopy(vstep) if ustep is None else _view_scale(vstep, ustep)
+        return ast.Slice(lower=new_lower, upper=new_upper, step=new_step)
+    return _view_offset(vstart, vstep, use_dim)
+
+
+def _has_negative_step(elts: List[ast.expr]) -> bool:
+    """``True`` iff any ``Slice`` among ``elts`` carries a literal NEGATIVE step.
+
+    A negative step flips numpy's default bounds (``a[::-2]`` starts at the LAST
+    element, not 0), which :func:`_compose_kept_axis`'s ``start + step*index``
+    algebra assumes is never the case (same "positive stride" convention
+    :func:`_slice_step_expr` documents for the rest of this file). A SYMBOLIC step
+    is never flagged -- it is always emitted as a positive stride, per that same
+    convention -- only a literal negative one is provably wrong to compose.
+    """
+    return any(isinstance(e, ast.Slice) and _step_is_negative(_slice_step_any(e)) for e in elts)
+
+
+def _is_fancy_dim(e: ast.expr, array_shapes: Dict[str, List[str]]) -> bool:
+    """``True`` for a subscript element that is an ADVANCED (gather) index rather than
+    a basic scalar/slice one: an index-array Name, or a newaxis/Ellipsis."""
+    if isinstance(e, ast.Slice):
+        return False
+    if _is_newaxis(e):
+        return True
+    return isinstance(e, ast.Name) and e.id in array_shapes
+
+
+def _child_blocks_of(stmt: ast.stmt):
+    if isinstance(stmt, (ast.For, ast.While, ast.If)):
+        yield stmt.body
+        yield stmt.orelse
+    elif isinstance(stmt, ast.Try):
+        yield stmt.body
+        yield stmt.orelse
+        yield stmt.finalbody
+        for h in stmt.handlers:
+            yield h.body
+
+
+def _names_written_in(stmts: List[ast.stmt]) -> OrderedSet:
+    """Names written in ``stmts``: a rebind, a loop target, or the base of a
+    subscript STORE (``x[...] = ...`` writes THROUGH ``x``, which a plain
+    Name-rebind scan misses)."""
+    out: OrderedSet = OrderedSet()
+    for s in stmts:
+        for n in ast.walk(s):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                out.add(n.id)
+            elif isinstance(n, ast.For) and isinstance(n.target, ast.Name):
+                out.add(n.target.id)
+            elif isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name):
+                out.add(n.value.id)
+    return out
+
+
+def _reject_view_writes_between_bind_and_use(tree: ast.AST,
+                                             candidates: Dict[str, Tuple[str, List[ast.expr]]]) -> OrderedSet:
+    """Names among ``candidates`` whose base array, or a name their captured bounds
+    read, is written in a statement able to run AFTER the alias's own ``Assign``
+    (same block, recursively) -- folding such an alias would read the value AFTER
+    that write at the use site, not the one the view captured at bind time."""
+    free_names: Dict[str, OrderedSet] = {}
+    for name, (base_name, elts) in candidates.items():
+        names = OrderedSet((base_name, ))
+        for e in elts:
+            for n in ast.walk(e):
+                if isinstance(n, ast.Name):
+                    names.add(n.id)
+        free_names[name] = names
+
+    unsafe: OrderedSet = OrderedSet()
+
+    def _scan(stmts: List[ast.stmt]) -> None:
+        for i, s in enumerate(stmts):
+            if (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
+                    and s.targets[0].id in candidates):
+                name = s.targets[0].id
+                written = _names_written_in(stmts[i + 1:])
+                if any(n in written for n in free_names[name]):
+                    unsafe.add(name)
+            for cb in _child_blocks_of(s):
+                _scan(cb)
+
+    _scan(tree.body if isinstance(tree, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)) else [tree])
+    return unsafe
+
+
+def _flatten_view_chains(good: Dict[str, Tuple[str, List[ast.expr]]]) -> Dict[str, Tuple[str, List[ast.expr]]]:
+    """Compose a VIEW-OF-A-VIEW chain down to its root array in one hop.
+
+    ``window = x_g[:, :, iy0:iy0+span_h:stride[0], ...]`` where ``x_g`` is itself a
+    folding view (``x_g = padded[:, g*ipg:(g+1)*ipg]``) binds ``window`` against
+    ``x_g``, not against ``padded``. Composing straight through to ``padded`` here
+    -- instead of leaving ``window`` pointing at ``x_g`` -- matters because ``x_g``'s
+    own ``Assign`` is about to be dropped by the SAME fold pass: an unresolved
+    chain would leave ``window`` referencing a name that no longer exists. Each
+    step reuses :func:`_compose_kept_axis`, exactly the math a further SUBSCRIPT of
+    ``x_g`` composes with; a view's own defining indices are algebraically no
+    different from a later use's. ``good`` already proved every entry safe to fold
+    against its OWN direct base, so composing two safe hops is still safe.
+    """
+    resolved: Dict[str, Tuple[str, List[ast.expr]]] = {}
+
+    def _resolve(name: str, seen: OrderedSet) -> Tuple[str, List[ast.expr]]:
+        if name in resolved:
+            return resolved[name]
+        base_name, elts = good[name]
+        if base_name in good and base_name not in seen:
+            deeper = OrderedSet(seen)
+            deeper.add(name)
+            root_base, root_elts = _resolve(base_name, deeper)
+            kept_positions = [i for i, e in enumerate(root_elts) if isinstance(e, ast.Slice)]
+            padded = elts + [
+                ast.Slice(lower=None, upper=None, step=None) for _ in range(len(kept_positions) - len(elts))
+            ]
+            composed = [copy.deepcopy(e) for e in root_elts]
+            for pos, u in zip(kept_positions, padded):
+                composed[pos] = _compose_kept_axis(root_elts[pos], u)
+            result = (root_base, composed)
+        else:
+            result = (base_name, elts)
+        resolved[name] = result
+        return result
+
+    for name in good:
+        _resolve(name, OrderedSet())
+    return resolved
+
+
+def _fold_slice_view_aliases(tree: ast.AST, array_shapes: Dict[str, List[str]]) -> OrderedSet:
+    """Fold a name bound to a partial/strided VIEW of an array into every subscripted use.
+
+    ``x_g = padded[:, g*in_per_group:(g+1)*in_per_group]`` on a 4-D ``padded`` binds a
+    view whose axis 1 is offset by ``g*in_per_group``, other axes passing through
+    untouched; a further subscript ``x_g[i0, i1, i2, i3]`` composes to
+    ``padded[i0, g*in_per_group + i1, i2, i3]`` (grouped conv's per-group input
+    slab -- conv2d_batch_norm_scaling and the rest of the "expression Slice"
+    machine_learning refusals). Unlike :func:`_fold_subarray_aliases` (a scalar
+    index PREFIX plus dropped trailing full slices), this handles a Slice with real
+    bounds/step at ANY axis position, composing offsets/strides against both a
+    further scalar index (``start + step*j``) and a further slice
+    (``start+step*a : start+step*b : step*c``, :func:`_compose_kept_axis`). numpy
+    squeeze semantics pick which base axis a kept view axis is: an INTEGER view
+    index drops the axis (it never appears at a use site again), a Slice view
+    index -- even a length-1 one -- keeps it as one of the view's own axes, in
+    the order it appears.
+
+    Fires only when it is provably sound: the alias is assigned exactly once, every
+    load of it is the base of a further BASIC-indexed subscript (never passed
+    around bare, never gathered through an index array), it is never itself a
+    subscript STORE target (a genuine alias, not a private copy), and neither the
+    source array nor a name the view's bounds read is written before every use
+    (:func:`_reject_view_writes_between_bind_and_use`). Any alias failing these
+    checks is left alone -- the existing "expression Slice" refusal stands rather
+    than risk a silently wrong shape or offset.
+    """
+    aliases: Dict[str, Tuple[str, List[ast.expr]]] = {}
+    for stmt in ast.walk(tree):
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            continue
+        val = stmt.value
+        if not (isinstance(val, ast.Subscript) and isinstance(val.value, ast.Name)):
+            continue
+        base_name = val.value.id
+        shape = array_shapes.get(base_name)
+        if not shape:
+            continue
+        elts = _slice_dims(val)
+        if len(elts) > len(shape) or any(_is_fancy_dim(e, array_shapes) for e in elts):
+            continue
+        elts = elts + [ast.Slice(lower=None, upper=None, step=None) for _ in range(len(shape) - len(elts))]
+        if not any(isinstance(e, ast.Slice) for e in elts):
+            continue  # a fully scalar index is an element read, not a view -- nothing to fold
+        if _has_negative_step(elts):
+            continue  # a numpy reverse -- the offset algebra below assumes a positive stride
+        aliases[stmt.targets[0].id] = (base_name, elts)
+    if not aliases:
+        return OrderedSet()
+
+    assigns: Dict[str, int] = {}
+    written_through: OrderedSet = OrderedSet()
+    uses_composable: Dict[str, bool] = {}
+    sub_value_ids: OrderedSet = OrderedSet()
+    load_ids: Dict[str, List[int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in aliases:
+                    assigns[t.id] = assigns.get(t.id, 0) + 1
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in aliases:
+            name = node.value.id
+            sub_value_ids.add(id(node.value))
+            if isinstance(node.ctx, ast.Store):
+                written_through.add(name)
+            kept = sum(1 for e in aliases[name][1] if isinstance(e, ast.Slice))
+            use_elts = _slice_dims(node)
+            ok = (len(use_elts) <= kept and not any(_is_fancy_dim(e, array_shapes) for e in use_elts)
+                  and not _has_negative_step(use_elts))
+            uses_composable[name] = uses_composable.get(name, True) and ok
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in aliases:
+            load_ids.setdefault(node.id, []).append(id(node))
+
+    candidates = {
+        name: aliases[name]
+        for name in aliases
+        if assigns.get(name, 0) == 1 and name not in written_through and uses_composable.get(name, True) and all(
+            i in sub_value_ids for i in load_ids.get(name, []))
+    }
+    if not candidates:
+        return OrderedSet()
+    unsafe = _reject_view_writes_between_bind_and_use(tree, candidates)
+    good = {name: v for name, v in candidates.items() if name not in unsafe}
+    if not good:
+        return OrderedSet()
+    good = _flatten_view_chains(good)
+
+    class _Fold(ast.NodeTransformer):
+
+        def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+            self.generic_visit(node)
+            if not (isinstance(node.value, ast.Name) and node.value.id in good):
+                return node
+            base_name, view_elts = good[node.value.id]
+            kept_positions = [i for i, e in enumerate(view_elts) if isinstance(e, ast.Slice)]
+            use_elts = _slice_dims(node)
+            use_elts = use_elts + [
+                ast.Slice(lower=None, upper=None, step=None) for _ in range(len(kept_positions) - len(use_elts))
+            ]
+            composed = [copy.deepcopy(e) for e in view_elts]
+            for pos, u in zip(kept_positions, use_elts):
+                composed[pos] = _compose_kept_axis(view_elts[pos], u)
+            sl = ast.Tuple(elts=composed, ctx=ast.Load()) if len(composed) > 1 else composed[0]
+            return ast.copy_location(
+                ast.Subscript(value=ast.Name(id=base_name, ctx=ast.Load()), slice=sl, ctx=node.ctx), node)
+
+        def visit_Assign(self, node: ast.Assign) -> Optional[ast.AST]:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in good:
+                return None  # drop the now-unused view-alias assignment
+            self.generic_visit(node)
+            return node
+
+    _Fold().visit(tree)
+    ast.fix_missing_locations(tree)
+    live = OrderedSet(n.id for n in ast.walk(tree) if isinstance(n, ast.Name))
+    return OrderedSet(name for name in good if name not in live)
+
+
 class _FlattenChainedSubscripts(ast.NodeTransformer):
     """Flatten a chained subscript ``B[inner][outer]`` into ONE combined subscript
     ``B[combined]`` -- the outer index addresses the axes the inner FULL-slices, in
@@ -7431,6 +7710,19 @@ def _lp_slice_normalize_and_lift(ctx: LoweringContext) -> None:
     # ``normalize-index-access`` phase.
     _FlattenChainedSubscripts(shapes).visit(tree)
     _fold_subarray_aliases(tree, shapes)
+    # Fold a name bound to a partial/strided VIEW (a real Slice with bounds/step,
+    # not just a scalar prefix) into every further-subscripted use, composing the
+    # offsets/strides -- grouped conv's ``x_g = padded[:, g*ipg:(g+1)*ipg]`` and
+    # sibling machine_learning kernels, whose further-sliced ``x_g[...]`` uses
+    # otherwise reach the emitter as a bare ``:`` value expression.
+    # A folded-away alias may be a MATERIALISED staging local (the slice lifter's
+    # ``__hcall`` copy): its uses now read the base array directly, so leaving it in
+    # ``zeros_locals`` emits a malloc/free pair for a buffer nothing writes or reads,
+    # hoisted to function top because it has no use to place it against.
+    for _dead in _fold_slice_view_aliases(tree, shapes):
+        ctx.kir.zeros_locals.pop(_dead, None)
+        ctx.kir.zeros_fills.pop(_dead, None)
+        shapes.pop(_dead, None)
     # Lift array-valued RHS (slice-bearing BinOp / Call / etc) on a bare-Name LHS to
     # a ``Name = np.zeros(extent); Name[:] = expr`` pair so slice fusion can lower
     # the per-element loop. Computes the shape from the iteration extent of the RHS,

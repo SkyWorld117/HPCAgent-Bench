@@ -259,7 +259,7 @@ class TupleDesugar:
             # `is not None`, never `or`: a 0-repeat is the empty tuple, which is falsy but correct.
             repeated = self.repeat(node.left, node.right, env)
             return repeated if repeated is not None else self.repeat(node.right, node.left, env)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "tuple" and len(
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("tuple", "list") and len(
                 node.args) == 1 and not node.keywords:
             inner = self.tuple_of(node.args[0], env)
             if inner is not None:
@@ -270,6 +270,10 @@ class TupleDesugar:
             # ``tuple(range(2, x.ndim))`` -- the ports spell "every axis from here on" this way.
             bounds = self.range_bounds(node.args[0], env)
             return None if bounds is None else [ast.Constant(value=i) for i in range(*bounds)]
+        # A bare comprehension: ``[<expr> for i in range(K)]`` used directly (not wrapped in
+        # ``tuple(...)``/``list(...)``), same trip-count requirement as the wrapped form.
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            return self.unroll(node, env)
         return self.shape_tuple(node)
 
     def shape_tuple(self, node: ast.AST) -> Optional[List[ast.expr]]:

@@ -242,7 +242,7 @@ def _run_numba(npy, bi, func, inputs, outputs, syms, expected, rtol, atol, captu
     try:
         nb_src = emit_numba(npy.read_text(), kir=lower(parse_kernel(npy, bi)))
     except Exception as exc:  # noqa: BLE001
-        return f"skip:unsupported:emit:{type(exc).__name__}"
+        return f"FAIL:emit:{type(exc).__name__}: {exc}"
     # Write + import (not exec-from-string): emit_numba decorates with
     # ``njit(cache=True)`` and numba's cache locator needs a real ``__file__``.
     mod = npy.parent / f"{func}_numba.py"
@@ -279,7 +279,7 @@ def _run_pythran(npy, bi, func, inputs, outputs, syms, expected, rtol, atol, tdp
     try:
         py_src = emit_pythran(npy.read_text(), lower(parse_kernel(npy, bi)))
     except Exception as exc:  # noqa: BLE001
-        return f"skip:unsupported:emit:{type(exc).__name__}"
+        return f"FAIL:emit:{type(exc).__name__}: {exc}"
     mod = tdp / f"{func}_pythran.py"
     mod.write_text(py_src)
     so = tdp / f"{func}_pythran.so"
@@ -397,7 +397,7 @@ def _jax_child(src, func, inputs, outputs, expected, rtol, atol, capture_return=
     try:
         jsrc = emit_jax(src, func)
     except Exception as exc:  # noqa: BLE001
-        return f"skip:unsupported:emit:{type(exc).__name__}"
+        return f"FAIL:emit:{type(exc).__name__}: {exc}"
     ns: Dict[str, object] = {}
     tree = ast.parse(jsrc)
     try:
