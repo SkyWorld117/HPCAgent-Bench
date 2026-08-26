@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from numpyto_common import dtypes
 from numpyto_common.lib_nodes import _parse_einsum_subscripts
+from numpyto_common.ordered import OrderedSet
 
 
 class DesugarError(NotImplementedError):
@@ -347,12 +348,12 @@ def _drop_rank_conflicts(tree: ast.AST, ranks: Dict[str, int], seed: Dict[str, i
     the top, so ``x.shape`` expanded to three axes. One rank per name or none; a caller that needs
     the value AT a statement has to track it itself.
     """
-    per_name: Dict[str, Set[int]] = {}
+    per_name: Dict[str, OrderedSet] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             rank = expr_rank(node.value, ranks)
             if rank is not None:
-                per_name.setdefault(node.targets[0].id, set()).add(rank)
+                per_name.setdefault(node.targets[0].id, OrderedSet()).add(rank)
     for name, seen in per_name.items():
         if len(seen) <= 1:
             continue
@@ -2171,19 +2172,27 @@ _UFUNC_OUT_OPS = {
     "mod": ast.Mod,
 }
 
+#: binary ufuncs with no Python operator (``max``/``min`` are statements, not BinOps) whose ``out=``
+#: form keeps the call and only drops the keyword -- the plain (no ``out=``) call already lowers
+#: through the generic elementwise-Call path (densenet's pooling cores, once their ``acc = None``
+#: seed is peeled, reduce to exactly this shape).
+_UFUNC_OUT_CALLS = OrderedSet(("maximum", "minimum", "fmax", "fmin"))
+
 
 class _UfuncOutInline(ast.NodeTransformer):
-    """``np.multiply(a, b, out=c)`` (and the other binary arithmetic ufuncs) -> the
-    explicit assignment ``c = a <op> b``. The C/Fortran backends have no ufunc
-    dispatch, so the ``out=`` form must be lowered to a store (minife's axpby).
-    ``c`` may be a slice (``wcoefs[:n]``) -- the assignment target is that slice."""
+    """``np.multiply(a, b, out=c)`` (the binary arithmetic ufuncs) -> the explicit assignment
+    ``c = a <op> b``; ``np.maximum(a, b, out=c)`` (and the other ``_UFUNC_OUT_CALLS`` members, which
+    have no BinOp form) -> ``c = np.maximum(a, b)``. The C/Fortran backends have no ufunc dispatch,
+    so the ``out=`` form must be lowered to a store (minife's axpby). ``c`` may be a slice
+    (``wcoefs[:n]``) -- the assignment target is that slice."""
 
     def _rewrite(self, call: ast.AST):
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
                 and isinstance(call.func.value, ast.Name) and call.func.value.id in ("np", "numpy")):
             return None
-        op = _UFUNC_OUT_OPS.get(call.func.attr)
-        if op is None or len(call.args) != 2:
+        attr = call.func.attr
+        op = _UFUNC_OUT_OPS.get(attr)
+        if (op is None and attr not in _UFUNC_OUT_CALLS) or len(call.args) != 2:
             return None
         out = next((kw.value for kw in call.keywords if kw.arg == "out"), None)
         if out is None:
@@ -2192,8 +2201,11 @@ class _UfuncOutInline(ast.NodeTransformer):
         for n in ast.walk(target):
             if isinstance(n, (ast.Name, ast.Subscript, ast.Attribute)):
                 n.ctx = ast.Store()
-        return ast.copy_location(
-            ast.Assign(targets=[target], value=ast.BinOp(left=call.args[0], op=op(), right=call.args[1])), call)
+        if op is not None:
+            value: ast.expr = ast.BinOp(left=call.args[0], op=op(), right=call.args[1])
+        else:
+            value = ast.Call(func=copy.deepcopy(call.func), args=[call.args[0], call.args[1]], keywords=[])
+        return ast.copy_location(ast.Assign(targets=[target], value=value), call)
 
     def visit_Expr(self, node: ast.Expr):
         rw = self._rewrite(node.value)

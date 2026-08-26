@@ -29,6 +29,7 @@ import copy
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from numpyto_common.numpy_desugar import expr_rank
+from numpyto_common.ordered import OrderedSet
 
 #: Module aliases a kernel may spell numpy as.
 NUMPY_MODULES = frozenset({"np", "numpy"})
@@ -138,9 +139,35 @@ def is_index_element(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "slice"
 
 
-def assigned_names(node: ast.AST) -> Set[str]:
+def _target_names(target: ast.AST) -> OrderedSet:
+    """The name(s) one assignment TARGET actually binds -- a bare Name, every element of a
+    Tuple/List/Starred pattern, or (for a Subscript/Attribute LValue) the base object being
+    written THROUGH, e.g. ``a`` in ``a[i] = x``.
+
+    Does NOT recurse into a Subscript's INDEX or an Attribute's name: those are read, not bound.
+    ``out[lo:hi:stride[0]] += tap`` (a strided-slice tap loop) walks the whole target with a bare
+    ``ast.walk`` and used to pick up ``stride`` from inside the slice STEP as if this statement
+    rebound it -- which then made ``assigned_names`` invalidate ``stride``'s compile-time tuple
+    tracking (see below) on every loop this statement sits in, so a stride that had already folded
+    to a literal outside the loop reverted to an un-foldable ``stride[0]`` the moment the SAME
+    variable was also used as a slice step somewhere inside it."""
+    if isinstance(target, ast.Name):
+        return OrderedSet((target.id, ))
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names = OrderedSet()
+        for elt in target.elts:
+            names |= _target_names(elt)
+        return names
+    if isinstance(target, (ast.Subscript, ast.Attribute)):
+        return _target_names(target.value)
+    return OrderedSet()
+
+
+def assigned_names(node: ast.AST) -> OrderedSet:
     """Every name the subtree can rebind -- the conservative kill set for a branch or loop body."""
-    out: Set[str] = set()
+    out = OrderedSet()
     for sub in ast.walk(node):
         targets: List[ast.AST] = []
         if isinstance(sub, ast.Assign):
@@ -150,9 +177,7 @@ def assigned_names(node: ast.AST) -> Set[str]:
         elif isinstance(sub, ast.For):
             targets = [sub.target]
         for tgt in targets:
-            for leaf in ast.walk(tgt):
-                if isinstance(leaf, ast.Name):
-                    out.add(leaf.id)
+            out |= _target_names(tgt)
     return out
 
 
@@ -656,19 +681,42 @@ def desugar_tuples(fn: ast.FunctionDef,
 
 
 def _drop_dead_none_bindings(fn: ast.FunctionDef) -> None:
-    """Drop ``name = None`` where nothing reads ``name`` any more.
+    """Drop ``name = None`` where nothing reads ``name`` any more, OR where the very next
+    statement in the same block unconditionally rebinds it.
 
     Folding ``if stride is None: stride = kernel_size`` leaves the helper's ``stride = None`` default
-    behind with no readers, and ``None`` has no C spelling -- the emitter would refuse the kernel over
-    a statement that no longer does anything."""
-    read = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    behind, and ``None`` has no C spelling -- the emitter would refuse the kernel over a statement
+    that no longer does anything. The "no readers anywhere" check alone misses the common case: the
+    call-site argument was itself a literal ``None`` (matmul_max_pool_sum_scale calling its own
+    ``_maxpool1d(..., None, ...)``), so inlining binds the reassigned param through a fresh
+    ``__inl1_stride = None`` init (see ``_InlineHelpers``'s ``reassigned_params``) that sits directly
+    beside the now-unconditional ``__inl1_stride = kernel_size`` the guard folded to -- and
+    ``__inl1_stride`` genuinely IS read later on, just never through this dead write. Adjacency makes
+    that safe to see without a full liveness pass: nothing between the two statements can read the
+    ``None``, so whatever the second statement writes is the only value that ever reaches a reader.
+    """
+    read = OrderedSet(n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
 
-    def dead(stmt: ast.stmt) -> bool:
+    def none_bind_target(stmt: ast.stmt) -> Optional[str]:
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                and isinstance(stmt.value, ast.Constant) and stmt.value.value is None):
+            return stmt.targets[0].id
+        return None
+
+    def rebinds(stmt: ast.stmt, name: str) -> bool:
         return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
-                and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
-                and stmt.targets[0].id not in read)
+                and stmt.targets[0].id == name)
+
+    def prune(stmts: List[ast.stmt]) -> List[ast.stmt]:
+        out: List[ast.stmt] = []
+        for i, stmt in enumerate(stmts):
+            name = none_bind_target(stmt)
+            if name is not None and (name not in read or (i + 1 < len(stmts) and rebinds(stmts[i + 1], name))):
+                continue
+            out.append(stmt)
+        return out
 
     for node in ast.walk(fn):
         for field, value in ast.iter_fields(node):
             if isinstance(value, list) and any(isinstance(v, ast.stmt) for v in value):
-                setattr(node, field, [v for v in value if not dead(v)])
+                setattr(node, field, prune(value))
