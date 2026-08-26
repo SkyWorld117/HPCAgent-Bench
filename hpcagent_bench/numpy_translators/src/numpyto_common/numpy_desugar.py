@@ -1984,6 +1984,7 @@ class _AddAtInline(ast.NodeTransformer):
                 first_arr = first_arr or t
             else:
                 idx_exprs.append(ast.unparse(e))
+        trail_iters: List[str] = []
         if vals is None:
             rhs = "1"
         else:
@@ -1996,16 +1997,28 @@ class _AddAtInline(ast.NodeTransformer):
                 tv = ast.unparse(vals)
             else:
                 pre.append(f"{tv} = np.ascontiguousarray({ast.unparse(vals)})")
-            if vr and vr not in (0, driver_rank):
-                # vals broadcasts against the index shape; only a scalar or a
-                # driver-shaped vals is unambiguous. Anything else would need
-                # numpy broadcast alignment we do not model -> fail loudly.
+            # ``A[idx]`` keeps the axes the index tuple does NOT address, so a rank-1 index into a
+            # rank-3 A selects rank-2 blocks and vals is legitimately rank 3 (cp2k_density_matrix_trs4's
+            # ``np.add.at(c_blocks, flat_c_pos, alpha * flat_prod)``). Those trailing axes get their
+            # own loops rather than a subarray ``+=``: scalar accumulation is what every backend
+            # supports, and it keeps the unbuffered duplicate-index order this lowering exists for.
+            trailing = vr - driver_rank if vr else 0
+            a_rank = self.ranks.get(A)
+            if vr and trailing and (trailing < 0 or a_rank is None or a_rank - len(elts) != trailing):
+                # Anything else would need numpy broadcast alignment we do not model -> fail loudly.
                 raise DesugarError(f"np.add.at values ndim {vr} != index ndim {driver_rank} "
-                                   "(only scalar or matching-shape values are lowered)")
-            rhs = f"{tv}[{it}]" if vr and vr >= 1 else tv
+                                   f"plus the {'unknown' if a_rank is None else a_rank - len(elts)} "
+                                   "axes the index leaves untouched (only scalar, matching-shape or "
+                                   "block-shaped values are lowered)")
+            trail_iters = [f"{p}_t{k}" for k in range(trailing)]
+            idx_exprs.extend(trail_iters)
+            rhs = f"{tv}[{', '.join(iters + trail_iters)}]" if vr and vr >= 1 else tv
         lines, deepen = list(pre), ""
         for k in range(driver_rank):
             lines.append(f"{deepen}for {iters[k]} in range({first_arr}.shape[{k}]):")
+            deepen += "    "
+        for k, t in enumerate(trail_iters):
+            lines.append(f"{deepen}for {t} in range({tv}.shape[{driver_rank + k}]):")
             deepen += "    "
         lines.append(f"{deepen}{A}[{', '.join(idx_exprs)}] {_AT_OPS[op]} {rhs}")
         self.changed = True
