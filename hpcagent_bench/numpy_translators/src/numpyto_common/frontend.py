@@ -80,6 +80,9 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     * ``top = slice(0, nlev)`` used as ``A[i, top, b]`` -> ``A[i, 0:nlev, b]`` -- a slice OBJECT is
       not a value any backend has, and left standing it also reads as a scalar index, which silently
       drops an axis from every shape derived through it.
+    * ``ia = np.array([i_start - 1, i_end])`` -> an ``np.empty`` of that length plus one store per
+      element (:class:`_ArrayLiteralToFill`). The backends have no array CONSTRUCTOR, only
+      allocations and stores.
     * ``acc = None`` seeding a first-iteration toggle (``acc = tap if acc is None else
       combiner(acc, tap)``, or the ``if acc is None: ... else: ...`` spelling) -> an explicit
       ``__acc_seen`` flag -- see :class:`_PeelNoneSeededAccumulators`.
@@ -94,6 +97,7 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     _FoldStaticNoneBranches().visit(fn)
     _PeelNoneSeededAccumulators().visit(fn)
     _ListRepeatToFull().visit(fn)
+    _ArrayLiteralToFill().visit(fn)
     _SpliceErrstate().visit(fn)
     _FoldSliceLocals().apply(fn)
     ast.fix_missing_locations(fn)
@@ -283,6 +287,113 @@ def _single_element_repeat(value: ast.expr) -> Optional[Tuple[ast.expr, ast.expr
         if isinstance(elt, ast.Constant) and isinstance(elt.value, (int, float)) and not isinstance(elt.value, bool):
             return elt, count
     return None
+
+
+class _ArrayLiteralToFill(ast.NodeTransformer):
+    """``ia = np.array([i0, i1])`` -> ``ia = np.empty((2,), dtype=np.int64)`` plus one store per
+    element.
+
+    A small literal array is how a kernel names a handful of rows it must touch out of order --
+    fv3's ``ia = np.array([i_start - 1, i_end])``, read back as ``al[ia, :, :] = ...``. The
+    backends have no array CONSTRUCTOR, only allocations and stores, so the call was refused where
+    it stood; spelled as an allocation and its stores the result is an ordinary index vector, and
+    the fancy-index gather and scatter that consume it already lower.
+
+    The element type is never guessed. It comes from an explicit ``dtype=``; from the elements when
+    all of them are numeric literals (numpy's own rule -- an int list is an INTEGER buffer); or,
+    for the symbolic elements above, from the name being read ONLY as a subscript index, which
+    makes it an index vector and so ``int64``. Anything else keeps the call and the refusal behind
+    it, because a buffer typed wrong is a miscompile and a refusal is not.
+    """
+
+    def __init__(self) -> None:
+        self.fn: Optional[ast.FunctionDef] = None
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        self.fn = node
+        self.generic_visit(node)
+        return node
+
+    def visit_Assign(self, node: ast.Assign):
+        if self.fn is None or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            return node
+        parsed = _array_literal(node.value)
+        if parsed is None:
+            return node
+        elts, dtype = parsed
+        name = node.targets[0].id
+        if dtype is None:
+            attr = _literal_elt_dtype(elts)
+            if attr is None and _reads_only_as_index(self.fn, name):
+                attr = "int64"
+            if attr is None:
+                return node
+            dtype = ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()), attr=attr, ctx=ast.Load())
+        alloc = ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())],
+                           value=ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
+                                                             attr="empty",
+                                                             ctx=ast.Load()),
+                                          args=[ast.Tuple(elts=[ast.Constant(value=len(elts))], ctx=ast.Load())],
+                                          keywords=[ast.keyword(arg="dtype", value=dtype)]))
+        stores = [
+            ast.Assign(targets=[
+                ast.Subscript(value=ast.Name(id=name, ctx=ast.Load()), slice=ast.Constant(value=k), ctx=ast.Store())
+            ],
+                       value=elt) for k, elt in enumerate(elts)
+        ]
+        return [ast.copy_location(stmt, node) for stmt in (alloc, *stores)]
+
+
+def _array_literal(value: ast.expr) -> Optional[Tuple[List[ast.expr], Optional[ast.expr]]]:
+    """``np.array([e0, ...])`` with an optional ``dtype=`` -> ``([e0, ...], dtype)``, else ``None``.
+
+    Any other keyword (``copy=``, ``order=``, ``ndmin=``) changes what the call builds, and a
+    nested or starred element makes it either 2-D or of no static length -- none of those is the
+    flat literal claimed here."""
+    if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "array"
+            and isinstance(value.func.value, ast.Name) and value.func.value.id in ("np", "numpy")):
+        return None
+    if len(value.args) != 1 or not isinstance(value.args[0], (ast.List, ast.Tuple)) or not value.args[0].elts:
+        return None
+    if any(kw.arg != "dtype" for kw in value.keywords):
+        return None
+    elts = list(value.args[0].elts)
+    if any(isinstance(elt, (ast.List, ast.Tuple, ast.Starred)) for elt in elts):
+        return None
+    return elts, next((kw.value for kw in value.keywords if kw.arg == "dtype"), None)
+
+
+def _is_num_literal(node: ast.expr) -> bool:
+    """A numeric literal, negated or not. ``True``/``False`` are ints to Python but a bool list is
+    a mask, not a number, so they are excluded."""
+    inner = node.operand if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)) else node
+    return (isinstance(inner, ast.Constant) and isinstance(inner.value, (int, float))
+            and not isinstance(inner.value, bool))
+
+
+def _literal_elt_dtype(elts: List[ast.expr]) -> Optional[str]:
+    """The buffer type an all-literal element list gives, following numpy: every element an int ->
+    ``int64``, any of them a float -> ``float64``. ``None`` when an element is not a literal."""
+    if all(_const_int(elt) is not None for elt in elts):
+        return "int64"
+    if all(_is_num_literal(elt) for elt in elts):
+        return "float64"
+    return None
+
+
+def _reads_only_as_index(fn: ast.FunctionDef, name: str) -> bool:
+    """Every READ of ``name`` sits inside a subscript's index expression.
+
+    Such a name is an index vector, which settles both open questions at once: its element type is
+    ``int64``, and its elements -- which the AST alone cannot type, being names and arithmetic over
+    them -- are integer expressions for the same reason. A single read anywhere else and the name
+    is something the AST cannot type, so nothing is claimed about it."""
+    indexed: OrderedSet = OrderedSet()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Subscript):
+            indexed.update(id(inner) for inner in ast.walk(node.slice))
+    reads = [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
+    return bool(reads) and all(id(n) in indexed for n in reads)
 
 
 def _list_mutated_names(fn: ast.FunctionDef) -> FrozenSet[str]:

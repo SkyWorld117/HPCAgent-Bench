@@ -42,9 +42,10 @@ from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import _np_linalg_attr
 from numpyto_common.lib_nodes import (DIM_IDENT_RE, SHAPE_READ_RE, LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES,
-                                      UNARY_C_MATH, _broadcast_extents, _const_int, _is_integer_expr, _iter_extent_of,
-                                      _scalarize_at_iters, _slice_step_any, _step_is_negative, _step_node,
-                                      expand_meshgrid, extent_is_scalar, reset_temp_counters)
+                                      UNARY_C_MATH, _broadcast_extents, _const_int, _is_full_slice_elt,
+                                      _is_integer_expr, _iter_extent_of, _scalarize_at_iters, _slice_step_any,
+                                      _step_is_negative, _step_node, expand_meshgrid, extent_is_scalar,
+                                      reset_temp_counters)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
                                      _substitute_inlined_scalar_defs)
 
@@ -3000,8 +3001,8 @@ def _names_written_in(stmts: List[ast.stmt]) -> OrderedSet:
     return out
 
 
-def _reject_view_writes_between_bind_and_use(tree: ast.AST,
-                                             candidates: Dict[str, Tuple[str, List[ast.expr]]]) -> OrderedSet:
+def _reject_view_writes_between_bind_and_use(tree: ast.AST, candidates: Dict[str, Tuple[str,
+                                                                                        List[ast.expr]]]) -> OrderedSet:
     """Names among ``candidates`` whose base array, or a name their captured bounds
     read, is written in a statement able to run AFTER the alias's own ``Assign``
     (same block, recursively) -- folding such an alias would read the value AFTER
@@ -5705,14 +5706,30 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         The C/Fortran emitter has no notion of array-valued subscripts, so a
         raw ``facb[nl] = v`` / ``tg[nl, 0] = psi[:, i]`` would emit an invalid
         ``arr[ptr] = ...``. The index array(s) give the trip count (they must
-        all agree on length); the RHS is scalarised at the loop iter."""
+        all agree on length); the RHS is scalarised at the loop iter.
+
+        A WHOLE-axis ``:`` may sit beside the index array (fv3's ``al[ia, :, :]``)
+        and gets a loop of its own over that axis, nested in subscript order. One
+        advanced-index position keeps its place in the result under numpy's rule,
+        so subscript order IS result-axis order and the iters line up with the RHS
+        as they stand; two such positions with a ``:`` between them do NOT, since
+        numpy moves that group to the front, so only one is claimed. A BOUNDED
+        slice (``a:b``, ``::2``) is not claimed either -- its iter would need
+        start/step arithmetic this loop does not do, and writing the wrong
+        elements is worse than declining."""
         if not isinstance(target.value, ast.Name):
             return []
         name = target.value.id
         if name not in self.shape_table:
             return []
         lead = (list(target.slice.elts) if isinstance(target.slice, ast.Tuple) else [target.slice])
-        if any(isinstance(e, ast.Slice) for e in lead):
+        slice_axes = [k for k, e in enumerate(lead) if isinstance(e, ast.Slice)]
+        if any(not _is_full_slice_elt(lead[k]) for k in slice_axes):
+            return []
+        if slice_axes and (op is not None or len(self.shape_table.get(name, ())) < len(lead)):
+            # ``A[idx, :] += rhs`` would need the buffered-read snapshot below shaped like the
+            # whole written plane, not the rank-1 vector it allocates; and a lead longer than the
+            # target's rank is not a subscript this can size.
             return []
         # Every Name referenced in ``lead`` AS A BARE ARRAY -- a whole position
         # (``idx``) or one buried inside a BinOp/Mod expression (``(idx + m) %
@@ -5741,6 +5758,14 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
             _collect_bare_arrays(e, False)
         if not idx_names:
             return []
+        carriers = [
+            k for k, e in enumerate(lead) if any(isinstance(n, ast.Name) and n.id in idx_names for n in ast.walk(e))
+        ]
+        if slice_axes and (len(carriers) != 1 or carriers[0] > slice_axes[0]):
+            # A single advanced-index position keeps its place in the result only while no ``:``
+            # precedes it; behind one, numpy moves the index axis to the FRONT and the iters here
+            # would fill the wrong axes -- measured as a wrong answer, not a crash, so it declines.
+            return []
         extents = {self.shape_table[n][0] for n in idx_names}
         if len(extents) != 1:
             return []  # disagreeing lengths -- not one broadcastable iteration plane
@@ -5767,19 +5792,40 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                                          ctx=ast.Load())
                 return node
 
-        new_lead = [_IndexArraysAtIter().visit(copy.deepcopy(e)) for e in lead]
+        new_lead: List[ast.expr] = []
+        iters: List[str] = []
+        bounds: List[str] = []
+        for k, e in enumerate(lead):
+            if k in slice_axes:
+                ivar = f"__scs{len(bounds)}"
+                new_lead.append(ast.Name(id=ivar, ctx=ast.Load()))
+                iters.append(ivar)
+                bounds.append(self.shape_table[name][k])
+            else:
+                new_lead.append(_IndexArraysAtIter().visit(copy.deepcopy(e)))
+                # Only a position that actually CARRIES an index array opens the shared iter; a
+                # plain scalar axis (``A[idx, 0, :]``) contributes no result axis at all, and
+                # letting it open one puts the iters out of step with the RHS.
+                if k in carriers and it not in iters:
+                    iters.append(it)
+                    bounds.append(extent)
         lhs_slice = (new_lead[0] if len(new_lead) == 1 else ast.Tuple(elts=new_lead, ctx=ast.Load()))
         lhs = ast.Subscript(value=ast.Name(id=name, ctx=ast.Load()), slice=lhs_slice, ctx=ast.Store())
-        rhs = _SubscriptifyNames(self.shape_table, [it]).visit(copy.deepcopy(value))
+        # The RHS reads the same index arrays at the same iter. An index EXPRESSION
+        # (``src[ia - 1, :]``) reaches emit with the array name still bare otherwise, which is
+        # the invalid pointer arithmetic this rewriter exists to avoid; substituting first
+        # leaves ``_SubscriptifyNames`` an already-scalarised element read, which it keeps.
+        rhs = _SubscriptifyNames(self.shape_table, iters).visit(_IndexArraysAtIter().visit(copy.deepcopy(value)))
 
-        def _loop(body_stmt: ast.stmt) -> ast.For:
-            f = ast.For(target=ast.Name(id=it, ctx=ast.Store()),
-                        iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()),
-                                      args=[_token_to_ast(extent)],
-                                      keywords=[]),
-                        body=[body_stmt],
-                        orelse=[])
-            return f
+        def _loop(body_stmt: ast.stmt) -> ast.stmt:
+            for ivar, bound in zip(reversed(iters), reversed(bounds)):
+                body_stmt = ast.For(target=ast.Name(id=ivar, ctx=ast.Store()),
+                                    iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()),
+                                                  args=[_token_to_ast(bound)],
+                                                  keywords=[]),
+                                    body=[body_stmt],
+                                    orelse=[])
+            return body_stmt
 
         if op is None:
             # Plain fancy store ``A[idx, c] = rhs`` -- a single per-element loop.
