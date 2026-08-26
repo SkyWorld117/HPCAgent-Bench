@@ -42,12 +42,11 @@ from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import _np_linalg_attr
 from numpyto_common.lib_nodes import (DIM_IDENT_RE, SHAPE_READ_RE, LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES,
-                                      UNARY_C_MATH, _broadcast_extents, _const_int, _is_full_slice_elt,
-                                      _is_integer_expr, _iter_extent_of, _scalarize_at_iters, _slice_step_any,
-                                      _step_is_negative, _step_node, expand_meshgrid, extent_is_scalar,
-                                      reset_temp_counters)
+                                      UNARY_C_MATH, _broadcast_extents, _const_int, _is_integer_expr, _iter_extent_of,
+                                      _scalarize_at_iters, _slice_step_any, _step_is_negative, _step_node,
+                                      expand_meshgrid, extent_is_scalar, reset_temp_counters)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
-                                     _substitute_inlined_scalar_defs)
+                                     _substitute_inlined_scalar_defs, fold_shape_expr)
 
 #: ``np.pi`` / ``np.e`` folded to their double literals.  ``math`` gives the identical IEEE-754 value
 #: ``float(sympy.pi)`` / ``float(sympy.E)`` did, without dragging sympy (+mpmath, 100s of ms) onto the
@@ -307,10 +306,15 @@ class _AstypeRewriter(ast.NodeTransformer):
       and ``(level == d).astype(np.int64)`` (bfs) lowerable.
     """
 
-    def __init__(self, array_dtypes: Optional[Dict[str, str]] = None):
+    def __init__(self, array_dtypes: Optional[Dict[str, str]] = None, default_float: str = ""):
         #: ``{array_name: dtype}`` so ``(cmp).astype(X.dtype)`` can resolve
         #: ``X.dtype`` to a concrete cast when the receiver is logical.
         self.array_dtypes = array_dtypes or {}
+        #: What an UNTYPED array is: every other pass reads one as the kernel's float, so a
+        #: ``.astype(tmp.dtype)`` off an intermediate resolves to the same thing rather than
+        #: dropping the cast (fv3_dycore's y stage casts off ``q_advected_x``, which carries no
+        #: recorded dtype).
+        self.default_float = default_float
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         self.generic_visit(node)
@@ -333,9 +337,16 @@ class _AstypeRewriter(ast.NodeTransformer):
             # ``(labels == ids).astype(X.dtype)``). Resolve the source array's
             # dtype and emit the concrete cast so the merge(1, 0, cond) path
             # fires and the destination is declared REAL.
-            if (isinstance(recv, (ast.Compare, ast.BoolOp)) and isinstance(dt, ast.Attribute) and dt.attr == "dtype"
-                    and isinstance(dt.value, ast.Name)):
-                name = self.array_dtypes.get(dt.value.id)
+            bitwise = ((isinstance(recv, ast.BinOp) and isinstance(recv.op, (ast.BitAnd, ast.BitOr, ast.BitXor)))
+                       or (isinstance(recv, ast.UnaryOp) and isinstance(recv.op, (ast.Not, ast.Invert))))
+            # A bitwise combination of masks (fv3_xppm's ``(smt5 | smt5_m1).astype(q.dtype)``) is as
+            # LOGICAL as the comparisons it joins; its operands are locals, so their dtype is not in
+            # this table yet and the receiver's own shape is the only evidence. Dropping the cast
+            # left Fortran multiplying REAL(8) by LOGICAL(1). ``& | ^ ~`` reject floats in numpy, so
+            # the operand is boolean or integer either way and the concrete cast is right for both.
+            if ((isinstance(recv, (ast.Compare, ast.BoolOp)) or bitwise) and isinstance(dt, ast.Attribute)
+                    and dt.attr == "dtype" and isinstance(dt.value, ast.Name)):
+                name = self.array_dtypes.get(dt.value.id) or self.default_float or None
             if name is None:
                 return recv
         return ast.copy_location(
@@ -3594,6 +3605,46 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         slot = elts[0] if len(elts) == 1 else ast.Tuple(elts=elts, ctx=ast.Load())
         return ast.Subscript(value=node, slice=slot, ctx=ast.Load())
 
+    def _advanced_rank(self, d: ast.AST) -> int:
+        """Result-axis count an ADVANCED index dim contributes: an index array's rank, else 0.
+
+        A bare ``ib`` and the expression ``ib - 1`` are the same advanced index to numpy. Only the
+        Name spelling was recognised, so ``dxa[ib - 1, :, :]`` took the plain-slice path and the
+        index array reached :meth:`visit_BinOp` as an ordinary operand.
+        """
+        if isinstance(d, ast.Name):
+            return len(self.array_shapes.get(d.id) or ())
+        if isinstance(d, ast.Slice) or _is_newaxis(d):
+            return 0
+        ext = _iter_extent_of(d, self.array_shapes)
+        return len(ext) if ext is not None and not extent_is_scalar(ext) else 0
+
+    def _bind_gather_operand(self, d: ast.AST, giters: List[ast.AST]) -> ast.AST:
+        """Subscript every index-array Name inside ``d`` at the shared gather iters.
+
+        For a bare Name this is the ``d[giters]`` the Name-only path built; for an expression it
+        reaches the array one operator down. A Name that is already a subscript's base is skipped --
+        it names its own element, not this gather's.
+        """
+        shapes = self.array_shapes
+
+        class _AtIters(ast.NodeTransformer):
+
+            def visit_Subscript(self_inner, n: ast.Subscript) -> ast.AST:
+                n.slice = self_inner.visit(n.slice)
+                return n
+
+            def visit_Name(self_inner, n: ast.Name) -> ast.AST:
+                sh = shapes.get(n.id)
+                if not sh or len(sh) > len(giters):
+                    return n
+                own = giters[len(giters) - len(sh):]
+                elts = [_const(0) if str(x).strip() == "1" else copy.deepcopy(g) for x, g in zip(sh, own)]
+                slot = elts[0] if len(elts) == 1 else ast.Tuple(elts=elts, ctx=ast.Load())
+                return ast.Subscript(value=n, slice=slot, ctx=ast.Load())
+
+        return _AtIters().visit(copy.deepcopy(d))
+
     @staticmethod
     def _iter_minus_start(iter_name: ast.Name, start: ast.AST) -> ast.AST:
         """The LOCAL result position ``iter - lhs_start`` (or just ``iter`` when the
@@ -3639,7 +3690,21 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         front = self._front_placed_gather(node)
         if front is not None:
             node = front
+        # An advanced index EXPRESSION must survive generic_visit intact: ``visit_BinOp``
+        # subscriptifies the index array inside one as an ordinary operand, right-aligned against
+        # the whole nest, so fv3_xppm's length-2 edge-column vector was read at the VERTICAL iter --
+        # a wrong answer, and out of bounds as soon as nk exceeds it. Bound to its own result axes
+        # below, from the pre-visit form.
+        keep = {
+            i: copy.deepcopy(d)
+            for i, d in enumerate(_slice_dims(node)) if not isinstance(d, ast.Name) and self._advanced_rank(d) >= 1
+        }
         self.generic_visit(node)
+        if keep:
+            restored = _slice_dims(node)
+            for i, d in keep.items():
+                restored[i] = d
+            node.slice = (restored[0] if len(restored) == 1 else ast.Tuple(elts=restored, ctx=ast.Load()))
         dims = _slice_dims(node)
         if not any(isinstance(d, ast.Slice) for d in dims):
             # No explicit ``:`` slice, but a PARTIAL scalar index on a
@@ -3747,9 +3812,8 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
         # result axis) inside a 2-slice-axis LHS ``A[k+1:, k:]`` reads the COLUMN
         # iter ``si1``, not the row iter ``si0`` (gaussian's rank-1 update).
         # ``align`` shifts the per-axis consumption by the rank difference.
-        rhs_result_axes = sum(
-            (len(self.array_shapes[d.id]) if isinstance(d, ast.Name) and self.array_shapes.get(d.id) else 1 if (
-                isinstance(d, ast.Slice) or (isinstance(d, ast.Constant) and d.value is None)) else 0) for d in dims)
+        rhs_result_axes = sum((self._advanced_rank(d) or (1 if (
+            isinstance(d, ast.Slice) or (isinstance(d, ast.Constant) and d.value is None)) else 0)) for d in dims)
         align = max(0, len(lhs_slice_iters) - rhs_result_axes)
         idx_nodes: List[ast.AST] = []
         rhs_slice_idx = 0
@@ -3774,8 +3838,8 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
             # Advanced index mixed with slices: a rank-r index array consumes r
             # result axes and reads ``IDX[(those iters)]`` along this source axis
             # (``x1[:, _VOLU_PERM]`` -> ``x1[w0, _VOLU_PERM[w1, w2]]``).
-            if isinstance(d, ast.Name) and self.array_shapes.get(d.id):
-                r = len(self.array_shapes[d.id])
+            r = self._advanced_rank(d)
+            if r >= 1:
                 if align + rhs_slice_idx + r <= len(lhs_slice_iters):
                     # Gather index reads at the LOCAL result position (iter - start),
                     # so a non-zero-start LHS slice indexes the length-matched index
@@ -3785,9 +3849,7 @@ class _SliceToScalarRewriter(ast.NodeTransformer):
                                                lhs_slice_iters[align + rhs_slice_idx + k][1]) for k in range(r)
                     ]
                     rhs_slice_idx += r
-                    gslot = giters[0] if r == 1 else ast.Tuple(elts=giters, ctx=ast.Load())
-                    idx_nodes.append(ast.Subscript(value=ast.Name(id=d.id, ctx=ast.Load()), slice=gslot,
-                                                   ctx=ast.Load()))
+                    idx_nodes.append(self._bind_gather_operand(d, giters))
                     continue
             if not isinstance(d, ast.Slice):
                 idx_nodes.append(self._resolve_scalar_index(d, rhs_name, axis))
@@ -5443,13 +5505,21 @@ def _normalise_shape(shape) -> Tuple[str, ...]:
     :func:`ast.parse` (mode='eval') and unparse back -- the result
     is canonical Python syntax that compares correctly regardless of
     the original wrapper parens.
+
+    Parens are not the only spelling difference that survives an unparse: neighbouring slices of one
+    array give ``hi - lo``, ``hi + 1 - (lo + 1)`` and ``hi - 1 - (lo - 1)`` for the SAME extent, and
+    fv3_xppm builds every PPM limiter out of exactly that. Textual inequality read as a broadcast
+    mismatch, so the whole-array expansion declined and the assignment reached emit as arithmetic on
+    two pointers. :func:`fold_shape_expr` gathers the literals of such a chain, which is enough to
+    make the three agree; it is evaluation-preserving (test_shape_expr_folding re-evaluates every
+    rewrite), so an extent it equates really is equal.
     """
     out = []
     for tok in shape:
         try:
             if tok and not str(tok).isdigit() and not str(tok).isidentifier():
                 parsed = ast.parse(str(tok), mode="eval").body
-                out.append(ast.unparse(parsed))
+                out.append(fold_shape_expr(ast.unparse(parsed)))
                 continue
         except (SyntaxError, ValueError):
             pass
@@ -5534,7 +5604,7 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
     arithmetic in C and as undefined Fortran.
     """
 
-    def __init__(self, shape_table, real_arrays=None, local_dtypes=None):
+    def __init__(self, shape_table, real_arrays=None, local_dtypes=None, scalar_defs=None):
         # We mutate ``shape_table`` to track Name aliases per Assign in
         # source order. Use a local copy so the caller's table is not
         # repeatedly clobbered when an alias gets reassigned.
@@ -5552,6 +5622,12 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         #: (``x = __cb2`` where ``x`` wasn't previously an array) --
         #: emitter must declare them as stack arrays.
         self.alias_locals: Dict[str, Tuple[str, ...]] = {}
+        #: Scalar-dim definitions (``ny = nhalo + nj + nhalo``), for shape comparison only.
+        #: Inlining leaves one extent spelled through the local and its sibling spelled out,
+        #: and the two never compare equal as text -- fv3_dycore's whole PPM stack declined on
+        #: ``__inl1_ny`` vs ``nhalo + nj + nhalo`` and reached emit as a slice expression.
+        self._scalar_defs: Dict[str, str] = dict(scalar_defs or {})
+        self._norm_memo: Dict[Tuple[str, ...], Tuple[str, ...]] = {}
         #: Monotonic id for the buffered fancy ``A[idx] += rhs`` snapshot temps.
         self._scatter_ctr = 0
         #: Per-name list of shapes recorded in source order, one entry
@@ -5708,15 +5784,14 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         ``arr[ptr] = ...``. The index array(s) give the trip count (they must
         all agree on length); the RHS is scalarised at the loop iter.
 
-        A WHOLE-axis ``:`` may sit beside the index array (fv3's ``al[ia, :, :]``)
-        and gets a loop of its own over that axis, nested in subscript order. One
-        advanced-index position keeps its place in the result under numpy's rule,
-        so subscript order IS result-axis order and the iters line up with the RHS
-        as they stand; two such positions with a ``:`` between them do NOT, since
-        numpy moves that group to the front, so only one is claimed. A BOUNDED
-        slice (``a:b``, ``::2``) is not claimed either -- its iter would need
-        start/step arithmetic this loop does not do, and writing the wrong
-        elements is worse than declining."""
+        A sliced axis may sit beside the index array (fv3's ``al[ia, :, :nk]``) and gets a loop of
+        its own over that slice's extent, offset by its ``lower``. The iters are emitted in numpy's
+        RESULT order -- the single advanced position first when a ``:`` precedes it (numpy moves
+        that group to the FRONT), otherwise in subscript order -- so the RHS, which the shared
+        scalarizer right-aligns against those iters, pairs element for element with the LHS whatever
+        axis each side happens to carry its own index array on. Two advanced positions broadcast
+        together and are not claimed, nor is a strided or negative-bounded slice, whose iter would
+        need arithmetic this loop does not do."""
         if not isinstance(target.value, ast.Name):
             return []
         name = target.value.id
@@ -5724,7 +5799,15 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
             return []
         lead = (list(target.slice.elts) if isinstance(target.slice, ast.Tuple) else [target.slice])
         slice_axes = [k for k, e in enumerate(lead) if isinstance(e, ast.Slice)]
-        if any(not _is_full_slice_elt(lead[k]) for k in slice_axes):
+
+        def _plain_bound(e: ast.expr) -> bool:
+            """A unit-step slice with non-negative literal bounds -- the only kind this loop sizes."""
+            if _slice_step_any(e) not in (None, 1):
+                return False
+            return not any(
+                isinstance(b, ast.Constant) and isinstance(b.value, int) and b.value < 0 for b in (e.lower, e.upper))
+
+        if any(not _plain_bound(lead[k]) for k in slice_axes):
             return []
         if slice_axes and (op is not None or len(self.shape_table.get(name, ())) < len(lead)):
             # ``A[idx, :] += rhs`` would need the buffered-read snapshot below shaped like the
@@ -5761,10 +5844,9 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         carriers = [
             k for k, e in enumerate(lead) if any(isinstance(n, ast.Name) and n.id in idx_names for n in ast.walk(e))
         ]
-        if slice_axes and (len(carriers) != 1 or carriers[0] > slice_axes[0]):
-            # A single advanced-index position keeps its place in the result only while no ``:``
-            # precedes it; behind one, numpy moves the index axis to the FRONT and the iters here
-            # would fill the wrong axes -- measured as a wrong answer, not a crash, so it declines.
+        if slice_axes and len(carriers) != 1:
+            # Two advanced positions broadcast into ONE result axis block; this loop gives each its
+            # own iter, which is a different (wrong) pairing.
             return []
         extents = {self.shape_table[n][0] for n in idx_names}
         if len(extents) != 1:
@@ -5793,22 +5875,32 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                 return node
 
         new_lead: List[ast.expr] = []
-        iters: List[str] = []
-        bounds: List[str] = []
+        # ``(iter, bound)`` in numpy RESULT-axis order; ``new_lead`` places each at its own axis.
+        plan: List[Tuple[str, ast.expr]] = []
+        n_sliced = 0
         for k, e in enumerate(lead):
             if k in slice_axes:
-                ivar = f"__scs{len(bounds)}"
-                new_lead.append(ast.Name(id=ivar, ctx=ast.Load()))
-                iters.append(ivar)
-                bounds.append(self.shape_table[name][k])
+                ivar = f"__scs{n_sliced}"
+                n_sliced += 1
+                hi = e.upper if e.upper is not None else _token_to_ast(self.shape_table[name][k])
+                bound = hi if e.lower is None else ast.BinOp(left=hi, op=ast.Sub(), right=copy.deepcopy(e.lower))
+                pos: ast.expr = ast.Name(id=ivar, ctx=ast.Load())
+                if e.lower is not None:
+                    pos = ast.BinOp(left=pos, op=ast.Add(), right=copy.deepcopy(e.lower))
+                new_lead.append(pos)
+                plan.append((ivar, bound))
             else:
                 new_lead.append(_IndexArraysAtIter().visit(copy.deepcopy(e)))
                 # Only a position that actually CARRIES an index array opens the shared iter; a
                 # plain scalar axis (``A[idx, 0, :]``) contributes no result axis at all, and
                 # letting it open one puts the iters out of step with the RHS.
-                if k in carriers and it not in iters:
-                    iters.append(it)
-                    bounds.append(extent)
+                if k in carriers and it not in [i for i, _ in plan]:
+                    # Behind a ``:`` numpy moves this axis to the FRONT of the result; the iters
+                    # must follow, since the RHS is right-aligned against them.
+                    at = 0 if (slice_axes and k > slice_axes[0]) else len(plan)
+                    plan.insert(at, (it, _token_to_ast(extent)))
+        iters = [i for i, _ in plan]
+        bounds = [b for _, b in plan]
         lhs_slice = (new_lead[0] if len(new_lead) == 1 else ast.Tuple(elts=new_lead, ctx=ast.Load()))
         lhs = ast.Subscript(value=ast.Name(id=name, ctx=ast.Load()), slice=lhs_slice, ctx=ast.Store())
         # The RHS reads the same index arrays at the same iter. An index EXPRESSION
@@ -5821,7 +5913,7 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
             for ivar, bound in zip(reversed(iters), reversed(bounds)):
                 body_stmt = ast.For(target=ast.Name(id=ivar, ctx=ast.Store()),
                                     iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()),
-                                                  args=[_token_to_ast(bound)],
+                                                  args=[copy.deepcopy(bound)],
                                                   keywords=[]),
                                     body=[body_stmt],
                                     orelse=[])
@@ -6280,6 +6372,15 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                         return expanded
         return node
 
+    def _norm(self, shape) -> Tuple[str, ...]:
+        """Shape tokens with scalar-dim locals resolved, then folded -- the comparison form."""
+        key = tuple(str(t) for t in shape)
+        got = self._norm_memo.get(key)
+        if got is None:
+            got = _normalise_shape(_substitute_inlined_scalar_defs(key, self._scalar_defs))
+            self._norm_memo[key] = got
+        return got
+
     def _rhs_is_whole_array(self, expr: ast.AST, lhs_name: str) -> bool:
         """Check that every array Name referenced in ``expr`` has a
         shape compatible with ``lhs_name``: equal, or broadcastable
@@ -6292,7 +6393,7 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         target_shape = self.shape_table.get(lhs_name)
         if target_shape is None:
             return False
-        target_norm = _normalise_shape(target_shape)
+        target_norm = self._norm(target_shape)
         # Collect Names that appear as a Subscript value -- those
         # are accessed in lower-rank form via the Subscript, so the
         # bare Name's full-rank shape is not the relevant constraint.
@@ -6308,7 +6409,7 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                 shape = self.shape_table.get(sub.id)
                 if shape is None:
                     continue
-                shape_norm = _normalise_shape(shape)
+                shape_norm = self._norm(shape)
                 if shape_norm == target_norm:
                     has_array = True
                     continue
@@ -6595,8 +6696,19 @@ class _SubscriptifyNames(ast.NodeTransformer):
                 # ``A[idx, lev, blk]`` -> rank 3, not the sum 9), and no Slice at
                 # all (the whole subscript is one adjacent group).
                 def _idx_rank(e):
-                    return (len(self.shape_table[e.id])
-                            if isinstance(e, ast.Name) and self.shape_table.get(e.id) else 0)
+                    if isinstance(e, ast.Name):
+                        return len(self.shape_table.get(e.id) or ())
+                    # An index EXPRESSION over an index array (``dxa[ib - 1, :, :]``) is advanced
+                    # indexing exactly as the bare ``ib`` is -- the lone-index gather above already
+                    # reads it that way. Recognised only here, it fell through to the slice path,
+                    # which copied the expression through untouched; the NEXT scalarising pass then
+                    # saw a bare rank-1 ``ib`` under a rank-3 nest and right-aligned it onto the
+                    # LAST iter. fv3_xppm's edge columns read ``ib[k]`` over the vertical extent --
+                    # a wrong answer, and out of bounds as soon as nk exceeds the index array.
+                    if isinstance(e, (ast.Slice, ast.Constant)) or _is_newaxis(e):
+                        return 0
+                    ext = _iter_extent_of(e, self.shape_table)
+                    return len(ext) if ext is not None and not extent_is_scalar(ext) else 0
 
                 def _is_index_array(e):
                     return _idx_rank(e) >= 1
@@ -7204,7 +7316,22 @@ def _lp_normalize_calls(ctx: LoweringContext) -> None:
     # ``ikb``, icon_scatter's ``lev``) have been materialised by the LibNode
     # expander -- run too early, its index/value shapes are simply unknown.
     _TransposeRewriter(set(ctx.original_kir.sparse or {})).visit(tree)
-    _AstypeRewriter({a.name: a.dtype for a in ctx.kir.arrays if a.dtype}).visit(tree)
+    # Local arrays too, not just declared parameters: fv3_dycore's y-stage reads
+    # ``.astype(q_advected_x.dtype)`` off an intermediate, and an unresolved dtype drops the cast,
+    # which leaves Fortran multiplying a REAL by the LOGICAL mask.
+    _AstypeRewriter(
+        {
+            **{
+                k: v
+                for k, v in ctx.local_dtypes.items() if v
+            },
+            **{
+                a.name: a.dtype
+                for a in ctx.kir.arrays if a.dtype
+            },
+        },
+        default_float=next((a.dtype for a in ctx.kir.arrays if a.dtype and a.dtype.startswith("float")),
+                           "")).visit(tree)
     _MethodCallRewriter().visit(tree)
     # A Call in subscript-index position (``v[np.argmax(np.abs(v))]``) is hoisted
     # to a fresh temp so the index is a bare Name the backends emit; the spilled
@@ -7691,7 +7818,10 @@ def _lp_whole_array_and_zeros(ctx: LoweringContext) -> None:
     # mask_expr[i]:`` guard. Runs before the whole-array rewriter so the LHS is a
     # plain scalar subscript downstream.
     _BooleanMaskRewriter(ctx.lib_shape_table, ctx.bool_names).visit(tree)
-    ctx.wa_rewriter = _WholeArrayAssignRewriter(ctx.lib_shape_table, real_arrays, local_dtypes=ctx.local_dtypes)
+    ctx.wa_rewriter = _WholeArrayAssignRewriter(ctx.lib_shape_table,
+                                                real_arrays,
+                                                local_dtypes=ctx.local_dtypes,
+                                                scalar_defs=_collect_inlined_scalar_defs(tree, None))
     ctx.wa_rewriter.visit(tree)
     # Fold the shapes the whole-array pass inferred for genuinely-new locals
     # (meshgrid ``gx``/``gy``/``gz``, the broadcast ``gsq``) back into the shared

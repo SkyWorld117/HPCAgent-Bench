@@ -177,6 +177,10 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
         return max([r for r in (lr, rr) if r is not None], default=None)
     if isinstance(value, ast.UnaryOp):
         return expr_rank(value.operand, ranks)
+    if isinstance(value, ast.List):
+        # ``np.array([a, b])`` -- a list literal's rank is its nesting depth. Left unknown, the
+        # index vector fv3 builds this way was untracked, and every pass keyed on rank skipped it.
+        return 1 + max((expr_rank(e, ranks) or 0) for e in value.elts) if value.elts else 1
     if isinstance(value, ast.Compare):
         rs = [expr_rank(value.left, ranks)] + [expr_rank(c, ranks) for c in value.comparators]
         return max([r for r in rs if r is not None], default=None)  # bool mask keeps operand rank
@@ -994,6 +998,10 @@ class _FancyGatherHoister(ast.NodeTransformer):
         arank = self.ranks.get(arr)
         elts = node.slice.elts
         if not arank or len(elts) != arank:
+            return node
+        if any(isinstance(e, ast.Slice) or _is_newaxis(e) or _is_ellipsis(e) for e in elts):
+            # Point-wise only. A ``:`` axis survives into the RESULT, so the rank-1 temp this
+            # allocates could not hold it -- the loop would store a plane into a scalar slot.
             return node
         elt_ranks = [expr_rank(e, self.ranks) for e in elts]
         arrs = [r for r in elt_ranks if r and r >= 1]
@@ -4543,6 +4551,85 @@ _AUG_OP_SRC = {
 }
 
 
+class _FancySliceStoreToLoop(ast.NodeTransformer):
+    """``A[idx, :, :] (op)= rhs`` (one index array, the other axes sliced) -> a loop over ``idx``.
+
+    pythran compiles this store to the WRONG elements and says nothing: measured on a 3-D write
+    through a length-2 index array, every written plane disagreed with numpy. The read form
+    (``q[idx - 1, :, :]``) is correct there, so only the store is lowered.
+
+    numpy places a lone advanced index at result axis 0 whenever slices surround it -- in place
+    when it leads, moved to the FRONT when a slice precedes it -- so the hoisted right-hand side
+    is always indexed on its first axis. Two index arrays broadcast together and are left alone.
+    """
+
+    def __init__(self, ranks: Dict[str, int], dtypes: Dict[str, str]):
+        self.ranks = ranks
+        self.dtypes = dtypes
+        self.changed = False
+        self._ctr = 0
+
+    def _carrier(self, lead: List[ast.expr]) -> Optional[int]:
+        """Index of the one lead position holding a rank-1 index array, if the shape fits."""
+        if not any(isinstance(e, ast.Slice) for e in lead):
+            return None
+        found = None
+        for k, e in enumerate(lead):
+            if isinstance(e, ast.Slice):
+                continue
+            names = [n.id for n in ast.walk(e) if isinstance(n, ast.Name)]
+            arrs = [n for n in names if self.ranks.get(n) == 1 and _dtype_kind(ast.Name(id=n), self.dtypes) != "bool"]
+            if not arrs:
+                continue
+            if found is not None or len(set(arrs)) != 1:
+                return None
+            found = k
+        return found
+
+    def _lower(self, node: ast.stmt, target: ast.expr, value: ast.expr, op: str) -> ast.AST:
+        if not (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)):
+            return node
+        lead = list(target.slice.elts) if isinstance(target.slice, ast.Tuple) else [target.slice]
+        k = self._carrier(lead)
+        if k is None:
+            return node
+        p = f"__fs{self._ctr}"
+        self._ctr += 1
+        it = f"{p}_i"
+        idx_name = next(n.id for n in ast.walk(lead[k]) if isinstance(n, ast.Name) and self.ranks.get(n.id) == 1)
+        at_iter = _SubstituteName(idx_name, f"{idx_name}[{it}]").visit(copy.deepcopy(lead[k]))
+        new_lead = [ast.unparse(e) if j != k else ast.unparse(at_iter) for j, e in enumerate(lead)]
+        lines = [
+            f"{p}_v = {ast.unparse(value)}",
+            f"for {it} in range({idx_name}.shape[0]):",
+            f"    {target.value.id}[{', '.join(new_lead)}] {op} {p}_v[{it}]",
+        ]
+        self.changed = True
+        return [ast.copy_location(st, node) for st in ast.parse("\n".join(lines)).body]
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.targets) != 1:
+            return node
+        return self._lower(node, node.targets[0], node.value, "=")
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
+        self.generic_visit(node)
+        op = _AUG_OP_SRC.get(type(node.op))
+        return node if op is None else self._lower(node, node.target, node.value, op)
+
+
+class _SubstituteName(ast.NodeTransformer):
+    """Replace bare ``name`` with the parsed ``text`` (used to index a gather array at a loop iter)."""
+
+    def __init__(self, name: str, text: str):
+        self.name = name
+        self.repl = ast.parse(text, mode="eval").body
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        return copy.deepcopy(self.repl) if node.id == self.name else node
+
+
 class _IxWriteToLoop(ast.NodeTransformer):
     """``A[np.ix_(i, j, k)] = / += rhs`` -> an explicit loop nest over the index
     vectors. ``np.ix_`` selects the OUTER PRODUCT of its vectors -- element
@@ -5008,6 +5095,7 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
             _BoolOpIfToChain(),
             _NormalizeNegativeAxis(ranks),
             _IxWriteToLoop(ranks, dtypes),
+            _FancySliceStoreToLoop(ranks, dtypes),
             _EighInline(ranks, eigh_aliases, dtypes, kir_array_dtypes),
             _LinalgInline(ranks, dtypes, lower_linalg, lower_solve_rhs_ranks),
             _ReshapeMatmulInline(ranks),

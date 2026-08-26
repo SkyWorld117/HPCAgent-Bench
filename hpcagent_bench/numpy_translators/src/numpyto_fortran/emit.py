@@ -1869,7 +1869,11 @@ class _FortranBodyEmitter(BaseEmitter):
                     # A numeric cast of a LOGICAL-valued operand is invalid in Fortran
                     # (INT(logical) is rejected); numpy maps True/False to 1/0, so
                     # emit a MERGE in the target kind instead.
-                    if intrinsic in ("INT", "REAL") and _produces_logical(node.args[0]):
+                    # Through the backend's own oracle, not the module-level predicate: a mask that
+                    # is only known logical from the side tables (``smt5(i) .or. smt5_m1(i)``, whose
+                    # operands are declared locals) scored non-logical here and emitted REAL() of a
+                    # LOGICAL, which gfortran rejects outright.
+                    if intrinsic in ("INT", "REAL") and self._is_logical_node(node.args[0]):
                         one = f"1_{kind}" if intrinsic == "INT" else f"1.0_{kind}"
                         zero = f"0_{kind}" if intrinsic == "INT" else f"0.0_{kind}"
                         return f"merge({one}, {zero}, {args_e[0]})"

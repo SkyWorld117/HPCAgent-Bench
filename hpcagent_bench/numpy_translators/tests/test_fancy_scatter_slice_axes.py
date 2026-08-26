@@ -98,20 +98,43 @@ def test_duplicate_index_is_last_write_wins():
     _ok(_run2("    ia[1] = 1\n    out[ia, :] = src[ia, :] * 2.0\n"))
 
 
-def test_index_behind_a_slice_is_declined_not_guessed():
-    """``out[:, ia]`` puts the index array BEHIND a ``:``. Filling the iters in subscript
-    order there writes the wrong axes -- measured as a silently wrong answer, not a crash --
-    so the expander must decline and leave the statement to whatever handled it before.
+def test_index_behind_a_slice_matches_numpy():
+    """``out[:, ia]`` puts the index array BEHIND a ``:``, which numpy answers by moving that
+    axis to the FRONT of the result. Filling the loop iters in SUBSCRIPT order there writes the
+    wrong axes -- a silently wrong answer, which is why this used to decline. The iters are now
+    emitted in result order, so the right-hand side (right-aligned against them by the shared
+    scalarizer) pairs element for element whatever axis it carries its own index array on."""
+    _ok(_run2("    out[:, ia] = src[:, ia] * 2.0\n"))
 
-    Asserted on the absence of the scatter iter, since a wrong answer is exactly what the
-    numeric check would have accepted as 'it ran'."""
+
+def test_index_behind_a_slice_with_an_index_expression_matches_numpy():
+    _ok(_run2("    out[:, ia] = src[:, ia - 1] * 2.0\n"))
+
+
+def test_index_between_two_slices_matches_numpy():
+    """fv3_dycore's y-direction edge fixup: ``al[:, ja, :nk]``."""
+    _ok(_run3("    out[:, ia, :] = src[:, ia - 1, :] * 2.0\n"))
+
+
+def test_bounded_slices_beside_the_index_matches_numpy():
+    """A bounded ``a:b`` axis is a loop over the slice EXTENT offset by its lower bound; both
+    sides carry their own offset, so the iters stay 0-based and agree."""
+    _ok(_run3("    out[ia, :, 0:2] = src[ia - 1, :, 1:3] * 2.0\n"))
+
+
+def test_a_strided_slice_beside_the_index_is_still_declined():
+    """``::2`` would need step arithmetic this loop does not do; writing the wrong elements is
+    worse than declining, so the expander must leave the statement alone.
+
+    Asserted on the absence of the scatter iter -- a wrong answer is exactly what a numeric
+    check would have accepted as 'it ran'."""
     d = pathlib.Path(tempfile.mkdtemp())
     (d / "k_numpy.py").write_text(("import numpy as np\n"
                                    "def pick(src, out):\n"
                                    "    ia = np.zeros(2, dtype=np.int64)\n"
                                    "    ia[0] = 1\n"
                                    "    ia[1] = 3\n"
-                                   "    out[:, ia] = src[:, ia] * 2.0\n"))
+                                   "    out[ia, ::2] = src[ia, ::2] * 2.0\n"))
     (d / "bi.json").write_text(
         json.dumps(_bench_info("pick", ["src"], ["out"], {
             "src": "(N, M)",
@@ -120,5 +143,8 @@ def test_index_behind_a_slice_is_declined_not_guessed():
             "N": 8,
             "M": 4
         }, None)))
-    text = emit_c(lower(parse_kernel(d / "k_numpy.py", d / "bi.json")), fn_name="pick")
+    try:
+        text = emit_c(lower(parse_kernel(d / "k_numpy.py", d / "bi.json")), fn_name="pick")
+    except NotImplementedError:
+        return
     assert "__sc0" not in text, text
