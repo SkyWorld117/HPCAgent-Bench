@@ -205,6 +205,7 @@ def lavamd_kernel(
     if fv is None:
         fv = np.zeros((rv.shape[0], 4), dtype=np.float64)
 
+    _validate_inputs(box_offsets, neighbor_counts, neighbor_list, rv, qv, fv)
     lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv)
 
     return fv
@@ -214,8 +215,6 @@ def lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv):
     """Manifest-compatible lavaMD benchmark entry point. Runs the lavaMD CPU
     interaction kernel and accumulates the pairwise force into the
     pre-allocated ``fv`` buffer in place."""
-
-    _validate_inputs(box_offsets, neighbor_counts, neighbor_list, rv, qv, fv)
 
     alpha = float(alpha)
     n_boxes = box_offsets.shape[0]
@@ -240,7 +239,8 @@ def lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv):
         pointers[1:] = neighbor_list[l, :count]
         first_j = box_offsets[pointers].astype(np.int64)
 
-        bj = (first_j[:, None] + within_box[None, :]).ravel()
+        neighbor_offsets = first_j[:, None] + within_box[None, :]
+        bj = neighbor_offsets.reshape(-1)
 
         rv_i = rv[first_i:last_i]
         rv_j = rv[bj]
@@ -258,7 +258,12 @@ def lavamd(alpha, box_offsets, neighbor_counts, neighbor_list, rv, qv, fv):
         dy = rv_i[:, 2, None] - rv_j[None, :, 2]
         dz = rv_i[:, 3, None] - rv_j[None, :, 3]
 
-        fv[first_i:last_i, 0] += (qv_j[None, :] * vij).sum(axis=1)
-        fv[first_i:last_i, 1] += (qv_j[None, :] * fs * dx).sum(axis=1)
-        fv[first_i:last_i, 2] += (qv_j[None, :] * fs * dy).sum(axis=1)
-        fv[first_i:last_i, 3] += (qv_j[None, :] * fs * dz).sum(axis=1)
+        term0 = qv_j[None, :] * vij
+        term1 = qv_j[None, :] * fs * dx
+        term2 = qv_j[None, :] * fs * dy
+        term3 = qv_j[None, :] * fs * dz
+
+        fv[first_i:last_i, 0] += term0.sum(axis=1)
+        fv[first_i:last_i, 1] += term1.sum(axis=1)
+        fv[first_i:last_i, 2] += term2.sum(axis=1)
+        fv[first_i:last_i, 3] += term3.sum(axis=1)
