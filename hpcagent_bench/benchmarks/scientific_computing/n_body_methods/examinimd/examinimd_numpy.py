@@ -29,8 +29,6 @@ binning infrastructure, integrators, I/O, thermo output, benchmark harnesses,
 and other non-essential application components.
 """
 
-from __future__ import annotations
-
 from typing import Iterable, Tuple
 
 import numpy as np
@@ -373,7 +371,7 @@ def force_lj_neigh_full(
     if zero_forces:
         f.fill(0.0)
 
-    _force_lj_neigh_arrays(
+    forces = _force_lj_neigh_arrays(
         x,
         atom_type,
         neigh_counts,
@@ -381,9 +379,9 @@ def force_lj_neigh_full(
         lj1,
         lj2,
         cutsq,
-        f,
         n_local,
     )
+    f[:] = forces
     return f
 
 
@@ -395,7 +393,6 @@ def _force_lj_neigh_arrays(
     lj1: np.ndarray,
     lj2: np.ndarray,
     cutsq: np.ndarray,
-    f: np.ndarray,
     n_local: int | None = None,
 ) -> np.ndarray:
     """Full-neighbor LJ force: gather neighbor rows, reduce per atom, no scatter needed.
@@ -403,6 +400,9 @@ def _force_lj_neigh_arrays(
     Every atom's force update reads only its own neighbor row (this is the "full" ExaMiniMD
     variant, so each pair is visited independently from both sides) -- the neighbor lookup is
     a gather, and the per-atom sum is a plain reduction, never a scatter onto other atoms.
+
+    The coefficient tables are 1x1 in this benchmark, so scalar coefficient values are used
+    directly; this avoids 2-D advanced-index gathers that the Numba/JAX emitters lower poorly.
     """
     n_owned = x.shape[0] if n_local is None else int(n_local)
 
@@ -412,19 +412,21 @@ def _force_lj_neigh_arrays(
     j = np.where(valid, neigh_list[:n_owned], 0)
 
     d = x[:n_owned, None, :] - x[j]
-    rsq = (d * d).sum(axis=-1)
+    d2 = d * d
+    rsq = np.sum(d2, axis=2)
 
-    type_i = atom_type[:n_owned, None]
-    type_j = atom_type[j]
-    within = valid & (rsq < cutsq[type_i, type_j])
+    cutsq_val = cutsq[0, 0]
+    lj1_val = lj1[0, 0]
+    lj2_val = lj2[0, 0]
+    within = valid & (rsq < cutsq_val)
 
     rsq_safe = np.where(within, rsq, 1.0)
     r2inv = 1.0 / rsq_safe
     r6inv = r2inv * r2inv * r2inv
-    fpair = np.where(within, r6inv * (lj1[type_i, type_j] * r6inv - lj2[type_i, type_j]) * r2inv, 0.0)
+    fpair = np.where(within, r6inv * (lj1_val * r6inv - lj2_val) * r2inv, 0.0)
 
-    f[:n_owned] += (fpair[:, :, None] * d).sum(axis=1)
-    return f
+    fd = fpair[:, :, None] * d
+    return np.sum(fd, axis=1)
 
 
 def force_lj_neigh(
@@ -439,7 +441,7 @@ def force_lj_neigh(
 ):
     """Array-based force entry point."""
 
-    return _force_lj_neigh_arrays(
+    forces = _force_lj_neigh_arrays(
         x,
         atom_type,
         neigh_counts,
@@ -447,9 +449,10 @@ def force_lj_neigh(
         lj1,
         lj2,
         cutsq,
-        f,
         n_local=x.shape[0],
     )
+    f[:] = forces
+    return f
 
 
 def compute_energy_full(
@@ -506,10 +509,21 @@ def run_examinimd_kernel(
 def kernel(*args, **kwargs):
     """Kernel entry point."""
 
-    return force_lj_neigh(*args, **kwargs)
+    return examinimd(*args, **kwargs)
 
 
 def examinimd(x, atom_type, neigh_counts, neigh_list, lj1, lj2, cutsq, f):
     """Manifest-compatible ExaMiniMD benchmark entry point."""
 
-    return force_lj_neigh(x, atom_type, neigh_counts, neigh_list, lj1, lj2, cutsq, f)
+    forces = _force_lj_neigh_arrays(
+        x,
+        atom_type,
+        neigh_counts,
+        neigh_list,
+        lj1,
+        lj2,
+        cutsq,
+        n_local=x.shape[0],
+    )
+    f[:] = forces
+    return f
