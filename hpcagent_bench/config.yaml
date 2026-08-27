@@ -145,7 +145,11 @@ measurement:
   mannwhitney:             # only used when timing_backend = mannwhitney_delta
     p: 0.1                 # significance threshold (credit a win only below this p-value)
     repeats: 20            # timed samples per side (candidate, baseline)
-    delta_step: 0.01       # granularity of the pessimistic-delta baseline-weakening sweep
+    ratio_step: 0.01       # grid resolution of the pessimistic sweep, RELATIVE: the credited
+                           # speed-up is (1+ratio_step)**k, so this is its precision at every
+                           # magnitude. The grid was linear in the baseline weakening until
+                           # 08-27, which capped every credit at 1/step = 100x.
+    ratio_max: 1000.0      # largest creditable speed-up; the grid stops here
 
 # Performance protocol: WHICH (config, shape) cells are TIMED (correctness spans a
 # broader set incl. edge shapes -- see docs/DESIGN_perf_protocol_configs_shapes.md).
