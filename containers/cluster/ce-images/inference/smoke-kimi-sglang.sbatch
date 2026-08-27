@@ -53,11 +53,16 @@ srun --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 --
   export SGLANG_SET_CPU_AFFINITY=0
   export HF_HUB_OFFLINE=1
   export TRITON_CACHE_DIR='"${FAST_SCRATCH}"'/triton-cache-sglang
-  mkdir -p "${TRITON_CACHE_DIR}"
+  # aiter builds into the read-only image by default; the mha_varlen build on the first request
+  # outran the 300 s watchdog in 610164. Persist it, and the second run pays nothing.
+  export AITER_JIT_DIR='"${FAST_SCRATCH}"'/aiter-jit/sglang-rocm-mi30x
+  mkdir -p "${TRITON_CACHE_DIR}" "${AITER_JIT_DIR}"
   exec /opt/venv/bin/python3 -m sglang.launch_server \
     --model-path "${MODEL_REPO}" \
     --served-model-name "${SERVED_MODEL}" \
     --trust-remote-code \
+    --language-model-only \
+    --watchdog-timeout 1800 \
     --tp-size 4 --pp-size '"${SLURM_NNODES}"' \
     --nnodes '"${SLURM_NNODES}"' --node-rank "${SLURM_PROCID}" \
     --dist-init-addr "'"${MASTER}"':29765" \

@@ -211,11 +211,14 @@ run_vllm_node() {
     # set VLLM_ROCM_USE_AITER_MLA=0 in its env file.
     if [[ "${INFERENCE_ENGINE:-vllm}" != "sglang" ]]; then
         export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
-        # Keyed by image: the cache holds .so files built against ONE aiter/ROCm build, and a
-        # rank that loads a mismatched one fails late or silently, the way the shared PCH did.
-        export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_CE_ENV:-default}}"
-        mkdir -p "${AITER_JIT_DIR}" 2>/dev/null || true
     fi
+    # Both engines: aiter defaults its build dir INSIDE the image, so an op it has to JIT on the
+    # first request builds there every run. On SGLang that build outran the 300 s scheduler
+    # watchdog and the server was killed mid-request (610164). Keyed by image because the cache
+    # holds .so files built against ONE aiter/ROCm build, and a rank that loads a mismatched one
+    # fails late or silently, the way the shared PCH did.
+    export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_CE_ENV:-default}}"
+    mkdir -p "${AITER_JIT_DIR}" 2>/dev/null || true
 
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
