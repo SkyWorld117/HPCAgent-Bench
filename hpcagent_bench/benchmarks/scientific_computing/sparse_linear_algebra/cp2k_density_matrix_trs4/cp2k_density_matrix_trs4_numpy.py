@@ -102,7 +102,11 @@ def blocked_csr_multiply(
     inner = block_size * block_size
     flat = c_blocks.reshape(n_c, inner)
     prefix = np.zeros((n_c, inner), dtype=c_blocks.dtype)
-    prefix[:] = np.cumsum(flat * flat, axis=1)
+    for _cp_row in range(n_c):
+        _cp_acc = 0.0
+        for _cp_col in range(inner):
+            _cp_acc += flat[_cp_row, _cp_col] * flat[_cp_row, _cp_col]
+            prefix[_cp_row, _cp_col] = _cp_acc
     block_norm_sq = prefix[:, inner - 1]
     # Selected with np.where rather than by assigning through a boolean mask. A mask store is a
     # store to a data-dependent set of rows; np.where writes every row and picks per row, which is
@@ -168,7 +172,6 @@ def cp2k_density_matrix_trs4(
     spectral_scale = -1.0 / (eps_max - eps_min)
     n_block_rows = row_ptr.shape[0] - 1
     diag_pos = _diag_positions(row_ptr, col_idx, n_block_rows)
-    diag_idx = np.arange(block_size)
 
     # The diagonal targets as FLAT index arrays. Spelled with newaxis, the two advanced positions
     # broadcast into one (n_block_rows, block_size) plane inside the subscript, and a fancy index
@@ -213,9 +216,19 @@ def cp2k_density_matrix_trs4(
         scan_rr = np.zeros(n_elems, dtype=x_blocks.dtype)
         scan_xx = np.zeros(n_elems, dtype=x_blocks.dtype)
         scan_xp = np.zeros(n_elems, dtype=x_blocks.dtype)
-        scan_rr[:] = np.cumsum(prod_rr.reshape(n_elems))
-        scan_xx[:] = np.cumsum(prod_xx.reshape(n_elems))
-        scan_xp[:] = np.cumsum(prod_xp.reshape(n_elems))
+        _prod_rr_flat = prod_rr.reshape(n_elems)
+        _prod_xx_flat = prod_xx.reshape(n_elems)
+        _prod_xp_flat = prod_xp.reshape(n_elems)
+        _acc_rr = 0.0
+        _acc_xx = 0.0
+        _acc_xp = 0.0
+        for _cp_i in range(n_elems):
+            _acc_rr += _prod_rr_flat[_cp_i]
+            _acc_xx += _prod_xx_flat[_cp_i]
+            _acc_xp += _prod_xp_flat[_cp_i]
+            scan_rr[_cp_i] = _acc_rr
+            scan_xx[_cp_i] = _acc_xx
+            scan_xp[_cp_i] = _acc_xp
         frob_id_sq = float(scan_rr[n_elems - 1])
         frob_x_sq = float(scan_xx[n_elems - 1])
         trace_fx = float(scan_xp[n_elems - 1])
@@ -245,7 +258,11 @@ def cp2k_density_matrix_trs4(
             inner = block_size * block_size
             flat = x_blocks.reshape(n_blocks, inner)
             prefix = np.zeros((n_blocks, inner), dtype=x_blocks.dtype)
-            prefix[:] = np.cumsum(flat * flat, axis=1)
+            for _cp_row in range(n_blocks):
+                _cp_acc = 0.0
+                for _cp_col in range(inner):
+                    _cp_acc += flat[_cp_row, _cp_col] * flat[_cp_row, _cp_col]
+                    prefix[_cp_row, _cp_col] = _cp_acc
             block_norm_sq = prefix[:, inner - 1]
             keep = block_norm_sq >= filter_eps_sq
             x_blocks[:] = np.where(keep[:, None, None], x_blocks, 0.0)
