@@ -52,7 +52,7 @@ leg() {  # leg <name> <extra sglang args>
         read -r -a extra <<<"${LEG_EXTRA}"
         exec /opt/venv/bin/python3 -m sglang.launch_server \
             --model-path "${MODEL_REPO}" --served-model-name "${SERVED_MODEL}" \
-            --trust-remote-code --tp-size 4 --mem-fraction-static 0.18 \
+            --trust-remote-code --language-only --tp-size 4 --mem-fraction-static 0.18 \
             --context-length 262144 --max-running-requests 128 --watchdog-timeout 1800 \
             --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
             --host 0.0.0.0 --port "${API_PORT}" "${extra[@]}"' >"${log}" 2>&1 &

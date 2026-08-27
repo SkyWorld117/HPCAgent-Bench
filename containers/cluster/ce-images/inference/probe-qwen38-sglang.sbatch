@@ -14,7 +14,8 @@
 # mem-fraction-static is 0.18, not the usual 0.8-0.9: MI300A reports is_integrated, so SGLang reads
 # node-wide host RAM as EACH rank's free memory and four ranks at 0.42 asked for 1.7x the node
 # (610137 host-OOM). Qwen3.8 is a VLM checkpoint, so the value is derated a further 0.85 on the way
-# in, and --language-model-only is rejected for this architecture the same way it is for Kimi.
+# in. The text-only switch is --language-only; --language-model-only is a different,
+# standalone-encoder flag this architecture rejects outright (610189).
 #SBATCH --job-name=probe-q38-sglang
 #SBATCH --partition=mi300
 #SBATCH --nodes=1
@@ -58,7 +59,7 @@ srun --nodes=1 --ntasks=1 --exclusive --export=ALL --environment="${EDF}" bash -
   mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${AITER_JIT_DIR}" "${TRITON_CACHE_DIR}"
   exec /opt/venv/bin/python3 -m sglang.launch_server \
     --model-path "${MODEL_REPO}" --served-model-name "${SERVED_MODEL}" \
-    --trust-remote-code --tp-size 4 \
+    --trust-remote-code --language-only --tp-size 4 \
     --mem-fraction-static "${MEM_FRACTION}" --context-length "${CONTEXT_LEN}" \
     --max-running-requests 128 --watchdog-timeout 1800 --enable-metrics \
     --reasoning-parser qwen3 --tool-call-parser qwen3_coder \

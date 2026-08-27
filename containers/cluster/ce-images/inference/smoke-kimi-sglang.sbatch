@@ -61,7 +61,7 @@ srun --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 --
     --model-path "${MODEL_REPO}" \
     --served-model-name "${SERVED_MODEL}" \
     --trust-remote-code \
-    --language-model-only \
+    --language-only \
     --watchdog-timeout 1800 \
     --tp-size 4 --pp-size '"${SLURM_NNODES}"' \
     --nnodes '"${SLURM_NNODES}"' --node-rank "${SLURM_PROCID}" \
