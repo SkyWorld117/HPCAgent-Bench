@@ -27,9 +27,16 @@ FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
 [[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
 export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
 INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
-# Keyed by image, exactly as run_cluster.sh keys it: these .so files are built against one
-# aiter/ROCm build and a rank that loads a mismatched one fails late or silently.
-export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_EDF}}"
+# Same root and the same image key run_cluster.sh uses: capstor for build artefacts, and one
+# subtree per image because these .so files are built against one aiter/ROCm build and a rank
+# that loads a mismatched one fails late or silently. HOME goes with it -- aiter falls back to
+# expanduser("~")/.aiter for template ops whatever AITER_JIT_DIR says.
+CACHE_ROOT="${JIT_CACHE_ROOT:-${SCRATCH}/.jit-cache}/${INFERENCE_EDF}"
+export AITER_JIT_DIR="${AITER_JIT_DIR:-${CACHE_ROOT}/aiter}"
+export HOME="${CACHE_ROOT}/home"
+export XDG_CACHE_HOME="${CACHE_ROOT}/xdg"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${CACHE_ROOT}/triton}"
+mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${TRITON_CACHE_DIR}"
 export MODEL_REPO="${MODEL_REPO:-moonshotai/Kimi-K2.7-Code}"
 export SERVED_MODEL="${SERVED_MODEL:-optarena-vllm}"
 

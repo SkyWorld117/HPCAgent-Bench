@@ -117,8 +117,9 @@ JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS="${JUDGE_UPSTREAM_READY_TIMEOUT_SECONDS:-30
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 INFERENCE_CE_ENV="${INFERENCE_CE_ENV:-rocm723-vllm-0.23.0-pytorch211-ofi}"
 AMD_CE_ENV="${AMD_CE_ENV:-optarena-amd-mi300-v4}"
-# Weights and compile cache. iopsstor reads 9.45 GB/s at 16 readers vs capstor 0.83 (job 593523),
-# but purges at 14 days against capstor's 30 -- so capstor keeps the durable copy.
+# Weights only. iopsstor reads 9.45 GB/s at 16 readers vs capstor 0.83 (job 593523), which is the
+# shape of a checkpoint load; build artefacts are small, many and written, and live on capstor
+# under JIT_CACHE_ROOT instead -- see run_vllm_node. iopsstor also purges at 14 days to capstor's 30.
 FAST_SCRATCH="${FAST_SCRATCH:-}"
 if [[ -z "${FAST_SCRATCH}" ]]; then
     if [[ -d "/iopsstor/scratch/cscs/${USER}" ]]; then
@@ -182,43 +183,53 @@ run_vllm_node() {
         export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-${moe_configs_dir}}"
     fi
 
-    # Unset, this defaults under ~/.cache, which is unmounted here -- the cache died with the job
-    # and 592283 re-ran 3 h 13 m of Inductor codegen. Graph capture stays uncached regardless.
-    export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${FAST_SCRATCH}/vllm-cache}"
+    # ONE cache root, on capstor, keyed by image. Weights stay on iopsstor (HF_HOME above): they
+    # are read once per rank at load and that filesystem is 11x faster at 16 concurrent readers.
+    # Build artefacts are the opposite shape -- small, many, written -- and they must never land in
+    # HOME, whose quota here is INODES.
+    #
+    # HOME is overridden rather than trusted because the libraries do not agree on a knob. aiter
+    # reads AITER_JIT_DIR for its module JIT but falls back to expanduser("~")/.aiter for template
+    # ops (jit/core.py home_jit_dir) -- which is how 610165 compiled a sampler into HOME with
+    # AITER_JIT_DIR correctly set -- and aot/flydsl/{gemm,moe,chunk_gdn_h}.py expanduser again.
+    # Triton does the same with ~/.triton. Setting HOME catches every one of them at once; the
+    # explicit knobs below stay because they are load-bearing on their own and document intent.
+    # Only the server process is affected: this function ends in exec.
+    #
+    # Keyed by image because these artefacts are built against ONE ROCm/aiter build, and a rank
+    # that loads a mismatched .so fails late or silently, the way the shared PCH did.
+    local cache_root="${JIT_CACHE_ROOT:-${SCRATCH}/.jit-cache}/${INFERENCE_CE_ENV:-default}"
+    export HOME="${cache_root}/home"
+    export XDG_CACHE_HOME="${cache_root}/xdg"
+    export AITER_JIT_DIR="${AITER_JIT_DIR:-${cache_root}/aiter}"
+    export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${cache_root}/vllm}"
+    # Triton's cache is SEPARATE from VLLM_CACHE_ROOT. Unset it defaults to ~/.triton, so every job
+    # re-JITs every kernel -- and does so DURING INFERENCE, not at startup. On 604721 that meant
+    # eight kernels compiling once per PP rank while 64 agent requests sat resident: generation
+    # arrived in bursts between total stalls and the arm produced 15 assistant turns in half an
+    # hour. Keyed by source+signature+arch, so the SECOND run pays nothing.
+    export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${cache_root}/triton}"
+    export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${cache_root}/inductor}"
+    export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${cache_root}/torch-ext}"
+    mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${AITER_JIT_DIR}" "${VLLM_CACHE_ROOT}" \
+        "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${TORCH_EXTENSIONS_DIR}" 2>/dev/null || true
 
-    # Triton's cache is SEPARATE from VLLM_CACHE_ROOT and defaults to ~/.triton, i.e. the same
-    # unmounted home -- so every job re-JITs every kernel, and it does so DURING INFERENCE rather
-    # than at startup. On 604721 that meant eight kernels (attn_fwd, fused_moe_kernel_gptq_awq,
-    # _fwd_kernel_stage2, the sampler...) compiling once per PP rank while 64 agent requests sat
-    # resident: generation arrived in bursts between total stalls, the CLI timed out and retried,
-    # and the arm produced 15 assistant turns in half an hour. Keyed by source+signature+arch, so
-    # one directory is safely shared across models and runs -- and the SECOND run is the one that
-    # pays nothing. Graph capture is a different thing again and genuinely cannot be cached: HIP
-    # graphs hold device pointers and do not survive the process.
-    export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${FAST_SCRATCH}/triton-cache}"
-    mkdir -p "${TRITON_CACHE_DIR}" 2>/dev/null || true
-
-    # AITER's master switch defaults OFF while every component behind it -- linear, fp8bmm, moe,
-    # mha, rmsnorm, tgemm -- defaults ON, so with the master unset every is_*_enabled() reads False
-    # (probes 602359/602360) and the campaign has served every model on Triton. That is what vLLM
-    # is warning about when it says a MoE or block-FP8 config is missing for MI300A: those are the
-    # TRITON path's per-shape tables, and aiter's CK/assembly kernels need none of them.
-    # aiter ships no prebuilt .so and JIT-builds module_aiter_core on first import, which is what
-    # left 598021 without a /v1/models for 5400 s -- so the shared cache is part of the switch, not
-    # an optimization. Fill it once with ce-images/inference/prebuild-aiter-jit.sbatch.
-    # MLA is the one component with a recorded gfx942 failure (600662, fmha_v3_varlen_fwd invalid
-    # argument). No vLLM arm serves an MLA model -- kimi moved to SGLang -- and any that does must
-    # set VLLM_ROCM_USE_AITER_MLA=0 in its env file.
     if [[ "${INFERENCE_ENGINE:-vllm}" != "sglang" ]]; then
+        # AITER's master switch defaults OFF while every component behind it -- linear, fp8bmm,
+        # moe, mha, rmsnorm, tgemm -- defaults ON, so with the master unset every is_*_enabled()
+        # reads False (probes 602359/602360) and the campaign served every model on Triton. That is
+        # what vLLM warns about when a MoE or block-FP8 config is missing for MI300A: those are the
+        # TRITON path's per-shape tables, and aiter's CK/assembly kernels need none of them
+        # (610165: 20 such warnings with the master off, 0 with it on).
+        # MLA is the one component with a recorded gfx942 failure (600662, fmha_v3_varlen_fwd
+        # invalid argument). No vLLM arm serves an MLA model -- kimi moved to SGLang -- and any
+        # that does must set VLLM_ROCM_USE_AITER_MLA=0 in its env file.
         export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
     fi
-    # Both engines: aiter defaults its build dir INSIDE the image, so an op it has to JIT on the
-    # first request builds there every run. On SGLang that build outran the 300 s scheduler
-    # watchdog and the server was killed mid-request (610164). Keyed by image because the cache
-    # holds .so files built against ONE aiter/ROCm build, and a rank that loads a mismatched one
-    # fails late or silently, the way the shared PCH did.
-    export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_CE_ENV:-default}}"
-    mkdir -p "${AITER_JIT_DIR}" 2>/dev/null || true
+
+    # aiter ships no prebuilt .so and JIT-builds module_aiter_core on first import, which left
+    # 598021 without a /v1/models for 5400 s. Fill the cache once with
+    # ce-images/inference/prebuild-aiter-jit.sbatch; serving then only imports.
 
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
