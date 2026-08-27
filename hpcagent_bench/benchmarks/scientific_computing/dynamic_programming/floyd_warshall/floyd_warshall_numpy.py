@@ -8,3 +8,4 @@ def kernel(path):
     for k in range(n):
         np.add.outer(path[:, k], path[k, :], out=outer)
         np.minimum(path, outer, out=path)
+    return path
