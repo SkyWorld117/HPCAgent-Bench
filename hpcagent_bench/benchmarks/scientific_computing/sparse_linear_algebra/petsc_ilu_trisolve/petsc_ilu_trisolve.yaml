@@ -1,0 +1,83 @@
+# Copyright 2026 ETH Zurich and the HPCAgent-Bench authors.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
+name: PETSc ILU(0) sparse triangular solve (MatSolve_SeqAIJ)
+short_name: petsc_ilu_trisolve
+kind: microapp
+level: 3
+# Grid dimensions of the 7-point star Laplacian whose ILU(0) factor is solved against.
+# Every buffer shape below is an exact closed form in these three symbols, so the oracle can
+# scale them independently: for an NX x NY x NZ star stencil the factor has exactly
+#   7*NX*NY*NZ - 2*(NY*NZ + NX*NZ + NX*NY)
+# entries, and ILU(0) preserves that count.  Deliberately non-cubic and mutually coprime so a
+# transposed axis cannot hide.
+parameters:
+  S:
+    NX: 82
+    NY: 85
+    NZ: 89
+  M:
+    NX: 95
+    NY: 98
+    NZ: 101
+  L:
+    NX: 106
+    NY: 109
+    NZ: 111
+  XL:
+    NX: 117
+    NY: 119
+    NZ: 123
+init:
+  input_args:
+  - NX
+  - NY
+  - NZ
+  output_args:
+  - b
+  - fact_cols
+  - fact_values
+  - l_rowptr
+  - perm_col
+  - perm_row
+  - solve_work
+  - u_diagptr
+  - x
+  arrays:
+    b:
+      shape: (NX * NY * NZ,)
+      dtype: float64
+    fact_cols:
+      shape: (7 * NX * NY * NZ - 2 * (NY * NZ + NX * NZ + NX * NY),)
+      dtype: int64
+    fact_values:
+      shape: (7 * NX * NY * NZ - 2 * (NY * NZ + NX * NZ + NX * NY),)
+      dtype: float64
+    l_rowptr:
+      shape: (NX * NY * NZ + 1,)
+      dtype: int64
+    perm_col:
+      shape: (NX * NY * NZ,)
+      dtype: int64
+    perm_row:
+      shape: (NX * NY * NZ,)
+      dtype: int64
+    solve_work:
+      shape: (NX * NY * NZ,)
+      dtype: float64
+    u_diagptr:
+      shape: (NX * NY * NZ + 1,)
+      dtype: int64
+    x:
+      shape: (NX * NY * NZ,)
+      dtype: float64
+  func_name: initialize
+output_args:
+- x
+taxonomy:
+  track: scientific_computing
+  dwarf: sparse_linear_algebra
+  domain: computational science
+  scale: proxy
+  tags:
+  - petsc

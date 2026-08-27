@@ -1,4 +1,4 @@
-# Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
+# Copyright 2026 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Faithfulness of newly ported NumPy references to their upstream algorithm.
 
@@ -434,6 +434,52 @@ def test_gaussian_matches_reference():
     gaussian(A, b)  # mutates A, b in place
     np.testing.assert_allclose(A, Aref, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(b, bref, rtol=1e-9, atol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# PETSc: ILU(0) sparse triangular solve (MatSolve_SeqAIJ, aijfact.c:2466)      #
+# --------------------------------------------------------------------------- #
+def _petsc_ilu_trisolve_reference(b, fact_cols, fact_values, l_rowptr, perm_col, perm_row, u_diagptr):
+    """Independent formulation of the ILU(0) solve: unpack, then solve densely.
+
+    Deliberately NOT a transcription of PETSc's recurrence.  It reconstructs dense ``L`` and
+    ``U`` from the packed factor -- inverting the reciprocal diagonal on the way, which is
+    where a port that divides instead of multiplying would diverge -- and then calls
+    ``scipy.linalg.solve_triangular`` twice, applying the permutations as whole-array
+    gathers/scatters.  Nothing here shares code or index arithmetic with the kernel, so the
+    two agreeing means the port really is the same mathematics, not the same typo twice.
+    """
+    from scipy.linalg import solve_triangular
+
+    n = l_rowptr.shape[0] - 1
+    L = np.eye(n, dtype=np.float64)
+    U = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for k in range(l_rowptr[i], l_rowptr[i + 1]):
+            L[i, fact_cols[k]] = fact_values[k]
+        for k in range(u_diagptr[i + 1] + 1, u_diagptr[i]):
+            U[i, fact_cols[k]] = fact_values[k]
+        U[i, i] = 1.0 / fact_values[u_diagptr[i]]  # PETSc stores the RECIPROCAL
+
+    y = solve_triangular(L, b[perm_row], lower=True, unit_diagonal=True)
+    z = solve_triangular(U, y, lower=False)
+    x = np.zeros(n, dtype=np.float64)
+    x[perm_col] = z
+    return x
+
+
+def test_petsc_ilu_trisolve_matches_reference():
+    import_or_skip("scipy")
+    initialize, petsc_ilu_trisolve = _load("sparse_linear_algebra", "petsc_ilu_trisolve")
+    # distinct, mutually coprime extents so a transposed axis cannot hide
+    args = initialize(7, 5, 6)
+    b, fact_cols, fact_values, l_rowptr, perm_col, perm_row, solve_work, u_diagptr, x = args
+
+    expected = _petsc_ilu_trisolve_reference(b, fact_cols, fact_values, l_rowptr, perm_col, perm_row, u_diagptr)
+    petsc_ilu_trisolve(*args)  # writes x (and solve_work) in place
+
+    assert np.abs(expected).min() > 1e-3, "degenerate reference -- a zero-writing port would pass"
+    np.testing.assert_allclose(x, expected, rtol=1e-11, atol=1e-11)
 
 
 if __name__ == "__main__":
