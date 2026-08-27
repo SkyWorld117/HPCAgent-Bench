@@ -2137,6 +2137,14 @@ def _harvest_local_shapes(tree: ast.AST,
     declare ``X = np.zeros((N,), dtype=np.complex128)`` as
     ``double _Complex X[N]``.
     """
+    # A name bound BOTH ways -- ``padded = x`` in one branch, ``padded = np.zeros(...)`` in the
+    # other -- must take the ALLOCATION's shape: the alias is derived, the allocation is the
+    # declaration, and the allocation is the larger of the two wherever the branch exists to avoid
+    # it. ast.walk is not source order, so whichever was visited first used to win: conv_standard_1d
+    # sized its zero-padded buffer like the unpadded input, wrote past the end of it, and returned
+    # wrong numbers at every output position that reads the pad. Aliases are therefore deferred and
+    # applied only to targets no allocation claimed.
+    aliases: List[Tuple[str, str]] = []
     for stmt in ast.walk(tree):
         if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
             continue
@@ -2156,15 +2164,9 @@ def _harvest_local_shapes(tree: ast.AST,
             none_br = [b for b in (rhs.body, rhs.orelse) if isinstance(b, ast.Constant) and b.value is None]
             if len(ctor) == 1 and len(none_br) == 1:
                 rhs = ctor[0]
-        # Name = Name alias -- inherit shape and dtype from the source.
+        # Name = Name alias -- inherit shape and dtype from the source, after every allocation.
         if isinstance(rhs, ast.Name):
-            src_shape = shape_table.get(rhs.id)
-            if src_shape and target.id not in shape_table:
-                shape_table[target.id] = tuple(src_shape)
-            if dtype_table is not None:
-                src_dt = dtype_table.get(rhs.id)
-                if src_dt is not None and target.id not in dtype_table:
-                    dtype_table[target.id] = src_dt
+            aliases.append((target.id, rhs.id))
             continue
         # ``nxt = data[partner]`` -- a gather or a slice of an array carries the BASE's dtype.
         # Without it the temp falls to the sweep's float default, and bitonic_sort's int64
@@ -2328,6 +2330,14 @@ def _harvest_local_shapes(tree: ast.AST,
             ext = _iter_extent_of(rhs, shape_table)
             if ext is not None:
                 shape_table[target.id] = tuple(ast.unparse(e) for e in ext)
+    for name, src in aliases:
+        src_shape = shape_table.get(src)
+        if src_shape and name not in shape_table:
+            shape_table[name] = tuple(src_shape)
+        if dtype_table is not None:
+            src_dt = dtype_table.get(src)
+            if src_dt is not None and name not in dtype_table:
+                dtype_table[name] = src_dt
 
 
 class _FullCallHoister(_StmtHoister):
@@ -8124,7 +8134,12 @@ def _lp_whole_array_and_zeros(ctx: LoweringContext) -> None:
     zeros_locals.update(ctx.lib_rewriter.matmul_temps)
     zeros_locals.update(ctx.lib_rewriter.fresh_local_allocs)
     zeros_locals.update(ctx.scalar_temps)
-    zeros_locals.update(ctx.wa_rewriter.alias_locals)
+    # setdefault, not update: an alias local is DERIVED (``padded = x``) while the entry already
+    # here came from an allocation (``padded = np.zeros((n, c_in, length + 2 * pa))``). Letting the
+    # alias win sized conv_standard_1d's zero-padded buffer like the unpadded input -- an
+    # out-of-bounds write and wrong numbers at every output position that reads the pad.
+    for _nm, _shp in ctx.wa_rewriter.alias_locals.items():
+        zeros_locals.setdefault(_nm, _shp)
     # Pre-pass harvested local arrays (corr = np.eye(M, ...), imgOut = np.copy(...),
     # etc.) that the LibNode expanders didn't rewrite. They must still be declared
     # so the emitter sees them.

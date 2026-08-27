@@ -2804,24 +2804,44 @@ def expand_take(target: ast.expr,
 
 def expand_linspace(target: ast.expr, args: List[ast.expr], shape_table: Dict[str, Tuple[str, ...]]) -> List[ast.stmt]:
     """``out = np.linspace(start, stop, n)`` -> ``for i in range(n): out[i] =
-    start + (stop - start) * i / max(n - 1, 1)``. numpy uses ``max(n - 1, 1)`` as
-    the divisor so ``np.linspace(start, stop, 1)`` returns ``[start]`` instead of
-    a ``0 / 0`` division-by-zero."""
+    (stop - start) / max(n - 1, 1) * i + start``, then ``out[n - 1] = stop`` when ``n > 1``.
+
+    Both details are numpy's arithmetic, not cosmetics. numpy divides FIRST and scales the index by
+    that step (``y = arange(num) * step; y += start``); folding the division to the end --
+    ``start + span * i / div`` -- is a different rounding, and it was off by an ulp on the very
+    first grid this expansion was used for. numpy then PINS the last sample to ``stop``, because
+    the computed one need not land on it exactly. An ulp is not a rounding nit wherever the grid
+    seeds an iteration: mandelbrot's escape-time map turned 4.4e-16 at the seed into 1.3 in the
+    result. ``max(n - 1, 1)`` is numpy's divisor too, so ``np.linspace(start, stop, 1)`` returns
+    ``[start]`` rather than dividing by zero -- which is also why the endpoint pin is guarded:
+    at ``n == 1`` numpy keeps ``start`` and pinning would overwrite it with ``stop``.
+    """
     if len(args) != 3:
         raise NotImplementedError("np.linspace needs (start, stop, n)")
     start, stop, n = args
-    span = ast.BinOp(left=stop, op=ast.Sub(), right=start)
-    denom = ast.Call(func=_name("max"), args=[ast.BinOp(left=n, op=ast.Sub(), right=_const(1)), _const(1)], keywords=[])
-    expr = ast.BinOp(left=start,
+    span = ast.BinOp(left=copy.deepcopy(stop), op=ast.Sub(), right=copy.deepcopy(start))
+    denom = ast.Call(func=_name("max"),
+                     args=[ast.BinOp(left=copy.deepcopy(n), op=ast.Sub(), right=_const(1)),
+                           _const(1)],
+                     keywords=[])
+    step = ast.BinOp(left=span, op=ast.Div(), right=denom)
+    expr = ast.BinOp(left=ast.BinOp(left=step, op=ast.Mult(), right=_name("__i")),
                      op=ast.Add(),
-                     right=ast.BinOp(left=ast.BinOp(left=span, op=ast.Mult(), right=_name("__i")),
-                                     op=ast.Div(),
-                                     right=denom))
+                     right=copy.deepcopy(start))
     body = [
         ast.Assign(targets=[ast.Subscript(value=_name(target.id), slice=_name("__i"), ctx=ast.Store())], value=expr)
     ]
+    last = ast.Subscript(value=_name(target.id),
+                         slice=ast.BinOp(left=copy.deepcopy(n), op=ast.Sub(), right=_const(1)),
+                         ctx=ast.Store())
     return [
-        ast.For(target=_store("__i"), iter=ast.Call(func=_name("range"), args=[n], keywords=[]), body=body, orelse=[])
+        ast.For(target=_store("__i"),
+                iter=ast.Call(func=_name("range"), args=[copy.deepcopy(n)], keywords=[]),
+                body=body,
+                orelse=[]),
+        ast.If(test=ast.Compare(left=copy.deepcopy(n), ops=[ast.Gt()], comparators=[_const(1)]),
+               body=[ast.Assign(targets=[last], value=copy.deepcopy(stop))],
+               orelse=[]),
     ]
 
 

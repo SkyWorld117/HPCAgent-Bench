@@ -22,11 +22,11 @@ def conv1d(x, weight, bias, stride, padding, dilation, groups):
     n, c_in, length = x.shape
     c_out, c_per_group, k = weight.shape
     out_l = (length + 2 * pa - di * (k - 1) - 1) // st + 1
-    if pa == 0:
-        padded = x
-    else:
-        padded = np.zeros((n, c_in, length + 2 * pa), dtype=x.dtype)
-        padded[:, :, pa:pa + length] = x
+    # Always materialise the padded buffer. Aliasing x when pa == 0 binds one name to two shapes,
+    # which a C/Fortran emitter cannot express -- it sized the buffer like the UNPADDED input and
+    # wrote past the end of it. The copy is free at pa == 0 (the shapes coincide).
+    padded = np.zeros((n, c_in, length + 2 * pa), dtype=x.dtype)
+    padded[:, :, pa:pa + length] = x
     out_per_group = c_out // groups
     in_per_group = c_in // groups
     out = np.empty((n, c_out, out_l), dtype=x.dtype)
