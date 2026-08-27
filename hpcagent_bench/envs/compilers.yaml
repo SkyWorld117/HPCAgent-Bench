@@ -209,13 +209,16 @@ nvfortran:
   compile: ["{cc}", "{baseline}", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}"]
 
+# c++20 is nvcc's ceiling -- `nvcc -std=c++23` is "Value 'c++23' is not defined for option 'std'"
+# through CUDA 13.1. Stated rather than left to the driver default (c++17), because DaCe builds its
+# GPU host and device code to ONE standard and reads this block to pick it.
 nvcc:
   lang: cuda
   install: {apt: null, spack: cuda}
   cc: nvcc
   baseline_ref: null          # uses flags.compose_cuda() (arch appended per-host)
   cuda: true
-  compile: ["{cc}", "{baseline}", "-Xcompiler", "-fPIC", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c++20", "-Xcompiler", "-fPIC", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "-shared", "{objs}", "-o", "{lib}"]
 
 hipcc:
@@ -291,7 +294,7 @@ mpicc-cuda:
   cuda: true
   install: {apt: null, spack: cuda}
   cc: nvcc
-  compile: ["{cc}", "{baseline}", "-c", "{src}", "-o", "{obj}"]
+  compile: ["{cc}", "{baseline}", "-std=c++20", "-c", "{src}", "-o", "{obj}"]
   link:    ["{cc}", "{objs}", "-o", "{exe}"]
 
 mpicc-hip:

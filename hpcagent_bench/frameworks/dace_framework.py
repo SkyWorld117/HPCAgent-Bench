@@ -139,10 +139,15 @@ def report_flags_for(compiler: str) -> str:
     return languages.report_flags("cpp", compiler=family)
 
 
-def pin_cpp_standard() -> None:
+def pin_cpp_standard(arch: str = "cpu") -> None:
     """Build dace's C++ to the standard compilers.yaml names, so a user's ~/.dace.conf cannot
-    grade a dace baseline against an agent submission compiled to a different C++."""
-    std = languages.std_flag("cpp").removeprefix("-std=c++")
+    grade a dace baseline against an agent submission compiled to a different C++.
+
+    A GPU build reads the CUDA block, not the C++ one: dace passes this single value through as
+    ``CMAKE_CUDA_STANDARD`` as well, and nvcc rejects the c++23 the host blocks ask for, so every
+    dace GPU column died in CMake's compiler-ABI probe before emitting a line of code.
+    """
+    std = languages.std_flag("cuda" if arch == "gpu" else "cpp").removeprefix("-std=c++")
     if std and dace.Config.get("compiler", "cpp_standard") != std:
         dace.Config.set("compiler", "cpp_standard", value=std)
 
@@ -369,6 +374,35 @@ def pipeline_auto_opt(sdfg: Any, ctx: Dict[str, Any]) -> None:
     opt.auto_optimize(sdfg, ctx["device"], symbols=ctx.get("symbols", {}), use_gpu_storage=True)
 
 
+#: Rounds of (MapCollapse, MapFusion, StateFusionExtended) the strict-CPU pipeline runs. Two, not a
+#: fixed point: the three feed each other (a fusion exposes a collapse, a collapse exposes a state
+#: fusion), and the second round is where that settles on this corpus.
+STRICT_CPU_FUSION_ROUNDS = 2
+
+
+def pipeline_strict_cpu(sdfg: Any, ctx: Dict[str, Any]) -> None:
+    """The numerical-correctness gate: the parallelization pipeline CloudSC is driven with.
+
+    ``simplify`` -> ``ShortLoopUnroll`` -> ``LoopToMap`` -> (``MapCollapse`` + ``MapFusion`` +
+    ``StateFusionExtended``) x :data:`STRICT_CPU_FUSION_ROUNDS`.
+
+    Separate from :func:`pipeline_strict` rather than a change to it: ``strict`` is the parent of
+    ``fusion``/``parallel``/``autoopt`` and the control the other columns are read against, so
+    editing it would move every column at once. Wrong numbers HERE are in the emitted DaCe program
+    or in simplify -- no optimizer has run yet -- which is what separates a translator bug from an
+    optimizer bug.
+    """
+    from dace.transformation.interstate.state_fusion_with_happens_before import StateFusionExtended
+    from dace.transformation.passes.parallelization_prep import ShortLoopUnroll
+    sdfg.simplify()
+    # Before LoopToMap, not after: a constant-trip loop that is still a loop is not a Map candidate,
+    # and unrolling it first is what lets the fusion rounds see one flat body.
+    ShortLoopUnroll().apply_pass(sdfg, {})
+    sdfg.apply_transformations_repeated([ctx["LoopToMap"]])
+    for _ in range(STRICT_CPU_FUSION_ROUNDS):
+        sdfg.apply_transformations_repeated([ctx["MapCollapse"], ctx["MapFusion"], StateFusionExtended])
+
+
 def pipeline_canonicalize(sdfg: Any, ctx: Dict[str, Any]) -> None:
     """The fork's ``canonicalize`` pipeline plus its finalization tail -- a DIFFERENT optimizer to
     ``auto_optimize``, not a stronger setting of it.
@@ -405,6 +439,7 @@ def pipeline_canonicalize(sdfg: Any, ctx: Dict[str, Any]) -> None:
 
 DACE_PIPELINES: Tuple[SdfgPipeline, ...] = (
     SdfgPipeline("strict", parent=None, transform=pipeline_strict),
+    SdfgPipeline("strict_cpu", parent=None, transform=pipeline_strict_cpu, finalized=True),
     SdfgPipeline("fusion", parent="strict", transform=pipeline_fusion),
     SdfgPipeline("parallel", parent="fusion", transform=pipeline_parallel),
     SdfgPipeline("autoopt", parent="strict", transform=pipeline_auto_opt, finalized=True),
@@ -613,7 +648,7 @@ class DaceFramework(Framework):
     def optimize(self, program: Any, bench: Benchmark, bdata: Dict[str, Any]) -> Any:
         """Build this flavor's pipelines, verify + score each, and return the fastest correct compiled variant."""
         ctx = self._build_context()
-        pin_cpp_standard()
+        pin_cpp_standard(self.info["arch"])
         pin_per_rank_build_dirs()
         unblock_sigchld()
         pin_build_caching()
@@ -718,7 +753,7 @@ class DaceFramework(Framework):
         plan.before_each()
         plan.run()
         ret = plan.result
-        return util.resolve_outputs(ret, plan.inout_values(), bench.info.get("output_args", []))
+        return util.resolve_outputs(ret, plan.inout_values(), bench.info.get("output_args", []), plan.inout_names())
 
     # ----- Reports ---------------------------------------------------------
     #

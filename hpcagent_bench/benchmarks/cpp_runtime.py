@@ -23,6 +23,7 @@ FRAMEWORK_LANG: Dict[str, str] = {
     "flang": "fortran",
     "polly": "cpp",
     "pluto": "c",
+    "ppcg": "cuda",
 }
 
 #: framework -> forced compiler override; every cpp framework must be listed or it silently falls back to g++.
@@ -93,6 +94,9 @@ def _native_sources(cpp_backend: pathlib.Path, short: str, framework: str) -> Li
     if framework == "pluto":
         from hpcagent_bench import pluto_transform
         return pluto_transform.transformed_sources(cpp_backend, short)
+    if framework == "ppcg":
+        from hpcagent_bench import ppcg_transform
+        return ppcg_transform.transformed_sources(cpp_backend, short)
     ext = LANG_EXT[FRAMEWORK_LANG[framework]]
     return [cpp_backend / f"{short}_fp64.{ext}", cpp_backend / f"{short}_fp32.{ext}"]
 
@@ -244,11 +248,40 @@ def load_backend_so(wrapper_file: str, short: str, framework: str) -> ctypes.CDL
 
 
 def _ctype_for(dtype):
-    """Map a numpy dtype to its ctypes equivalent (single dtype registry)."""
+    """ctypes type to POINT AT for an array of ``dtype``.
+
+    Only the address crosses, so a complex array uses its real component's type -- a complex64
+    buffer is byte-identical to a float32 one of twice the length. By-value complex stays refused.
+    """
     import numpy as np
 
-    from hpcagent_bench.dtypes import ctype_for
-    return ctype_for(np.dtype(dtype).name)
+    from hpcagent_bench.dtypes import ctype_for, real_component_dtype
+    name = np.dtype(dtype).name
+    if np.dtype(dtype).kind == "c":
+        return ctype_for(real_component_dtype(name))
+    return ctype_for(name)
+
+
+def index_rebase(wrapper_file: str, short: str, framework: str) -> Tuple[int, ...]:
+    """Per-argument delta to the 0-based numpy buffers for a 1-based target language.
+
+    An index array is delivered in the CALLING language's base, so the Fortran emitter subscripts
+    with the value as-is (``a(ip(j))``). ``native_call`` shifts at its ABI seam; this path had
+    none, so every Fortran gather read one element low. Empty for every 0-based language.
+    """
+    from hpcagent_bench.support.bindings.contract import index_base
+    base = index_base(FRAMEWORK_LANG[framework])
+    if not base:
+        return ()
+    from hpcagent_bench.spec import BenchSpec
+    from hpcagent_bench.support.bindings import binding_from_spec
+    # Keyed on the DIRECTORY, not on ``short``: a sparse kernel wraps one sub-benchmark per
+    # configuration (``spmv_csr``, ``spmv_csc``) and only the directory carries a manifest.
+    parts = pathlib.Path(wrapper_file).resolve().parts
+    here = parts[parts.index("benchmarks") + 1:-1]
+    args = binding_from_spec(BenchSpec.load("/".join(here + (here[-1], )))).args
+    deltas = tuple(base if (a.kind == "ptr" and a.is_index) else 0 for a in args)
+    return deltas if any(deltas) else ()
 
 
 def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
@@ -257,7 +290,12 @@ def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
     if framework not in FRAMEWORK_LANG:
         raise ValueError(f"unknown native framework {framework!r}; "
                          f"known: {sorted(FRAMEWORK_LANG)}")
-    state: Dict[str, Any] = {"loaded": False, "syms": {}, "bound": set()}
+    state: Dict[str, Any] = {
+        "loaded": False,
+        "syms": {},
+        "bound": set(),
+        "rebase": index_rebase(wrapper_file, short, framework),
+    }
 
     from hpcagent_bench.dtypes import ctype_for as _registry_ctype
     _int_ctype = _registry_ctype("int")  # canonical symbol type (int64)
@@ -297,7 +335,9 @@ def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
 
     def call(*args):
         _ensure_loaded()
-        is_double = any(isinstance(a, np.ndarray) and a.dtype == np.dtype(np.float64) for a in args)
+        # complex128 is the fp64 rung: without it a complex-only kernel binds the fp32 symbol.
+        is_double = any(
+            isinstance(a, np.ndarray) and a.dtype in (np.dtype(np.float64), np.dtype(np.complex128)) for a in args)
         fptype = "fp64" if is_double else "fp32"
         fcty = ctypes.c_double if is_double else ctypes.c_float
         sym = state["syms"].get(fptype)
@@ -309,7 +349,18 @@ def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
             sym.restype = None
             state["bound"].add(fptype)
         c_args = [_to_ctypes(a, fcty) for a in args]
-        sym(*c_args)
+        # In place, then undone: the caller reads its outputs back out of these very arrays, so a
+        # rebased COPY would lose whatever the kernel wrote into an index buffer.
+        deltas = state["rebase"]
+        for arg, delta in zip(args, deltas):
+            if delta:
+                arg += delta
+        try:
+            sym(*c_args)
+        finally:
+            for arg, delta in zip(args, deltas):
+                if delta:
+                    arg -= delta
 
     return call
 

@@ -252,7 +252,6 @@ def run_framework_sweep(benchmark: str,
 
     # Fork EACH kernel so a crash or framework exception in one cannot take down the sweep.
     failed = []
-    rows: List[Dict[str, str]] = []
     for benchname in benchnames:
         r = run_forked(run_one,
                        benchname,
@@ -271,11 +270,11 @@ def run_framework_sweep(benchmark: str,
             why = forked_failure_reason(r)
             print(f"[FAIL] {benchname}: {why}")
             failed.append(benchname)
+        # Flushed PER KERNEL, not accumulated: a sweep over the corpus runs for hours, and holding
+        # every row until the end means an interrupt -- or an OOM kill -- loses the whole run rather
+        # than the kernel it died on. write_csv_rows appends and writes the header only when new.
         if csv_path:
-            rows.extend(sweep_rows(benchname, framework_names, preset, datatype or "float64", r))
-
-    if csv_path:
-        write_csv_rows(rows, csv_path)
+            write_csv_rows(sweep_rows(benchname, framework_names, preset, datatype or "float64", r), csv_path)
 
     if failed:
         print(f"Failed: {len(failed)} out of {len(benchnames)}")

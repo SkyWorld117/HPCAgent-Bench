@@ -784,6 +784,27 @@ def _stdpar_link_for_block(block: Dict[str, Any]) -> Tuple[str, ...]:
     return resolved
 
 
+#: OpenMP driver flags a compile baseline may carry. A shared library whose objects reference the
+#: OpenMP runtime needs the SAME flag on the link driver, which is what pulls that toolchain's
+#: runtime in -- ``-lgomp`` by hand would be a gcc-only spelling of one entry here.
+OPENMP_BASELINE_FLAGS: Tuple[str, ...] = ("-fopenmp=libgomp", "-fopenmp", "-qopenmp", "-mp")
+
+
+def openmp_link_for_block(block: Dict[str, Any], mode: Mode) -> Tuple[str, ...]:
+    """The OpenMP flag this block's link driver needs, or ``()`` when its baseline carries none.
+
+    The link line never sees the compile baseline. gfortran turns a plain ``do concurrent`` into
+    ``GOMP_parallel`` with no directive in the source, so 46 of 49 kernels built clean and died at
+    ``dlopen``. Read off the resolved baseline, so a block cannot declare OpenMP only at compile.
+    """
+    baseline = _resolve_baseline(block, mode)
+    tokens = shlex.split(baseline)
+    for flag in OPENMP_BASELINE_FLAGS:
+        if flag in tokens:
+            return (flag, )
+    return ()
+
+
 #: Probe sources per compiler-block language: the smallest translation unit each front end accepts.
 _VECLIB_PROBE: Dict[str, Tuple[str, str]] = {
     "fortran": (".f90", "end\n"),
@@ -1158,6 +1179,7 @@ wrap_kernel` dlopens. Flags resolve from :mod:`hpcagent_bench.flags` via
     link_argv = _render_argv(link_block["link"], link_subst)
     link_argv.extend(link_block.get("link_extra") or [])
     link_argv.extend(f for f in _stdpar_link_for_block(link_block) if f not in link_argv)
+    link_argv.extend(f for f in openmp_link_for_block(link_block, mode) if f not in link_argv)
     # The allocator, on the BASELINE link line for the same reason it is on the submission's
     # (build_shared_lib_commands): these framework columns are what a submission's speedup is
     # divided by, so an allocator the candidate links and the baseline does not is a ratio the
@@ -1264,6 +1286,7 @@ def build_mpi_executable_commands(
     link_subst = subst_map(cc_override.get(link_lang, link_block["cc"]), objs=" ".join(objs), exe=out_exe)
     link_argv = _render_argv(link_block["link"], link_subst)
     link_argv.extend(link_block.get("link_extra") or [])
+    link_argv.extend(f for f in openmp_link_for_block(link_block, mode) if f not in link_argv)
     link_argv.extend(extra_link)  # -l/-L dependency tokens on the link step
     cmds.append(link_argv)
     return cmds
@@ -1328,11 +1351,7 @@ def build_shared_lib_commands(
     if link:
         link_argv = _render_argv(link, subst)
         link_argv.extend(block.get("link_extra") or [])
-        # An OpenMP-parallelized object (multi-core / autopar baseline carries
-        # -fopenmp) emits GOMP_* references that must also be resolved at link;
-        # the link template carries no {baseline}, so propagate -fopenmp here.
-        if "-fopenmp" in baseline and "-fopenmp" not in link_argv:
-            link_argv.append("-fopenmp")
+        link_argv.extend(f for f in openmp_link_for_block(block, mode) if f not in link_argv)
         # The C++ <execution> policies (std::execution::par / par_unseq) dispatch into oneTBB in
         # libstdc++, and an unresolved TBB symbol is a link failure the agent cannot fix from the
         # source field. Appended for every C++ link so the task text can promise the policies work;
