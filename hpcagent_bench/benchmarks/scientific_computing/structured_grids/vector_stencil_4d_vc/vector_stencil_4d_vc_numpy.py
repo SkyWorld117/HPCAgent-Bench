@@ -27,3 +27,4 @@ def vector_stencil_4d_vc(b_grid, in_grid, out_grid, w_dist, B, N, R):
     np.multiply(b_grid, in_grid, out=acc)
     np.multiply(stencil_comp, in_grid, out=stencil_comp)
     np.add(stencil_comp, acc, out=out_grid)
+    return out_grid
