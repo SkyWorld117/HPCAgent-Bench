@@ -2187,6 +2187,48 @@ _UFUNC_OUT_OPS = {
 _UFUNC_OUT_CALLS = OrderedSet(("maximum", "minimum", "fmax", "fmin"))
 
 
+class _FillDiagonalInline(ast.NodeTransformer):
+    """``np.fill_diagonal(A, v)`` -> ``for __fd in range(min(A.shape[0], A.shape[1])): A[__fd, __fd] = v``.
+
+    numpy's rule for a 2-D target, written out. A higher-rank target keeps the call and is refused
+    downstream: numpy then fills ``A[i, i, ..., i]`` and requires every axis to be equal, and
+    ``wrap=True`` fills a different set of cells again, so neither may be assumed here.
+    """
+
+    def visit_Expr(self, node: ast.Expr) -> ast.AST:
+        call = node.value
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name) and call.func.value.id in ("np", "numpy")
+                and call.func.attr == "fill_diagonal"):
+            return node
+        if len(call.args) != 2 or call.keywords or not isinstance(call.args[0], ast.Name):
+            return node
+        arr, val = call.args[0], call.args[1]
+        it = "__fd0"
+
+        def axis(k: int) -> ast.expr:
+            return ast.Subscript(value=ast.Attribute(value=ast.Name(id=arr.id, ctx=ast.Load()),
+                                                     attr="shape",
+                                                     ctx=ast.Load()),
+                                 slice=ast.Constant(value=k),
+                                 ctx=ast.Load())
+
+        bound = ast.Call(func=ast.Name(id="min", ctx=ast.Load()), args=[axis(0), axis(1)], keywords=[])
+        store = ast.Assign(targets=[
+            ast.Subscript(value=ast.Name(id=arr.id, ctx=ast.Load()),
+                          slice=ast.Tuple(elts=[ast.Name(id=it, ctx=ast.Load()),
+                                                ast.Name(id=it, ctx=ast.Load())],
+                                          ctx=ast.Load()),
+                          ctx=ast.Store())
+        ],
+                           value=val)
+        loop = ast.For(target=ast.Name(id=it, ctx=ast.Store()),
+                       iter=ast.Call(func=ast.Name(id="range", ctx=ast.Load()), args=[bound], keywords=[]),
+                       body=[store],
+                       orelse=[])
+        return ast.fix_missing_locations(ast.copy_location(loop, node))
+
+
 class _UfuncOutInline(ast.NodeTransformer):
     """``np.multiply(a, b, out=c)`` (the binary arithmetic ufuncs) -> the explicit assignment
     ``c = a <op> b``; ``np.maximum(a, b, out=c)`` (and the other ``_UFUNC_OUT_CALLS`` members, which
@@ -2195,13 +2237,22 @@ class _UfuncOutInline(ast.NodeTransformer):
     (``wcoefs[:n]``) -- the assignment target is that slice."""
 
     def _rewrite(self, call: ast.AST):
-        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                and isinstance(call.func.value, ast.Name) and call.func.value.id in ("np", "numpy")):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and len(call.args) == 2):
             return None
-        attr = call.func.attr
-        op = _UFUNC_OUT_OPS.get(attr)
-        if (op is None and attr not in _UFUNC_OUT_CALLS) or len(call.args) != 2:
-            return None
+        # ``np.<ufunc>.outer(a, b, out=c)`` is the same store with a two-level name. There is no
+        # BinOp spelling for an outer product, so the call is kept and only the ``out=`` becomes a
+        # target -- floyd_warshall writes its whole relaxation step this way.
+        outer_form = (isinstance(call.func.value, ast.Attribute) and isinstance(call.func.value.value, ast.Name)
+                      and call.func.value.value.id in ("np", "numpy") and call.func.attr == "outer")
+        if outer_form:
+            op = None
+        else:
+            if not (isinstance(call.func.value, ast.Name) and call.func.value.id in ("np", "numpy")):
+                return None
+            attr = call.func.attr
+            op = _UFUNC_OUT_OPS.get(attr)
+            if op is None and attr not in _UFUNC_OUT_CALLS:
+                return None
         out = next((kw.value for kw in call.keywords if kw.arg == "out"), None)
         if out is None:
             return None

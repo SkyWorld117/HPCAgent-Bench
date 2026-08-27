@@ -40,8 +40,8 @@ from numpyto_common.lib_nodes import (_const_int, _is_full_slice_elt, _iter_exte
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
-                                          _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer, REDUCE_FNS,
-                                          _eigh_alias_names, _kind_of_dtype_str, expr_rank, rank_table,
+                                          _FillDiagonalInline, _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer,
+                                          REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, rank_table,
                                           rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
 
@@ -90,6 +90,7 @@ def native_desugar(fn: ast.FunctionDef) -> None:
     _UfuncReduceToReducer().visit(fn)  # np.add.reduce -> np.sum before the elementwise-ufunc desugars
     _NewaxisToNone().visit(fn)
     _UfuncOutInline().visit(fn)
+    _FillDiagonalInline().visit(fn)
     _DecomposeRollSlice().visit(fn)
     _ComplexAccessorToFunc().visit(fn)
     _ElementalUfuncToPrimitive().visit(fn)
@@ -466,6 +467,11 @@ class _AxisReshapeToIndexing(ast.NodeTransformer):
         i, j = (a % rank for a in axes[:2])
         perm = list(range(rank))
         perm[i], perm[j] = perm[j], perm[i]
+        # An identity ``perm`` is emitted as a transpose like any other, never dropped: it is built
+        # from ``rank``, so it means either a genuine no-op or a rank this pass read wrong, and the
+        # two are indistinguishable from here. Dropping it on that reading turned
+        # conv_transpose3d_leaky_relu_multiply_leaky_relu_max's rank-5 ``moveaxis(tap, -1, 1)`` into
+        # an identity copy while its consumer went on indexing the permuted layout.
         return self._rewrite(f"np.transpose({ast.unparse(node.args[0])}, ({', '.join(map(str, perm))},))", node)
 
     @staticmethod

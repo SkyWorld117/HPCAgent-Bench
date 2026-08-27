@@ -379,6 +379,18 @@ def _np_fft_attr(call: ast.Call) -> Optional[str]:
     return None
 
 
+def _np_call_attr(func: ast.expr) -> Optional[str]:
+    """``np.foo`` -> ``"foo"``, ``np.foo.bar`` -> ``"foo.bar"``, anything else -> ``None``."""
+    if not isinstance(func, ast.Attribute):
+        return None
+    if isinstance(func.value, ast.Name) and func.value.id == "np":
+        return func.attr
+    if (isinstance(func.value, ast.Attribute) and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "np"):
+        return f"{func.value.attr}.{func.attr}"
+    return None
+
+
 def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> Optional[Tuple[ast.expr, ...]]:
     """Iteration extent of an array-valued expression. ``Name(A)`` -> A's full
     shape; ``Subscript(A, axes)`` -> upper-minus-lower per Slice axis in order
@@ -517,9 +529,11 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
         # ``tmp_twid = np.reshape(tmp_perm, (N,)) * np.reshape(D, (N,))`` must be
         # rank-1, not tmp_perm's rank-3). ``repeat``/``transpose`` aren't statically
         # resolvable here -- bail to None rather than report the wrong extent.
-        if (isinstance(expr.func, ast.Attribute) and isinstance(expr.func.value, ast.Name)
-                and expr.func.value.id == "np"):
-            attr = expr.func.attr
+        # ``np.<x>`` and the two-level ufunc-method spellings ``np.<ufunc>.<method>`` alike. The
+        # dotted form never reached here, so the ``maximum.accumulate`` branch below was
+        # unreachable and every ``np.<op>.outer`` came back with its first operand's extent.
+        attr = _np_call_attr(expr.func)
+        if attr is not None:
             # An array CONSTRUCTOR states its extent in its shape argument -- read it
             # directly, since an inline constructor (never assigned to a Name) is
             # never sized by the harvest. Otherwise the triu/tril first-arg hoist in
@@ -652,6 +666,14 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
                 return tuple(out)
             if attr == "repeat":
                 return None
+            # ``np.<op>.outer(a, b)`` pairs every element of a with every element of b: rank 2,
+            # sized from the two operands' own extents.
+            if attr.endswith(".outer") and len(expr.args) == 2:
+                l_out = _iter_extent_of(expr.args[0], shape_table)
+                r_out = _iter_extent_of(expr.args[1], shape_table)
+                if l_out is None or r_out is None or len(l_out) != 1 or len(r_out) != 1:
+                    return None
+                return (l_out[0], r_out[0])
             # ``np.einsum(subscripts, *operands)`` -> the output extent: one axis per
             # output index letter, sized from the operand that introduces it. The
             # elementwise fallthrough below would wrongly take the first operand's
@@ -2597,6 +2619,12 @@ def expand_transpose(target: ast.expr,
     if not args_one_name(args):
         raise NotImplementedError("np.transpose needs Name first arg")
     a = args[0]
+    if isinstance(target, ast.Name) and target.id == a.id:
+        # ``tap = np.moveaxis(tap, -1, 1)`` -- the permutation writes back into the buffer it is
+        # reading. Element by element that overwrites source cells before they are read, so the
+        # result is neither the input nor the permutation. Refuse rather than emit it: a wrong
+        # answer that compiles is worse than a kernel that does not.
+        raise NotImplementedError(f"np.transpose permutes {a.id!r} into itself; give the result its own name")
     shape = shape_table.get(a.id)
     if not shape:
         raise NotImplementedError("np.transpose: source shape unknown")
@@ -8237,6 +8265,13 @@ class _CallHoister(ast.NodeTransformer):
             b_ext = _iter_extent_of(args[1], self.shape_table)
             if (a_ext is not None and b_ext is not None and len(a_ext) == 1 and len(b_ext) == 1):
                 return (self._extent_to_shape_token(a_ext[0]), self._extent_to_shape_token(b_ext[0]))
+        # ``np.diagonal(a)`` on a SQUARE rank-2 operand: one element per row. Without a size here the
+        # hoister declines, so the diagonal stayed inline inside ``np.tanh(...)`` -- where the
+        # elementwise scalariser has no cell to read and the call reached emit whole.
+        if op == "diagonal" and len(args) == 1:
+            d_ext = _iter_extent_of(args[0], self.shape_table)
+            if d_ext is not None and len(d_ext) == 2 and ast.unparse(d_ext[0]) == ast.unparse(d_ext[1]):
+                return (self._extent_to_shape_token(d_ext[0]), )
         # linalg ops that preserve their argument's shape.
         if op in {"linalg.cholesky", "linalg.inv"} \
                 and args and isinstance(args[0], ast.Name):
