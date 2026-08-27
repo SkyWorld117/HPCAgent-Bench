@@ -198,6 +198,25 @@ run_vllm_node() {
     export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${FAST_SCRATCH}/triton-cache}"
     mkdir -p "${TRITON_CACHE_DIR}" 2>/dev/null || true
 
+    # AITER's master switch defaults OFF while every component behind it -- linear, fp8bmm, moe,
+    # mha, rmsnorm, tgemm -- defaults ON, so with the master unset every is_*_enabled() reads False
+    # (probes 602359/602360) and the campaign has served every model on Triton. That is what vLLM
+    # is warning about when it says a MoE or block-FP8 config is missing for MI300A: those are the
+    # TRITON path's per-shape tables, and aiter's CK/assembly kernels need none of them.
+    # aiter ships no prebuilt .so and JIT-builds module_aiter_core on first import, which is what
+    # left 598021 without a /v1/models for 5400 s -- so the shared cache is part of the switch, not
+    # an optimization. Fill it once with ce-images/inference/prebuild-aiter-jit.sbatch.
+    # MLA is the one component with a recorded gfx942 failure (600662, fmha_v3_varlen_fwd invalid
+    # argument). No vLLM arm serves an MLA model -- kimi moved to SGLang -- and any that does must
+    # set VLLM_ROCM_USE_AITER_MLA=0 in its env file.
+    if [[ "${INFERENCE_ENGINE:-vllm}" != "sglang" ]]; then
+        export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
+        # Keyed by image: the cache holds .so files built against ONE aiter/ROCm build, and a
+        # rank that loads a mismatched one fails late or silently, the way the shared PCH did.
+        export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_CE_ENV:-default}}"
+        mkdir -p "${AITER_JIT_DIR}" 2>/dev/null || true
+    fi
+
     # Serve the resolved snapshot path, as the roundtrip gate did: with a bare repo id the engine
     # keeps consulting the HF hub during startup (observed 44 s stalls + rate-limit warnings).
     : "${VLLM_MODEL:?VLLM_MODEL must be set}"
@@ -339,8 +358,9 @@ PY
     # "Address already in use" worker crash after the full checkpoint load (589170).
     unset VLLM_PORT
 
-    printf 'vLLM mode=%s rank=%s host=%s master=%s:%s\n' \
-        "${INFERENCE_MODE}" "${node_rank}" "$(hostname)" "${VLLM_MASTER_HOST}" "${VLLM_MASTER_PORT}"
+    printf 'vLLM mode=%s rank=%s host=%s master=%s:%s engine=%s aiter=%s\n' \
+        "${INFERENCE_MODE}" "${node_rank}" "$(hostname)" "${VLLM_MASTER_HOST}" "${VLLM_MASTER_PORT}" \
+        "${INFERENCE_ENGINE:-vllm}" "${VLLM_ROCM_USE_AITER:-${SGLANG_USE_AITER:-unset}}"
     exec "${command[@]}"
 }
 

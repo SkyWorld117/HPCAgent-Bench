@@ -26,10 +26,12 @@ SCRATCH="${SCRATCH:-/capstor/scratch/cscs/ybudanaz/x86_64}"
 FAST_SCRATCH="/iopsstor/scratch/cscs/${USER}"
 [[ -d "${FAST_SCRATCH}" ]] || FAST_SCRATCH="${SCRATCH}"
 export HF_HOME="${HF_HOME:-${FAST_SCRATCH}/hf}"
-export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
+# Keyed by image, exactly as run_cluster.sh keys it: these .so files are built against one
+# aiter/ROCm build and a rank that loads a mismatched one fails late or silently.
+export AITER_JIT_DIR="${AITER_JIT_DIR:-${FAST_SCRATCH}/aiter-jit/${INFERENCE_EDF}}"
 export MODEL_REPO="${MODEL_REPO:-moonshotai/Kimi-K2.7-Code}"
 export SERVED_MODEL="${SERVED_MODEL:-optarena-vllm}"
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 
 mkdir -p "${AITER_JIT_DIR}"
 printf 'job:   %s\ncache: %s\n\n' "${SLURM_JOB_ID}" "${AITER_JIT_DIR}"
