@@ -52,12 +52,25 @@ qwen38)
     BASE_ARGS+=" --generation-config auto --enable-auto-tool-choice --tool-call-parser qwen3_xml"
     BASE_ARGS+=" --reasoning-parser qwen3 --max-model-len 262144 --gpu-memory-utilization 0.70"
     BASE_ARGS+=" --max-num-seqs 128 --language-model-only"
+    MTP='--speculative-config {"method":"mtp","num_speculative_tokens":3}'
+    # Every aiter component defaults ON but is gated by the master switch, so a component is
+    # selected by turning the master on and the others explicitly off (probe 602360). The master
+    # alone is the upper bound AND the thing that took >40 min to become ready in 610165, so the
+    # granular legs are what tell us whether the win can be had without that cost.
+    OFF="VLLM_ROCM_USE_AITER_LINEAR=0 VLLM_ROCM_USE_AITER_MOE=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
+    OFF+=" VLLM_ROCM_USE_AITER_FP8BMM=0 VLLM_ROCM_USE_AITER_FP4BMM=0"
+    OFF+=" VLLM_ROCM_USE_AITER_TRITON_GEMM=0 VLLM_ROCM_USE_AITER_CUSTOM_AR=0"
+    MHA_LINEAR="VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1 VLLM_ROCM_USE_AITER_LINEAR=1"
+    MHA_LINEAR+=" VLLM_ROCM_USE_AITER_FP8BMM=1 VLLM_ROCM_USE_AITER_MOE=0"
+    MHA_LINEAR+=" VLLM_ROCM_USE_AITER_FP4BMM=0 VLLM_ROCM_USE_AITER_CUSTOM_AR=0"
     LEGS=(
         "baseline||"
         "fp8kv||--kv-cache-dtype fp8"
-        "mtp||--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":3}"
-        "fp8kv+mtp||--kv-cache-dtype fp8 --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":3}"
-        "fp8kv+mtp+aiter|VLLM_ROCM_USE_AITER=1|--kv-cache-dtype fp8 --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":3}"
+        "mtp||${MTP}"
+        "fp8kv+mtp||--kv-cache-dtype fp8 ${MTP}"
+        "aiter-mha|VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1 ${OFF}|--kv-cache-dtype fp8 ${MTP}"
+        "aiter-mha-linear|${MHA_LINEAR}|--kv-cache-dtype fp8 ${MTP}"
+        "aiter-all|VLLM_ROCM_USE_AITER=1|--kv-cache-dtype fp8 ${MTP}"
     )
     ;;
 oss120b)
@@ -66,7 +79,14 @@ oss120b)
     BASE_ARGS+=" --generation-config auto --enable-auto-tool-choice --tool-call-parser openai"
     BASE_ARGS+=" --reasoning-parser openai_gptoss --max-model-len 131072"
     BASE_ARGS+=" --gpu-memory-utilization 0.70 --max-num-seqs 128"
-    LEGS=("baseline||" "aiter|VLLM_ROCM_USE_AITER=1|")
+    OFF="VLLM_ROCM_USE_AITER_LINEAR=0 VLLM_ROCM_USE_AITER_MOE=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
+    OFF+=" VLLM_ROCM_USE_AITER_FP8BMM=0 VLLM_ROCM_USE_AITER_FP4BMM=0"
+    OFF+=" VLLM_ROCM_USE_AITER_TRITON_GEMM=0 VLLM_ROCM_USE_AITER_CUSTOM_AR=0"
+    LEGS=(
+        "baseline||"
+        "aiter-mha|VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1 ${OFF}|"
+        "aiter-all|VLLM_ROCM_USE_AITER=1|"
+    )
     ;;
 *)
     echo "FATAL: unknown PROFILE=${PROFILE}" >&2; exit 2 ;;
