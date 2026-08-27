@@ -69,8 +69,21 @@ leg() {  # leg <0|1>
         export VLLM_ROCM_USE_AITER="${AITER}"
         export AITER_JIT_DIR="${FAST_SCRATCH}/aiter-jit/${INFERENCE_EDF}"
         mkdir -p "${AITER_JIT_DIR}" "${TRITON_CACHE_DIR}"
+        # Serve the resolved snapshot PATH, as run_cluster.sh does. Handed a bare repo id, vLLM
+        # resolves it itself and refuses gpt-oss: the cached snapshot omits the original/ and
+        # metal/ format copies nothing here serves, and that reads as IncompleteSnapshotError.
+        model_path="$(python3 - <<PYEOF | tail -n 1
+import os
+
+from huggingface_hub import snapshot_download
+
+print(snapshot_download(repo_id=os.environ["MODEL_REPO"], local_files_only=True,
+                        ignore_patterns=["original/*", "metal/*"]))
+PYEOF
+)"
+        test -d "${model_path}"
         read -r -a extra <<<"${EXTRA_ARGS}"
-        exec vllm serve "${MODEL_REPO}" --served-model-name "${SERVED_MODEL}" \
+        exec vllm serve "${model_path}" --served-model-name "${SERVED_MODEL}" \
             --tensor-parallel-size 4 --host 0.0.0.0 --port "${API_PORT}" "${extra[@]}"
     ' >"${log}" 2>&1 &
     local pid=$!
