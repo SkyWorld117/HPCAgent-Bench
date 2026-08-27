@@ -75,8 +75,10 @@ done
 echo "ready in $(( $(date +%s) - started ))s"
 
 echo "=== backends sglang picked ==="
+# `|| true`, and it is load-bearing: head closes the pipe, the upstream greps take SIGPIPE, and
+# under `set -o pipefail` that aborts the whole probe one line after the server came up (610207).
 grep -aiE "attention backend|aiter|linear_attn|mamba|kv cache dtype|page" "${RUN_DIR}/sglang.log" \
-    | grep -av "server_args=" | head -12
+    | grep -av "server_args=" | head -12 || true
 
 echo "=== accuracy gate ==="
 python3 "${SUBMIT_DIR}/accuracy-gate.py" --base "${BASE}" --model "${SERVED_MODEL}" | tee "${RUN_DIR}/accuracy.txt" || true
