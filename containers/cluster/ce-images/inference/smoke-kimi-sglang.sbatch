@@ -9,8 +9,8 @@
 # discriminates.
 #SBATCH --job-name=smoke-kimi-sglang
 #SBATCH --partition=mi300
+# PP spans the allocation: -N4 gives the campaign's own topology, -N2 the 2-node recipe.
 #SBATCH --nodes=2
-#SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=0
@@ -38,14 +38,14 @@ export SWEEP_CONCURRENCY="${SWEEP_CONCURRENCY:-1 8 16}"
 
 export MASTER="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n1)"
 echo "job:    ${SLURM_JOB_ID}"
-echo "model:  ${MODEL_REPO} tp=4 pp=2 on 2 nodes (sglang)"
+echo "model:  ${MODEL_REPO} tp=4 pp=${SLURM_NNODES} on ${SLURM_NNODES} nodes (sglang)"
 echo "master: ${MASTER}"
 echo "logs:   ${RUN_DIR}"
 
 stage() { printf '\n===== stage: %s =====\n' "$*"; }
 
 stage "serving tp=4 pp=2 across 2 nodes via sglang"
-srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --exclusive --export=ALL \
+srun --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 --exclusive --export=ALL \
     --environment="${EDF}" bash -c '
   export SGLANG_USE_AITER=1
   export SGLANG_ROCM_FUSED_DECODE_MLA=0
@@ -58,8 +58,8 @@ srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --exclusive --export=ALL \
     --model-path "${MODEL_REPO}" \
     --served-model-name "${SERVED_MODEL}" \
     --trust-remote-code \
-    --tp-size 4 --pp-size 2 \
-    --nnodes 2 --node-rank "${SLURM_PROCID}" \
+    --tp-size 4 --pp-size '"${SLURM_NNODES}"' \
+    --nnodes '"${SLURM_NNODES}"' --node-rank "${SLURM_PROCID}" \
     --dist-init-addr "'"${MASTER}"':29765" \
     --kv-cache-dtype fp8_e4m3 \
     --page-size 64 \
@@ -196,4 +196,4 @@ srun --overlap --nodes=1 --ntasks=1 --nodelist="${MASTER}" --export=ALL \
     --environment="${EDF}" /opt/venv/bin/python3 "${RUN_DIR}/client.py" \
     2>&1 | tee "${RUN_DIR}/client.out"
 
-printf '\n===== SMOKE DONE (sglang tp=4 pp=2) =====\nlogs: %s\n' "${RUN_DIR}"
+printf '\n===== SMOKE DONE (sglang tp=4 pp=%s) =====\nlogs: %s\n' "${SLURM_NNODES}" "${RUN_DIR}"
