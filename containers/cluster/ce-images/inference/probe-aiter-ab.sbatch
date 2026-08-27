@@ -43,13 +43,14 @@ export INFERENCE_EDF
 
 mkdir -p "${RUN_DIR}" logs
 HOST="$(hostname)"
-BASE="http://${HOST}:${API_PORT}/v1"
+# No /v1 suffix: the probe clients append their own path, as the judge and agents do.
+BASE="http://${HOST}:${API_PORT}"
 printf 'job:   %s\nmodel: %s\nimage: %s\nlogs:  %s\n\n' \
     "${SLURM_JOB_ID}" "${MODEL_REPO}" "${INFERENCE_EDF}" "${RUN_DIR}"
 
 wait_ready() {  # wait_ready <log> <pid>
     local deadline=$(( $(date +%s) + READY_TIMEOUT ))
-    until python3 -c "import sys,urllib.request; urllib.request.urlopen('${BASE}/models', timeout=10)" 2>/dev/null; do
+    until python3 -c "import sys,urllib.request; urllib.request.urlopen('${BASE}/v1/models', timeout=10)" 2>/dev/null; do
         kill -0 "$2" 2>/dev/null || { echo "FAIL: server exited before the API came up"; tail -40 "$1"; return 1; }
         (( $(date +%s) < deadline )) || { echo "FAIL: API not ready in ${READY_TIMEOUT}s"; tail -40 "$1"; return 1; }
         sleep 15
