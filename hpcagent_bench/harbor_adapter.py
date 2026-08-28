@@ -129,7 +129,7 @@ class KernelTask:
     @property
     def kernel_arg(self) -> str:
         """The ``--kernel`` value passed to the grader: the loadable STEM (last path segment of
-        the registry key). For the 25/281 kernels whose ``short_name`` != stem (``jacobi2d`` vs
+        the registry key). For the 25/281 kernels whose ``short_name`` != stem (``jacobi_2d`` vs
         ``jacobi_2d``), the short_name is NOT ``BenchSpec.load``-able, so use the stem."""
         return self.key.rsplit("/", 1)[-1]
 

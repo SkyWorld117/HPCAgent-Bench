@@ -1,6 +1,6 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Sparse Biconjugate Gradient
-module_name: bicg
+module_name: sp_bicg
 kind: microapp
 level: 3
 parameters:

@@ -33,5 +33,5 @@ init:
     wout: {shape: "(N,)", dtype: float64}
     vout: {shape: "(N, N)", dtype: complex128}
 array_args: [a, b, wout, vout]
-output_args: [wout]
+output_args: [wout, vout]
 taxonomy: {track: scientific_computing, subtrack: polybench, dwarf: dense_linear_algebra, domain: Solver}

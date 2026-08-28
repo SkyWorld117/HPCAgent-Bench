@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import time
 import types
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pytest
@@ -387,7 +387,7 @@ def test_the_oracle_transforms_with_the_columns_own_flags(tmp_path, monkeypatch)
     monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
     monkeypatch.setattr(pluto_transform, "run_bounded", capture)
 
-    status = oracle._run_pluto(tmp_path, "mm", "fp64", {}, {}, {}, {}, (), 0.0, 0.0, "ok", tmp_path, "mm")
+    status = oracle._run_pluto(tmp_path, "mm", "fp64", {}, {}, {}, {}, (), 0.0, 0.0, "ok", tmp_path, "mm", frozenset())
 
     assert status.startswith("skip:unsupported:polycc")
     args = tuple(seen["cmd"][1:1 + len(pluto_transform.POLYCC_ARGS)])
@@ -562,3 +562,198 @@ def test_a_stale_library_is_rebuilt_rather_than_timed(tmp_path) -> None:
 
     assert so_path == stale
     assert stale.read_bytes()[:4] == b"\x7fELF", "a stale .so was returned instead of rebuilt"
+
+
+# --------------------------------------------------------------------------------------------------
+# Atomic publication, the properties `test_a_failed_polycc_never_writes_out_directly` and
+# `test_concurrent_runs_on_the_same_out_do_not_corrupt_each_other` above do NOT cover: what a reader
+# sees WHILE a transform is in flight, that what lands is the post-processed whole, that the expiry
+# path is as safe as the non-zero-exit one, and that no scratch survives a SUCCESSFUL run either.
+# These drive stand-in polycc's, so they run on a box with no Pluto installed, where the real
+# concurrency test above skips.
+# --------------------------------------------------------------------------------------------------
+
+
+def emitted_to(cmd: List[str]) -> pathlib.Path:
+    """Where the polycc invocation ``cmd`` was told to write -- the operand of its ``-o``.
+
+    The stand-ins below honour it instead of assuming the destination, which is the whole point:
+    a stand-in that wrote the destination directly would pass against the bug being pinned.
+    """
+    return pathlib.Path(cmd[cmd.index("-o") + 1])
+
+
+def timing_out_polycc(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """A polycc wedged mid-emit: partial output on disk, then killed by the bound."""
+    emitted_to(cmd).write_text("void mm_fp64(const int64_t N) {\n  int t1, t2;\n  for (t1")
+    raise subprocess.TimeoutExpired(cmd, 1.0)
+
+
+#: What a stand-in polycc "transforms" the scop into. Two scratch declarations of ``t1`` in one
+#: scope, so the dedupe pass has something to do and the published file is provably POST-processed
+#: rather than the raw emission.
+TRANSFORMED = ("void mm_fp64(const int64_t N, double (*restrict C)[N]) {\n"
+               "  int t1, t2;\n"
+               "  int t1;\n"
+               "#pragma omp parallel for\n"
+               "  for (t1 = 0; t1 < N; t1++) C[t1][t1] = 1.0;\n"
+               "}\n")
+
+#: The same text after ``dedupe_scratch_declarations`` -- what a correct publish must land.
+PUBLISHED = pluto_transform.dedupe_scratch_declarations(TRANSFORMED)
+
+
+def writing_polycc(text: str = TRANSFORMED,
+                   watch: Optional[pathlib.Path] = None,
+                   seen: Optional[List[Optional[str]]] = None) -> Any:
+    """A polycc that emits ``text`` in two steps, sampling ``watch`` between them.
+
+    The sample is the evidence for "the destination is never exposed mid-transform": it is taken at
+    the one instant a half-written translation unit exists on disk.
+    """
+
+    def run(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        dst = emitted_to(cmd)
+        head, tail = text[:len(text) // 2], text[len(text) // 2:]
+        dst.write_text(head)
+        if seen is not None and watch is not None:
+            seen.append(watch.read_text() if watch.exists() else None)
+        dst.write_text(head + tail)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    return run
+
+
+def polycc_scratch(directory: pathlib.Path) -> List[pathlib.Path]:
+    """Every scratch file ``run_polycc`` could have left in ``directory``.
+
+    Matches the name ``run_polycc`` reserves -- ``.<out name>.<random>.tmp`` -- so this tracks that
+    function's own spelling rather than restating it.
+    """
+    return sorted(p for p in directory.glob(".*.tmp"))
+
+
+def test_the_destination_is_never_exposed_mid_transform(tmp_path, monkeypatch) -> None:
+    """While polycc is half-way through emitting, the path the build compiles still holds the
+    previous COMPLETE output -- never the partial one. A reader that arrives at the wrong instant is
+    the whole failure mode, and it cannot be fixed by cleaning up afterwards."""
+    scop = write_scop(tmp_path)
+    out = pluto_transform.transformed_path(scop)
+    out.write_text(PUBLISHED)
+    seen: List[Optional[str]] = []
+    monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
+    monkeypatch.setattr(pluto_transform, "run_bounded", writing_polycc(watch=out, seen=seen))
+
+    pluto_transform.run_polycc(scop, out)
+
+    assert seen == [PUBLISHED], "the destination held a half-written translation unit mid-transform"
+
+
+def test_a_successful_transform_publishes_the_whole_post_processed_result(tmp_path, monkeypatch) -> None:
+    """What lands is the COMPLETE transform after the dedupe pass -- not the raw emission, and not a
+    prefix of either. The returned argv keeps naming the destination, because the report echoes it
+    as the command a reader can re-run, while polycc was actually pointed at the scratch name."""
+    scop = write_scop(tmp_path)
+    out = pluto_transform.transformed_path(scop)
+    executed: List[List[str]] = []
+
+    def recording(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        executed.append(list(cmd))
+        return writing_polycc()(cmd, **kwargs)
+
+    monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
+    monkeypatch.setattr(pluto_transform, "run_bounded", recording)
+
+    argv, proc = pluto_transform.run_polycc(scop, out)
+
+    assert proc.returncode == 0
+    assert out.read_text() == PUBLISHED
+    assert argv[argv.index("-o") + 1] == str(out), "the echoed command must name the published path"
+    assert emitted_to(executed[0]) != out, "polycc wrote the destination directly"
+    assert emitted_to(executed[0]).parent == out.parent, "os.replace is only atomic within one filesystem"
+
+
+def test_a_timed_out_polycc_cannot_damage_an_existing_destination(tmp_path, monkeypatch) -> None:
+    """The expiry path, which the non-zero-exit test above does not reach: a run killed mid-emit by
+    the bound leaves a good destination BYTE-IDENTICAL, mtime included."""
+    scop = write_scop(tmp_path)
+    out = pluto_transform.transformed_path(scop)
+    out.write_text(PUBLISHED)
+    before = out.read_bytes(), out.stat().st_mtime_ns
+    monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
+    monkeypatch.setattr(pluto_transform, "run_bounded", timing_out_polycc)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        pluto_transform.run_polycc(scop, out, timeout=1.0)
+
+    assert (out.read_bytes(), out.stat().st_mtime_ns) == before, "an expired run damaged a good destination"
+
+
+@pytest.mark.parametrize("polycc", [writing_polycc(), timing_out_polycc])
+def test_no_scratch_survives_a_successful_or_expired_run(tmp_path, monkeypatch, polycc) -> None:
+    """Success and expiry both clean up. A build directory that accumulates half-written ``.c``
+    files per run is how a shared destination gets recreated one level down."""
+    scop = write_scop(tmp_path)
+    out = pluto_transform.transformed_path(scop)
+    monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
+    monkeypatch.setattr(pluto_transform, "run_bounded", polycc)
+
+    try:
+        pluto_transform.run_polycc(scop, out, timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+    assert polycc_scratch(out.parent) == [], "a polycc scratch file survived the run"
+
+
+# --------------------------------------------------------------------------------------------------
+# An oracle defect must not be reported as a polycc defect.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_run_pluto_takes_the_index_array_set(tmp_path) -> None:
+    """``_run_pluto`` passes ``index_names`` to the invoke but never took it as a parameter, so the
+    name was undefined and EVERY pluto grade in the corpus raised ``NameError`` before polycc's
+    output was ever run. Broken from 28bf3c477c until it was caught in CI as
+    ``skip:unsupported:pluto-miscompile:NameError`` on gemm -- a verdict that blamed polycc.
+
+    Asserted on the signature, because the failure needs a full polycc toolchain to reproduce and
+    the parameter is what the bug was."""
+    import inspect
+
+    import tests.numerical_oracle as oracle
+
+    params = list(inspect.signature(oracle._run_pluto).parameters)
+    assert "index_names" in params, params
+    # The call site must supply it too -- an unfilled default would reintroduce the silence.
+    source = inspect.getsource(oracle.run_kernel) if hasattr(oracle, "run_kernel") else ""
+    assert oracle._run_pluto.__defaults__ in (None, ()), "index_names must be required, not defaulted"
+
+
+def test_an_exception_out_of_the_invoke_is_not_blamed_on_polycc(tmp_path, monkeypatch) -> None:
+    """The reclassification exists for a transform that COMPUTES the wrong numbers. An exception
+    escaping ``_invoke_isolated`` is a defect in this harness -- the invoke reports a run failure as
+    a status string -- so it must keep its own prefix instead of being laundered into
+    ``pluto-miscompile``, which is exactly what hid the undefined ``index_names`` above."""
+    import tests.numerical_oracle as oracle
+
+    write_scop(tmp_path)
+
+    def fake_polycc(src: Any, out: Any, timeout: Any = None) -> Any:
+        pathlib.Path(out).write_text("void mm(void) {}\n")  # the transform "succeeded"
+        return ["polycc"], subprocess.CompletedProcess(["polycc"], 0, "", "")
+
+    monkeypatch.setattr(pluto_transform, "polycc_exe", lambda: "/usr/bin/polycc")
+    monkeypatch.setattr(pluto_transform, "run_polycc", fake_polycc)
+    monkeypatch.setattr(pluto_transform, "run_bounded",
+                        lambda cmd, **kw: subprocess.CompletedProcess(list(cmd), 0, "", ""))
+
+    def boom(*_a: Any, **_kw: Any) -> str:
+        raise NameError("name 'index_names' is not defined")
+
+    monkeypatch.setattr(oracle, "_invoke_isolated", boom)
+
+    status = oracle._run_pluto(tmp_path, "mm", "fp64", {}, {}, {}, {}, (), 0.0, 0.0, "ok", tmp_path, "mm", frozenset())
+
+    assert "pluto-miscompile" not in status, status
+    assert status.startswith("FAIL:oracle:NameError"), status

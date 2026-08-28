@@ -11,7 +11,7 @@
 #define _PB_NX NX
 #define _PB_NY NY
 
-void fdtd_2d_fp64(int64_t NX, int64_t NY, int64_t TMAX, const double *restrict _fict_, double ex[restrict NX][NY], double ey[restrict NX][NY], double hz[restrict NX][NY], double ex_courant, double ey_courant, double hz_courant) {
+void fdtd_2d_fp64(int64_t NX, int64_t NY, int64_t TMAX, const double *restrict fict, double ex[restrict NX][NY], double ey[restrict NX][NY], double hz[restrict NX][NY], double ex_courant, double ey_courant, double hz_courant) {
   int t, i, j;
 
   (void)ex_courant;
@@ -23,7 +23,7 @@ void fdtd_2d_fp64(int64_t NX, int64_t NY, int64_t TMAX, const double *restrict _
   for(t = 0; t < _PB_TMAX; t++)
     {
       for (j = 0; j < _PB_NY; j++)
-        ey[0][j] = _fict_[t];
+        ey[0][j] = fict[t];
       for (i = 1; i < _PB_NX; i++)
         for (j = 0; j < _PB_NY; j++)
           ey[i][j] = ey[i][j] - SCALAR_VAL(0.5)*(hz[i][j]-hz[i-1][j]);

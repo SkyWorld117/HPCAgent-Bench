@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 17000000
   L:
-    LEN_1D: 59507987
+    LEN_1D: 27076953
   XL:
-    LEN_1D: 208305913
+    LEN_1D: 43127140
 init:
   arrays:
     b: (LEN_1D,)
@@ -20,6 +20,7 @@ init:
     idx:
       shape: (LEN_1D,)
       dtype: int64
+      index_array: true
 output_args:
 - b
 - e

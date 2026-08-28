@@ -18,9 +18,9 @@ parameters:
   M:
     N: 18000
   L:
-    N: 27804
+    N: 20267
   XL:
-    N: 42947
+    N: 22819
 init:
   input_args: [N]
   output_args: [cov, w, r, risk, ret]

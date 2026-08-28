@@ -37,20 +37,26 @@ def build_up_b(rho, dt, dx, dy, u, v):
 
 
 def pressure_poisson_periodic(nit, p, dx, dy, b):
+    # A fixed number of Jacobi sweeps is the algorithm (not a solve-to-tolerance), so the
+    # iteration itself is a genuine recurrence and stays a loop -- only the buffer churn around
+    # it is wasteful: the shipped code preallocates `pn` then immediately discards it every sweep
+    # via `pn = p.copy()`. Reuse the buffer instead of reallocating nit times.
     pn = np.empty_like(p)
+    denom = 2 * (dx**2 + dy**2)
+    dxy2 = dx**2 * dy**2 / denom
 
-    for q in range(nit):
-        pn = p.copy()
-        p[1:-1, 1:-1] = (((pn[1:-1, 2:] + pn[1:-1, 0:-2]) * dy**2 + (pn[2:, 1:-1] + pn[0:-2, 1:-1]) * dx**2) /
-                         (2 * (dx**2 + dy**2)) - dx**2 * dy**2 / (2 * (dx**2 + dy**2)) * b[1:-1, 1:-1])
+    for _ in range(nit):
+        pn[:] = p
+        p[1:-1, 1:-1] = (((pn[1:-1, 2:] + pn[1:-1, 0:-2]) * dy**2 +
+                           (pn[2:, 1:-1] + pn[0:-2, 1:-1]) * dx**2) / denom - dxy2 * b[1:-1, 1:-1])
 
         # Periodic BC Pressure @ x = 2
-        p[1:-1, -1] = (((pn[1:-1, 0] + pn[1:-1, -2]) * dy**2 + (pn[2:, -1] + pn[0:-2, -1]) * dx**2) /
-                       (2 * (dx**2 + dy**2)) - dx**2 * dy**2 / (2 * (dx**2 + dy**2)) * b[1:-1, -1])
+        p[1:-1, -1] = (((pn[1:-1, 0] + pn[1:-1, -2]) * dy**2 +
+                         (pn[2:, -1] + pn[0:-2, -1]) * dx**2) / denom - dxy2 * b[1:-1, -1])
 
         # Periodic BC Pressure @ x = 0
-        p[1:-1, 0] = (((pn[1:-1, 1] + pn[1:-1, -1]) * dy**2 + (pn[2:, 0] + pn[0:-2, 0]) * dx**2) /
-                      (2 * (dx**2 + dy**2)) - dx**2 * dy**2 / (2 * (dx**2 + dy**2)) * b[1:-1, 0])
+        p[1:-1, 0] = (((pn[1:-1, 1] + pn[1:-1, -1]) * dy**2 +
+                        (pn[2:, 0] + pn[0:-2, 0]) * dx**2) / denom - dxy2 * b[1:-1, 0])
 
         # Wall boundary conditions, pressure
         p[-1, :] = p[-2, :]  # dp/dy = 0 at y = 2
@@ -60,11 +66,16 @@ def pressure_poisson_periodic(nit, p, dx, dy, b):
 def channel_flow(nit, u, v, dt, dx, dy, p, rho, nu, F):
     # In-place: u, v, p are pre-allocated output buffers (see initialize());
     # every update below writes into them, nothing is returned.
+    # The while loop is a genuine convergence recurrence (unknown iteration count) -- kept as a
+    # loop; un/vn buffers are preallocated once and refilled in place instead of a fresh .copy()
+    # per iteration, and the repeated np.sum(u) is computed once and reused.
+    un = np.empty_like(u)
+    vn = np.empty_like(v)
     udiff = 1
 
     while udiff > .001:
-        un = u.copy()
-        vn = v.copy()
+        un[:] = u
+        vn[:] = v
 
         b = build_up_b(rho, dt, dx, dy, u, v)
         pressure_poisson_periodic(nit, p, dx, dy, b)
@@ -111,4 +122,5 @@ def channel_flow(nit, u, v, dt, dx, dy, p, rho, nu, F):
         v[0, :] = 0.0
         v[-1, :] = 0.0
 
-        udiff = (np.sum(u) - np.sum(un)) / np.sum(u)
+        sum_u = np.sum(u)
+        udiff = (sum_u - np.sum(un)) / sum_u

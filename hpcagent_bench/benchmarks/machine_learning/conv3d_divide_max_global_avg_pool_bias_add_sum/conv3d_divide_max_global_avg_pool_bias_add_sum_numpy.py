@@ -81,7 +81,7 @@ def _maxpool3d(x, kernel_size, stride, padding):
 # ``out`` is declared (batch_size, 1, 1, 1): the pooled (n, c, 1, 1, 1) with its CHANNEL axis summed
 # away, which is axis 1 and no other. The axis is a constant of this artifact, so it is keyword-only
 # and defaulted -- out of ``input_args``, hence out of the ABI.
-def conv3d_divide_max_global_avg_pool_bias_add_sum(x, in_channels, out_channels, kernel_size, divisor, pool_size, conv_weight, conv_bias, bias, out, *, sum_dim=1):
+def conv3d_divide_max_global_avg_pool_bias_add_sum(x, divisor, pool_size, conv_weight, conv_bias, bias, out, *, sum_dim=1):
     x = _conv3d(x, conv_weight, conv_bias, 1, 0, 1, 1)
     x = (x / divisor)
     x = _maxpool3d(x, pool_size, None, 0)

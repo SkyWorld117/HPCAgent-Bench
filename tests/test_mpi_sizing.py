@@ -5,7 +5,6 @@ import pytest
 
 from hpcagent_bench.harness import mpi_sizing
 from hpcagent_bench.harness.task import Task
-from hpcagent_bench.precision import Precision
 from hpcagent_bench.spec import BenchSpec
 
 

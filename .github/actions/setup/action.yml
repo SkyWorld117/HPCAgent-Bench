@@ -27,23 +27,97 @@ runs:
         #             every SDFG pays a full configure. Nothing reports it; the build is just slow.
         #   ccache -- DaCe knows nothing about ccache. It helps only through a compiler launcher or
         #             a PATH shim, so the package has to exist before either can point at it.
+        # libtbb-dev is the same shape of silent failure, and the reason it lives HERE rather than
+        # in the jobs that noticed: libstdc++ picks its parallel <execution> backend per TU with
+        # __has_include(<tbb/tbb.h>), so with the headers absent the par/par_unseq policies compile
+        # and run SEQUENTIALLY under a parallel name -- a wrong measurement, not a build failure.
+        # languages.stdpar_link_flags asks the compiler that same question before appending -ltbb,
+        # so this package is what actually turns the cpp_isopar column parallel. It used to be
+        # installed inline by seven jobs and missed by port-fidelity and gpu, which build C++ all
+        # the same. The graded image installs it too (ce-images/amd/Dockerfile).
         sudo apt-get update
         sudo apt-get install -y build-essential gfortran pkg-config libopenblas-dev libfftw3-dev \
-          liblapacke-dev ninja-build ccache
+          liblapacke-dev ninja-build ccache libtbb-dev
+
+    - name: GNU Fortran matching the graded image
+      shell: bash
+      run: |
+        # Same argument as the LLVM step below, for the OTHER family. The graded images
+        # (containers/cpu.def, judge.def) are built `From: ubuntu:26.04`, whose gfortran implements
+        # the F2018 DO CONCURRENT LOCALITY SPECS (`local()` / `shared()`); ubuntu-latest's
+        # gfortran 13 does not, and hard-errors with "Syntax error in DO statement". A skill page
+        # that teaches a construct the GRADED toolchain accepts then reads as a broken promise on
+        # CI alone -- tests/test_parallelism_dispatch.py caught exactly that. Pin the major so the
+        # runner answers for the same compiler the agent is graded on.
+        #
+        # The WHOLE GNU family moves together, gcc and g++ included. That used to be a
+        # Fortran-only pin, but compilers.yaml now builds C at -std=c23, and the runner's default
+        # gcc is 13: `gcc-13 -std=c23` is "unrecognized command line option ... did you mean
+        # '-std=c2x'?" (measured), so every GNU C build would fail on CI. The major is the
+        # one the GRADED image pins (containers/cluster/ce-images/amd/Dockerfile, GCC 16 +
+        # LLVM 22), out of the same ubuntu-toolchain-r/test PPA, so CI answers for the
+        # compiler the agent is actually graded on. /usr/local/bin precedes /usr/bin on the runner's
+        # PATH, and compilers.yaml names the driver unversioned, so the symlink is what makes it
+        # take effect.
+        #
+        # libstdc++-<major>-dev is NOT optional, and not for gfortran's sake. Installing gfortran-15
+        # creates /usr/lib/gcc/<triple>/15, and clang selects the HIGHEST such directory whether or
+        # not gcc-15 itself is installed -- so a Fortran-only pin silently re-toolchained clang onto
+        # a GCC install carrying no C++ headers, and every clang C++ build died with
+        # "fatal error: 'cstdint' file not found" (clang says so itself, as
+        # -Wgcc-install-dir-libstdcxx: "'.../14' would be chosen over '.../15'"). That took out the
+        # warnings ratchet, test_frameworks, test_default_datatype_tolerance and Pluto's configure
+        # in one go. Complete the directory clang picks rather than pinning it to a path.
+        set -euo pipefail
+        GCC_MAJOR=16
+        # add-apt-repository talks to Launchpad, which answered HTTP 500 twice in a row on
+        # 2026-08-23 and took out five jobs across two runs before a single test had run
+        # (lazr.restfulclient.errors.ServerError -> no python -> "No module named pytest").
+        # Same retry shape as the llvm key fetch and pip_retry below: a transient upstream
+        # outage should cost a minute, not a run.
+        for attempt in 1 2 3 4 5; do
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test && break
+          if [ "$attempt" = 5 ]; then
+            echo "::error::add-apt-repository failed 5 times; Launchpad is down, not this branch"
+            exit 1
+          fi
+          echo "add-apt-repository attempt $attempt failed (Launchpad); retrying in $((attempt * 10))s" >&2
+          sleep $((attempt * 10))
+        done
+        sudo apt-get update
+        sudo apt-get install -y "gcc-${GCC_MAJOR}" "g++-${GCC_MAJOR}" "gfortran-${GCC_MAJOR}" \
+          "libstdc++-${GCC_MAJOR}-dev"
+        for driver in gcc g++ gfortran; do
+          sudo ln -sf "/usr/bin/${driver}-${GCC_MAJOR}" "/usr/local/bin/${driver}"
+        done
+        # cc and c++ are part of that family and have no -<major> spelling to loop over, so they
+        # need naming. Not cosmetic: dace resolves its host compiler as
+        # `Config(compiler.cpu.executable) or $CXX or 'c++'` (dace/codegen/compiler_family.py), the
+        # harness pins neither, and CMake's own default is `c++` as well -- so with only g++ linked,
+        # every dace-compiled kernel built with the runner's /usr/bin/c++ while every other column
+        # used the pinned major. That was GCC 13 against GCC 16, and 13 is the major dace itself
+        # warns mislowers a masked select to silent zeros (_MISCOMPILING_GCC_MAJORS), so the dace
+        # baseline the agent is graded against was the one build nobody had pinned.
+        sudo ln -sf "/usr/bin/gcc-${GCC_MAJOR}" /usr/local/bin/cc
+        sudo ln -sf "/usr/bin/g++-${GCC_MAJOR}" /usr/local/bin/c++
+        gcc --version | head -1
+        gfortran --version | head -1
 
     - name: LLVM toolchain (clang / clang++ / flang / libomp)
       shell: bash
       run: |
         # ubuntu-latest ships LLVM 18, whose Fortran driver is still spelled `flang-new`. The
-        # harness is developed and measured against LLVM 21 (flags.POLLY_PAR's Polly findings, the
-        # clang OpenMP-spelling measurements behind flags.PLUTO_PAR), so CI runs the same major --
-        # a CI-only LLVM is how a count comes out 0 on a dev box and nonzero on a runner with
-        # nothing in the log to say the toolchains differed.
+        # harness is developed and measured against LLVM 22 -- envs/toolset.yaml names `clang-22`
+        # first and languages.resolve_compiler takes the highest major on PATH, so that is what a
+        # dev box resolves (flags.POLLY_PAR's Polly findings, the clang OpenMP-spelling
+        # measurements behind flags.PLUTO_PAR). CI runs the same major: a CI-only LLVM is how a
+        # count comes out 0 on a dev box and nonzero on a runner with nothing in the log to say
+        # the toolchains differed.
         #
-        # libomp-21-dev is the SECOND OpenMP runtime, required rather than optional:
+        # libomp-<major>-dev is the SECOND OpenMP runtime, required rather than optional:
         # tests/test_fork_openmp_safety.py asserts on it because libgomp deadlocks across fork()
         # and libomp recovers, so a suite that only ever sees libgomp cannot tell the fix from the
-        # forgiving runtime. It puts the LINKER name under /usr/lib/llvm-21/lib while only the
+        # forgiving runtime. It puts the LINKER name under /usr/lib/llvm-<major>/lib while only the
         # runtime libomp.so.N lands on the default path -- hence `ld: cannot find -lomp` with the
         # package installed, which languages.LLVM_LIB_GLOBS is what resolves.
         #
@@ -53,7 +127,7 @@ runs:
         # on the box would keep winning and the LLVM columns would silently stay on 18.
         # /usr/local/bin precedes /usr/bin on the runner's PATH.
         set -euo pipefail
-        LLVM_MAJOR=21
+        LLVM_MAJOR=22
         for attempt in 1 2 3; do
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null && break
@@ -70,6 +144,15 @@ runs:
         done
         clang --version | head -1
         flang --version | head -1
+        # A version banner does not prove clang can COMPILE. It resolves its libstdc++ from whichever
+        # /usr/lib/gcc/<triple>/<major> directory sorts highest, so an unrelated step that installs a
+        # versioned GCC component can leave the driver unable to find <cstdint> while --version still
+        # answers happily. That shipped: five jobs went red before anything said the C++ arm was
+        # broken. Compile the smallest TU that needs the standard library, here, loudly.
+        printf '#include <cstdint>\nint main(){return 0;}\n' > "${RUNNER_TEMP}/cxx-smoke.cpp"
+        clang++ -std=c++23 -fsyntax-only "${RUNNER_TEMP}/cxx-smoke.cpp" \
+          || { echo "::error::clang++ cannot compile a <cstdint> TU -- its selected GCC install has no libstdc++ headers"; \
+               clang++ -v -x c++ -E /dev/null 2>&1 | grep -i 'selected gcc installation' >&2; exit 1; }
 
     - name: Base Python deps (translators + the frameworks every phase shares)
       shell: bash
@@ -94,29 +177,44 @@ runs:
         # stream.h), so a plain shallow clone builds an SDFG straight into
         # "fatal error: ... blockingconcurrentqueue.h: No such file or directory".
         #
-        # PINNED TO A SHA, not to the branch tip. tests/test_dace_numeric_agreement.py ratchets
-        # NUMERIC_BAD in BOTH directions, and a ratchet over a dependency that moves under it is a
-        # coin flip: `extended` advancing between two runs attributes dace's changes to whichever
-        # optarena commit was in flight, and a "healed" kernel forces a deletion that the next dace
-        # commit undoes. This tree has already lost a gate that way -- a shared dace moving mid-run
-        # faked ~40 failures. Bump DACE_SHA in its own commit and expect NUMERIC_BAD to move with it.
+        # TRACKS THE extended BRANCH TIP, deliberately unpinned: this suite grades kernels through
+        # dace, and the emitters target what extended actually supports today (np.where and
+        # np.broadcast_to reach the Merge/Broadcast library nodes there, so the emitter does not
+        # desugar them). A pin froze that capability set and made the emitter work around gaps the
+        # branch had already closed.
         #
-        # A --depth 1 clone cannot check out an arbitrary SHA, hence init + fetch of that one commit.
-        # --recurse-submodules stays MANDATORY either way: dace vendors its runtime headers as
-        # submodules (external/moodycamel/blockingconcurrentqueue.h is included by
+        # The cost is real: tests/test_dace_numeric_agreement.py ratchets NUMERIC_BAD in BOTH
+        # directions, so a dace commit landing between two runs is attributed to whichever optarena
+        # commit was in flight, and a "healed" kernel forces a deletion the next dace commit may
+        # undo. A shared dace moving mid-run has faked ~40 failures here before. When a red is not
+        # explained by the optarena diff, compare the resolved sha echoed below across the two runs
+        # BEFORE touching a ratchet list.
+        #
+        # There is NO override. A DACE_SHA escape hatch used to sit here "for a bisect", and it is
+        # how run 32571640992 came to grade the corpus against a dace a week old and report four
+        # symbol-propagation failures that the tip had already fixed -- a whole triage spent on
+        # dead bugs. Bisect by checking out the dace commit locally, not by teaching CI to freeze.
+        # A --depth 1 fetch takes a branch name, hence init + fetch of that one ref.
+        # --recurse-submodules stays MANDATORY: dace vendors its runtime headers as submodules
+        # (external/moodycamel/blockingconcurrentqueue.h is included by
         # dace/runtime/include/dace/stream.h), so without them every SDFG build dies on a missing header.
-        DACE_SHA="${DACE_SHA:-a4740d4e7dd087350c707562c1c3706a21c4de87}"
+        DACE_REF=extended
         mkdir -p "$RUNNER_TEMP/dace"
         git -C "$RUNNER_TEMP/dace" init -q
         git -C "$RUNNER_TEMP/dace" remote add origin https://github.com/spcl/dace.git
-        git -C "$RUNNER_TEMP/dace" fetch -q --depth 1 origin "$DACE_SHA"
+        git -C "$RUNNER_TEMP/dace" fetch -q --depth 1 origin "$DACE_REF"
         git -C "$RUNNER_TEMP/dace" checkout -q FETCH_HEAD
         git -C "$RUNNER_TEMP/dace" submodule update --init --recursive --depth 1
         pip_retry -e "$RUNNER_TEMP/dace"
         # Echo the RESOLVED sha: a job that grades against dace must say which dace, or a triage
         # reader has to guess from the run date.
         echo "dace @ $(git -C "$RUNNER_TEMP/dace" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-        pip_retry "jax[cpu]" numba pythran pyarrow
+        # pythran IS pinned, unlike dace: it is a third-party compiler this suite GRADES
+        # kernels through, and it moved under the gate. 0.19.0 landed between run 31842426040
+        # (08-14) and 32065774711 (08-17) and turned subset_sum from green into a >600 s hang,
+        # then a SIG11 -- the kernel itself unchanged and still green here on 0.18.1. Bump this in
+        # its own commit, and expect the e2e statuses to move with it.
+        pip_retry "jax[cpu]" numba pythran==0.18.1 pyarrow
         # DELIBERATELY no `DACE_compiler_build_mode=native` here. It used to be exported for speed
         # (native skips the per-SDFG cmake configure), and it silently DEFEATED the build cache the
         # framework pins: a DACE_* environment variable outranks Config.set, so

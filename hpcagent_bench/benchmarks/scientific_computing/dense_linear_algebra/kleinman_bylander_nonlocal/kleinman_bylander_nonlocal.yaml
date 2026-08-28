@@ -13,13 +13,13 @@ parameters:
     nproj: 256
     nstate: 128
   L:
-    ngrid: 291451
-    nproj: 651
-    nstate: 325
+    ngrid: 204584
+    nproj: 457
+    nstate: 228
   XL:
-    ngrid: 648069
-    nproj: 1656
-    nstate: 826
+    ngrid: 319326
+    nproj: 815
+    nstate: 406
   fuzzed:
     ngrid: [2048, 300000]
     nproj: [8, 512]

@@ -22,19 +22,19 @@ parameters:
     nscf: 6
     m: 10
   L:
-    N: 128
-    Lb: 16
-    nfrag: 64
-    nstate: 28
-    nproj: 16
+    N: 119
+    Lb: 21
+    nfrag: 85
+    nstate: 26
+    nproj: 10
     nscf: 6
     m: 10
   XL:
-    N: 256
-    Lb: 32
-    nfrag: 512
-    nstate: 48
-    nproj: 16
+    N: 223
+    Lb: 27
+    nfrag: 447
+    nstate: 41
+    nproj: 13
     nscf: 6
     m: 10
   fuzzed:
@@ -93,6 +93,7 @@ array_args:
 - rho
 - V_tot
 output_args:
+- psi_frag
 - rho
 - V_tot
 fuzz:

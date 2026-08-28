@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 95000000
   L:
-    LEN_1D: 222424492
+    LEN_1D: 157277866
   XL:
-    LEN_1D: 520764784
+    LEN_1D: 260382392
 init:
   scalars:
     alpha: 2.0

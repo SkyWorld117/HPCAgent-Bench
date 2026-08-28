@@ -178,5 +178,13 @@ class Benchmark(object):
                 for name, value in zip(out_names, result):
                     data[name] = value
 
+        # A declared array the initializer does not return still has to exist as a buffer for the
+        # pointer columns; see initialize.allocate_declared_buffers for why the failure otherwise
+        # surfaces as a shape mismatch on an unrelated output.
+        if info_init:
+            from hpcagent_bench.initialize import allocate_declared_buffers
+            from hpcagent_bench.precision import precision_from_datatype
+            allocate_declared_buffers(spec, data, precision_from_datatype(datatype))
+
         self.bdata[cache_key] = data
         return self.bdata[cache_key]

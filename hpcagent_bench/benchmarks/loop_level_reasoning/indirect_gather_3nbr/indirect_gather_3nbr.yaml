@@ -6,17 +6,18 @@ parameters:
   S:
     N: 16
   M:
-    N: 20971520
+    N: 20971521
   L:
-    N: 52252342
+    N: 36947986
   XL:
-    N: 130191196
+    N: 65095598
 init:
   arrays:
     field: (N,)
     idx:
       shape: (N,3)
       dtype: int64
+      index_array: true
     w: (N,3)
     out: (N,)
 output_args:

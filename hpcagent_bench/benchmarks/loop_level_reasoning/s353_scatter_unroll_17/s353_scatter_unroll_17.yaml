@@ -8,14 +8,15 @@ parameters:
   M:
     N: 33554432
   L:
-    N: 107931974
+    N: 54149318
   XL:
-    N: 347176523
+    N: 87384838
 init:
   arrays:
     ip:
       shape: (N,)
       dtype: int64
+      index_array: true
     a: (N,)
     b: (N,)
 output_args:

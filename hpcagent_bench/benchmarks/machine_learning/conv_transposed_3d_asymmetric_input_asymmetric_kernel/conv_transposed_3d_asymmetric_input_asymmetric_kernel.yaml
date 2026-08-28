@@ -41,20 +41,22 @@ parameters:
     out_channels: 72
     width_in: 72
 config:
+  dilation:
+    value: 1
   groups:
     value: 1
   output_padding:
     value: 0
   padding:
-    value: 0
+    value: 1
   stride:
     value: 1
 init:
   arrays:
     x: (batch_size, in_channels, depth_in, height_in, width_in)
-    conv_transpose3d_weight: (batch_size, depth_in, kernel_size, kernel_size, kernel_size)
-    conv_transpose3d_bias: (depth_in,)
-    out: (batch_size, depth_in, depth_in, depth_in, depth_in)
+    conv_transpose3d_weight: (in_channels, out_channels // groups, kernel_size, kernel_size, kernel_size)
+    conv_transpose3d_bias: (out_channels,)
+    out: (batch_size, out_channels, (depth_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1, (height_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1, (width_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1)
   scalars:
     conv_transpose3d_stride: 1
     conv_transpose3d_padding: 1

@@ -21,7 +21,7 @@ import itertools
 import pathlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
 
@@ -48,21 +48,51 @@ class Preset(str, Enum):
 #: The preset vocabulary as a tuple; the single source of truth is :class:`Preset`.
 PRESET_CHOICES = tuple(p.value for p in Preset)
 
+#: The SIZE RUNGS -- the presets that name a fixed size, i.e. everything a ``+fuzz`` can
+#: attach to. Derived from :class:`Preset` rather than imported from ``sizing`` because
+#: ``sizing`` imports this module.
+RUNGS = tuple(p.value for p in Preset if p is not Preset.FUZZED)
 
-def parse_preset(preset: str) -> Tuple[str, Optional[int]]:
-    """Split a preset token into ``(base, seed)``. ``S``/``M``/``L``/``XL``/``fuzzed``
-    give ``(base, None)``; ``fuzzed:42`` gives ``("fuzzed", 42)``. Only ``fuzzed``
-    takes a ``:seed`` suffix. Raises ``ValueError`` on an unknown base or a
-    non-integer / misplaced seed."""
-    base, sep, rest = preset.partition(":")
-    if base not in PRESET_CHOICES:
-        raise ValueError(f"unknown preset {base!r}; choose from {', '.join(PRESET_CHOICES)}")
+#: The one preset MODIFIER: ``<rung>+fuzz`` samples sizes around ``<rung>``.
+FUZZ_SUFFIX = "fuzz"
+
+#: What a bare ``fuzzed`` token anchors on. XL is the size the manifests declare as the
+#: production shape, so it is what a submission is graded at unless a caller says otherwise.
+DEFAULT_FUZZ_ANCHOR = "XL"
+
+
+def parse_preset(preset: str) -> Tuple[str, Optional[int], str]:
+    """Split a preset token into ``(base, seed, anchor)``.
+
+    Fuzzing is a PROPERTY of a preset, not a preset of its own: ``+fuzz`` samples sizes around
+    the rung it is attached to, so ``XL+fuzz`` draws around XL and ``M+fuzz`` around M. Every
+    rung accepts it. The bare ``fuzzed`` token is the historical spelling of ``XL+fuzz`` and
+    still resolves to exactly that.
+
+    ``S`` / ``M`` / ``L`` / ``XL`` give ``(base, None, base)`` -- a fixed size, anchor unused.
+    ``XL+fuzz`` gives ``("fuzzed", None, "XL")``; ``M+fuzz:42`` gives ``("fuzzed", 42, "M")``.
+    A ``:seed`` suffix pins the sampling RNG and is only meaningful with ``+fuzz``.
+
+    Raises ``ValueError`` on an unknown rung or a non-integer / misplaced seed."""
+    head, sep, rest = preset.partition(":")
+    anchor, plus, suffix = head.partition("+")
+    if plus:
+        if suffix != FUZZ_SUFFIX:
+            raise ValueError(f"unknown preset modifier {suffix!r} in {preset!r}; only '+{FUZZ_SUFFIX}' exists")
+        if anchor not in RUNGS:
+            raise ValueError(f"'+{FUZZ_SUFFIX}' attaches to a size rung; "
+                             f"got {anchor!r}, choose from {', '.join(RUNGS)}")
+        base = Preset.FUZZED.value
+    else:
+        base, anchor = head, (head if head != Preset.FUZZED.value else DEFAULT_FUZZ_ANCHOR)
+        if base not in PRESET_CHOICES:
+            raise ValueError(f"unknown preset {base!r}; choose from {', '.join(PRESET_CHOICES)}")
     if not sep:
-        return base, None
-    if base != "fuzzed":
-        raise ValueError(f"only the fuzzed preset takes a ':seed' suffix (got {preset!r})")
+        return base, None, anchor
+    if base != Preset.FUZZED.value:
+        raise ValueError(f"only a fuzzed preset takes a ':seed' suffix (got {preset!r})")
     try:
-        return base, int(rest)
+        return base, int(rest), anchor
     except ValueError:
         raise ValueError(f"fuzzed seed must be an integer (got {rest!r})") from None
 
@@ -75,11 +105,17 @@ def preset_arg(preset: str) -> str:
 
 
 def resolve_preset(preset: str) -> str:
-    """Parse a preset token, apply any ``fuzzed:seed`` as a ``seeds.fuzz`` override for
-    this process, and return the base preset (``fuzzed``/``S``/...) to run with."""
-    base, seed = parse_preset(preset)
+    """Parse a preset token, apply its modifiers as process overrides, and return the base
+    preset (``fuzzed``/``S``/...) to run with.
+
+    Two overrides, both following the pattern this function already used for ``:seed``: the
+    sampling RNG (``seeds.fuzz``) and the rung the sizes are drawn around (``fuzz.anchor``).
+    The anchor is set for EVERY token, so a plain ``M`` leaves no stale ``XL`` behind from a
+    previous call in the same process."""
+    base, seed, anchor = parse_preset(preset)
     if seed is not None:
         config.set_override("seeds.fuzz", seed)
+    config.set_override("fuzz.anchor", anchor)
     return base
 
 
@@ -185,6 +221,9 @@ class InitSpec:
     output_args: Tuple[str, ...]
     shapes: Dict[str, str] = field(default_factory=dict)
     scalars: Dict[str, float] = field(default_factory=dict)
+    #: Compile-time sizes referenced by ``shapes`` that the ABI never passes as arguments
+    #: (cloudsc's ``nclv``). Emitted as a PARAMETER/constexpr in the generated stub.
+    constants: Dict[str, int] = field(default_factory=dict)
     #: Per-array dtype overrides -- ``{name: dtype_str}`` (e.g.
     #: ``{"ip": "int32"}``). An array listed here has a FIXED dtype that
     #: overrides the global fp64/fp32 precision sweep -- the canonical
@@ -204,6 +243,14 @@ class InitSpec:
     #: every distribution onto it (``support.distributions.generate``), so the hidden rotation
     #: can vary sign and magnitude everywhere a kernel has not said it cannot.
     domains: Dict[str, Any] = field(default_factory=dict)
+    #: Arrays whose ELEMENTS are subscripts into another array, as declared by
+    #: ``init.arrays[name].index_array: true``. The numpy reference is the 0-based truth for every
+    #: one of them; the index BASE is then a property of the consuming language, not of the data,
+    #: so the ABI seam rebases the buffer on the way in and out (see
+    #: :func:`hpcagent_bench.support.bindings.contract.index_base`). Declared, never inferred:
+    #: "is this integer buffer a subscript or a measurement?" is a semantic question no scan can
+    #: answer, and guessing it wrong silently shifts every gathered element by one.
+    index_arrays: FrozenSet[str] = frozenset()
     #: Declared floor, in bytes, for scratch/persistent memory this kernel's ``init`` needs (e.g.
     #: DaCe's library-init transients) -- from ``init.workspace.bytes``. ``None`` when the manifest
     #: omits the block. Schema + validation only here; the harness reads it, this does not score it.
@@ -356,7 +403,7 @@ def parse_baseline(raw: Any, relative_path: str, source: str = "<spec>") -> Base
 
 #: Everything one ``init.arrays`` entry may declare. Closed on purpose: a key outside this set
 #: is a load error, not a silently ignored line.
-ARRAY_ENTRY_KEYS = frozenset({"shape", "dtype", "dist", "domain"})
+ARRAY_ENTRY_KEYS = frozenset({"shape", "dtype", "dist", "domain", "index_array"})
 
 
 def init_arrays_raw(init: "InitSpec") -> Dict[str, Any]:
@@ -377,6 +424,8 @@ def init_arrays_raw(init: "InitSpec") -> Dict[str, Any]:
             entry["dist"] = init.dists[name]
         if name in init.domains:
             entry["domain"] = init.domains[name]
+        if name in init.index_arrays:
+            entry["index_array"] = True
         out[name] = shape if len(entry) == 1 else entry
     return out
 
@@ -1182,6 +1231,7 @@ class BenchSpec:
             dtypes: Dict[str, str] = dict(init_raw.get("dtypes", {}))
             dists: Dict[str, str] = dict(init_raw.get("dists", {}))
             domains: Dict[str, Any] = {}
+            index_arrays: List[str] = []
             for name, entry in (init_raw.get("arrays") or {}).items():
                 if isinstance(entry, str):
                     shapes[name] = entry
@@ -1200,11 +1250,28 @@ class BenchSpec:
                     dtypes[name] = entry["dtype"]
                 if entry.get("dist"):
                     dists[name] = entry["dist"]
+                if entry.get("index_array") is not None:
+                    flag = entry["index_array"]
+                    if not isinstance(flag, bool):
+                        raise ValueError(f"{source}: init.arrays[{name!r}].index_array must be true or false, "
+                                         f"got {flag!r}")
+                    if flag:
+                        index_arrays.append(name)
                 if entry.get("domain") is not None:
                     # Validated HERE so a bad domain fails at load, naming the kernel and array,
                     # instead of at generation time inside a worker.
                     domain_mod.parse(entry["domain"])
                     domains[name] = entry["domain"]
+            # An index array must declare an INTEGER element type. Without one it follows the
+            # fp64/fp32 precision sweep, and the ABI would then be asked to rebase a float buffer
+            # -- a subscript that is a float is not a subscript.
+            for name in index_arrays:
+                declared = dtypes.get(name)
+                if declared is None or not declared.lstrip("u").startswith("int"):
+                    raise ValueError(f"{source}: init.arrays[{name!r}] is index_array but declares "
+                                     f"dtype {declared!r}; an index array must pin an integer dtype "
+                                     f"(e.g. 'int64'), because a subscript cannot follow the float "
+                                     f"precision sweep")
             if "generate" in init_raw:
                 raise ValueError(f"{source}: init.generate is not a valid key; use init.func_name "
                                  "(the single canonical name of the generation function)")
@@ -1237,9 +1304,11 @@ class BenchSpec:
                 output_args=tuple(init_out),
                 shapes=shapes,
                 scalars=scalars,
+                constants=dict(init_raw.get("constants", {}) or {}),
                 dtypes=dtypes,
                 dists=dists,
                 domains=domains,
+                index_arrays=frozenset(index_arrays),
                 workspace_bytes=workspace_bytes,
             )
 
@@ -1516,17 +1585,23 @@ class BenchSpec:
                 idx = len(p.parts) - 1 - p.parts[::-1].index("benchmarks")
                 raw["relative_path"] = "/".join(p.parts[idx + 1:-1])
             raw.setdefault("module_name", p.stem)
-            # The remaining identity fields are derivable from the manifest
-            # filename + the numpy reference, so a concise manifest may omit
-            # them: ``short_name`` defaults to the file stem, ``func_name`` to
-            # the reference's entry def, and ``name`` (the human title) to the
-            # short_name. Each is honoured verbatim when written out.
-            raw.setdefault("short_name", p.stem)
+            # A benchmark has ONE name and it is the manifest stem, which is unique across the
+            # corpus and is the name every other identity field is derived from. A manifest may
+            # not override it: a second, shorter identity is how the harness came to hand out a
+            # name it could not then load back, silently taking 34 kernels out of every
+            # python-delivery path. A name too long for a backend's symbol rules is shortened at
+            # EMISSION instead -- see ``numpyto_common.naming.entry_symbol``.
+            declared = raw.get("short_name")
+            if declared is not None and declared != p.stem:
+                raise ValueError(f"{p}: short_name {declared!r} differs from the manifest stem "
+                                 f"{p.stem!r}. A benchmark has one name; rename the file to change "
+                                 f"it. A Fortran-illegal length is handled by naming.entry_symbol.")
+            raw["short_name"] = p.stem
             if "func_name" not in raw:
                 fn = derive_func_name(raw.get("relative_path", ""), raw["module_name"])
                 if fn is not None:
                     raw["func_name"] = fn
-            raw.setdefault("name", raw["short_name"])
+            raw.setdefault("name", raw["short_name"])  # human title, free-form; NOT an identity
         taxonomy = raw.pop("taxonomy", None)
         if isinstance(taxonomy, dict):
             for k in ("track", "subtrack", "dwarf", "domain", "scale", "level", "tags", "min_precision"):
@@ -1666,7 +1741,7 @@ class BenchSpec:
         the manifest's ``short_name`` abbreviation (``numpyto_c.cli``). Using
         ``short_name`` here desyncs for the 26 kernels that abbreviate: the
         emitter writes ``arc_distance_fp64.c`` while the loader hunts for
-        ``adist_fp64.c`` and reports the sources as ungenerated.
+        ``arc_distance_fp64.c`` and reports the sources as ungenerated.
         """
         return self.module_name if config in (None, "dense") else f"{self.module_name}_{config}"
 
@@ -1780,7 +1855,7 @@ def _key_to_short_name() -> Dict[str, str]:
 
     The bridge the plot selectors need: ``select`` / ``select_keys`` work in path-key /
     stem space, the results DB in short_name space, and the two DIVERGE for 26 kernels
-    (``heat_3d`` stem / ``heat3d`` short_name, ``jacobi_2d`` / ``jacobi2d``, ...). Without
+    (``heat_3d`` stem / ``heat_3d`` short_name, ``jacobi_2d`` / ``jacobi_2d``, ...). Without
     this map a narrow plot selector silently filters the results table to zero rows. A
     light YAML read (not a full ``BenchSpec.load``): only the one field is needed."""
     out: Dict[str, str] = {}
@@ -1975,9 +2050,9 @@ def select_short_names(selector: str) -> List[str]:
     Resolves through :meth:`KernelRegistry.select_keys` (collision-proof path-keys) and
     maps each to its manifest short_name via :func:`_key_to_short_name` -- NOT the bare
     directory stem :meth:`KernelRegistry.select` returns, which diverges from the DB key
-    for 26 kernels (``heat_3d`` stem vs ``heat3d`` short_name) and would filter a narrow
+    for 26 kernels (``heat_3d`` stem vs ``heat_3d`` short_name) and would filter a narrow
     selection to zero rows. A selector that is itself a short_name the user copied from the
-    DB (``heat3d``) is honoured directly."""
+    DB (``heat_3d``) is honoured directly."""
     sel = selector.strip()
     bare = _BARE_LEVEL.fullmatch(sel)
     if bare:
@@ -1988,7 +2063,7 @@ def select_short_names(selector: str) -> List[str]:
     try:
         keys = KERNELS.select_keys(sel)
     except KeyError:
-        if sel in set(key_to_sn.values()):  # a raw DB short_name (e.g. "heat3d"), not a stem
+        if sel in set(key_to_sn.values()):  # a raw DB short_name (e.g. "heat_3d"), not a stem
             return [sel]
         raise
     return sorted({key_to_sn[k] for k in keys})

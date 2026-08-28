@@ -18,14 +18,14 @@ parameters:
     nz: 64
     niter: 20
   L:
-    nx: 256
-    ny: 256
-    nz: 256
+    nx: 337
+    ny: 168
+    nz: 168
     niter: 20
   XL:
-    nx: 1024
-    ny: 512
-    nz: 512
+    nx: 885
+    ny: 442
+    nz: 442
     niter: 20
 init:
   input_args:

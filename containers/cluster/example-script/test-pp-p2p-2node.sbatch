@@ -20,7 +20,7 @@
 # Each variant below runs the same probe under a different env, in ONE allocation: about two minutes
 # each, against three hours for a vLLM probe that answers the same question.
 #
-#   sbatch --account=a-g200 test-pp-p2p-2node.sbatch
+#   sbatch test-pp-p2p-2node.sbatch
 #
 # Each variant prints `allreduce=<v> p2p_size2=<v> p2p_size4=<v>`, and the two P2P columns are the
 # point. torch mints a lazy 2-rank communicator only when the group is WIDER than the pair actually
@@ -51,7 +51,7 @@ RUN_DIR="${SCRATCH}/rccl-ofi/logs/${SLURM_JOB_ID}"
 # NOT dirname "${BASH_SOURCE[0]}": slurmd runs a spooled copy out of /var/spool, so that resolves to
 # a directory holding nothing but the script itself. SLURM_SUBMIT_DIR is where sbatch was invoked.
 PROBE_PY="${PROBE_PY:-${SLURM_SUBMIT_DIR:-.}/pp-p2p-probe.py}"
-INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.23.0-pytorch211-ofi}"
+INFERENCE_EDF="${INFERENCE_EDF:-rocm723-vllm-0.27.1-pytorch211-ofi}"
 
 MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-4}"

@@ -30,5 +30,5 @@ init:
     wmax: {shape: "(1,)", dtype: float64}
     vmax: {shape: "(N,)", dtype: float64}
 array_args: [a, wmax, vmax]
-output_args: [wmax]
+output_args: [wmax, vmax]
 taxonomy: {track: scientific_computing, subtrack: terminal_bench, dwarf: dense_linear_algebra, domain: Solver}

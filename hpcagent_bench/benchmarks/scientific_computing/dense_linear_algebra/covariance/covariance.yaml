@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Covariance
-short_name: covarian
 kind: microkernel
 level: 2
 parameters:
@@ -34,6 +33,7 @@ array_args:
 - data
 - cov
 output_args:
+- data
 - cov
 taxonomy:
   track: scientific_computing

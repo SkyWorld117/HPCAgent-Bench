@@ -5,16 +5,16 @@ level: 2
 parameters:
   S:
     N: 64
-    TSTEPS: 1
+    TSTEPS: 20
   M:
-    N: 6144
-    TSTEPS: 2
+    N: 1942
+    TSTEPS: 20
   L:
-    N: 11841
-    TSTEPS: 3
+    N: 3450
+    TSTEPS: 20
   XL:
-    N: 22820
-    TSTEPS: 6
+    N: 6129
+    TSTEPS: 20
 init:
   arrays:
     A: (N,N)

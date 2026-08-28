@@ -85,12 +85,12 @@ ranks those separately, as `rising`.
 
 ## Read counters
 
-One run per metric, deliberately. A CPU has a handful of counter registers (5 on a Ryzen 8845HS,
-4-8 typical); ask for more events at once and PAPI or perf will multiplex -- time-slice the
-events and scale the partial counts back up. What comes back looks exactly like a count and is
-an extrapolation. Nothing here multiplexes: every metric gets a measured run of its own, so a
-count is a count. The price is stated in runs, and it is the reason counters are opt-in. Turn
-them on after the call graph has named the loop, not before.
+One run per metric, deliberately. A CPU has a handful of counter registers -- how many is a
+property of that CPU, not a number to assume; ask for more events at once and PAPI or perf will
+multiplex -- time-slice the events and scale the partial counts back up. What comes back looks
+exactly like a count and is an extrapolation. Nothing here multiplexes: every metric gets a
+measured run of its own, so a count is a count. The price is stated in runs, and it is the reason
+counters are opt-in. Turn them on after the call graph has named the loop, not before.
 
 Ask a QUESTION, not an event. `counter_group` names the metrics that answer one, and its size
 IS its cost -- one extra measured run per metric in the group:
@@ -127,8 +127,9 @@ What each metric is for:
 | `fma_instructions` | did it fuse |
 
 Which of them this machine can actually give you is the intersection of that list with the CPU's
-own event table, computed at run time and never assumed: `PAPI_L1_DCM` is available on a Zen4
-while `PAPI_L1_ICM`, `PAPI_L3_DCM` and `PAPI_L1_TCM` are not. Ask before you measure --
+own event table, computed at run time and never assumed: a microarchitecture that offers
+`PAPI_L1_DCM` may have no `PAPI_L1_ICM`, `PAPI_L3_DCM` or `PAPI_L1_TCM` at all, and the next one
+draws the line elsewhere. Ask before you measure --
 `papi.feature_set()` returns `supported` and `unsupported` with a reason each, without running a
 workload.
 
@@ -252,16 +253,16 @@ numerical kernels; when it appears, it is self-inflicted.
 
 ### Traps, in the order you will hit them
 
-**An instruction count is not an op count.** One packed AVX-512 FMA is 1 instruction and 32
-operations. `fma_instructions` and `integer_instructions` are instruction counts -- PAPI has no
-op-count preset for either on any CPU. Never multiply them by a vector width you have not read
-off the disassembly.
+**An instruction count is not an op count.** One packed FMA is 1 instruction and as many
+operations as the vector unit is wide. `fma_instructions` and `integer_instructions` are
+instruction counts -- PAPI has no op-count preset for either on any CPU. Never multiply them by a
+vector width you have not read off the disassembly.
 
-**A zero is a measurement, not an absence.** `fma_instructions` reads exactly 0 for gemm on Zen4
-even though the kernel is full of FMAs: `PAPI_FMA_INS` is a *derived* preset there and AMD does
-not feed it. `count:null` means unavailable; `0` means PAPI counted and got nothing, which is
-either true or a broken derivation. Cross-check a suspicious zero against `objdump -d` before you
-conclude anything from it.
+**A zero is a measurement, not an absence.** `fma_instructions` reads exactly 0 for a gemm full of
+FMAs on any CPU where `PAPI_FMA_INS` is a *derived* preset the vendor does not feed. `count:null`
+means unavailable; `0` means PAPI counted and got nothing, which is either true or a broken
+derivation. Cross-check a suspicious zero against `objdump -d` before you conclude anything from
+it.
 
 **Counts are summed over every thread**, worker threads included -- the master thread's event set
 is attached to each of the others. So a count is thread-count invariant when the work is: gemm
@@ -284,8 +285,8 @@ sibling, and the imbalance below them is not the kernel's.
 counters are two cores mixed -- the CPI belongs to neither.
 
 **Event names are a property of the microarchitecture, not of PAPI.** The same preset exists on
-one CPU and not the next -- `PAPI_L1_DCM` on Zen4 but not `PAPI_L1_ICM`, `PAPI_L3_DCM` or
-`PAPI_L1_TCM` -- and a "hit rate" whose two operands resolved to different levels is a
+one CPU and not the next -- a data-cache-miss preset with no instruction-cache or L3 counterpart
+beside it is the usual shape -- and a "hit rate" whose two operands resolved to different levels is a
 cross-level ratio, which is why one arrives with a `caveat` instead of pretending. Read the
 `expressions` a ratio was built from before you compare its value with a published threshold,
 and never carry a number across machines without carrying its expression too.

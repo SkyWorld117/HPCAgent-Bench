@@ -38,10 +38,10 @@ parameters:
     numElem: 91125
     nsteps: 30
   L:
-    numElem: 1568558
+    numElem: 1132501
     nsteps: 30
   XL:
-    numElem: 27000000
+    numElem: 14074723
     nsteps: 30
   # Fuzzed draws MUST keep numElem a perfect cube -- initialize() -> _edge_elems()
   # raises on a non-cube, so the default continuous [L, XL] range would crash every
@@ -96,9 +96,39 @@ init:
     fy: "(numNode,)"
     fz: "(numNode,)"
     nodalMass: "(numNode,)"
-    symmX: {shape: "(numSymm,)", dtype: int64}
-    symmY: {shape: "(numSymm,)", dtype: int64}
-    symmZ: {shape: "(numSymm,)", dtype: int64}
+    symmX: {shape: "(numSymm,)", dtype: int64, index_array: true}
+    symmY: {shape: "(numSymm,)", dtype: int64, index_array: true}
+    symmZ: {shape: "(numSymm,)", dtype: int64, index_array: true}
+    arealg: "(numElem,)"
+    delv: "(numElem,)"
+    delv_eta: "(numElem,)"
+    delv_xi: "(numElem,)"
+    delv_zeta: "(numElem,)"
+    delx_eta: "(numElem,)"
+    delx_xi: "(numElem,)"
+    delx_zeta: "(numElem,)"
+    dxx: "(numElem,)"
+    dyy: "(numElem,)"
+    dzz: "(numElem,)"
+    e: "(numElem,)"
+    elemBC: "(numElem,)"
+    elemMass: "(numElem,)"
+    letam: "(numElem,)"
+    letap: "(numElem,)"
+    lxim: "(numElem,)"
+    lxip: "(numElem,)"
+    lzetam: "(numElem,)"
+    lzetap: "(numElem,)"
+    p: "(numElem,)"
+    q: "(numElem,)"
+    ql: "(numElem,)"
+    qq: "(numElem,)"
+    ss: "(numElem,)"
+    v: "(numElem,)"
+    vdov: "(numElem,)"
+    vnew: "(numElem,)"
+    volo: "(numElem,)"
+    nodelist: {shape: "(numElem, 8)", dtype: int64, index_array: true}
   # dtypes of SCALAR symbols only; an array's element type lives on its own
   # init.arrays entry. Both are int64 size/index symbols the C ABI must match.
   scalars:
@@ -279,7 +309,35 @@ output_args:
 - e
 - p
 - q
+- ql
+- qq
 - v
+- vnew
+- delv
+- vdov
+- arealg
+- ss
+- dxx
+- dyy
+- dzz
+- delv_xi
+- delv_eta
+- delv_zeta
+- delx_xi
+- delx_eta
+- delx_zeta
+- x
+- y
+- z
+- xd
+- yd
+- zd
+- xdd
+- ydd
+- zdd
+- fx
+- fy
+- fz
 taxonomy:
   track: scientific_computing
   subtrack: lulesh

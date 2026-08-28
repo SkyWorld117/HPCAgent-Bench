@@ -11,11 +11,11 @@ parameters:
     ngrid: 262144
     k: 96
   L:
-    ngrid: 669980
-    k: 200
+    ngrid: 470335
+    k: 140
   XL:
-    ngrid: 1712317
-    k: 418
+    ngrid: 843869
+    k: 205
   fuzzed:
     ngrid: [2048, 1500000]
     k: [8, 160]

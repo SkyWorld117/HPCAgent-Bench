@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Floyd-Warshall
-short_name: floydwar
 kind: microapp
 level: 3
 parameters:

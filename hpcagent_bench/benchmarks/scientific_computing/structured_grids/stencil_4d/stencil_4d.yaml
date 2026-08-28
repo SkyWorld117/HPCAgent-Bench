@@ -17,8 +17,8 @@ parameters:
     N: 140
     R: 6
   XL:
-    B: 32
-    N: 204
+    B: 31
+    N: 203
     R: 6
 init:
   func_name: initialize

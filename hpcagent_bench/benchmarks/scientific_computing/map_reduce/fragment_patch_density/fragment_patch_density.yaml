@@ -15,15 +15,15 @@ parameters:
     nfrag: 125
     k: 32
   L:
-    N: 302
-    Lb: 43
-    nfrag: 159
-    k: 38
+    N: 265
+    Lb: 38
+    nfrag: 139
+    k: 32
   XL:
-    N: 476
-    Lb: 59
-    nfrag: 201
-    k: 44
+    N: 367
+    Lb: 45
+    nfrag: 155
+    k: 33
   fuzzed:
     N: [24, 200]
     Lb: [4, 56]

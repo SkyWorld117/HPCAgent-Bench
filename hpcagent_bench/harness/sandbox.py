@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Optional, Sequence, Tuple
 
-from hpcagent_bench import flags, languages
+from hpcagent_bench import config, flags, languages
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.support.bindings.contract import Binding
 from hpcagent_bench.support.bindings.mpi_driver import gen_mpi_driver, mpi_symbol
@@ -143,6 +143,39 @@ class BuildResult:
 _COMPILE_PREFIXES = ("-I", "-D")
 _LINK_PREFIXES = ("-l", "-L")
 
+#: Extra compile tokens allowed ONLY when ``grading.allow_agent_build_flags`` is on. Tuning knobs
+#: the agent may reasonably want and that leave the measurement comparable: unrolling, inlining,
+#: prefetch, alignment, vectorizer width, and the autopar bundles the MULTI_CORE mode itself uses
+#: (``-ftree-parallelize-loops``, ``-floop-*``, ``-fgraphite*``), which a Fortran/C/C++ autopar
+#: submission cannot request any other way.
+_OPT_IN_COMPILE_PREFIXES = ("-funroll", "-finline", "-fprefetch", "-falign", "-ftree-", "-floop", "-fgraphite",
+                            "-fipa-", "-fvect", "-mprefer-vector-width", "-fno-semantic-interposition",
+                            "-fstrict-aliasing", "-fno-strict-aliasing", "-fopenmp")
+
+#: Never allowed, whatever the knob says: these change FLOATING-POINT SEMANTICS or the language
+#: dialect, and either one makes a speedup incomparable to every other submission (the matrix keeps
+#: -ffast-math off deliberately, see compilers.yaml). Substring match, so ``-Ofast`` and
+#: ``-funsafe-math-optimizations`` are caught wherever they appear in the token.
+_NEVER_ALLOWED = ("fast-math", "Ofast", "unsafe-math", "finite-math", "-frounding-math", "-fexcess-precision", "-std=",
+                  "-fsingle-precision-constant", "-fcx-limited-range")
+
+
+def agent_flags_allowed() -> bool:
+    """Whether a submission's own tuning/autopar flags may enter the measured build.
+
+    Config ``grading.allow_agent_build_flags``, default OFF: with it off every submission is built
+    on the flags the matrix chose, which is what makes two arms' speedups comparable at all.
+    """
+    return bool(config.get("grading.allow_agent_build_flags", False))
+
+
+def _opt_in_compile(token: str) -> bool:
+    """An extra compile token the opt-in knob may pass through: on the tuning list, never on the
+    semantics list."""
+    if any(bad in token for bad in _NEVER_ALLOWED):
+        return False
+    return token.startswith(_OPT_IN_COMPILE_PREFIXES)
+
 
 def _safe_link(token: str) -> bool:
     """A link token that names a system library, not an arbitrary file/path.
@@ -158,7 +191,7 @@ def _safe_link(token: str) -> bool:
     return True  # -L<dir> search paths
 
 
-def split_build(tokens: List[str]) -> Tuple[List[str], List[str]]:
+def split_build(tokens: List[str], *, allow_flags: bool = False) -> Tuple[List[str], List[str]]:
     """Partition a submission's ``build`` list into ``(compile, link)`` tokens.
 
     Compile-step tokens (``-I``/``-D`` ...) must reach the compile argv and
@@ -166,8 +199,24 @@ def split_build(tokens: List[str]) -> Tuple[List[str], List[str]]:
     (see :func:`hpcagent_bench.languages.build_shared_lib_commands`). Tokens matching
     neither allow-list (e.g. ``-O3``, ``-march=native``) are silently dropped,
     and ``-l:file`` / ``-l/abs/path`` injection forms are rejected.
+
+    ``allow_flags`` (config ``grading.allow_agent_build_flags``, OFF by default) additionally
+    admits the tuning and autopar knobs in :data:`_OPT_IN_COMPILE_PREFIXES`. It never admits
+    :data:`_NEVER_ALLOWED`: with the knob on, submissions still share one FP semantics and one
+    language dialect, which is what keeps their speedups comparable to each other and to the
+    baseline. The knob is a DEPLOYMENT choice -- an arm that turns it on must say so, because its
+    numbers are then answering a different question from an arm that did not.
+
+    ``grading.allow_agent_build_tokens`` (ON by default) is the outer switch: OFF makes the whole
+    ``build`` list inert, ``-I``/``-D``/``-l``/``-L`` included, so every submission builds on
+    exactly the matrix flags. A track whose kernels are self-contained (loop_level_reasoning)
+    runs with it off; the campaign env sets it identically for every arm.
     """
+    if not bool(config.get("grading.allow_agent_build_tokens", True)):
+        return [], []
     compile_tokens = [t for t in tokens if t.startswith(_COMPILE_PREFIXES)]
+    if allow_flags:
+        compile_tokens += [t for t in tokens if not t.startswith(_COMPILE_PREFIXES) and _opt_in_compile(t)]
     link_tokens = [t for t in tokens if t.startswith(_LINK_PREFIXES) and _safe_link(t)]
     return compile_tokens, link_tokens
 
@@ -286,14 +335,19 @@ class Sandbox:
         # judge supplies the include + library search paths itself. The agent's
         # own -l/-L tokens come AFTER -L<shared>/lib (link order is significant).
         shared = shared_dir()
-        agent_compile, agent_link = split_build(submission.build)
+        agent_compile, agent_link = split_build(submission.build, allow_flags=agent_flags_allowed())
         extra_compile = [f"-I{shared}/include"] + (flags.DEBUG_SYMBOLS if debug else []) + agent_compile
         extra_link = [f"-L{shared}/lib"] + agent_link
         try:
+            # compiler= takes a compilers.yaml BLOCK name, so the requested FAMILY is translated
+            # first; None (family absent from this image) falls back to the default block.
+            family = languages.resolve_family(submission.language, submission.compiler)
+            block = languages.compiler_for_family(submission.language, family)
             cmds = languages.build_shared_lib_commands(submission.language,
                                                        src,
                                                        lib,
                                                        mode=mode,
+                                                       compiler=block,
                                                        extra_compile=extra_compile,
                                                        extra_link=extra_link)
         except (KeyError, FileNotFoundError) as e:
@@ -380,7 +434,7 @@ class Sandbox:
         exe = self.root / f"{short}_bench"
 
         shared = shared_dir()
-        agent_compile, agent_link = split_build(submission.build)
+        agent_compile, agent_link = split_build(submission.build, allow_flags=agent_flags_allowed())
         extra_compile = [f"-I{shared}/include"] + gpu_compile + agent_compile
         extra_link = [f"-L{shared}/lib"] + gpu_link + agent_link
         try:

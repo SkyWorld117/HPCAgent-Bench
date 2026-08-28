@@ -13,11 +13,11 @@ parameters:
     gamma: 1.4
     alpha: 1.0
   L:
-    ncells: 16745501
+    ncells: 4044010
     gamma: 1.4
     alpha: 1.0
   XL:
-    ncells: 80117659
+    ncells: 20029414
     gamma: 1.4
     alpha: 1.0
 init:
@@ -47,6 +47,7 @@ init:
     neigh:
       shape: (ncells, 4)
       dtype: int64
+      index_array: true
     normals:
       shape: (ncells, 4, 3)
     res_density:

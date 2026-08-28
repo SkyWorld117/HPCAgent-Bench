@@ -31,7 +31,7 @@ TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1] / "containers" / "agent"
 KERNEL = "gemm"
 
 #: The tool modules, in import order (each imports the one before it).
-TOOL_MODULES = ("http_json", "task", "score", "submit", "profile_tool", "syntax_check", "mcp_server")
+TOOL_MODULES = ("http_json", "score", "submit", "profile_tool", "syntax_check", "mcp_server")
 
 
 def load_tools(monkeypatch, input_mode: str, language: str) -> types.SimpleNamespace:
@@ -93,6 +93,10 @@ def free_choice_judge(make_judge, monkeypatch):
         "library": "/shared/libk.so",
         "workspace_bytes": "8*NI*NJ"
     }),
+    (dict(language="c", source="void k(void) {}", compiler="llvm"), {
+        "source": "void k(void) {}",
+        "compiler": "llvm"
+    }),
 ])
 def test_the_body_is_field_for_field_what_the_reference_client_sends(agent_tools, monkeypatch, submission, payload):
     """The drift guard: same field NAMES, same values, no invented ones.
@@ -133,7 +137,6 @@ def test_every_route_carries_the_rank_and_a_wrong_one_is_refused(agent_tools, ju
     would prove the tools omit it. The default (no ``JUDGE_RANK``) must reach the default-rank judge.
     """
     calls = (
-        lambda: agent_tools.task.run({"kernel": KERNEL}),
         lambda: agent_tools.score.run({
             "kernel": KERNEL,
             "source": "void k(void) {}"
@@ -208,11 +211,16 @@ def test_two_spellings_of_the_code_are_refused_by_the_judge_not_repaired(agent_t
 
 def test_the_mcp_server_advertises_the_judge_routes_and_relays_a_refusal(agent_tools, judge):
     """What the model actually sees: the tool list, and a failed call as ``isError`` content rather
-    than a dead server."""
+    than a dead server.
+
+    The set is exact, so it also pins the ABSENCE of ``task``: the route was dropped with the
+    per-language references and the spec is rendered into the prompt instead. A ``task`` back in this
+    list would mean the route returned without the prompt being updated.
+    """
     listed = agent_tools.mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
-    assert set(tools) == {"task", "score", "submit", "profile", "search", "syntax_check"}
-    for name in ("task", "score", "submit", "profile"):
+    assert set(tools) == {"score", "submit", "profile", "search", "syntax_check"}
+    for name in ("score", "submit", "profile"):
         assert tools[name]["inputSchema"]["required"] == ["kernel"]
         assert "language" not in tools[name]["inputSchema"]["properties"], (
             f"{name} invites the model to choose a language the enforced track will refuse")
@@ -237,7 +245,7 @@ def test_the_launcher_allows_every_tool_the_server_advertises(agent_tools):
 
     Nothing fails when these two drift: the server answers ``tools/list`` with the full set, the CLI
     silently withholds the ones it was not told about, and the run merely comes out worse -- an agent
-    that never fetched its task spec or never profiled, with no error anywhere to explain why. That is
+    that never scored an iteration or never profiled, with no error anywhere to explain why. That is
     why this reads the launcher's own line rather than trusting a second list kept in a doc.
     """
     served = set(agent_tools.mcp_server.TOOLS)
@@ -297,7 +305,7 @@ def test_language_is_offered_only_where_the_track_pins_none(monkeypatch, mode, e
     so guessing the other way would offer a field that earns a 400 on the commonest configuration.
     """
     tools = load_tools(monkeypatch, mode, "c")
-    for module in (tools.task, tools.score, tools.submit, tools.profile_tool):
+    for module in (tools.score, tools.submit, tools.profile_tool):
         properties = module.INPUT_SCHEMA["properties"]
         assert ("language" in properties) is not enforced, module.__name__
         assert module.INPUT_SCHEMA["required"] == ["kernel"]
@@ -342,10 +350,6 @@ def test_a_free_choice_submission_reaches_the_judge_in_the_language_it_named(fre
     refusal = free_choice_tools.score.run({"kernel": KERNEL, "source_file": "wrong_name.txt", "language": "fortran"})
     assert refusal["status"] == 400
     assert f"{KERNEL}.f90" in refusal["error"] and "fortran extension" in refusal["error"]
-
-    served = free_choice_tools.task.run({"kernel": KERNEL, "language": "fortran"})
-    assert served["language"] == "fortran", "the task spec must be rendered for the language that will be submitted"
-    assert "subroutine" in served["signature"].lower(), served["signature"]
 
 
 def test_the_free_choice_judge_would_have_refused_the_c_fallback_for_fortran_source(free_choice_tools,

@@ -11,10 +11,10 @@ parameters:
     N: 16000
     penalty: 1
   L:
-    N: 28284
+    N: 22723
     penalty: 1
   XL:
-    N: 50000
+    N: 32270
     penalty: 1
 init:
   input_args:

@@ -8,12 +8,14 @@ parameters:
   M:
     LEN_1D: 200000000
   L:
-    LEN_1D: 456405427
+    LEN_1D: 322727372
   XL:
-    LEN_1D: 1041529568
+    LEN_1D: 520764783
 init:
-  output_args:
+  input_args:
+  - LEN_1D
   - threshold
+  output_args:
   - a
   - result
   scalars:
@@ -21,6 +23,7 @@ init:
   arrays:
     a: (LEN_1D,)
     result: (1,)
+  func_name: initialize
 output_args:
 - result
 taxonomy:

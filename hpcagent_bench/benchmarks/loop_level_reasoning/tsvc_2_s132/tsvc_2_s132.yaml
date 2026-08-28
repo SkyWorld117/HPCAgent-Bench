@@ -6,14 +6,17 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 4096
+    LEN_2D: 60000001
   L:
-    LEN_2D: 8192
+    LEN_2D: 88382532
   XL:
-    LEN_2D: 16384
+    LEN_2D: 130191196
 init:
   arrays:
-    aa: (LEN_2D,LEN_2D)
+    # Two rows, not LEN_2D of them: the loop touches only rows 0 and 1, so a square aa spent the
+    # ceiling on rows nothing addresses and pinned the trip count at 16k (0.20 ms). The alias
+    # question is unchanged, and adjacent rows sharpen it.
+    aa: (2,LEN_2D)
     b: (LEN_2D,)
     c: (LEN_2D,)
 output_args:

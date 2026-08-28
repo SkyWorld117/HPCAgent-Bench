@@ -9,8 +9,9 @@ evaluated on its own -- still the shipped text, byte for byte, so a change to it
 to what these tests run.
 
 What is pinned: the shared-folder mount lands in the copy, the copy is still valid TOML with
-its other entries intact, and both refusals (no such EDF, no multi-line ``mounts = [`` block)
-exit 2 rather than launching a run whose judge would see an empty shared folder.
+its other entries intact, the path carries the ROLE so two roles cannot rewrite one file, and
+both refusals (no such EDF, no multi-line ``mounts = [`` block) exit 2 rather than launching a
+run whose judge would see an empty shared folder.
 """
 import pathlib
 import re
@@ -30,8 +31,8 @@ def function_text():
     return match.group(0)
 
 
-def run_derived_edf(tmp_path, name, edf_dir):
-    """Call ``derived_edf <name>`` with EDF_PATH pointed at ``edf_dir``; return (proc, shared_dir)."""
+def run_derived_edf(tmp_path, name, edf_dir, role="judge"):
+    """Call ``derived_edf <name> <role>`` with EDF_PATH pointed at ``edf_dir``; return (proc, shared_dir)."""
     run_dir = tmp_path / "run"
     shared_dir = run_dir / "shared"
     script = "\n".join([
@@ -42,7 +43,7 @@ def run_derived_edf(tmp_path, name, edf_dir):
         f"EDF_PATH={shlex.quote(str(edf_dir))}",
         f"HPCAGENT_BENCH_REPO={shlex.quote(str(REPO_ROOT))}",
         function_text(),
-        f"derived_edf {shlex.quote(name)}",
+        f"derived_edf {shlex.quote(name)} {shlex.quote(role)}",
         'printf %s "${EDF_FILE}"',
     ])
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
@@ -73,13 +74,30 @@ def test_the_shared_mount_lands_in_a_copy_that_is_still_valid_toml(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     derived = pathlib.Path(proc.stdout)
-    assert derived == tmp_path / "run/edf/bench.toml"
+    assert derived == tmp_path / "run/edf/bench.judge.toml"
     parsed = tomllib.loads(derived.read_text())
     assert f"{shared_dir}:/shared" in parsed["mounts"]
     assert AGENT_MOUNT in parsed["mounts"]
     assert parsed["image"] == "docker://example/optarena:latest"
     assert parsed["env"] == {"FI_PROVIDER": "cxi"}
     assert (edf_dir / "bench.toml").read_text() == MULTILINE_EDF, "the registered EDF must not be rewritten"
+
+
+def test_two_roles_get_two_files(tmp_path):
+    """The reason the role is in the path at all. Judge and agent are launched from the same
+    AMD_CE_ENV, and role_srun backgrounds the judge's srun before the agent's rewrite starts -- so a
+    name-only path had the agent truncating the file the judge's srun was still reading, the step
+    ran on the bare host, and the arm was lost (589512, 590356)."""
+    edf_dir = tmp_path / "edf"
+    write_edf(edf_dir, "bench", MULTILINE_EDF)
+
+    judge, _ = run_derived_edf(tmp_path, "bench", edf_dir, role="judge")
+    agent, _ = run_derived_edf(tmp_path, "bench", edf_dir, role="agent")
+
+    assert judge.returncode == 0 and agent.returncode == 0, judge.stderr + agent.stderr
+    assert judge.stdout != agent.stdout
+    assert pathlib.Path(judge.stdout).name == "bench.judge.toml"
+    assert pathlib.Path(agent.stdout).name == "bench.agent.toml"
 
 
 def test_a_missing_edf_exits_2(tmp_path):

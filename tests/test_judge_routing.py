@@ -99,8 +99,8 @@ def test_two_clients_never_cross_talk(recorder):
     to the client it was made on. A shared/global base_url would show up here."""
     a, b = JudgeClient("http://judge-a:8000"), JudgeClient("http://judge-b:8000")
     for _ in range(3):
-        a.task("gemm", "c")
-        b.task("gesummv", "c")
+        a.baseline("gemm", "c", "S")
+        b.baseline("gesummv", "c", "S")
     urls = recorder.urls()
     assert len(urls) == 6
     # Every gemm request to judge-a, every gesummv request to judge-b -- no leakage.
@@ -114,7 +114,7 @@ def test_an_explicit_url_beats_the_environment(monkeypatch, recorder):
     hijack an explicitly assigned judge, or every worker on a node would silently converge
     on the same one."""
     monkeypatch.setenv("JUDGE_URL", "http://ambient-judge:1")
-    JudgeClient("http://judge-b:8000").task("gemm", "c")
+    JudgeClient("http://judge-b:8000").baseline("gemm", "c", "S")
     assert recorder.hosts() == {"judge-b:8000"}
 
 
@@ -127,15 +127,15 @@ def test_the_client_holds_no_shared_state():
 
 
 def test_a_trailing_slash_does_not_produce_a_double_slash(recorder):
-    """`http://j:1//task/gemm` is a different path; a judge would 404 it."""
-    JudgeClient("http://judge-a:8000/").task("gemm", "c")
-    assert recorder.urls() == ["http://judge-a:8000/task/gemm?language=c&rank=0"]
+    """`http://j:1//baseline/gemm` is a different path; a judge would 404 it."""
+    JudgeClient("http://judge-a:8000/").baseline("gemm", "c", "S")
+    assert recorder.urls() == ["http://judge-a:8000/baseline/gemm?language=c&preset=S&rank=0"]
 
 
 def test_every_endpoint_targets_its_own_judge(recorder):
-    """Not just `task` -- baseline and submit route by instance too."""
+    """Not just one GET -- baseline and submit route by instance too."""
     judge = JudgeClient("http://judge-b:8000")
-    judge.task("gemm", "c")
+    judge.baseline("gemm", "c", "S")
     judge.baseline("gemm", "c")
     judge.submit(Submission(source="int f(){}", language="c"), "gemm")
     judge.score(Submission(source="int f(){}", language="c"), "gemm")
@@ -149,11 +149,11 @@ def test_the_kernel_travels_in_the_request_not_the_client(recorder):
     """One judge serves many kernels, so the kernel must be per-CALL. If it were bound to
     the client, a second kernel on the same judge would be misrouted."""
     judge = JudgeClient("http://judge-a:8000")
-    judge.task("gemm", "c")
-    judge.task("gesummv", "c")
+    judge.baseline("gemm", "c", "S")
+    judge.baseline("gesummv", "c", "S")
     assert recorder.urls() == [
-        "http://judge-a:8000/task/gemm?language=c&rank=0",
-        "http://judge-a:8000/task/gesummv?language=c&rank=0",
+        "http://judge-a:8000/baseline/gemm?language=c&preset=S&rank=0",
+        "http://judge-a:8000/baseline/gesummv?language=c&preset=S&rank=0",
     ]
 
 
@@ -273,7 +273,7 @@ def test_every_endpoint_carries_the_rank(recorder):
     rank must be on EVERY request, GET and POST alike, or the judge cannot check the routing."""
     judge = JudgeClient("http://judge-c:8000", rank=3)
     judge.health()
-    judge.task("gemm", "c")
+    judge.baseline("gemm", "c", "S")
     judge.baseline("gemm", "c")
     judge.submit(Submission(source="int f(){}", language="c"), "gemm")
     judge.profile(Submission(source="int f(){}", language="c"), "gemm")
@@ -285,7 +285,7 @@ def test_the_kernel_rides_along_on_every_graded_endpoint(recorder):
     """One judge serves many kernels, so the task identifier is on every route that does work --
     in the path for the GETs, in the body for the POSTs (``/profile`` included)."""
     judge = JudgeClient("http://judge-a:8000")
-    judge.task("gesummv", "c")
+    judge.baseline("gesummv", "c", "S")
     judge.baseline("gesummv", "c")
     judge.submit(Submission(source="int f(){}", language="c"), "gesummv")
     judge.profile(Submission(source="int f(){}", language="c"), "gesummv")
@@ -305,7 +305,7 @@ def test_the_agent_never_writes_the_rank_itself(recorder):
 def test_a_client_without_a_rank_addresses_the_single_judge(recorder):
     """Default 0 = "the only judge". It keeps a single-judge run rank-free AND still validated;
     in a multi-judge run it disagrees with every judge but the first, so it cannot pass silently."""
-    JudgeClient("http://judge-a:8000").task("gemm", "c")
+    JudgeClient("http://judge-a:8000").baseline("gemm", "c", "S")
     assert recorder.ranks() == [0]
 
 
@@ -313,8 +313,8 @@ def test_two_clients_carry_two_ranks(recorder):
     """The rank is per-client, exactly like the URL -- never global, never cached on the class."""
     a, b = JudgeClient("http://judge-a:8000", rank=0), JudgeClient("http://judge-b:8000", rank=1)
     for _ in range(2):
-        a.task("gemm", "c")
-        b.task("gemm", "c")
+        a.baseline("gemm", "c", "S")
+        b.baseline("gemm", "c", "S")
     pairs = [(u.split("/")[2], r) for u, r in zip(recorder.urls(), recorder.ranks())]
     assert set(pairs) == {("judge-a:8000", 0), ("judge-b:8000", 1)}
 
@@ -396,9 +396,9 @@ def test_the_judge_refuses_a_mis_routed_request_over_http(make_judge):
     """End to end through a REAL judge: the mismatch is a 421 on the wire, and the task spec it
     would have answered with is never produced."""
     _srv, url = make_judge(ServiceConfig(), rank=1)
-    assert JudgeClient(url, rank=1).task("gemm", "c")["kernel"] == "gemm"  # right rank -> served
+    assert JudgeClient(url, rank=1).baseline("gemm", "c", "S")["kernel"] == "gemm"  # right rank -> served
     with pytest.raises(urllib.error.HTTPError) as ei:
-        JudgeClient(url, rank=0).task("gemm", "c")
+        JudgeClient(url, rank=0).baseline("gemm", "c", "S")
     assert ei.value.code == MISDIRECTED_REQUEST
     body = json.loads(ei.value.read())
     assert (body["judge_rank"], body["requested_rank"]) == (1, 0)

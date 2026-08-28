@@ -390,12 +390,40 @@ def _binding_square() -> Binding:
     return Binding(kernel="ksq", config="dense", args=args, symbols={})
 
 
-def test_local_size_scalars_rejects_row_col_coupled_symbol():
-    # N sizes A axis 0 (decomposed, block over the 1-D grid) AND A axis 1 (replicated) -- ambiguous.
+def test_local_size_scalars_keeps_a_row_col_coupled_symbol_global():
+    """N sizes A axis 0 (block-decomposed) AND A axis 1 (replicated), so it stays GLOBAL.
+
+    Localizing it would under-size the replicated axis: rank 0's tile is 4 rows by 8 COLUMNS, and a
+    kernel handed N=4 would read a 4x4 field. The global N is what the kernel derives its slab from.
+    """
     b = _binding_square()
     sub = _sub({"grid": [2], "arrays": {"A": {"axes": [{"grid_dim": 0, "scheme": "block"}, {"grid_dim": None}]}}})
     d = Descriptor.from_submission(sub, b, ranks=2)
-    with pytest.raises(ValueError, match="row/column coupling|conflicting distributions"):
+    assert d.local_size_scalars({"N": 8}, 0)["N"] == 8
+    assert d.local_size_scalars({"N": 8}, 1)["N"] == 8
+    # the tile really is short-and-wide -- the reason the symbol cannot be the local row count
+    assert d.local_shape("A", (8, 8), 0) == (4, 8)
+
+
+def test_local_size_scalars_rejects_a_symbol_split_two_different_ways():
+    """Two DECOMPOSED axes on different grid dimensions leave no single per-rank value to pick."""
+    b = _binding_square()
+    sub = _sub({
+        "grid": [2, 2],
+        "arrays": {
+            "A": {
+                "axes": [{
+                    "grid_dim": 0,
+                    "scheme": "block"
+                }, {
+                    "grid_dim": 1,
+                    "scheme": "block"
+                }]
+            }
+        }
+    })
+    d = Descriptor.from_submission(sub, b, ranks=4)
+    with pytest.raises(ValueError, match="CONFLICTING decompositions"):
         d.local_size_scalars({"N": 8}, 0)
 
 

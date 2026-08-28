@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Edge Laplacian
-short_name: edgelap
 kind: microapp
 level: 3
 parameters:
@@ -11,11 +10,11 @@ parameters:
     N: 2097152
     E: 12582912
   L:
-    N: 14779194
-    E: 88675165
+    N: 7389597
+    E: 44337583
   XL:
-    N: 104152956
-    E: 624917741
+    N: 26038239
+    E: 156229435
 init:
   input_args:
   - N
@@ -37,9 +36,11 @@ init:
     src:
       shape: (E,)
       dtype: int64
+      index_array: true
     dst:
       shape: (E,)
       dtype: int64
+      index_array: true
     w:
       shape: (E,)
     x:

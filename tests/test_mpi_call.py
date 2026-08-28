@@ -11,7 +11,6 @@ from hpcagent_bench.harness import mpi_call
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.mpi_descriptor import ArrayDist, AxisDist, Descriptor, Grid
 from hpcagent_bench.harness.sandbox import Sandbox
-from hpcagent_bench.harness.task import Task
 from hpcagent_bench.support.bindings.contract import Arg, Binding
 from hpcagent_bench.support.bindings.stubs import LANGS
 from hpcagent_bench.languages import build_mpi_executable_commands

@@ -548,12 +548,10 @@ call names both its kernel and the judge rank it is addressed to. The agent need
 endpoint or the Python wrapper -- the prompt documents both:
 
 ```sh
-curl -s "$JUDGE_URL/task/gemm?language=c&rank=0"  # signature, reference, tolerances, goal
 ```
 ```python
 from hpcagent_bench.harness.tools import JudgeClient
 judge = JudgeClient(judge_url, rank=judge_rank)   # per-agent; never global
-spec   = judge.task("gemm", "c")
 result = judge.submit(submission, "gemm")         # terminal action: correctness + speed
 ```
 

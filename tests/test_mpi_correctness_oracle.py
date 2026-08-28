@@ -8,7 +8,6 @@ from hpcagent_bench.harness import mpi_call
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.mpi_descriptor import Descriptor
 from hpcagent_bench.harness.sandbox import Sandbox
-from hpcagent_bench.harness.task import Task
 from hpcagent_bench.support.bindings.contract import Arg, Binding
 from hpcagent_bench.support.bindings.stubs import LANGS
 from tests.mpi_launch_helpers import c_toolchain, cc_override_for, mpi4py_launcher

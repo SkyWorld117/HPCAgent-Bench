@@ -8,7 +8,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 from hpcagent_bench import config, fuzz
 from hpcagent_bench.harness import timing
-from hpcagent_bench.harness.grading import (DEFAULT_BASELINE, VENDORED_BASELINE, baseline_compiled,
+from hpcagent_bench.harness.grading import (AUTO_ORACLE, DEFAULT_BASELINE, VENDORED_BASELINE, baseline_compiled,
                                             c_reference_available, resolve_baseline)
 from hpcagent_bench.harness.scoring import (Score, implausible_speedup, independent_verify, score_cells,
                                             score_distributed, score_scaling, suspect_threshold)
@@ -268,14 +268,41 @@ def _correctness_cells(params, configs, constraints, k, config_names):
 
 
 def _timed_cells(params, configs, constraints, mode, config_names):
-    """The timed set: every config x large shape, as score_cells cell dicts (timed=True)."""
+    """The timed set: ``perf.n_large_shapes`` cells, each ONE config PAIRED with ONE large shape.
+
+    Paired, not crossed. The cross product made timed work scale with the config count -- 15
+    cells x 20 reps x 2 sides for a 5-config kernel -- while measuring every config at three
+    sizes that all sit inside +/-15% of XL, so the extra cells bought resolution the repeats
+    already provide. Pairing caps the timed set at n whatever the config count, and spends each
+    cell on a distinct (config, size) point.
+
+    Configs are dealt round-robin, the way :func:`~hpcagent_bench.harness.hidden_tests.hidden_cases`
+    deals them against its variants, and shape ``i`` keeps the seed it had under the cross
+    product (``_public_large_seeds`` is indexed by position), so a cell's size stays
+    reproducible. A kernel with no config space is unchanged: one config, n shapes, n cells.
+    """
     cells = []
-    for ci, cfg in enumerate(fuzz.enumerate_configs(configs)):
-        for label, sample in fuzz.large_shapes(params,
-                                               cfg,
-                                               mode=mode,
-                                               constraints=constraints,
-                                               config_names=config_names):
+    cfgs = fuzz.enumerate_configs(configs)
+    n = fuzz.default_n_large_shapes()
+    # One draw per DISTINCT config that the round-robin actually reaches, not one per cell: the
+    # call resolves constraints for all n seeds every time, so calling it inside the loop did n
+    # times the work of the function whose whole purpose is cutting that work.
+    drawn = {}
+    for i in range(n):
+        ci = i % len(cfgs)
+        if ci not in drawn:
+            drawn[ci] = fuzz.large_shapes(params,
+                                          cfgs[ci],
+                                          mode=mode,
+                                          n=n,
+                                          constraints=constraints,
+                                          config_names=config_names)
+        shapes = drawn[ci]
+        # large_shapes DROPS a seed whose draw cannot satisfy the constraints, so the i-th shape
+        # need not exist. Skip the cell rather than substituting another draw: reusing one would
+        # time the same point twice and DOUBLE-WEIGHT it in the geomean over cells.
+        if i < len(shapes):
+            label, sample = shapes[i]
             cells.append({"label": f"cfg{ci}:{label}", "params": sample, "timed": True})
     return cells
 
@@ -382,7 +409,7 @@ def score_task_fuzzed(submission: Submission,
                       verify: bool = True,
                       datatype: str = "float64",
                       repeat: int = 5,
-                      oracle: str = "numpy",
+                      oracle: str = AUTO_ORACLE,
                       baseline: str = DEFAULT_BASELINE,
                       perf_mode: Optional[str] = None,
                       rtol: Optional[float] = None,
@@ -407,7 +434,7 @@ def score_task_fuzzed(submission: Submission,
                                        atol=atol,
                                        c_max=c_max,
                                        single_rank_anchor=single_rank_anchor)
-    k = k if k is not None else fuzz.iterations()
+    k = k if k is not None else fuzz.correctness_iterations()
     spec = BenchSpec.load(task.kernel)
     dwarf = spec.dwarf or _UNCLASSIFIED
     fz = spec.fuzz or {}

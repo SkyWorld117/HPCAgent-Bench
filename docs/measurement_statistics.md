@@ -105,7 +105,7 @@ kernels, columns = frameworks, each cell the median speedup vs NumPy with a boot
 **width** superscript (as % of the median), and a geomean **Total** row. The per-cell median used
 for both best-selection **and** the plotted value comes from **outlier-cleaned** samples, and the
 CI from the same cleaned samples — one `stats.median_ci` call per cell (`cell_summary`), which
-warns (naming the cell, e.g. `heat3d@dace_cpu`) on every dropped sample. Selectable by kernel /
+warns (naming the cell, e.g. `heat_3d@dace_cpu`) on every dropped sample. Selectable by kernel /
 track / dwarf / `@lvl<n>` / preset / precision.
 
 ### Per-kernel distribution grid — `plot_distribution_grid`

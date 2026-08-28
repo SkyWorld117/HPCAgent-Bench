@@ -41,7 +41,7 @@ corpus across ranks by it, as a pure function so every rank computes the same an
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -50,7 +50,7 @@ from hpcagent_bench import config
 from hpcagent_bench.dtypes import storage_dtype
 from hpcagent_bench.fuzz import _safe_eval
 from hpcagent_bench.precision import numpy_dtype, precision_from_datatype
-from hpcagent_bench.spec import BenchSpec, module_level_constants
+from hpcagent_bench.spec import BenchSpec, SparseLayoutVariant, module_level_constants
 
 #: The ladder, small to large. The ends are authored; the middle is derived.
 PRESETS: Tuple[str, ...] = ("S", "M", "L", "XL")
@@ -75,7 +75,23 @@ XL_BYTE_CEILING = 16 << 30
 #: one loop shape, one dependence pattern -- so its size buys nothing a judge can use: it makes the
 #: probe expensive to run, expensive to cache and, at 16 GB, unplaceable on a 40 GB accelerator
 #: alongside anything else. The track that exists to be RUN OFTEN gets the smallest ceiling.
-TRACK_XL_CEILING: Dict[str, int] = {"loop_level_reasoning": 8 << 30}
+#:
+#: 4 GB, not the 8 GB it was until 2026-08-19. A ceiling is a target, not a limit that is rarely
+#: reached: `fit_to_ceiling` grows a kernel UP to it, so 102 of the 242 llr kernels sat at exactly
+#: 8.00 GiB. That is survivable for a `score`, which builds one dataset -- but `submit` re-checks a
+#: SECOND SEED, and `native_call.run_followup` generates that dataset while the first is still
+#: resident, so the peak is TWICE the ceiling. Measured consequence in the 2026-08-19 arms: half of
+#: every arm's final answers were lost to `numpy._core._exceptions._ArrayMemoryError: Unable to
+#: allocate 8.00 GiB`, recorded as `score_error` (86 against 81 `ok` in llr4-qwen30b-c-skills), on
+#: 70 of the 140 kernels that reached a submit. Judge nodes report 501 GiB, but an MI300A node is
+#: 4 x 128 GiB of unified memory and a worker sees its own socket, shared with everything on it.
+#: At 4 GB the largest single array is 4 GiB and the submit-time peak is 8 GiB.
+#: scientific_computing joins it at the same 4 GB for the same reason, and one more: a
+#: scicomp XL is the rung the polyhedral and DaCe legs compile, and a 16 GB input set puts the
+#: largest single array at 15.5 GB (trisolv, bicg, atax, mvt, gemver all sat there), which no
+#: accelerator in the fleet holds and which the submit-time second seed doubles. 4 GB caps the
+#: largest single array at 4 GiB and the submit peak at 8 GiB.
+TRACK_XL_CEILING: Dict[str, int] = {"loop_level_reasoning": 4 << 30, "scientific_computing": 4 << 30}
 #: Element width assumed for an array the manifest declares no dtype for.
 DEFAULT_DTYPE = "float64"
 #: Fraction of a ceiling :func:`fit_to_ceiling` actually targets, so per-symbol integer rounding
@@ -192,7 +208,9 @@ def ladder_violations(ladder: Mapping[str, Mapping[str, object]]) -> List[str]:
     """Every way ``ladder`` is not monotone, as human-readable strings (empty when it is).
 
     A rung that shrinks where its neighbours grow is the failure this catches: it makes ``M``
-    slower than ``L``, or puts the fuzzer's ``[L, XL]`` interval the wrong way round.
+    slower than ``L``, or puts the fuzzer's ``[L, XL]`` interval the wrong way round. A pair of
+    rungs where no symbol grows is caught too: three presets at one size are one benchmark
+    measured three times, not a ladder.
     """
     out: List[str] = []
     for name in sorted(ladder.get("S", {})):
@@ -202,6 +220,17 @@ def ladder_violations(ladder: Mapping[str, Mapping[str, object]]) -> List[str]:
         for (lo_name, lo), (hi_name, hi) in zip(numeric, numeric[1:]):
             if hi < lo:
                 out.append(f"{name}: {lo_name}={lo} > {hi_name}={hi}")
+    # Timed rungs only: the kept S is a smoke rung the test suite runs at, and a proposal whose M
+    # lands on the size S already declares is not thereby a broken ladder.
+    for lo_name, hi_name in zip(PRESETS[1:], PRESETS[2:]):
+        if lo_name not in ladder or hi_name not in ladder:
+            continue
+        lo_vals, hi_vals = ladder[lo_name], ladder[hi_name]
+        grown = any(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and isinstance(hi_vals.get(k), (int, float))
+            and not isinstance(hi_vals.get(k), bool) and hi_vals[k] > v for k, v in lo_vals.items())
+        if not grown:
+            out.append(f"{lo_name}->{hi_name}: no symbol strictly increases, not a ladder")
     return out
 
 
@@ -292,6 +321,67 @@ def rewrite_parameters(text: str, ladder: Mapping[str, Mapping[str, object]]) ->
     return "".join(lines)
 
 
+def variant_bytes(variant: SparseLayoutVariant, namespace: Mapping[str, object]) -> Optional[int]:
+    """Bytes one sparse format's physical buffers occupy, or ``None`` when a shape does not resolve.
+
+    Buffer dtypes are always declared, so unlike a dense array none of them fall back to the run's
+    precision -- an index buffer is int64 whatever the values are.
+    """
+    total = 0
+    for buf in variant.buffers:
+        try:
+            shape = _safe_eval("(" + ", ".join(buf.shape) + ",)", namespace)
+        except Exception:  # noqa: BLE001 -- a shape naming an underivable symbol is not a byte count
+            return None
+        if not all(isinstance(d, (int, float)) and not isinstance(d, bool) for d in shape):
+            return None
+        total += int(math.prod(int(d) for d in shape)) * int(np.dtype(storage_dtype(buf.dtype)).itemsize)
+    return total
+
+
+def sparse_bytes(spec: BenchSpec,
+                 namespace: Mapping[str, object],
+                 dense: Mapping[str, int],
+                 wanted: Optional[AbstractSet[str]] = None) -> Optional[int]:
+    """``dense`` corrected for every array a ``sparse_layouts`` block gives a physical format.
+
+    A logical array with a sparse layout is never materialised dense: the initializer hands the
+    harness a scipy matrix and the binding unpacks it into that format's buffers. So its
+    ``init.shapes`` entry, when it has one, is a LOGICAL shape and not a footprint, and the buffers
+    that DO exist are declared nowhere the sizer was reading. Both directions were wrong by orders
+    of magnitude -- bicg_solvers declares ``A: (N, N)`` and read as 4.29 GB at XL against a matrix
+    that is 1.8 MB of csr, while spmv declares no shape for A at all, so its 21.6 GB of indices and
+    values were simply invisible and its XL sat five times over the ceiling unnoticed.
+
+    A kernel is graded at every configuration it declares, so the footprint is the LARGEST of them.
+    A configuration whose buffer shapes name a symbol the manifest never declares (``dia``'s ``ND``,
+    ``bcsr``'s ``nnz_blk``) cannot be sized from the manifest and is skipped; reporting the whole
+    kernel unknown instead would take spmv's 21.6 GB back out of view in order to describe a format
+    that is no better known either way. A layout with no ``configurations`` block at all names no
+    graded format, and that IS unknown -- ``None``, per :func:`working_bytes`'s rule.
+    """
+    if not spec.configurations:
+        return None
+    totals: List[int] = []
+    for configuration in spec.configurations.values():
+        total = sum(dense.values())
+        resolved = True
+        for logical, fmt in configuration.arrays.items():
+            layout = spec.sparse_layouts.get(logical)
+            if layout is None or fmt not in layout.variants:
+                continue  # 'dense', or an array carrying no layout: its declared shape is the truth
+            if wanted is not None and logical not in wanted:
+                continue
+            nbytes = variant_bytes(layout.variants[fmt], namespace)
+            if nbytes is None:
+                resolved = False
+                break
+            total += nbytes - dense.get(logical, 0)
+        if resolved:
+            totals.append(total)
+    return max(totals) if totals else None
+
+
 def working_bytes(spec: BenchSpec,
                   values: Mapping[str, object],
                   datatype: str = DEFAULT_DTYPE,
@@ -306,6 +396,10 @@ def working_bytes(spec: BenchSpec,
     keeps its float32 weights on an fp64 run), so a declared width is the safer estimate for both a
     ceiling check and a memory cap.
 
+    An array with a ``sparse_layouts`` entry is sized from that block instead
+    (:func:`sparse_bytes`): its ``init.shapes`` entry, if it has one, is the LOGICAL shape of a
+    matrix the run never materialises.
+
     ``None`` means "unknown", never "zero": a kernel whose ``init`` is a hand-written function
     declares no shapes here, and reporting it as an empty working set would let any size past a
     ceiling check. A non-empty ``names`` that matches no declared array is unknown for the same
@@ -318,12 +412,10 @@ def working_bytes(spec: BenchSpec,
     undeclared = numpy_dtype(precision_from_datatype(datatype))
     wanted = None if names is None else set(names)
     namespace = shape_namespace(spec, values)
-    total = 0
-    matched = 0
+    dense: Dict[str, int] = {}
     for array, expr in spec.init.shapes.items():
         if wanted is not None and array not in wanted:
             continue
-        matched += 1
         try:
             shape = _safe_eval(str(expr), namespace)
         except Exception:  # noqa: BLE001 -- an unresolvable shape is not a byte count; report unknown
@@ -335,10 +427,12 @@ def working_bytes(spec: BenchSpec,
         # A DECLARED dtype is sized by its STORAGE (int4 lives one value per int8 byte, and
         # numpy has no "int4"), so the width is the buffer's, not the logical format's.
         width = int(np.dtype(storage_dtype(declared) if declared else undeclared).itemsize)
-        total += int(math.prod(int(d) for d in dims)) * width
-    if wanted and not matched:
+        dense[array] = int(math.prod(int(d) for d in dims)) * width
+    if wanted and not dense:
         return None
-    return total
+    if not spec.sparse_layouts:
+        return sum(dense.values())
+    return sparse_bytes(spec, namespace, dense, wanted)
 
 
 def shape_namespace(spec: BenchSpec, values: Mapping[str, object]) -> Dict[str, object]:
@@ -604,6 +698,14 @@ def derive_ladder(spec: BenchSpec, small: Mapping[str, object],
     for (lo_name, lo), (hi_name, hi) in zip(zip(PRESETS, sizes), zip(PRESETS[1:], sizes[1:])):
         if hi < lo:
             problems.append(f"the problem shrinks from {lo_name} to {hi_name} ({lo:.3g} -> {hi:.3g})")
+        elif hi == lo and lo_name != KEPT:
+            # A fit whose anchor rung already costs more than the target proposes an XL below M, and
+            # the per-symbol floor then clamps it back UP to M -- so the ladder collapses to one size
+            # and every rung measures the same run. Caught here and not by the shrink test, which
+            # reads == as monotone. Only among the TIMED rungs: the kept S is a smoke rung the tests
+            # run at, and seissol_batched_gemm's S already sits at the batch the proposal names as M.
+            problems.append(f"the problem does not grow from {lo_name} to {hi_name} ({lo:.3g}), so the "
+                            f"two rungs are one benchmark measured twice")
     for preset in PRESETS:
         problems.extend(constraint_violations(spec, preset, ladder[preset]))
     # The single-core ceiling belongs on the TIMED one-core rung, not on the kept tests rung:

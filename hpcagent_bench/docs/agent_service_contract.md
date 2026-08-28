@@ -24,7 +24,6 @@ baseline**, grades it on **public + hidden** inputs, and returns the score.
 | Method | Path | Returns |
 |---|---|---|
 | GET  | `/health` | `{status, rank, oracle, baseline, input_mode}` |
-| GET  | `/task/<kernel>?language=c&rank=0` | task spec: `kernel`, `language`, `signature`, `symbol`, `reference_numpy`, `rtol`, `atol`, `preset`, `oracle`, `baseline`, `input_mode`, `abi_doc`, `goal` |
 | GET  | `/baseline/<kernel>?language=c&preset=S&rank=0` | `{kernel, preset, baselines: {numpy: ns, c: ns}}` -- the time(s) to beat |
 | POST | `/submit` (historical alias `/oracle`) | grade a submission on public **+ hidden** inputs and record it -- the terminal action |
 | POST | `/score` | the same grade on the **public** inputs only -- the iteration signal, never recorded |

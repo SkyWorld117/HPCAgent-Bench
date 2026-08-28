@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 76000000
   L:
-    LEN_1D: 140673600
+    LEN_1D: 99471257
   XL:
-    LEN_1D: 260382392
+    LEN_1D: 130191196
 init:
   input_args:
   - LEN_1D
@@ -25,5 +25,7 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
 loop_level_reasoning:
   source: tsvc_2_5

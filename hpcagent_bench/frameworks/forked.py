@@ -16,6 +16,38 @@ from hpcagent_bench.isolation import pause_openmp_pools
 #: Grace period (seconds) to drain the result queue after the child exits cleanly.
 _DRAIN_S = 5.0
 
+#: How long the child may take to say it started before the deadline is armed anyway. An
+#: unbounded wait on a child that never runs is worse than a slightly wrong clock.
+ARM_GRACE_S = 30.0
+
+#: How long a SIGTERMed child has to exit before the parent escalates to SIGKILL.
+TERM_GRACE_S = 5.0
+
+#: Extra time granted to a child the kernel says is DUMPING CORE. Its cause is already decided --
+#: it took a fatal signal and the kernel is writing the image -- so a SIGKILL here does not stop a
+#: hung child, it relabels a crash as a kill and the caller records the wrong cause. On a distro
+#: whose ``core_pattern`` pipes to a helper the dump costs a second even on an idle box (measured:
+#: 1.1s for a 20MB python child), and the helper is itself a process that has to be scheduled, so
+#: on a loaded runner it is the SIGTERM grace that runs out first. A dump terminates on its own;
+#: this only has to be longer than one takes.
+COREDUMP_GRACE_S = 60.0
+
+
+def is_core_dumping(pid: int) -> bool:
+    """True when the kernel reports ``pid`` is writing a core image (Linux >= 4.15).
+
+    False everywhere the answer is not knowable -- another OS, a reaped pid, a hidepid mount --
+    which is the pre-existing behaviour: escalate.
+    """
+    try:
+        with open(f"/proc/{pid}/status", "r") as fh:
+            for line in fh:
+                if line.startswith("CoreDumping:"):
+                    return line.split(":", 1)[1].strip() == "1"
+    except OSError:
+        return False
+    return False
+
 
 @dataclass
 class RunResult:
@@ -34,17 +66,39 @@ def forked_failure_reason(r: RunResult) -> str:
 
 
 def _child(fn, args, kwargs, q):
+    # First act, before any work: this is what arms the parent's deadline (see run_forked).
+    q.put(("started", None))
     try:
         out = fn(*args, **kwargs)
         try:
+            # NOTE: put() only enqueues -- pickling happens later in the queue's feeder thread, so an
+            # unpicklable or oversized payload is NOT caught here. It surfaces in the parent as
+            # "child exited 0 with no result"; callers with large payloads must spill to disk
+            # (see native_call.spill_outputs). This except covers only put() itself failing.
             q.put(("ok", out))
-        except Exception:  # unpicklable return value -> success without a payload
+        except Exception:  # queue unusable -> success without a payload
             q.put(("ok", None))
     except BaseException:  # noqa: BLE001 -- surface EVERY failure, never swallow it
         tb = traceback.format_exc()
         sys.stdout.write(tb)
         sys.stdout.flush()
         q.put(("error", tb))
+
+
+def take_result(q, timeout):
+    """Next item from ``q`` that is a RESULT, or None within ``timeout``.
+
+    ``started`` is a clock signal rather than an outcome, and a child that starts and finishes
+    inside one poll leaves both queued -- so every read has to be able to step past it.
+    """
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            item = q.get(timeout=max(0.0, end - time.monotonic()))
+        except queue.Empty:
+            return None
+        if item[0] != "started":
+            return item
 
 
 def _drain(progress_q, current):
@@ -80,7 +134,13 @@ def run_forked(fn: Callable,
     tag = f"[{label}] " if label else ""
     p.start()
     last_progress = None
-    deadline = (time.monotonic() + timeout) if timeout is not None else None
+    # The deadline measures the CHILD'S runtime, so the child arms it by reporting that it started
+    # -- not p.start(). Fork/spawn latency is the parent's cost (seconds under spawn, and on a
+    # loaded box a fork can be slow to schedule too); billing it to the callee means a child that
+    # takes longer to reach its first bytecode than its own timeout is SIGTERMed before it runs,
+    # and every failure it was about to report is attributed to a clock it never got to start.
+    started_at = time.monotonic()
+    deadline = None
     # Poll so the result queue drains while the child is alive -- a payload bigger than the OS
     # pipe buffer would otherwise block the child's feeder thread forever (join-then-read deadlocks).
     poll = 0.1
@@ -88,11 +148,17 @@ def run_forked(fn: Callable,
     while p.is_alive():
         if progress_q is not None:
             last_progress = _drain(progress_q, last_progress)
-        if deadline is not None and time.monotonic() >= deadline:
+        # Until the child reports in, the ceiling is its own timeout plus the arming grace, so a
+        # child that never runs at all still ends rather than hanging the parent forever.
+        limit = None if timeout is None else (deadline if deadline is not None else
+                                              (started_at + timeout + ARM_GRACE_S))
+        if limit is not None and time.monotonic() >= limit:
             if result_item is not None:
                 break  # child actually finished (payload already drained) -- not a timeout
             p.terminate()  # SIGTERM
-            p.join(5.0)
+            p.join(TERM_GRACE_S)
+            if p.is_alive() and p.pid is not None and is_core_dumping(p.pid):
+                p.join(COREDUMP_GRACE_S)  # already dying of its own signal -- wait, do not relabel it
             if p.is_alive():  # a child that ignores/blocks SIGTERM would hang the
                 p.kill()  # parent on an unbounded join -- escalate to SIGKILL
                 p.join()
@@ -102,6 +168,9 @@ def run_forked(fn: Callable,
             # and terminate() -- a segfaulting vendor runtime on a loaded box is exactly that race.
             # Reporting it as TIMEOUT hides the cause the caller is trying to attribute, so the
             # exit code decides: anything other than the signal we just sent is the child's own.
+            # Losing that race was never about the DEADLINE (widened 0.5s -> 2s, and CI went red
+            # again): the child dies on time and the kernel then takes a second or more to reap it
+            # through the core_pattern helper, which is charged against the grace above.
             ec = p.exitcode
             if ec is not None and ec < 0 and -ec not in (signal.SIGTERM, signal.SIGKILL):
                 break
@@ -111,9 +180,13 @@ def run_forked(fn: Callable,
             return RunResult(ok=False, signal="TIMEOUT", error=msg, result=last_progress)
         if result_item is None:
             try:
-                result_item = q.get(timeout=poll)
+                item = q.get(timeout=poll)
             except queue.Empty:
-                pass
+                item = None
+            if item is not None and item[0] == "started":
+                deadline = time.monotonic() + timeout if timeout is not None else None
+            elif item is not None:
+                result_item = item
         else:
             p.join(poll)
     if progress_q is not None:
@@ -129,12 +202,13 @@ def run_forked(fn: Callable,
         sys.stdout.flush()
         return RunResult(ok=False, exit_code=ec, signal=sig, error=msg, result=last_progress)
     if result_item is None:  # not drained in-loop -- covers the clean-exit race window
-        try:
-            result_item = q.get(timeout=_DRAIN_S)
-        except queue.Empty:
+        result_item = take_result(q, _DRAIN_S)
+        if result_item is None:
             return RunResult(ok=False,
                              exit_code=ec,
-                             error=f"{tag}child exited {ec} with no result",
+                             error=(f"{tag}child exited {ec} with no result "
+                                    "(a payload the queue feeder could not deliver -- oversized or "
+                                    "unpicklable -- dies exactly this way)"),
                              result=last_progress)
     status, payload = result_item
     if status == "ok":

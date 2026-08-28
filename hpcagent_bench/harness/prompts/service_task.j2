@@ -14,16 +14,15 @@ It must reproduce the semantics of this NumPy reference:
 {{ reference }}
 ```
 {% else %}
-It must reproduce the semantics of the NumPy reference. Read it from the judge at any
-time -- one judge serves many kernels, so name yours in the request:
+It must reproduce the semantics of the NumPy reference. Both it and a working
+{{ language | upper }} implementation of it are already in your task folder:
 ```sh
-curl -s "{{ judge_url }}/task/{{ kernel }}?language={{ language }}&rank={{ judge_rank }}" | jq -r .reference_numpy
+ls {{ shared_dir }}/tasks/{{ kernel }}/
 ```
-or from Python (stdlib only):
-```python
-from hpcagent_bench.harness.tools import JudgeClient
-JudgeClient("{{ judge_url }}", rank={{ judge_rank }}).task("{{ kernel }}", "{{ language }}")["reference_numpy"]
-```
+`*_numpy.py` is the semantics. `*_reference.{{ ext }}` is that same computation in
+{{ language | upper }} -- correct, already matching the signature above, and NOT fast.
+Read it first and optimise from it; it is the shape the judge expects, so starting there
+costs you no build failures.
 {% endif %}
 Argument order is the canonical HPCAgent-Bench C-ABI: array pointers first (alphabetical),
 then scalars/size symbols (alphabetical), then the reserved scratch pair. You do NOT
@@ -58,7 +57,7 @@ Python via `hpcagent_bench.harness.tools.JudgeClient`:
 {{ "\n" }}
 {% endfor %}
 {% include "optimizations.j2" %}
-{% if shared_dir %}
+{% if shared_dir and build_list_applied %}
 ## Extra libraries -- the shared folder ({{ shared_dir }})
 Need a library that is not installed? Install it + its headers into `{{ shared_dir }}`
 (e.g. `./configure --prefix={{ shared_dir }} && make install`). It is shared with the

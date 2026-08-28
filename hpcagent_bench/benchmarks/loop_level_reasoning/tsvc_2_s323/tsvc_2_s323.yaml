@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 57000000
   L:
-    LEN_1D: 108965302
+    LEN_1D: 77050104
   XL:
-    LEN_1D: 208305913
+    LEN_1D: 104152956
 init:
   arrays:
     a: (LEN_1D,)
@@ -24,6 +24,8 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
 loop_level_reasoning:
   source: tsvc_2
   category: recurrences

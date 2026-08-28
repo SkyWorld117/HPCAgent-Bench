@@ -30,7 +30,10 @@ _BENCH = (_HERE.parent / "hpcagent_bench" / "benchmarks" / "scientific_computing
 _CPP = _HERE / "ports" / "velocity_tendencies" / "baseline" / "velocity_tendencies_generated.cpp"
 _KERNEL = "velocity_tendencies"
 
-pytestmark = pytest.mark.skipif(not mo.have_oracle_toolchain(), reason="c++ compiler or dace headers absent")
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not mo.have_oracle_toolchain(), reason="usable c++ compiler or dace headers absent"),
+]
 
 _OUTPUTS = ("p_diag_vt", "p_diag_vn_ie", "p_diag_w_concorr_c", "p_diag_ddt_vn_apc_pc", "p_diag_ddt_w_adv_pc",
             "p_diag_max_vcfl_dyn", "z_w_concorr_me", "z_kin_hor_e", "z_vt_ie")

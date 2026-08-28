@@ -12,11 +12,11 @@ parameters:
     NS: 256
     NA: 256
   L:
-    N: 268435456
+    N: 264361562
     NS: 256
     NA: 256
   XL:
-    N: 1073741824
+    N: 520698992
     NS: 256
     NA: 256
 init:
@@ -44,6 +44,7 @@ init:
     symbols:
       shape: (N,)
       dtype: int64
+      index_array: true
     counts:
       shape: (NS,)
       dtype: int64

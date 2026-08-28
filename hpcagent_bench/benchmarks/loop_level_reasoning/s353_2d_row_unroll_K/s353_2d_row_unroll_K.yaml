@@ -6,16 +6,17 @@ parameters:
   S:
     N: 128
   M:
-    N: 10240
+    N: 10241
   L:
-    N: 14262
+    N: 12855
   XL:
-    N: 19865
+    N: 16136
 init:
   arrays:
     ip:
       shape: (N,)
       dtype: int64
+      index_array: true
     a: (N,N)
     b: (N,N)
 output_args:

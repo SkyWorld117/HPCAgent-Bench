@@ -16,8 +16,6 @@ import subprocess
 from pathlib import Path
 from typing import List
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 STYLE = REPO / ".style.yapf"
 HEADER: tuple = (

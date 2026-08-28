@@ -16,17 +16,34 @@ def restore_seed():
 
 
 def test_parse_preset_bases():
-    assert parse_preset("S") == ("S", None)
-    assert parse_preset("XL") == ("XL", None)
-    assert parse_preset("fuzzed") == ("fuzzed", None)
+    assert parse_preset("S") == ("S", None, "S")
+    assert parse_preset("XL") == ("XL", None, "XL")
+    # `fuzzed` is the historical spelling of `XL+fuzz` and must keep resolving to it.
+    assert parse_preset("fuzzed") == ("fuzzed", None, "XL")
+    # `+fuzz` attaches to ANY rung, and the rung is what the sizes are drawn around.
+    assert parse_preset("XL+fuzz") == ("fuzzed", None, "XL")
+    assert parse_preset("M+fuzz") == ("fuzzed", None, "M")
+    assert parse_preset("S+fuzz") == ("fuzzed", None, "S")
+    assert parse_preset("M+fuzz:42") == ("fuzzed", 42, "M")
 
 
 def test_parse_preset_seed():
-    assert parse_preset("fuzzed:42") == ("fuzzed", 42)
-    assert parse_preset("fuzzed:0") == ("fuzzed", 0)
+    assert parse_preset("fuzzed:42") == ("fuzzed", 42, "XL")
+    assert parse_preset("fuzzed:0") == ("fuzzed", 0, "XL")
 
 
-@pytest.mark.parametrize("bad", ["bogus", "S:9", "fuzzed:x", "M:1", "fuzzed:"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "bogus",
+        "S:9",
+        "fuzzed:x",
+        "M:1",
+        "fuzzed:",
+        "XL+bogus",  # the only modifier is +fuzz
+        "fuzzed+fuzz",  # +fuzz attaches to a RUNG, and `fuzzed` is not one
+        "Q+fuzz",  # unknown rung
+    ])
 def test_parse_preset_rejects(bad):
     with pytest.raises(ValueError):
         parse_preset(bad)

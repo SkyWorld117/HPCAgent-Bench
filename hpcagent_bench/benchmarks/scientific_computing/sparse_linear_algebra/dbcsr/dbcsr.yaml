@@ -18,16 +18,16 @@ parameters:
     block_size: 32
     density: 0.25
   L:
-    n_block_rows: 379
-    n_block_cols: 379
-    n_block_inner: 379
-    block_size: 32
+    n_block_rows: 321
+    n_block_cols: 321
+    n_block_inner: 321
+    block_size: 27
     density: 0.25
   XL:
-    n_block_rows: 800
-    n_block_cols: 800
-    n_block_inner: 800
-    block_size: 32
+    n_block_rows: 574
+    n_block_cols: 574
+    n_block_inner: 574
+    block_size: 22
     density: 0.25
 config:
   multrec_limit: {value: 512, selects: tile}

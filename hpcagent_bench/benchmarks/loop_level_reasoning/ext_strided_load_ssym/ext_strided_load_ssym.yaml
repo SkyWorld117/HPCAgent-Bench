@@ -3,17 +3,19 @@ name: TSVC ext_strided_load_ssym
 kind: microkernel
 level: 1
 parameters:
+  # SSYM 1 at every rung: src is SSYM * LEN_1D, so stride 2 puts XL at 12 GiB over an 8 GiB
+  # ceiling. Still a runtime symbol, so no compiler may assume contiguity.
   S:
     LEN_1D: 512
-    SSYM: 2
+    SSYM: 1
   M:
     LEN_1D: 67108864
-    SSYM: 2
+    SSYM: 1
   L:
-    LEN_1D: 186943663
-    SSYM: 2
+    LEN_1D: 132189132
+    SSYM: 1
   XL:
-    LEN_1D: 520764784
+    LEN_1D: 260382392
     SSYM: 1
 init:
   output_args:

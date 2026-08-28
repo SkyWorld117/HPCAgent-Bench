@@ -70,12 +70,9 @@ def _swin_mlp_block(x, norm1_weight, norm1_bias, spatial_mlp_weight, spatial_mlp
     tokens = np.reshape(per_head, (heads, ws2, nwin * head_dim))
 
     # Conv1d(nH*ws^2, nH*ws^2, kernel_size=1, groups=nH) is one (ws^2, ws^2) token mix per head.
+    # @ batches over the leading heads axis directly -- no need to loop the per-head matmul.
     weights = np.reshape(spatial_mlp_weight, (heads, ws2, ws2))
-    mixed = np.zeros((heads, ws2, nwin * head_dim), x.dtype)
-    for g in range(heads):
-        wg = weights[g]
-        tg = tokens[g]
-        mixed[g] = wg @ tg
+    mixed = weights @ tokens
     biased = mixed + np.reshape(spatial_mlp_bias, (heads, ws2, 1))
 
     # Merge heads, merge windows, undo the shift.

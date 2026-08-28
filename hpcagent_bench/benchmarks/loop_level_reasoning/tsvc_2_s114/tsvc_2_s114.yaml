@@ -7,13 +7,13 @@ parameters:
     LEN_2D: 64
     VLEN: 8
   M:
-    LEN_2D: 15360
+    LEN_2D: 15361
     VLEN: 8
   L:
-    LEN_2D: 18722
+    LEN_2D: 15744
     VLEN: 8
   XL:
-    LEN_2D: 22820
+    LEN_2D: 16136
     VLEN: 8
 init:
   arrays:

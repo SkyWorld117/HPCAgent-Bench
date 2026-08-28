@@ -6,11 +6,11 @@ parameters:
   S:
     N: 16
   M:
-    N: 20971520
+    N: 20971521
   L:
-    N: 46735916
+    N: 33047284
   XL:
-    N: 104152956
+    N: 52076478
 init:
   arrays:
     mass_fl: (N,)
@@ -18,6 +18,7 @@ init:
     idx:
       shape: (N,3)
       dtype: int64
+      index_array: true
     gfac: (N,3)
     div_mass: (N,)
     div_theta: (N,)

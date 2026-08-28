@@ -152,7 +152,7 @@ def load_problem_kernels(path: pathlib.Path) -> dict[int, str]:
     The manifest's ``kernel`` is the registry key (``loop_level_reasoning/argmax_value/argmax_value``)
     while ``submissions.benchmark`` holds the manifest's ``short_name``, which defaults to the path
     stem (hpcagent_bench/spec.py:1448) -- so the stem is what joins the two. The ~25 kernels whose
-    manifest OVERRIDES short_name (``jacobi2d`` vs ``jacobi_2d``, see hpcagent_bench/harbor_adapter.py:132)
+    manifest OVERRIDES short_name (``jacobi_2d`` vs ``jacobi_2d``, see hpcagent_bench/harbor_adapter.py:132)
     do not join on the stem; they are the known limit of this column, not a reason to import the
     benchmark package onto a login node.
     """

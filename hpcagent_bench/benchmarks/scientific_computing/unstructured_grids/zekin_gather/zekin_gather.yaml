@@ -38,9 +38,11 @@ init:
     edge_idx:
       shape: (NB, NPROMA, 3)
       dtype: int32
+      index_array: true
     edge_blk:
       shape: (NB, NPROMA, 3)
       dtype: int32
+      index_array: true
     z_kin_hor_e:
       shape: (NB, NLEV, NPROMA)
       dtype: float64

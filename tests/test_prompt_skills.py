@@ -216,7 +216,7 @@ def test_debug_marks_the_skills_too():
     """Skills arrive as context, not as templates, so the loader cannot annotate them."""
     prompt = build_prompt(TASK, prompt_config=PromptConfig.from_config(debug=True))
     assert f"# Generated from: hpcagent_bench/skills/{GENERAL_SKILL}/SKILL.md" in prompt
-    assert "# Generated from: hpcagent_bench/skills/vectorization/SKILL.md" in prompt
+    assert "# Generated from: hpcagent_bench/skills/openmp-c/SKILL.md" in prompt
 
 
 def test_debug_reports_the_overriding_file_not_the_builtin(tmp_path):
@@ -328,12 +328,12 @@ def test_tool_fragments_are_overridable(tmp_path):
 # --------------------------- the service prompt path --------------------------- #
 def test_service_prompt_honours_inline_kernel():
     """The HTTP judge-loop prompt is a different template, not a different system: it names
-    where to READ the reference instead of pasting it. An HTTP-driven agent may have no
-    container filesystem, so it is pointed at the /task endpoint it definitely has -- not at
-    an /app path that may not exist for it."""
+    where to READ the reference instead of pasting it. That place is the agent's own task folder,
+    which materialize_shared.sh fills before the run -- both containers see it, and it now holds a
+    per-language baseline as well as the numpy semantics."""
     from hpcagent_bench.harness.service import service_prompt
     prompt = service_prompt("gemm", "c", "http://judge:8000")
-    assert "http://judge:8000/task" in prompt and "reference_numpy" in prompt
+    assert "/tasks/gemm/" in prompt and "_numpy.py" in prompt
     assert reference_body() not in prompt
 
 
@@ -371,13 +371,14 @@ def test_service_prompt_never_leaks_the_host_path():
 
 
 # ---------------------------- judge access, multi-task ---------------------------- #
-def test_task_endpoint_names_the_kernel():
-    """One judge serves many kernels, so every documented call carries the kernel -- a bare
-    /task would 400 ('usage: GET /task/<kernel>?language=c')."""
+def test_the_prompt_points_at_this_kernels_own_material():
+    """One judge and one shared folder serve many kernels, so every path the prompt hands the
+    agent carries the kernel. A bare tasks/ directory would have it reading someone else's
+    reference -- and the route that used to serve this is gone, so the folder is the only copy."""
     from hpcagent_bench.harness.service import service_prompt
     prompt = service_prompt("gemm", "c", "http://judge:8000")
-    assert "http://judge:8000/task/gemm?language=c" in prompt
-    assert "/task |" not in prompt and "/task \n" not in prompt
+    assert "/tasks/gemm/" in prompt
+    assert "/task/gemm" not in prompt, "the removed /task route came back into the prompt"
 
 
 def test_both_a_curl_and_a_python_call_are_offered():
@@ -396,10 +397,11 @@ def test_the_python_wrapper_really_exposes_what_the_prompt_claims():
     import inspect
 
     from hpcagent_bench.harness.tools import JudgeClient
-    for method in ("task", "baseline", "submit"):
-        assert callable(getattr(JudgeClient, method, None)), method
-    params = inspect.signature(JudgeClient.task).parameters
+    for method in ("baseline", "score", "submit"):
+        assert callable(vars(JudgeClient).get(method)), method
+    params = inspect.signature(JudgeClient.baseline).parameters
     assert "kernel" in params and "language" in params
+    assert "task" not in vars(JudgeClient), "the removed /task route came back onto the client"
 
 
 def test_the_judge_url_is_per_prompt_not_global():
@@ -415,7 +417,7 @@ def test_the_judge_url_is_per_prompt_not_global():
 def test_one_judge_serves_many_kernels():
     from hpcagent_bench.harness.service import service_prompt
     for kernel in ("gemm", "gesummv"):
-        assert f"/task/{kernel}?language=c" in service_prompt(kernel, "c", "http://j:1")
+        assert f"/tasks/{kernel}/" in service_prompt(kernel, "c", "http://j:1")
 
 
 # --------------------------- timed shapes are never disclosed --------------------------- #
@@ -493,13 +495,14 @@ def test_every_manual_sized_page_is_gated():
     The invariant the gate actually protects is TOKEN COST: these bodies are injected verbatim into
     every prompt, and before the gate existed four instrument manuals were 1081 of 1169 prompt
     lines. So derive the check from size. A page big enough to be a manual must be gated; the short
-    strategy skills (general, loopnest, memory, parallelism, vectorization -- all ~22 lines) are the
-    ones that always ride along, and they are cheap enough to.
+    strategy skills (general and the per-language model pages) are the ones that ride along where
+    they apply, and they are cheap enough to.
 
     A draft graduates by one ``mv``, so drafts are checked too: this must fail BEFORE the page
     lands in every prompt, not after.
     """
-    from hpcagent_bench.harness.prompts import (ALWAYS_INLINE_MANUALS, INSTRUMENT_SKILLS, LANGUAGE_SKILLS, parse_skill)
+    from hpcagent_bench.harness.prompts import (ALWAYS_INLINE_MANUALS, INSTRUMENT_SKILLS, LANGUAGE_SKILLS,
+                                                MODEL_SKILL_LANGUAGES, parse_skill)
 
     #: Between the strategy skills (~22 lines) and the manuals (~180-480). Nothing sits near it.
     MANUAL_LINES = 100
@@ -507,9 +510,10 @@ def test_every_manual_sized_page_is_gated():
     root = paths.ROOT
     pages = sorted((root / "hpcagent_bench" / "skills").glob("*/SKILL.md"))
     pages += sorted((root / "docs" / "skills_draft").glob("*/SKILL.md"))
-    # LANGUAGE_SKILLS is a third gated category: gated on the submission language, not on the
-    # profiling knob. Still gated, so it satisfies this size check.
-    classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS | LANGUAGE_SKILLS
+    # LANGUAGE_SKILLS and MODEL_SKILL_LANGUAGES are further gated categories: gated on the
+    # submission language (and image), not on the profiling knob. Still gated, so they satisfy
+    # this size check -- a model page ships to exactly one language's prompts.
+    classified = INSTRUMENT_SKILLS | ALWAYS_INLINE_MANUALS | LANGUAGE_SKILLS | set(MODEL_SKILL_LANGUAGES)
     ungated = []
     on_disk = set()
     for path in pages:
@@ -608,9 +612,11 @@ def test_an_any_language_task_gets_every_language_page() -> None:
     assert not missing, f"any-language task is missing language pages: {missing}"
 
 
-@pytest.mark.parametrize("language,wanted", [("c", {"openmp", "openacc"}), ("cpp", {"openmp", "stdpar-cpp", "openacc"}),
-                                             ("fortran", {"openmp", "doconcurrent-fortran", "openacc"}),
-                                             ("cuda", set())])
+@pytest.mark.parametrize("language,wanted",
+                         [("c", {"openmp-c", "openacc", "openmp-offload", "loop-transformations-c"}),
+                          ("cpp", {"openmp-cpp", "openacc", "openmp-offload", "loop-transformations-cpp"}),
+                          ("fortran", {"openmp-fortran", "openacc", "openmp-offload", "loop-transformations-fortran"}),
+                          ("cuda", set())])
 def test_a_parallelism_model_page_ships_only_where_the_language_can_spell_it(language: str, wanted: set) -> None:
     """`std::execution` is not a thing a Fortran submission can write, and `!$acc` is not a thing a
     C++ one can. A model page in the wrong prompt is guidance the agent is unable to act on, so it
@@ -618,7 +624,7 @@ def test_a_parallelism_model_page_ships_only_where_the_language_can_spell_it(lan
     there to read."""
     from hpcagent_bench.harness.prompts import MODEL_SKILL_LANGUAGES
 
-    prompt = build_prompt(Task("gemm", "restricted", language),
+    prompt = build_prompt(Task("gemm", "restricted", language, image="nvidia"),
                           prompt_config=PromptConfig.from_config(profiling_guidance=False))
     for page in sorted(MODEL_SKILL_LANGUAGES):
         present = re.search(rf"^### {re.escape(page)}$", prompt, re.MULTILINE) is not None
@@ -627,11 +633,35 @@ def test_a_parallelism_model_page_ships_only_where_the_language_can_spell_it(lan
         assert indexed == (page in wanted), f"{page} indexed={indexed} for a {language} task"
 
 
+@pytest.mark.parametrize("language", ["c", "cpp", "fortran"])
+def test_an_offload_only_page_is_dropped_on_a_cpu_image(language: str) -> None:
+    """A CPU image has no device, and no build on the scoring path passes an offload flag, so the
+    openacc page can only tell the reader that its own subject does not work here.
+
+    The packet is re-read on EVERY agent turn, so a page is charged once per turn rather than once
+    per task -- measured on the gpt-oss C arm, the extra tokens per kernel came to ~72x the packet's
+    own size. A page with no possible benefit is therefore not free, it is per-turn rent, which is
+    why this is a hard drop and not a style preference.
+    """
+    from hpcagent_bench.harness.prompts import OFFLOAD_ONLY_SKILLS
+
+    config = PromptConfig.from_config(profiling_guidance=False)
+    cpu = build_prompt(Task("gemm", "restricted", language, image="cpu"), prompt_config=config)
+    gpu = build_prompt(Task("gemm", "restricted", language, image="nvidia"), prompt_config=config)
+    for page in sorted(OFFLOAD_ONLY_SKILLS):
+        assert f"### {page}" not in cpu and f"**{page}**" not in cpu, f"{page} shipped on a cpu image"
+        assert f"### {page}" in gpu, f"{page} is gated on the image, so it must still ship on one"
+
+
 def test_an_any_language_task_keeps_every_parallelism_model_page() -> None:
-    """`any` lets the agent pick the language, so no model can be ruled out for it."""
+    """`any` lets the agent pick the language, so no model can be ruled out for it.
+
+    The image is not relaxed that way -- no source language makes a CPU box grow a device -- so this
+    asks on a device image, where language is the only thing left doing the selecting."""
     from hpcagent_bench.harness.prompts import MODEL_SKILL_LANGUAGES
 
-    prompt = build_prompt(Task("gemm", "any", "c"), prompt_config=PromptConfig.from_config(profiling_guidance=False))
+    prompt = build_prompt(Task("gemm", "any", "c", image="nvidia"),
+                          prompt_config=PromptConfig.from_config(profiling_guidance=False))
     missing = [n for n in sorted(MODEL_SKILL_LANGUAGES) if f"### {n}" not in prompt]
     assert not missing, f"an any-language task dropped {missing}"
 

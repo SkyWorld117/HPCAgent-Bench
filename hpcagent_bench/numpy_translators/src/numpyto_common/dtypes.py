@@ -269,6 +269,45 @@ def itemsize(dtype: str) -> int:
     return bits // 8
 
 
+#: Real dtype backing one component (``.real`` / ``.imag``) of each complex dtype.
+_COMPLEX_REAL_COMPONENT = {
+    "complex64": "float32",
+    "complex128": "float64",
+    "complex256": "float128",
+}
+
+#: The complex dtype each real dtype widens to -- the inverse of _COMPLEX_REAL_COMPONENT.
+_REAL_COMPLEX_COMPONENT = {real: cplx for cplx, real in _COMPLEX_REAL_COMPONENT.items()}
+
+
+def real_component_dtype(dtype: str) -> str:
+    """The real dtype of one component of a complex ``dtype`` (``complex128`` -> ``float64``).
+
+    For a source-emitting caller that needs to cast an operand to MATCH a complex value's
+    precision (e.g. a divisor that must promote to ``complex64``, not silently to
+    ``complex128``) rather than hardcoding one width. Raises ``KeyError`` if ``dtype`` is not
+    a complex dtype in the registry.
+    """
+    key = canonical(dtype)
+    if key not in _COMPLEX_REAL_COMPONENT:
+        raise KeyError(f"{dtype!r} is not a complex dtype")
+    return _COMPLEX_REAL_COMPONENT[key]
+
+
+def complex_dtype_for(real: str) -> str:
+    """The complex dtype holding ``real`` as each component (``float32`` -> ``complex64``).
+
+    The allocation counterpart of :func:`real_component_dtype`: a lowering that emits a complex
+    working buffer must size it from the transform's OWN precision, since a hardcoded
+    ``complex128`` in an fp32 port both doubles the working precision and makes the store back
+    into the fp32 target a narrowing copy. Raises ``KeyError`` for a non-real dtype.
+    """
+    key = canonical(real)
+    if key not in _REAL_COMPLEX_COMPONENT:
+        raise KeyError(f"{real!r} has no complex counterpart")
+    return _REAL_COMPLEX_COMPONENT[key]
+
+
 #: Machine epsilon of each real float dtype -- the ``numpy.finfo(x).eps`` constants inlined, so the
 #: pure-Python translator neither imports nor runs numpy: it imports + JITs under PyPy, and stays fast
 #: on CPython where numpy is only a runtime-reference dependency, not a construction-time one.
