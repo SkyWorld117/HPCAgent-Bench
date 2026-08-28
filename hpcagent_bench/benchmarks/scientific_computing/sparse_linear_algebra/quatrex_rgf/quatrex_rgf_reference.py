@@ -1,5 +1,5 @@
-# Adapted from QuaTrEx (github.com/quatrex/quatrex, ETH Zurich Integrated Systems
-# Laboratory / SPCL), BSD-3-Clause, file ``src/qttools/greens_function_solver/rgf.py``,
+# Adapted from QuaTrEx (github.com/quatrex/quatrex, Computational Nanoelectronics Group,
+# ETH Zurich), BSD-3-Clause, file ``src/qttools/greens_function_solver/rgf.py``,
 # class ``RGF``, method ``selected_solve`` (commit cdcdb79e). Transcribed to plain
 # NumPy for HPCAgent-Bench; not the scoring oracle (``quatrex_rgf_numpy.py`` remains
 # the correctness oracle).
