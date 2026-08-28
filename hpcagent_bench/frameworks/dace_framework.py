@@ -233,6 +233,32 @@ def pin_gpu_toolchain() -> None:
         os.environ["CMAKE_PREFIX_PATH"] = os.pathsep.join([str(root), prefix]) if prefix else str(root)
     if dace.Config.get("compiler", "cuda", "backend") == "auto":
         dace.Config.set("compiler", "cuda", "backend", value="hip")
+    if not dace.Config.get("compiler", "cuda", "hip_arch"):
+        arch = local_gpu_arch(root)
+        if arch:
+            dace.Config.set("compiler", "cuda", "hip_arch", value=arch)
+
+
+def local_gpu_arch(rocm_root: pathlib.Path) -> str:
+    """The AMD ISA this node compiles for, as a comma list, or ``""`` when nothing answers.
+
+    DaCe's CMake detects this by compiling and RUNNING a probe with hipcc, and on a node whose
+    visible devices are masked -- which is every rank here, since each takes one GPU -- that probe
+    comes back empty and CMake fails outright with "HIP_ARCHITECTURES is empty". Asked instead of
+    hardcoded: ``amdgpu-arch`` is the ROCm tool that answers it, and the two environment variables
+    below are what a ROCm image already declares, so no gfx number is written down in this repo.
+    """
+    probe = rocm_root / "llvm" / "bin" / "amdgpu-arch"
+    if probe.is_file():
+        try:
+            out = subprocess.run([str(probe)], capture_output=True, text=True, timeout=30, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        found = sorted({line.strip() for line in out.splitlines() if line.strip()})
+        if found:
+            return ",".join(found)
+    declared = os.environ.get("HCC_AMDGPU_TARGET") or os.environ.get("PYTORCH_ROCM_ARCH") or ""
+    return ",".join(part for part in (p.strip() for p in declared.replace(";", ",").split(",")) if part)
 
 
 def pin_per_rank_build_dirs() -> None:
