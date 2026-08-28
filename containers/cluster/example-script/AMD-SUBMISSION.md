@@ -144,11 +144,20 @@ Kimi cannot hold 40 kernels in one arm at 12 agents, which is why C is split int
 | model | value | why |
 |---|---|---|
 | oss120b | `high` | ladder is low/medium/high, and the template renders `Reasoning: <v>` VERBATIM with no guard -- a wrong value is pasted into the system prompt rather than refused |
-| qwen3.8 | *(empty)* | the ladder is low/medium/xhigh, but on SGLang an explicit value is rewritten to `max` and the template raises. Empty leaves the template on its OWN default, which IS xhigh -- the level we wanted, without the rewrite |
+| qwen3.8 | **unsolved on SGLang** | the ladder is low/medium/xhigh. An explicit `xhigh` is rewritten by SGLang's Anthropic adapter to `max` and the template raises; EMPTY does not mean "send nothing" either, because `agent_driver.py` then pops the variable and claude falls back to `~/.claude/settings.json`, whose `effortLevel` is `high` -- a level Qwen3.8 does not have. Only `medium`/`low` survive both hops today |
 | Kimi K2.7 | *(empty)* | no ladder at all -- `reasoning_effort` is a K3-only field |
 
 Set it EMPTY, never delete the line: `agent_driver.py` defaults a MISSING `AGENT_EFFORT` to
-`xhigh`, which would raise on oss120b and silently mislabel Kimi.
+`xhigh`.
+
+**EMPTY is not the same as sending nothing.** `agent_driver.py` pops
+`CLAUDE_CODE_EFFORT_LEVEL`, and claude then reads `~/.claude/settings.json` -- HOME is shared with
+the submitter, so that file's `effortLevel` (`high` today) goes out instead. The Kimi arms have
+been sending `high` for this reason rather than running effort-free; Kimi has no ladder and
+ignores it, so their results stand, but the intent was never achieved. To genuinely send nothing,
+point the agent at a config dir of its own with `CLAUDE_CONFIG_DIR` (the binary honours it) --
+not yet wired, because `agent_driver.py` is read by every agent a rolling pool launches and
+editing it mid-arm would split that arm's population.
 
 ## Problem lists
 
