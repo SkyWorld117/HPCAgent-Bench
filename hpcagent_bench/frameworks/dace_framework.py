@@ -918,7 +918,19 @@ class DaceFramework(Framework):
     def call_args(self, bench: Benchmark, impl: Callable, resolved, bdata):
         """DaCe compiled programs take the inputs AND the symbol params as keywords (``A=..., NI=...``)."""
         renames = self.arg_renames(bench)
-        kwargs = {renames.get(a, a): resolved[a] for a in bench.info["input_args"]}
+        # The compiled signature takes a sparse array as its expanded buffers, never the logical name.
+        # ``resolved`` is keyed by the MANIFEST's input_args, so it holds the logical entry and none
+        # of the buffers; it still wins where it has a name, since it carries the per-run mutable copy.
+        from hpcagent_bench.initialize import abi_input_args
+        source = {**bdata, **resolved}
+        # The SDFG's own arglist is the authority on what the signature takes: abi_input_args adds
+        # declared OUTPUT buffers, which a program that returns them instead does not accept.
+        declared = set(impl.sdfg.arglist()) if isinstance(impl, TimedCompiledSDFG) else None
+        wanted = [
+            a for a in abi_input_args(bench.spec, bdata)
+            if a in source and (declared is None or renames.get(a, a) in declared)
+        ]
+        kwargs = {renames.get(a, a): source[a] for a in wanted}
         for p in self.params(bench, impl):
             kwargs[renames.get(p, p)] = bdata[p]
         kwargs.update(self.shape_symbols(impl, bench, resolved, kwargs))
