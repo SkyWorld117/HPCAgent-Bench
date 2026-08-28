@@ -251,18 +251,13 @@ def dace_build_root() -> pathlib.Path:
     """Where the DaCe probe children build.
 
     NEVER ``/tmp``: it is tmpfs on these nodes, a corpus of C++ builds exhausts it, and the
-    resulting compile failures read as kernel defects. And ``$HOME`` only LOOKS like the safe
-    alternative: a build tree is thousands of tiny files, and an HPC home is typically quota'd on
-    INODE COUNT rather than bytes -- measured here at 26k inodes and 195 MB, which is a home quota
-    spent on rebuildable scratch. So scratch first, home only when there is no scratch, in the same
-    order ``scripts/submit_deterministic.sbatch`` picks its build folder, so the two cannot drift.
+    resulting compile failures read as kernel defects, and never ``$HOME`` either -- see
+    :func:`hpcagent_bench.paths.scratch_root`, which decides this for every rebuildable tree.
     """
     override = os.environ.get("HPCAGENT_BENCH_DACE_BUILD_ROOT")
     if override:
         return pathlib.Path(override)
-    scratch = os.environ.get("SCRATCH")
-    base = pathlib.Path(scratch) if scratch else (pathlib.Path.home() / ".cache")
-    return base / "hpcagent_bench" / "dace_numeric"
+    return paths.scratch_root("hpcagent_bench") / "dace_numeric"
 
 
 def _all_backend_status(reason: str) -> Dict[str, str]:

@@ -11,7 +11,6 @@ import os
 import pathlib
 import shlex
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -310,22 +309,6 @@ def pin_per_rank_build_dirs() -> None:
         base = (shm / f"dace_build_cache_{getpass.getuser()}"
                 if shm.is_dir() and os.access(shm, os.W_OK) else pathlib.Path.home() / ".cache/dace/build_cache")
         os.environ["DACE_BUILD_CACHE_DIR"] = str(base / f"rank{rank}")
-
-
-def unblock_sigchld() -> None:
-    """Let the build see its own children exit.
-
-    srun/mpirun start their tasks with SIGCHLD blocked; the mask survives fork AND exec, and CPython
-    does NOT reset it for a subprocess -- so cmake inherits the block, and KWSys, which learns that
-    the helpers it spawns during configure have exited by receiving SIGCHLD, waits for it in
-    ``select()`` forever. Measured: cmake 4.3.4 configure times out with SIGCHLD blocked and exits 0
-    without it. Doing it here rather than in a launcher wrapper covers every way the job is started
-    (``srun python -m ...`` execs the interpreter directly, so no shell is around to clear the mask).
-
-    Masks are per-THREAD and a child inherits the FORKING thread's, so this must run on the thread
-    that goes on to build -- which is why it sits with the other pins in ``optimize``.
-    """
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
 
 
 def pin_build_caching() -> None:
@@ -709,7 +692,6 @@ class DaceFramework(Framework):
         ctx = self._build_context()
         pin_cpp_standard(self.info["arch"])
         pin_per_rank_build_dirs()
-        unblock_sigchld()
         pin_build_caching()
         if self.info["arch"] == "gpu":
             pin_gpu_toolchain()
