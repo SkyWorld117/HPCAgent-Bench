@@ -92,12 +92,18 @@ def _simplify_sub(hi: ast.AST, lo: ast.AST) -> Optional[ast.AST]:
     if _ast_eq(hi, lo):
         return ast.Constant(value=0)
     if isinstance(hi, ast.BinOp) and isinstance(hi.op, ast.Add):
-        # ``(lo + K) - lo`` -> K
-        if _ast_eq(hi.left, lo):
-            return hi.right
-        # ``(K + lo) - lo`` -> K
-        if _ast_eq(hi.right, lo):
-            return hi.left
+        # ``(lo + K) - lo`` -> K, at ANY depth of the ``+`` chain. A convolution tap slice spells
+        # its upper bound ``ky + (oh - 1) * stride + 1``, which puts ``lo`` one level down where the
+        # top-level match missed it. The extent is the same number either way, but the unsimplified
+        # form NAMES the tap loop's variable, and the buffer it sizes is declared outside that loop
+        # -- so the emitted C does not compile (alexnet, lenet5).
+        for near, far in ((hi.left, hi.right), (hi.right, hi.left)):
+            if _ast_eq(near, lo):
+                return far
+            inner = _simplify_sub(near, lo)
+            if inner is not None:
+                # ``(near - lo) + far`` is ``(near + far) - lo``, which is ``hi - lo``.
+                return ast.BinOp(left=inner, op=ast.Add(), right=far)
     # ``(K - lo) - lo`` and other forms don't simplify in general.
     return None
 
