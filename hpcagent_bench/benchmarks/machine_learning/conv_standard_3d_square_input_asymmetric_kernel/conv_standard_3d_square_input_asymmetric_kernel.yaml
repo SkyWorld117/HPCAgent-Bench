@@ -52,9 +52,9 @@ config:
 init:
   arrays:
     x: (batch_size, in_channels, width, height, depth)
-    conv3d_weight: (height, batch_size, kernel_size, kernel_size, kernel_size)
-    conv3d_bias: (height,)
-    out: (batch_size, height, height, height, depth)
+    conv3d_weight: (out_channels, in_channels // groups, kernel_size, kernel_size, kernel_size)
+    conv3d_bias: (out_channels,)
+    out: (batch_size, out_channels, (width + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1, (height + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1, (depth + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1)
   scalars:
     conv3d_stride: 1
     conv3d_padding: 1

@@ -173,11 +173,32 @@ def test_the_arm_falls_back_to_the_problems_file_stem_but_never_to_a_blank(monke
 def test_every_campaign_variant_declares_its_own_arm():
     """A mislabelled arm is worse than an unlabelled one. The variant file is COPIED to .env, so a
     stale copy would file this arm's rows under the previous one and nothing in the DB would show
-    it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to."""
-    for path in sorted(EXAMPLE.glob(".env.llr-*")) + [EXAMPLE / ".env.smoke"]:
+    it; run_campaign.sh refuses that drift, and the labels have to agree for it to be able to.
+
+    EVERY .env, not a hand-listed few: the pair drifted apart four times while two were checked.
+    .env.example is the template and carries a deliberately blank arm."""
+    for path in sorted(EXAMPLE.glob(".env.*")):
+        if path.name == ".env.example" or path.suffix in (".bak", ".v2bak"):
+            continue
         arm = path.name[len(".env."):]
-        assert f"\nCAMPAIGN_ARM={arm}\n" in path.read_text(), path
+        assert f"\nCAMPAIGN_ARM={arm}\n" in path.read_text(), (
+            f"{path.name} must carry CAMPAIGN_ARM={arm}; rename the file to the arm label rather "
+            "than relabelling the arm, because the label is what the judge DB already records")
+    assert "\nCAMPAIGN_ARM=\n" in (EXAMPLE / ".env.example").read_text()
     assert '"${CAMPAIGN_ARM:-}" != "${VARIANT}"' in (EXAMPLE / "run_campaign.sh").read_text()
+
+
+def test_no_submitter_can_pass_an_account():
+    """beverin schedules root, a-g200 and a-g34 identically, so -A only picks a billing line
+    nobody chose, and every submitter here targets beverin.sbatch alone.
+
+    Absent, not defaulted: an empty default is still a knob, and one of these held a real account
+    while reading as if it did not. Comments may explain the rule; non-comment lines may not
+    mention ACCOUNT or pass -A."""
+    for path in sorted(EXAMPLE.glob("submit*.sh")):
+        code = "\n".join(ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#"))
+        assert "ACCOUNT" not in code, f"{path.name} still carries an ACCOUNT knob"
+        assert "-A " not in code, f"{path.name} still passes -A"
 
 
 def test_the_driver_hands_each_agent_its_identity_in_the_environment(tmp_path, monkeypatch):
@@ -197,7 +218,9 @@ def test_the_driver_hands_each_agent_its_identity_in_the_environment(tmp_path, m
     node_dir = tmp_path / "node-0"
     node_dir.mkdir()
     problem = {"id": 5, "kernel": "gemm", "language": "c", "task": "optimize gemm"}
-    assert agent_driver().run_agent(problem, 1, node_dir, ["http://127.0.0.1:8800"], 5) == 0
+    # Worker 1 of 2: the trailing count is the node's worker total, which run_agent needs only to
+    # deal CPUs out between the agents, and 1-of-1 would contradict the worker index above.
+    assert agent_driver().run_agent(problem, 1, node_dir, ["http://127.0.0.1:8800"], 5, 2) == 0
     log = (node_dir / "problem-5-worker-1" / "claude.log").read_text()
     assert "OPTARENA_RUN_ID=llr-any.n0.p5.w1" in log
     assert "OPTARENA_OPTIMIZER=optarena-vllm" in log

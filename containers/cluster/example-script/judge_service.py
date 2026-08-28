@@ -152,6 +152,10 @@ def log_grade(route: str, body: dict, graded: dict | None) -> None:
         # grade and what the agent shipped, so it stands in both columns rather than one of them
         # guessing at the arm the judge was never told.
         delivered_language=language,
+        # The agent's cumulative token spend when it asked for this grade. Only the agent can
+        # count it (the judge never sees the transcript), so it rides in on the request body and
+        # is 0 for any client that does not send it.
+        tokens=int(body.get("tokens") or 0),
         # Resolved WITHOUT the body's 'compiler': the upstream judge drops that field (see
         # service._submission_from_body), so the pin/default is what really built this grade.
         compiler=languages.resolve_family(language))
@@ -182,15 +186,8 @@ def health() -> dict[str, Any]:
         "vllm_base_url": os.environ.get("WEBSEARCH_LLM_BASE_URL", ""),
         "judge_upstream_url": UPSTREAM_URL,
         "implemented": ["health", "search", "web-search"],
-        "proxied": ["task", "baseline", "submit", "score", "bench", "verify", "profile"],
+        "proxied": ["baseline", "submit", "score", "bench", "verify", "profile"],
     }
-
-
-@app.get("/task/{kernel:path}")
-async def task(request: Request, kernel: str) -> Response:
-    """The leak-free task spec the agent reads before writing anything. Read-only, never graded.
-    ``:path`` because kernel keys carry slashes (``track/dir/name``)."""
-    return relay(await forward(request, f"/task/{kernel}"))
 
 
 @app.get("/baseline/{kernel:path}")

@@ -34,7 +34,7 @@ raise on a whole array or a traced `b[jg]` -- and the kernel's own imports are
 still carried over for any unmapped name.
 
 The cost is speed: a loop-heavy kernel (the `TSTEPS x N^2` polybench stencils --
-seidel/adi/heat3d/jacobi) dispatches every scalar `.at[].set()` separately and
+seidel/adi/heat_3d/jacobi) dispatches every scalar `.at[].set()` separately and
 is **slow** eagerly where the `jit` path would vectorise it. Correctness is
 preserved; `jit=True` is the escape hatch.
 

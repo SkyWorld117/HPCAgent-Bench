@@ -10,10 +10,10 @@ parameters:
     LEN_3D: 448
     T: 8
   L:
-    LEN_3D: 581
+    LEN_3D: 535
     T: 8
   XL:
-    LEN_3D: 754
+    LEN_3D: 638
     T: 8
 init:
   arrays:

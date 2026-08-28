@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Arc Distance
-short_name: adist
 kind: microkernel
 level: 1
 parameters:
@@ -9,9 +8,9 @@ parameters:
   M:
     N: 60000000
   L:
-    N: 158103478
+    N: 79051739
   XL:
-    N: 416611827
+    N: 104152956
 init:
   input_args:
   - N

@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 9216
+    LEN_2D: 9217
   L:
-    LEN_2D: 12836
+    LEN_2D: 11020
   XL:
-    LEN_2D: 17879
+    LEN_2D: 13175
 config:
   K:
     domain: [1, -1]
@@ -27,5 +27,7 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
 loop_level_reasoning:
   source: tsvc_2_5

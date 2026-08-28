@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: 2-D Jacobi stencil computation
-short_name: jacobi2d
 kind: microkernel
 level: 2
 parameters:
@@ -8,15 +7,18 @@ parameters:
     TSTEPS: 50
     N: 150
   M:
-    TSTEPS: 100
+    TSTEPS: 50
     N: 2048
   L:
-    TSTEPS: 156
-    N: 8097
+    TSTEPS: 50
+    N: 5749
   XL:
-    TSTEPS: 244
-    N: 32009
+    TSTEPS: 50
+    N: 16136
 init:
+  arrays:
+    A: "(N, N)"
+    B: "(N, N)"
   input_args:
   - N
   output_args:

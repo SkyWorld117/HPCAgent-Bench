@@ -97,25 +97,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -162,7 +159,20 @@ jobs:
           files=$(ls tests/test_*.py | grep -vxF -f "$excl")
           test -n "$files" || { echo 'unit sweep selected no files'; exit 1; }
           echo "$files" | tr ' ' '\n' | wc -l | xargs echo "sweeping files:"
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 $files
+          # Killed twice here with "the runner has received a shutdown signal", both times at the
+          # same 38% mark. A step sampler named it: memory 2.5 GB -> 14.8 GB inside one 30 s
+          # interval with 1.1 GB left and disk untouched at 77 GB free -- an OOM, and the test in
+          # flight was test_metric.py::test_fuzz_iteration_draws_distinct_sizes, which drew 7.7 GB
+          # of arrays over 7 minutes. It runs under the ordinary fuzz size cap now, so the sampler
+          # and the -v it took to name it are both gone again.
+          #
+          # --timeout-method=thread, not pytest-timeout's default: in run 32076991237 this sweep
+          # reached 93%, wedged, and sat there for 25m46s without the 600 s timeout ever firing --
+          # then died on the STEP timeout, which prints no summary and so names nothing. The
+          # default method arms SIGALRM, and this suite forks and waits on subprocesses, where the
+          # signal never lands. The thread method owns its own timer, so a wedge dumps the stack of
+          # the test that is actually hanging instead of costing the whole job.
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 --timeout-method=thread $files
 
       - name: Phase 2 -- translations (C / C++ / Fortran emit + compile + validate)
         if: ${{ !cancelled() }}
@@ -193,6 +203,11 @@ jobs:
         # not the job. --timeout is the per-test backstop; the oracle already SIGKILLs its
         # own forked jax/native children, so this only catches an in-process numba hang.
         #
+        # --timeout MUST stay above numerical_oracle.PY_FORK_TIMEOUT_S (600), or the backstop fires
+        # first and the oracle's own SIGKILL never runs: at 600 == 600 the cloudsc numba leg (618s,
+        # measured) died as a pytest Timeout instead of recording skip:too-long, and reported twice
+        # because _result runs every backend in ONE cached call per stem.
+        #
         # 35 -> 55: the old budget was set against a 200-port kernelbench subtrack and an
         # UNINSTRUMENTED run. Both moved. The subtrack is now 239 (+19.5%) and coverage is on
         # job-wide, which is deliberate here -- unlike Phase 2c this phase drives real library
@@ -204,7 +219,7 @@ jobs:
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "numba,jax"
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=600 tests/test_e2e_numerical.py
+          python -m pytest -q -p no:cacheprovider -rfEs -n auto --timeout=900 tests/test_e2e_numerical.py
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
@@ -238,7 +253,7 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: integration (build/run real artifacts)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
       # tests/test_dace_openblas_link.py builds a pinned OpenBLAS with USE_OPENMP=1 (~10 min at
@@ -252,15 +267,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Same ccache + TBB rationale as `unit`; the key is namespaced by github.job, so this job
+      # Same ccache setup as `unit`; the key is namespaced by github.job, so this job
       # warms its own cache rather than contending for that one.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
@@ -295,10 +317,15 @@ jobs:
         #
         # Capped well under the job ceiling so a wedged build still fails as a STEP, leaving the
         # coverage upload below to run -- the cap is a hang detector, not the budget it used to be.
-        timeout-minutes: 70
+        #
+        # --timeout-method=thread for the same reason Phase 1 carries it: in run 32076991237 this
+        # phase hung for 38 minutes past its last line with the 900 s timeout never firing, because
+        # the default method arms SIGALRM and the wedge was below a fork/subprocess wait. The
+        # thread method reports the hanging test instead of losing the phase to the step cap.
+        timeout-minutes: 85
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 -m integration \
-            tests/ hpcagent_bench/numpy_translators/tests/
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 --timeout-method=thread --durations=25 \
+            -m integration tests/ hpcagent_bench/numpy_translators/tests/
 
       - name: ccache statistics
         if: always()
@@ -323,8 +350,8 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: port-fidelity (dace frontend reads the generated corpus)
     runs-on: ubuntu-latest
-    # Phase 8 (50) + Phase 8b (25) + checkout/setup/torch, which is ~10 on a warm cache.
-    timeout-minutes: 100
+    # Phase 8 (75) + Phase 8b (25) + checkout/setup/torch, which is ~10 on a warm cache.
+    timeout-minutes: 125
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
@@ -358,14 +385,19 @@ jobs:
         # No -n: the sweep is ONE test that already forks a subprocess per program, so xdist would
         # shard nothing. The concurrency lives in the test (PARSE_WORKERS). Measured 2026-08-08 on
         # the full 625-program corpus: 4.3 min to emit + 45 min to parse serially -- which is why
-        # this step timed out at 40 twice on 08-07 -- against 4.3 + 20 at two workers. Five REFUSED
-        # entries are `hang`, 180 s of pure timeout each, and serially they alone are 15 minutes.
-        # 50 rather than 25 because a hosted runner is slower than the machine that was measured.
+        # this step timed out at 40 twice on 08-07 -- against 4.3 + 20 at two workers. Three REFUSED
+        # entries are `hang` and spend the whole PARSE_TIMEOUT_S each; at the 900 s that budget was
+        # raised to on 08-21 they alone are 22 min across the two workers, so the 20 min this step
+        # measured at 360 s becomes ~34. 75 rather than 50 keeps the same margin over that.
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 75
         run: |
+          # Which CPU this ran on, because the parse timings only mean something next to it:
+          # esirkepov_deposition took 274 s here and 24 s on the dev box, while mobilenet_v2 came
+          # in FASTER than its local number, so "the runner is slower" does not yet explain it.
+          lscpu | grep -E "^(Model name|CPU\(s\)|Thread|Core)" || true
           python -m pytest -q -p no:cacheprovider -rfsxX -m dace_frontend \
-            --timeout=2400 tests/test_dace_frontend_validity.py
+            --timeout=4200 tests/test_dace_frontend_validity.py
 
       - name: Phase 8b -- the ML ports still compute what their PyTorch models compute
         # The numpy reference is the oracle for every backend, so a port that drifted from the
@@ -432,25 +464,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -468,13 +497,15 @@ jobs:
       - name: Phase 2a -- numpy-translator op suite
         # ~640 tests: per-op faithfulness plus feature-fix and corpus kernels, each emitted to
         # C/C++/Fortran (+ numba/pythran/jax where the test opts in), compiled, validated vs
-        # numpy. A couple of full-kernel cases (cloudsc, velocity_tendencies) run ~5 min, hence
-        # --timeout=900. xdist balances the files across the runner's cores at runtime, which no
-        # static split can beat on a set whose per-file cost spans three orders of magnitude.
+        # numpy. A couple of full-kernel cases (cloudsc, velocity_tendencies) run ~5 min, and the
+        # corpus-wide ABI agreement test walks every kernel in one test -- measured at 1294 s on a
+        # loaded 16-core box after the shape-compare cache, hence --timeout=1500. xdist balances
+        # the files across the runner's cores at runtime, which no static split can beat on a set
+        # whose per-file cost spans three orders of magnitude.
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
-          python -m pytest -q -p no:cacheprovider -rfsxX -n auto --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfsxX -n auto --timeout=1500 \
             hpcagent_bench/numpy_translators/tests/
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
@@ -518,25 +549,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -566,8 +594,12 @@ jobs:
           set -euo pipefail
           # clang-17 feeds pet via --with-clang-prefix; libgmp/flex/bison/texinfo/libltdl
           # build isl/cloog/candl; pkg-config + libyaml-dev are pet's configure deps.
+          # libstdc++-14-dev is the C++ standard library clang-17 is pinned onto below: the
+          # runner's /usr/lib/gcc/<triple>/14 is a GCC install directory, not a guarantee that
+          # /usr/include/c++/14 came with it, and pinning clang at a headerless GCC install is
+          # the exact failure this pin exists to avoid.
           sudo apt-get install -y --no-install-recommends \
-            clang-17 llvm-17 llvm-17-dev libclang-17-dev \
+            clang-17 llvm-17 llvm-17-dev libclang-17-dev libstdc++-14-dev \
             autoconf automake libtool pkg-config libgmp-dev libyaml-dev flex bison texinfo libltdl-dev
           # pet prefers the monolithic -lclang-cpp, but Ubuntu ships only libclang-cpp.so.17
           # (no unversioned .so), so pet falls back to individual -lclang* libs and misses
@@ -585,8 +617,34 @@ jobs:
           git checkout "$PLUTO_COMMIT"
           git submodule update --init --recursive
           ./autogen.sh
+          # clang-17 is pinned because pet does not build against a newer clang API -- and a
+          # compiler that old cannot consume GCC 15's libstdc++ headers, which is what it now
+          # selects (the runner has /usr/lib/gcc/<triple>/15, and clang takes the highest). Pin it
+          # to the newest GCC install it predates rather than letting the driver pick.
+          #
+          # This pin covers PET'S OWN BUILD and nothing else. The kernels polycc transforms are
+          # compiled by the ordinary native toolchain (hpcagent_bench.languages), which tracks the
+          # newest compiler on the box -- clang-17/llvm-17 appear nowhere outside this step, and
+          # must not, or the benchmark would be graded through a compiler three releases old.
+          gccdir=$(ls -d /usr/lib/gcc/x86_64-linux-gnu/14 2>/dev/null || true)
+          test -n "$gccdir" || { echo "::error::no GCC 14 install for clang-17 to sit on"; exit 1; }
+          # The pin rides on CC/CXX, NOT on CFLAGS/CXXFLAGS: pet's configure OVERWRITES CXXFLAGS
+          # with its own '-fno-rtti' for the clang checks, so anything passed there is silently
+          # dropped and clang++ slides back onto GCC 15 (run 32076991237: every clang/Lex/* header
+          # check answered "no" and pet died on "unable to link against libclang-cpp").
+          clangxx="clang++-17 --gcc-install-dir=$gccdir"
+          # Prove the pinned pair compiles+links C++ here, where the error names the toolchain,
+          # instead of 90 seconds later as a configure result spelled "unknown".
+          printf '%s\n' '#include <cstdint>' '#include <string>' \
+            'int main() { return (int)std::string("x").size() - 1; }' \
+            | $clangxx -std=c++17 -x c++ - -o "$RUNNER_TEMP/cxx-smoke" && "$RUNNER_TEMP/cxx-smoke"
+          # config.log holds the actual link line and error; without it a pet configure failure
+          # reads as one word ("unknown") and costs a full CI round-trip to diagnose. Grep for the
+          # failing conftest -- the tail of config.log is the variable dump, not the error.
           ./configure --with-clang-prefix=/usr/lib/llvm-17 \
-            CC=clang-17 CXX=clang++-17 CXXFLAGS='-std=c++17 -include cstdint'
+            CC="clang-17 --gcc-install-dir=$gccdir" CXX="$clangxx" \
+            CXXFLAGS="-std=c++17 -include cstdint" \
+            || { echo "::group::pet/config.log"; grep -B5 -A15 -iE '\berror\b' pet/config.log 2>/dev/null | tail -150; echo "::endgroup::"; exit 1; }
           make -j"$(nproc)"
           sudo make install          # polycc + pluto -> /usr/local/bin
           sudo ldconfig
@@ -612,7 +670,7 @@ jobs:
           HPCAGENT_BENCH_TVM_NOTUNE: "1"
           HPCAGENT_BENCH_TVM_METASCHEDULE_TRIALS: "2"
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_frameworks.py \
             tests/test_fp16.py \
             tests/test_default_datatype_tolerance.py
@@ -679,25 +737,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -766,6 +821,19 @@ jobs:
           python -m pytest -q -p no:cacheprovider -rfEs --timeout=2400 \
             tests/test_kernelbench_translation.py
 
+      # Every loop_level_reasoning kernel EMITS a reference in all three languages, and the agent
+      # reads that text -- the track ships no committed copy, so drift between a stale file and the
+      # emitter is no longer possible and is no longer what this guards. What is left is the
+      # emitter itself: an emit that fails outright, a baseline carrying a timer the score would
+      # divide by, a Fortran baseline off the bind(C) shape submissions actually fail on, and the
+      # three languages disagreeing on one kernel's ABI -- which no numeric leg can see, because
+      # the C leg passes while the Fortran leg reads the wrong bytes.
+      - name: Phase 5e -- emitted references are well-formed and share one ABI
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 tests/test_generated_references.py
+
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       - name: ccache statistics
         if: always()
@@ -807,25 +875,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -954,7 +1019,26 @@ jobs:
         env:
           HPCAGENT_BENCH_JUDGE_SIF: ${{ github.workspace }}/hpcagent_bench-cpu.sif
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 tests/test_container_launch.py
+          # Killed with "the runner has received a shutdown signal" inside this step, which prints
+          # no summary. The sampler says it is MEMORY, not the disk a SIF launch would have been
+          # blamed for, and -v named the test: test_two_containers_judge_and_agent_via_tools, at
+          # 15752/15989 MB used with 237 MB left and 89 GB of disk still free (run 32076991237).
+          #
+          # What it does NOT say is WHICH process. `free`'s "used" excludes tmpfs, so the
+          # --writable-tmpfs overlays are not it -- something is allocating ~15 GB of anonymous
+          # memory, and the two candidates (the host-side pytest, and the judge serving inside the
+          # container) call for opposite fixes. So sample every 5 s and print the top RSS
+          # consumers with their command lines; a 30 s interval already missed one whole ramp.
+          # All of this comes out once the consumer is named.
+          ( while sleep 5; do
+              echo "SAMPLE $(date -u +%H:%M:%S)" \
+                   "mem=$(free -m | awk '/^Mem:/{print $3"/"$2"MB used "$7"MB avail"}')" \
+                   "disk=$(df -Pm / | awk 'NR==2{print $4"MB free"}')"
+              ps -eo rss=,args= --sort=-rss | head -3 | awk '{printf "  TOP %dMB %.100s\n", $1/1024, $0}'
+            done ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          python -m pytest -v -p no:cacheprovider -rfEs --timeout=1500 tests/test_container_launch.py
 
   # ===========================================================================================
   # mpi -- the whole MPI / distributed-residency track on its own runner (the "5th runner"): the
@@ -995,9 +1079,12 @@ jobs:
     name: mpi + dace-numeric + hf-export (distributed track, DaCe-vs-numpy corpus, HF dataset)
     runs-on: ubuntu-latest
     # ~11m51s (mpi) + ~16m18s (dace-numeric) + ~2m37s (hf-export), measured on runs 31478271044 /
-    # 31023526869 -- ~31m sequential. 75 leaves more than 2x that, with room above the two explicit
-    # phase caps below (30 + 30) on a bad day for either.
-    timeout-minutes: 75
+    # 31023526869 -- ~31m sequential, all three WARM. 95 leaves more than 2x that, with room above
+    # the two explicit phase caps below (30 + 50) on a bad day for either. The dace-numeric cap is
+    # sized for a COLD compile cache, not the warm measurement: a job that trips a step timeout ends
+    # red, actions/cache skips the save, and the next run starts cold again -- so a cap that fits
+    # only the warm number never lets the first cold run save the cache that would make it warm.
+    timeout-minutes: 95
     env:
       # OpenMPI on a GH-Actions runner has no high-speed fabric (no InfiniBand / UCX device), so pin
       # the simple self + shared-memory transports and disable UCX's VFS probe -- otherwise MPI_Init
@@ -1026,25 +1113,22 @@ jobs:
       # embedded paths or timestamps), so every CI run recompiles the very same TUs.
       # compilers.yaml invokes bare `gcc`/`g++`/`gfortran`, so putting the shim dir first on
       # PATH routes the whole build through the cache without touching any build code.
-      - name: Setup -- ccache + TBB
+      - name: Setup -- ccache
         run: |
           sudo apt-get update -qq
-          # libtbb-dev is not optional for the cpp_isopar column: libstdc++ picks its parallel
-          # <execution> backend per TU with __has_include(<tbb/tbb.h>), so with the headers absent
-          # the par/par_unseq policies compile and run SEQUENTIALLY under a parallel name -- a
-          # silently wrong measurement, not a build failure. languages.stdpar_link_flags asks the
-          # compiler that same question before appending -ltbb, so installing it here is what
-          # actually turns the column parallel.
-          sudo apt-get install -y --no-install-recommends ccache libtbb-dev
+          sudo apt-get install -y --no-install-recommends ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           CCACHE_DIR="$HOME/.ccache" ccache --set-config max_size=1G
-          # The CPU baselines compile -march=native and ccache hashes that flag literally,
-          # so an object cached on a wider-ISA runner runs here as SIGILL (exit 132). Key
-          # the cache on the ISA the compiler would actually select.
+          # Namespaced by uarch, because ccache alone is NOT enough here: it hashes the
+          # preprocessed source, the compiler and the command line, and `-march=native` is the
+          # same string on every runner while the code it selects is not. Same hash, different
+          # instruction set -- a cache warmed on one runner is served to another and the object
+          # SIGILLs when it runs. That took `integration` down for three runs: 99.32% hits off a
+          # foreign uarch, then `Illegal instruction` in the dlopened probe. Fragmenting the cache
+          # per uarch is what an object that runs costs.
           cpu_key=$(awk -F': ' '/^(model name|flags)/ {print $2}' /proc/cpuinfo |
             head -2 | sha256sum | cut -c1-12)
-          # An empty key would silently restore the old cross-runner behaviour.
           test -n "$cpu_key" || { echo "could not derive a CPU key" >&2; exit 1; }
           echo "CPU_KEY=$cpu_key" >> "$GITHUB_ENV"
       - name: Setup -- restore the compile cache
@@ -1096,7 +1180,7 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 30
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_mpi_call.py \
             tests/test_mpi_drivers_launch.py \
             tests/test_mpi_correctness_oracle.py \
@@ -1154,7 +1238,11 @@ jobs:
         # difference between a ten-minute job and a forty-minute one.
         #
         # --maxfail=20 so a translator-wide break reports twenty named kernels, not three hundred.
-        timeout-minutes: 30
+        #
+        # 50, not the ~16m18s warm measurement: run 32669847845 was killed at 81% on a cold cache
+        # (357/798 hits against ~99% warm) after the ccache key rotated, and the kill is what stops
+        # the new-format cache from ever being saved.
+        timeout-minutes: 50
         env:
           # NOT /tmp: it is tmpfs, and exhausting it fails builds in a way that reads as a kernel defect.
           HPCAGENT_BENCH_DACE_BUILD_ROOT: ${{ runner.temp }}/dace_numeric
@@ -1167,7 +1255,7 @@ jobs:
           python -c "from tests.test_dace_frontend_validity import generated_programs; \
             print(len(generated_programs()), 'dace programs ready')"
           python -m pytest -q -p no:cacheprovider -rfEs -n 4 -m dace_numeric \
-            --maxfail=20 --timeout=900 tests/test_dace_numeric_agreement.py
+            --maxfail=20 --timeout=1500 tests/test_dace_numeric_agreement.py
 
       # Hit rate is the whole point of the cache -- surface it so a regression to 0% is visible.
       # One combined step now: it reports the mpi phases' + dace-numeric's compiles together, same
@@ -1253,7 +1341,7 @@ jobs:
         run: python -m pip install apache-tvm==0.25.0rc0 apache-tvm-ffi==0.1.12 triton
       - name: GPU frameworks + fp16 (tvm-gpu / triton targets)
         run: |
-          python -m pytest -q -p no:cacheprovider -rfEs --timeout=900 \
+          python -m pytest -q -p no:cacheprovider -rfEs --timeout=1500 \
             tests/test_frameworks.py tests/test_fp16.py
 
       # if: always() -- a job that went red still covered lines on the way, and the total is more

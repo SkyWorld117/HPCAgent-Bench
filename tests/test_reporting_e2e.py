@@ -30,7 +30,7 @@ from hpcagent_bench.plotting import (cell_summary, load_results, machine_groups,
                                      plot_heatmap)
 
 #: Known-good simple stencil that builds + validates under native dace (verified on this box).
-_NATIVE_KERNEL_STEM = "heat_3d"  # directory stem; recorded under short_name "heat3d"
+_NATIVE_KERNEL_STEM = "heat_3d"  # directory stem; recorded under short_name "heat_3d"
 
 
 def _native_env(cwd: pathlib.Path) -> dict:
@@ -141,7 +141,7 @@ def _build_synthetic(db: pathlib.Path) -> None:
     rng = np.random.default_rng(0)
     engine = results_engine(str(db))
     # (kernel short_name, domain) -- real short_names so the ordering resolves them to HPC.
-    kernels = [("heat3d", "Physics"), ("jacobi2d", "Physics")]
+    kernels = [("heat_3d", "Physics"), ("jacobi_2d", "Physics")]
     # framework -> baseline runtime (ms); numpy is the slow reference.
     fw_base = {"numpy": 10.0, "dace_cpu": 4.0, "numba": 6.0}
     with Session(engine) as session:

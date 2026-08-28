@@ -22,12 +22,17 @@ def _reference_submission(kernel="gemm", language="c"):
     return Submission(language=language, source=reference_source(Task(kernel, "restricted", language)))
 
 
-def test_client_reads_task_and_baseline(make_judge):
+def test_client_reads_health_and_baseline(make_judge):
+    """The two read endpoints the client still has, and proof the third one is gone.
+
+    ``/task`` was removed with the per-language references (the signature, tolerances and goal are
+    rendered into the prompt instead), so a client that still answers ``task`` would mean the route
+    came back without the prompt being updated -- and this test kept calling it long after.
+    """
     _srv, url = make_judge(ServiceConfig(baseline="c", oracle="numpy", repeat=2))
     client = tools.JudgeClient(url)
     assert client.health()["status"] == "ok"
-    spec = client.task("gemm", "c")
-    assert spec["kernel"] == "gemm" and spec["symbol"] and spec["signature"]
+    assert not hasattr(client, "task"), "the /task route is gone; the prompt carries the spec now"
     base = client.baseline("gemm", "c", "S")
     assert base["baselines"]["c"] > 0  # baseline runs in the judge (always C here)
 

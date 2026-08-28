@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 200000000
   L:
-    LEN_1D: 456405427
+    LEN_1D: 208144136
   XL:
-    LEN_1D: 1041529568
+    LEN_1D: 216619907
 init:
   arrays:
     a: (LEN_1D,)

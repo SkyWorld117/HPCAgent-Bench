@@ -17,18 +17,22 @@ NBNXN_MIN_DISTANCE_SQUARED = 1.0e-36
 
 def _v_q_ewald_lr(beta, r):
     if r == 0.0:
-        return beta * 2.0 / math.sqrt(math.pi)
+        return beta * 2.0 / np.sqrt(np.pi)
+    # numpy has no erf and scipy is banned in a kernel, so the real-space Ewald term stays on
+    # math.erf, computed in double, and narrows once when stored into table_f below. Scalar here
+    # because the table is built point by point; vexx_k needs the same value over an array and
+    # wraps the identical stdlib call in frompyfunc.
     return math.erf(beta * r) / r
 
 
-def make_coulomb_force_table(table_size, cutoff, table_strength=0.15):
-    """Build a deterministic double-precision force table for CALC_COUL_TAB."""
+def make_coulomb_force_table(table_size, cutoff, table_strength=0.15, datatype=np.float64):
+    """Build the force table for CALC_COUL_TAB, at the run's precision."""
 
     scale = float(table_size) / float(cutoff)
     num_points = int(table_size) + 1
     beta = float(table_strength)
     dx = 1.0 / scale
-    table_f = np.zeros(num_points, dtype=np.float64)
+    table_f = np.zeros(num_points, dtype=datatype)
 
     dc = 0.0
     for i in range(num_points - 1, 0, -1):
@@ -52,13 +56,13 @@ def make_coulomb_force_table(table_size, cutoff, table_strength=0.15):
         table_f[i - 1] = -0.5 * dc
 
     table_f[0] *= 2.0
-    return table_f.astype(np.float64), scale
+    return table_f, scale
 
 
 def _cluster_grid_dimensions(n_clusters):
-    nx = int(math.ceil(n_clusters**(1.0 / 3.0)))
-    ny = int(math.ceil(math.sqrt(max(1, n_clusters / nx))))
-    nz = int(math.ceil(n_clusters / (nx * ny)))
+    nx = int(np.ceil(n_clusters**(1.0 / 3.0)))
+    ny = int(np.ceil(np.sqrt(max(1, n_clusters / nx))))
+    nz = int(np.ceil(n_clusters / (nx * ny)))
     return nx, ny, nz
 
 
@@ -236,6 +240,7 @@ def generate_random_gromacs_inputs(
     seed=0,
     table_size=2048,
     include_exclusions=True,
+    datatype=np.float64,
 ):
     """Generate deterministic inputs for the 4x4 NBNXM reference path."""
 
@@ -254,26 +259,26 @@ def generate_random_gromacs_inputs(
     n_atoms = n_clusters * UNROLLI
 
     x = _generate_clustered_coordinates(n_clusters, cutoff, rng)
-    q = rng.uniform(-0.8, 0.8, size=n_atoms).astype(np.float64)
+    q = rng.uniform(-0.8, 0.8, size=n_atoms).astype(datatype)
     atom_type = rng.integers(0, num_types, size=n_atoms, dtype=np.int32)
 
     sigma = rng.uniform(0.25, 0.45, size=num_types)
     epsilon = rng.uniform(0.05, 0.30, size=num_types)
-    c6 = np.empty((num_types, num_types), dtype=np.float64)
-    c12 = np.empty((num_types, num_types), dtype=np.float64)
+    c6 = np.empty((num_types, num_types), dtype=datatype)
+    c12 = np.empty((num_types, num_types), dtype=datatype)
     for ti in range(num_types):
         for tj in range(num_types):
             sigma_ij = 0.5 * (sigma[ti] + sigma[tj])
-            epsilon_ij = math.sqrt(float(epsilon[ti] * epsilon[tj]))
+            epsilon_ij = np.sqrt(float(epsilon[ti] * epsilon[tj]))
             c6[ti, tj] = 4.0 * epsilon_ij * sigma_ij**6
             c12[ti, tj] = 4.0 * epsilon_ij * sigma_ij**12
-    nbfp = np.stack((c6, c12), axis=2).astype(np.float64)
+    nbfp = np.stack((c6, c12), axis=2).astype(datatype)
 
-    coulomb_table_f, tab_coul_scale = make_coulomb_force_table(table_size, cutoff)
+    coulomb_table_f, tab_coul_scale = make_coulomb_force_table(table_size, cutoff, datatype=datatype)
     if not np.isfinite(coulomb_table_f).all():
         raise ValueError("generated Coulomb table contains non-finite values")
 
-    shift_vec = np.zeros((1, 3), dtype=np.float64)
+    shift_vec = np.zeros((1, 3), dtype=datatype)
 
     ci_cluster = np.arange(n_clusters, dtype=np.int32)
     ci_shift = np.zeros(n_clusters, dtype=np.int32)
@@ -321,10 +326,10 @@ def generate_random_gromacs_inputs(
             cj_exclusions.append(mask)
         ci_cj_end[ci] = len(cj_clusters)
 
-    x = np.ascontiguousarray(x, dtype=np.float64)
-    q = np.ascontiguousarray(q, dtype=np.float64)
+    x = np.ascontiguousarray(x, dtype=datatype)
+    q = np.ascontiguousarray(q, dtype=datatype)
     atom_type = np.ascontiguousarray(atom_type, dtype=np.int32)
-    nbfp = np.ascontiguousarray(nbfp, dtype=np.float64)
+    nbfp = np.ascontiguousarray(nbfp, dtype=datatype)
     ci_cluster = np.ascontiguousarray(ci_cluster, dtype=np.int32)
     ci_shift = np.ascontiguousarray(ci_shift, dtype=np.int32)
     ci_cj_start = np.ascontiguousarray(ci_cj_start, dtype=np.int32)
@@ -332,8 +337,8 @@ def generate_random_gromacs_inputs(
     ci_flags = np.ascontiguousarray(ci_flags, dtype=np.int32)
     cj_cluster = np.ascontiguousarray(cj_clusters, dtype=np.int32)
     cj_excl = np.ascontiguousarray(cj_exclusions, dtype=np.uint16)
-    shift_vec = np.ascontiguousarray(shift_vec, dtype=np.float64)
-    coulomb_table_f = np.ascontiguousarray(coulomb_table_f, dtype=np.float64)
+    shift_vec = np.ascontiguousarray(shift_vec, dtype=datatype)
+    coulomb_table_f = np.ascontiguousarray(coulomb_table_f, dtype=datatype)
     epsfac = 1.0
     rcut = float(cutoff)
     tab_coul_scale = float(tab_coul_scale)
@@ -397,9 +402,11 @@ def nbnxm_4x4_qstab_lj_force(
     tab_coul_scale,
     min_distance_squared,
 ):
-    """Run the 4x4 electrostatics/LJ NBNXM force kernel."""
-
-    return _nbnxm_4x4_qstab_lj_force_arrays(
+    """Run the 4x4 electrostatics/LJ NBNXM force kernel (allocates fresh output arrays)."""
+    n_atoms = x.shape[0]
+    f = np.zeros((n_atoms, 3), dtype=x.dtype)
+    fshift = np.zeros_like(shift_vec)
+    _nbnxm_4x4_qstab_lj_force_arrays(
         x,
         q,
         atom_type,
@@ -417,7 +424,10 @@ def nbnxm_4x4_qstab_lj_force(
         rcut,
         tab_coul_scale,
         min_distance_squared,
+        f,
+        fshift,
     )
+    return f, fshift
 
 
 def gromacs(
@@ -443,7 +453,7 @@ def gromacs(
 ):
     """Manifest-compatible entry point: writes per-atom forces (f) and per-shift virial (fshift) in place."""
 
-    f_res, fshift_res = _nbnxm_4x4_qstab_lj_force_arrays(
+    _nbnxm_4x4_qstab_lj_force_arrays(
         x,
         q,
         atom_type,
@@ -461,9 +471,9 @@ def gromacs(
         rcut,
         tab_coul_scale,
         min_distance_squared,
+        f,
+        fshift,
     )
-    f[:] = f_res
-    fshift[:] = fshift_res
 
 
 def _nbnxm_4x4_qstab_lj_force_arrays(
@@ -484,11 +494,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
     rcut,
     tab_coul_scale,
     min_distance_squared,
+    f,
+    fshift,
 ):
-    n_atoms = x.shape[0]
-    f = np.zeros((n_atoms, 3), dtype=np.float64)
-    fshift = np.zeros_like(shift_vec, dtype=np.float64)
-
     rcut2 = rcut * rcut
 
     for ci_entry in range(ci_cluster.shape[0]):
@@ -503,15 +511,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
         do_coul = (flags & CI_DO_COUL) != 0
         half_lj = ((flags & CI_HALF_LJ) != 0 or not do_lj) and do_coul
 
-        xi = np.zeros((UNROLLI, 3), dtype=np.float64)
-        fi = np.zeros((UNROLLI, 3), dtype=np.float64)
-        qi = np.zeros(UNROLLI, dtype=np.float64)
-
-        for i in range(UNROLLI):
-            ai = ci * UNROLLI + i
-            for d in range(3):
-                xi[i, d] = x[ai, d] + shift_vec[ish, d]
-            qi[i] = epsfac * q[ai]
+        xi = x[ci * UNROLLI:(ci + 1) * UNROLLI, :] + shift_vec[ish, :]
+        qi = epsfac * q[ci * UNROLLI:(ci + 1) * UNROLLI]
+        fi = np.zeros((UNROLLI, 3), dtype=x.dtype)
 
         cjind = cjind0
 
@@ -565,13 +567,9 @@ def _nbnxm_4x4_qstab_lj_force_arrays(
             )
             cjind += 1
 
+        f[ci * UNROLLI:(ci + 1) * UNROLLI, :] += fi
         for i in range(UNROLLI):
-            ai = ci * UNROLLI + i
-            for d in range(3):
-                f[ai, d] += fi[i, d]
-                fshift[ish, d] += fi[i, d]
-
-    return f, fshift
+            fshift[ish, :] += fi[i, :]
 
 
 def _inner_4x4(
@@ -596,6 +594,11 @@ def _inner_4x4(
     rcut2,
     min_distance_squared,
 ):
+    # NOTE: a fully vectorized (UNROLLI, UNROLLJ) rewrite of this tap was built and verified
+    # bit-identical (c/c++/fortran/numba/jax/dace all ok), but pythran's compile time exploded
+    # past 5+ minutes on the branchy (do_lj/do_coul/half_lj/check_exclusions) array-temporary
+    # version, against a few seconds for this scalar form -- reverted to keep pythran's existing
+    # native support intact rather than trade one backend for another.
     for i in range(UNROLLI):
         ai = ci * UNROLLI + i
         type_i = int(atom_type[ai])

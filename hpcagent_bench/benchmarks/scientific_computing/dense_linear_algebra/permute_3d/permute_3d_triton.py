@@ -1,4 +1,4 @@
-"""Triton implementation of permute3d.
+"""Triton implementation of permute_3d.
 
 The 3D axis-swap is layout-bound -- there's no arithmetic to optimise.
 We dispatch to ``torch.permute`` + ``.contiguous()`` so the underlying

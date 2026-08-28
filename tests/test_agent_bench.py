@@ -489,12 +489,13 @@ def test_score_build_failure_is_scored_not_raised():
 def test_hidden_cases_use_held_out_seed():
     from hpcagent_bench.harness.hidden_tests import hidden_cases
     from hpcagent_bench.spec import BenchSpec
+    from hpcagent_bench.harness.hidden_tests.seeds import secret_seed_first, secret_seed_second
     cases = hidden_cases(BenchSpec.load("gemm"), "S")
     assert len(cases) >= 1
-    # held-out seed differs from the public seed (no-overfit by construction)
-    from hpcagent_bench import config
-    public = int(config.get("seeds.public_tests", 42))
-    assert all(c.seed != public for c in cases)
+    # Held out from what the agent can probe: the cases run on the RECORDED seed, never on the
+    # one /score, /profile and /baseline all feed back. That gap is the overfit gate.
+    assert all(c.seed != secret_seed_first() for c in cases), "hidden cases must not reuse the iteration seed"
+    assert all(c.seed == secret_seed_second() for c in cases), "hidden cases are graded with the recorded row"
 
 
 def test_hidden_tests_firewalled():
@@ -547,6 +548,20 @@ def test_status_overfit_mapping():
     assert status_of(overfit) == "overfit"
     assert status_of(wrong) == "incorrect"
     assert status_of(good) == "ok"
+
+
+def test_status_timeout_and_harness_fault_mapping():
+    """A budget kill maps to 'timeout' and a judge-side fault to 'score_error' -- neither may
+    read as the submission's 'build_error' or 'incorrect' (the smoke's 18 guillotine kills and
+    6 dead-oracle grades were all charged to the model)."""
+    from hpcagent_bench.harness.runner import status_of
+    from hpcagent_bench.harness.scoring import Score
+    timed = Score(False, float("inf"), 0, True, "native call failed: budget", timed_out=True)
+    oracle_dead = Score(False, float("inf"), 0, False, "kernel: child exited 0 with no result", harness_fault=True)
+    judge_oom = Score(False, float("inf"), 0, True, "MemoryError", harness_fault=True)
+    assert status_of(timed) == "timeout"
+    assert status_of(oracle_dead) == "score_error"  # harness_fault beats build_ok=False
+    assert status_of(judge_oom) == "score_error"
 
 
 # --- runner + CLI -------------------------------------------------------------

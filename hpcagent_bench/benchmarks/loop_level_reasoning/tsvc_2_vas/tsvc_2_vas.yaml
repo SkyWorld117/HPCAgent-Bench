@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 31000000
   L:
-    LEN_1D: 113644035
+    LEN_1D: 53560494
   XL:
-    LEN_1D: 416611827
+    LEN_1D: 92539565
 init:
   arrays:
     a: (LEN_1D,)
@@ -18,6 +18,7 @@ init:
     ip:
       shape: (LEN_1D,)
       dtype: int32
+      index_array: true
 output_args:
 - a
 taxonomy:

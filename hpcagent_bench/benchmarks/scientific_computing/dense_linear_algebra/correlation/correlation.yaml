@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Correlation
-short_name: correlat
 kind: microkernel
 level: 2
 parameters:
@@ -39,6 +38,7 @@ array_args:
 - data
 - corr
 output_args:
+- data
 - corr
 taxonomy:
   track: scientific_computing

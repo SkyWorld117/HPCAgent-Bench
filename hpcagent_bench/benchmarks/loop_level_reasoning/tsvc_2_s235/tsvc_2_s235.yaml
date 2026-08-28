@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_2D: 64
   M:
-    LEN_2D: 10240
+    LEN_2D: 10241
   L:
-    LEN_2D: 14615
+    LEN_2D: 11083
   XL:
-    LEN_2D: 20858
+    LEN_2D: 11994
 init:
   arrays:
     a: (LEN_2D,)
@@ -24,6 +24,8 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
 loop_level_reasoning:
   source: tsvc_2
   # What vectorizing-compiler pattern this loop probes (from the original TSVC

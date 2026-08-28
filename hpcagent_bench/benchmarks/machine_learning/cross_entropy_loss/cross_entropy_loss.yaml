@@ -22,6 +22,7 @@ init:
     targets:
       shape: (batch_size,)
       dtype: int64
+      index_array: true
     out: (1,)
 output_args:
 - out

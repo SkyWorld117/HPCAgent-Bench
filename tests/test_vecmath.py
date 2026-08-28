@@ -84,16 +84,65 @@ def test_the_vecmath_header_ships_with_the_package():
     assert "envs/vecmath.h" in setup_py, "vecmath.h is not in setup.py package_data; wheels will drop it"
 
 
-def test_every_cpu_baseline_reaches_libmvec():
+#: Every CPU baseline constant, and the route by which it reaches libmvec. Enumerated so that
+#: ADDING a baseline without classifying it fails :func:`test_every_cpu_baseline_is_classified`
+#: -- checking only the two obvious ones is how pythran and flang came to build libm scalar.
+#:
+#: ``header``  the -include decl header (gcc has no -fveclib, and glibc gates its decls behind
+#:             __FAST_MATH__); accepted by clang too, which is why pythran uses it.
+#: ``flag``    -fveclib=libmvec, a clang-family driver option.
+#: ``block``   probe-gated at use, declared as a ``veclib_ref`` in compilers.yaml.
+#: ``driver``  the distro driver spec pre-includes glibc's Fortran directives -- a host property,
+#:             asserted for real by test_gfortran_vectorizes_libm_at_the_baseline.
+#: ``builtin`` the compiler ships its own vector libm (Intel SVML) and needs no knob.
+#: ``device``  device code, where libmvec (a host glibc library) does not apply at all.
+VECLIB_ROUTE = {
+    "CPU_BASELINE_GCC": "header",
+    "PYTHRAN_BASELINE": "header",
+    "CPU_BASELINE_CLANG": "flag",
+    "CPU_BASELINE_CLANG_PLUTO": "flag",
+    "FLANG_BASELINE": "block",
+    "CPU_BASELINE_GFORTRAN": "driver",
+    "CPU_BASELINE_ICPX": "builtin",
+    "CUDA_BASELINE": "device",
+    "HIP_BASELINE": "device",
+}
+
+
+def test_every_cpu_baseline_is_classified():
+    """A new CPU baseline must declare how it reaches libmvec. Without this the guard below only
+    checks the constants someone remembered to list, which is exactly how the gaps survived."""
+    declared = {name for name in vars(flags) if name.endswith("_BASELINE") or name.startswith("CPU_BASELINE_")}
+    unclassified = sorted(declared - set(VECLIB_ROUTE))
+    assert not unclassified, (f"these CPU baselines are not classified in VECLIB_ROUTE: {unclassified}. "
+                              "Say how each reaches libmvec, or that its compiler needs no knob.")
+
+
+@pytest.mark.parametrize("name", sorted(n for n, route in VECLIB_ROUTE.items() if route in ("header", "flag")))
+def test_every_cpu_baseline_reaches_libmvec(name):
     """The point of the whole file: no CPU baseline may silently lack the vector libm while another
     has it, or the compiler axis measures libmvec instead of the compiler."""
+    baseline = vars(flags)[name]
     if not osinfo.IS_LINUX:
-        # Not a skip: on macOS there is no libmvec, so the correct state is that neither knob is present.
-        assert "-fveclib" not in flags.CPU_BASELINE_CLANG
-        assert "-include" not in flags.CPU_BASELINE_GCC
+        # Not a skip: on macOS there is no libmvec, so the correct state is that no knob is present.
+        assert "-fveclib" not in baseline and "vecmath.h" not in baseline
         return
-    assert "-fveclib=libmvec" in flags.CPU_BASELINE_CLANG
-    assert "-include" in flags.CPU_BASELINE_GCC and "vecmath.h" in flags.CPU_BASELINE_GCC
+    if VECLIB_ROUTE[name] == "flag":
+        assert "-fveclib=libmvec" in baseline
+    else:
+        assert "-include" in baseline and "vecmath.h" in baseline
+
+
+@pytest.mark.parametrize("name", sorted(n for n, route in VECLIB_ROUTE.items() if route == "block"))
+def test_a_block_routed_baseline_declares_its_veclib_ref(name):
+    """A ``block``-routed baseline carries no knob in the constant, so the knob must be declared by
+    every compilers.yaml block that uses it -- otherwise the route is a comment, not a flag."""
+    users = [b for b in _load_compilers().values() if b.get("baseline_ref") == name]
+    assert users, f"{name} is classified 'block' but no compilers.yaml block names it"
+    for block in users:
+        ref = block.get("veclib_ref")
+        assert ref, f"{block['cc']} uses {name} but declares no veclib_ref"
+        assert ref in vars(flags), f"veclib_ref {ref!r} is not a constant in hpcagent_bench.flags"
 
 
 def test_the_fortran_baseline_does_not_carry_the_c_header():

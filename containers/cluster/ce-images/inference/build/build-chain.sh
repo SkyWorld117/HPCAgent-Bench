@@ -13,7 +13,7 @@
 # directory holding the verified production copies: a rebuild has different hashes (timestamps),
 # so the checked-in sha256 pins verify provenance of the ORIGINALS, not build reproducibility.
 #
-#   VLLM_BUILD_ROOT=$SCRATCH/vllm-mi300-rebuild ./build-chain.sh --account=a-g200
+#   VLLM_BUILD_ROOT=$SCRATCH/vllm-mi300-rebuild ./build-chain.sh
 #
 # Extra arguments are passed to every sbatch verbatim.
 set -euo pipefail

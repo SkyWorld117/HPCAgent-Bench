@@ -45,15 +45,21 @@ parameters:
     scaling_factor: 2.0
     width: 64
 config:
+  dilation:
+    value: 1
+  groups:
+    value: 1
+  output_padding:
+    value: 0
   stride:
     value: 1
 init:
   arrays:
     x: (batch_size, in_channels, depth, height, width)
-    conv_transpose_weight: (batch_size, height, kernel_size, kernel_size, kernel_size)
-    conv_transpose_bias: (height,)
-    bias: (padding,)
-    out: (batch_size, height, padding, height, height)
+    conv_transpose_weight: (in_channels, out_channels // groups, kernel_size, kernel_size, kernel_size)
+    conv_transpose_bias: (out_channels,)
+    bias: (1, out_channels, 1, 1, 1)
+    out: (batch_size, out_channels, 1, (height - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1, (width - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1)
   scalars:
     conv_transpose_stride: 1
     conv_transpose_padding: 1

@@ -8,9 +8,9 @@ parameters:
   M:
     LEN_1D: 220000000
   L:
-    LEN_1D: 338479324
+    LEN_1D: 239341025
   XL:
-    LEN_1D: 520764784
+    LEN_1D: 260382392
 init:
   arrays:
     a: (LEN_1D,)
@@ -20,6 +20,8 @@ output_args:
 taxonomy:
   track: loop_level_reasoning
   domain: classical compiler optimizations
+  tags:
+  - llr-focus40
 loop_level_reasoning:
   source: tsvc_2
   # What vectorizing-compiler pattern this loop probes (from the original TSVC

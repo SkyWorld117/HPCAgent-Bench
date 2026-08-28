@@ -49,7 +49,8 @@ class RunMode(str, Enum):
 
 
 class Oracle(str, Enum):
-    """Which reference grades correctness."""
+    """Which reference grades correctness. ``auto`` resolves per kernel track."""
+    AUTO = "auto"
     NUMPY = "numpy"
     C = "c"
     BOTH = "both"
@@ -113,7 +114,7 @@ class RunConfig:
     running judge's, not these fields -- only ``preset`` (and ``judge_url``) apply.
     """
     mode: RunMode = RunMode.NATIVE  # client-only: grade in-process vs against a judge
-    oracle: Oracle = Oracle.NUMPY
+    oracle: Oracle = Oracle.AUTO  # resolved per kernel track at grade time
     baseline: Optional[Baseline] = None  # None = auto-resolve per kernel track; "auto" on the wire/CLI/config
     input_mode: InputMode = InputMode.SOURCE  # server-only: what a submission may carry
     preset: str = "S"
@@ -151,7 +152,7 @@ class Kernel:
     """A handle on one kernel -- the Python-side mirror of the judge's routes.
 
     :meth:`info` (and the :attr:`reference` / :attr:`signature` / :attr:`symbol`
-    shortcuts) read the leak-free task context (``GET /task``); :meth:`baseline`
+    shortcuts) build the leak-free task context locally; :meth:`baseline`
     times the reference (``GET /baseline``); :meth:`verify` / :meth:`score` /
     :meth:`submit` grade a submission (``POST /submit``). Every call honors this
     handle's :class:`RunConfig` (native or container).
@@ -159,22 +160,14 @@ class Kernel:
     task: Task
     config: RunConfig = field(default_factory=RunConfig)
 
-    # -- read-only task context (mirrors GET /task) ---------------------------
+    # -- read-only task context (built locally, not served) -------------------
     def info(self) -> dict:
         """The leak-free task spec: ``{kernel, language, symbol, signature,
         reference, rtol, atol}`` -- the same public context the prompt is built
         from (native) or the judge returns (container)."""
-        if self.config.mode is RunMode.CONTAINER:
-            d = self._client().task(self.task.kernel, self.task.language)
-            return {
-                "kernel": d["kernel"],
-                "language": d["language"],
-                "symbol": d["symbol"],
-                "signature": d["signature"],
-                "reference": d.get("reference_numpy", ""),
-                "rtol": d["rtol"],
-                "atol": d["atol"],
-            }
+        # One path for both modes. This context is assembled LOCALLY from the manifest, so a
+        # judge round-trip only re-served what the caller could already build -- and anyone
+        # holding this class holds the harness that builds it.
         from hpcagent_bench.harness.prompts import PromptConfig, build_context
         # Explicit PromptConfig: the context is never assembled from ambient defaults.
         ctx = build_context(self.task,

@@ -117,7 +117,7 @@ def test_band_limits_are_anchored_at_the_band_edge_and_open_only_at_the_top() ->
 
 
 def test_points_carry_the_median_speedup_over_the_baseline() -> None:
-    frame = summary_for([("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 5.0)])
+    frame = summary_for([("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 5.0)])
     points: List[speedup.Point] = speedup.speedup_points(frame)
     assert len(points) == 1, "the baseline is the divisor, not a series"
     assert points[0].framework == "dace_cpu"
@@ -127,17 +127,17 @@ def test_points_carry_the_median_speedup_over_the_baseline() -> None:
 
 
 def test_a_kernel_with_no_baseline_is_dropped_and_named() -> None:
-    frame = summary_for([("heat3d", "dace_cpu", 5.0), ("jacobi2d", plotting.BASELINE, 10.0),
-                         ("jacobi2d", "dace_cpu", 20.0)])
-    with pytest.warns(UserWarning, match="heat3d@dace_cpu"):
+    frame = summary_for([("heat_3d", "dace_cpu", 5.0), ("jacobi_2d", plotting.BASELINE, 10.0),
+                         ("jacobi_2d", "dace_cpu", 20.0)])
+    with pytest.warns(UserWarning, match="heat_3d@dace_cpu"):
         points = speedup.speedup_points(frame)
-    assert [point.kernel for point in points] == ["jacobi2d"]
+    assert [point.kernel for point in points] == ["jacobi_2d"]
     assert points[0].change == pytest.approx(-1.0), "a 2x slow-down is -1, the mirror of a 2x win"
 
 
 def test_a_non_positive_median_is_dropped_not_plotted_at_zero() -> None:
-    frame = summary_for([("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 0.0)])
-    with pytest.warns(UserWarning, match="heat3d@dace_cpu"):
+    frame = summary_for([("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 0.0)])
+    with pytest.warns(UserWarning, match="heat_3d@dace_cpu"):
         assert speedup.speedup_points(frame) == []
 
 
@@ -163,30 +163,30 @@ def test_an_empty_band_is_dropped_rather_than_drawn_empty(monkeypatch: pytest.Mo
                                                           tmp_path: pathlib.Path) -> None:
     """Two kernels, one band -> ONE panel. An empty panel carries no information and its y scale
     would be invented rather than measured, so the band is dropped from the layout."""
-    frame = summary_for([("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 5.0),
-                         ("jacobi2d", plotting.BASELINE, 10.0), ("jacobi2d", "dace_cpu", 2.5)])
+    frame = summary_for([("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 5.0),
+                         ("jacobi_2d", plotting.BASELINE, 10.0), ("jacobi_2d", "dace_cpu", 2.5)])
     points = speedup.speedup_points(frame)
     assert {point.band for point in points} == {speedup.BAND_MID}
-    assert rendered_panels(monkeypatch, points, ["heat3d", "jacobi2d"], str(tmp_path / "speedup.pdf")) == 1
+    assert rendered_panels(monkeypatch, points, ["heat_3d", "jacobi_2d"], str(tmp_path / "speedup.pdf")) == 1
 
 
 def test_every_non_empty_band_gets_its_own_panel(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     """Three magnitudes -> three panels, each with its own y scale."""
-    frame = summary_for([("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 9.5),
-                         ("jacobi2d", plotting.BASELINE, 10.0), ("jacobi2d", "dace_cpu", 2.0),
+    frame = summary_for([("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 9.5),
+                         ("jacobi_2d", plotting.BASELINE, 10.0), ("jacobi_2d", "dace_cpu", 2.0),
                          ("gemm", plotting.BASELINE, 10.0), ("gemm", "dace_cpu", 0.05)])
     points = speedup.speedup_points(frame)
     assert {point.band for point in points} == {speedup.BAND_LOW, speedup.BAND_MID, speedup.BAND_HIGH}
-    assert rendered_panels(monkeypatch, points, ["gemm", "heat3d", "jacobi2d"], str(tmp_path / "speedup.pdf")) == 3
+    assert rendered_panels(monkeypatch, points, ["gemm", "heat_3d", "jacobi_2d"], str(tmp_path / "speedup.pdf")) == 3
 
 
 def test_the_simplified_figure_shows_the_band_with_the_most_points(tmp_path: pathlib.Path) -> None:
-    frame = summary_for([("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 5.0),
-                         ("jacobi2d", plotting.BASELINE, 10.0), ("jacobi2d", "dace_cpu", 2.5),
+    frame = summary_for([("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 5.0),
+                         ("jacobi_2d", plotting.BASELINE, 10.0), ("jacobi_2d", "dace_cpu", 2.5),
                          ("gemm", plotting.BASELINE, 10.0), ("gemm", "dace_cpu", 9.5)])
     points = speedup.speedup_points(frame)
     assert speedup.dominant_band(points) == speedup.BAND_MID
-    out = speedup.simple_figure(points, ["gemm", "heat3d", "jacobi2d"], str(tmp_path / "speedup-simple.svg"))
+    out = speedup.simple_figure(points, ["gemm", "heat_3d", "jacobi_2d"], str(tmp_path / "speedup-simple.svg"))
     blob = pathlib.Path(out).read_bytes()
     assert blob.lstrip().startswith(b"<?xml"), "the simplified variant must be a real SVG"
     assert b"<svg" in blob
@@ -244,7 +244,7 @@ def baseline_only_db(path: pathlib.Path) -> None:
         for value in (10.0, 10.5, 9.5):
             session.add(
                 Result(timestamp=0,
-                       benchmark="heat3d",
+                       benchmark="heat_3d",
                        domain="Physics",
                        preset="S",
                        framework=plotting.BASELINE,
@@ -311,7 +311,7 @@ def test_a_cell_whose_baseline_is_unusable_yields_no_samples() -> None:
 def test_points_carry_their_repetitions_only_when_asked() -> None:
     """``speedup_points`` must not change the POSITIONS it computes by being asked for spread --
     the median and the band come from the summary either way, and only ``samples`` is added."""
-    cells = [("heat3d", plotting.BASELINE, 10.0), ("heat3d", "dace_cpu", 5.0)]
+    cells = [("heat_3d", plotting.BASELINE, 10.0), ("heat_3d", "dace_cpu", 5.0)]
     rows = pd.DataFrame(
         [dict(benchmark=k, domain="Physics", framework=f, time=t) for k, f, ms in cells for t in [ms] * 5])
     frame = plotting.cell_summary(rows)
@@ -329,12 +329,12 @@ def test_a_thinly_sampled_cell_keeps_its_marker_instead_of_faking_quartiles(tmp_
     figure's population, which is the worse of the two errors."""
     import matplotlib.pyplot as plt
 
-    thin = speedup.Point("heat3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1))
-    fat = speedup.Point("jacobi2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, tuple([1.0] * speedup.MIN_BOX_SAMPLES))
+    thin = speedup.Point("heat_3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1))
+    fat = speedup.Point("jacobi_2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, tuple([1.0] * speedup.MIN_BOX_SAMPLES))
     fig, ax = plt.subplots()
-    left = speedup.draw_boxes(ax, [thin, fat], {"heat3d": 0, "jacobi2d": 1}, {"dace_cpu": "#1f77b4"})
+    left = speedup.draw_boxes(ax, [thin, fat], {"heat_3d": 0, "jacobi_2d": 1}, {"dace_cpu": "#1f77b4"})
     plt.close(fig)
-    assert [point.kernel for point in left] == ["heat3d"], "the thin cell must fall back to a marker"
+    assert [point.kernel for point in left] == ["heat_3d"], "the thin cell must fall back to a marker"
 
 
 def test_every_cell_is_drawn_exactly_once_whichever_way_it_is_drawn(tmp_path: pathlib.Path) -> None:
@@ -342,11 +342,11 @@ def test_every_cell_is_drawn_exactly_once_whichever_way_it_is_drawn(tmp_path: pa
     import matplotlib.pyplot as plt
 
     points = [
-        speedup.Point("heat3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1)),
-        speedup.Point("jacobi2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.0, 1.1, 1.2, 1.05)),
+        speedup.Point("heat_3d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.1)),
+        speedup.Point("jacobi_2d", "dace_cpu", 2.0, 1.0, speedup.BAND_MID, (0.9, 1.0, 1.1, 1.2, 1.05)),
     ]
     fig, ax = plt.subplots()
-    speedup.draw_band(ax, speedup.BAND_MID, points, {"heat3d": 0, "jacobi2d": 1}, {"dace_cpu": "#1f77b4"}, boxes=True)
+    speedup.draw_band(ax, speedup.BAND_MID, points, {"heat_3d": 0, "jacobi_2d": 1}, {"dace_cpu": "#1f77b4"}, boxes=True)
     markers = [line for line in ax.get_lines() if line.get_marker() == "o"]
     drawn = sum(len(line.get_xdata()) for line in markers)
     plt.close(fig)

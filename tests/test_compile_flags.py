@@ -196,6 +196,22 @@ def fake_path(tmp_path, monkeypatch):
     languages.resolve_compiler.cache_clear()
 
 
+def test_a_driver_below_its_floor_is_not_resolved(fake_path):
+    """A too-old driver must MISS, not be handed a flag its release cannot parse.
+
+    Each floor in COMPILER_MIN_MAJOR is a flag the block pins: gcc 14 for -std=c23 (gcc-13 answers
+    "did you mean '-std=c2x'?"), flang 20 for -fdo-concurrent-to-openmp=host. Resolving one of
+    these would not degrade gracefully -- it fails EVERY build in that language, so the driver has
+    to fall through to a versioned sibling or to nothing at all.
+    """
+    for name, floor in (("gcc", 14), ("flang", 20)):
+        make_fake_driver(fake_path, f"{name}-{floor - 1}")
+        languages.resolve_compiler.cache_clear()
+        assert languages.resolve_compiler(name) is None, (
+            f"{name}-{floor - 1} resolved despite a floor of {floor}; it cannot build what the "
+            f"compilers.yaml block pins")
+
+
 def test_resolve_compiler_prefers_the_highest_version_numerically(fake_path):
     """A lexical sort picks ``zzc-9`` and silently pins the suite to an ancient toolchain."""
     for name in ("zzc-9", "zzc-14", "zzc-21"):
@@ -211,9 +227,14 @@ def test_resolve_compiler_prefers_the_unversioned_driver(fake_path):
 
 
 def test_resolve_compiler_follows_the_flang_rename(fake_path):
-    """LLVM renamed ``flang-new`` to ``flang``; either spelling must find what is installed."""
-    make_fake_driver(fake_path, "flang-new-18")
-    assert languages.resolve_compiler("flang") == str(fake_path / "flang-new-18")
+    """LLVM renamed ``flang-new`` to ``flang``; either spelling must find what is installed.
+
+    The 22 is load-bearing: flang carries a COMPILER_MIN_MAJOR of 20 (the release that
+    added -fdo-concurrent-to-openmp=host, which every graded Fortran build now passes), so a
+    fixture below it would be rejected for the version and prove nothing about the rename.
+    """
+    make_fake_driver(fake_path, "flang-new-22")
+    assert languages.resolve_compiler("flang") == str(fake_path / "flang-new-22")
 
 
 def test_resolve_compiler_reports_a_genuinely_absent_driver(fake_path):

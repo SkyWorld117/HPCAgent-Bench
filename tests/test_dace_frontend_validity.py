@@ -20,8 +20,9 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 import pytest
 
@@ -30,39 +31,51 @@ BENCHMARKS = REPO / "hpcagent_bench" / "benchmarks"
 
 #: Seconds one kernel's PARSE may take before it counts as a hang. Generous next to the ~2 s a
 #: kernel actually takes: the budget is here to bound a wedged frontend, not to time anything.
-#: 360 not 180: mobilenet_v2 legitimately parses in 171 s on an idle box, so 180 flipped it to
-#: ``timeout`` whenever a hang co-scheduled with it (measured twice locally, seen on CI runners
-#: since 2026-08-08). The slowest legit parse must clear the budget WITH contention margin.
-PARSE_TIMEOUT_S = 360.0
+#: The slowest legit parse must clear the budget WITH contention margin, because a timeout on an
+#: UNLISTED kernel is reported as a regression -- the ratchet cannot tell a slow parse from a
+#: refusal, so too tight a budget makes this gate fail for reasons the corpus did not cause.
+#: 900 not 360: shufflenet parses in 338 s under this sweep's own two-worker contention and
+#: mobilenet_v2 in 180 s idle but past 360 s contended (both measured 2026-08-21), so 360 left
+#: shufflenet 22 s of margin and flipped mobilenet_v2 on a loaded runner. 900 is ~2.7x the
+#: slowest legit parse. The cost is bounded and small: only the three ``hang`` entries ever spend
+#: the full budget, 22 min of pure timeout across two workers against the CI step's 75.
+PARSE_TIMEOUT_S = 900.0
 
 #: How many kernels are in flight at once. The sweep is a SUBPROCESS per program already, so this
-#: changes no verdict and no per-kernel budget -- it only stops the five ``hang`` entries, at
-#: :data:`PARSE_TIMEOUT_S` each, from serialising 15 minutes of pure timeout ahead of the 620
+#: changes no verdict and no per-kernel budget -- it only stops the three ``hang`` entries, at
+#: :data:`PARSE_TIMEOUT_S` each, from serialising 45 minutes of pure timeout ahead of the 620
 #: kernels that take ~2 s. Measured on the whole corpus 2026-08-08: 45 min serial against 20 min at
 #: two workers, which is the difference between fitting the CI step's budget and not. Two, not
 #: ``auto``: a parse of the deep vision nets is memory-bound in sympy, not core-bound.
 PARSE_WORKERS = 2
+
+#: Reasons that are a WALL-CLOCK verdict rather than a frontend refusal. A faster runner, or one
+#: under less load, finishes such a kernel inside :data:`PARSE_TIMEOUT_S` and reports ``ok`` without
+#: anything having been fixed. They are therefore exempt from the SHRINK direction of the ratchet
+#: below -- an entry named here may parse without failing the test, and comes off the list by hand
+#: once the generator makes it reliably fast. Every other reason still must come off the moment it
+#: parses, which is what keeps the list measuring.
+TIMEOUT_REASONS = frozenset({"hang"})
 
 #: Kernels whose generated DaCe program the frontend does not accept today, with the cause. Shrink
 #: this list by fixing the GENERATOR (a desugar in ``dace_emit``) or by fixing DaCe -- never by
 #: hand-editing a ``*_dace.py``, which is regenerated from the numpy reference on the next miss.
 #: Keyed on the kernel directory's PATH under ``benchmarks/`` -- see :func:`kernel_of`.
 #:
-#: The causes on the list below, one process per kernel (153 of 626):
-#:   broadcast     109 -- two extents that ARE one quantity reach a write spelled differently, and
+#: The causes on the list below, one process per kernel (142 of 626):
+#:   broadcast     108 -- two extents that ARE one quantity reach a write spelled differently, and
 #:                        the frontend re-promotes each to a fresh symbol it cannot prove equal
 #:   misc            7 -- one-offs: negative strides, a symbolic ``np.arange`` stop, ``np.ix_``, a
 #:                        memlet dimensionality, a ZeroDivisionError, an unimplemented replacement
 #:   symbol_data     6 -- a scalar used BOTH as data and as a shape symbol ("Cannot create symbol
 #:                        X, the name is used by a data descriptor")
 #:   undefined       6 -- a name the frontend cannot resolve in the emitted scope
-#:   callback        5 -- an untyped callback return value
-#:   reassign        5 -- a second assignment to an array/View name the frontend treats as
-#:                        single-assignment
-#:   keyerror        4 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns
 #:   hang            3 -- the frontend does not finish parsing inside the budget; the deep vision
 #:                        nets spend it in sympy over per-layer extent expressions
 #:   matmul          2 -- ``numpy.matmul`` has no SDFG implementation registered (``np.dot`` does)
+#:   reassign        2 -- a second assignment to an array/View name the frontend treats as
+#:                        single-assignment
+#:   keyerror        2 -- a DaCe-internal ``KeyError`` naming a symbol the program reassigns
 #:   symbolic_or     2 -- ``if dim == 0 or dim == -2`` over symbols
 #:   clip_syntax     1 -- the emitted clip tasklet is not valid Python
 #:   keepdims        1 -- ``keepdims=`` on a reduction whose replacement does not take it
@@ -81,7 +94,6 @@ REFUSED: Dict[str, str] = {
     "machine_learning/conv2d_avg_pool_sigmoid_sum": "broadcast",
     "machine_learning/conv2d_batch_norm_scaling": "broadcast",
     "machine_learning/conv2d_divide_leaky_relu": "broadcast",
-    "machine_learning/conv2d_gelu_global_avg_pool": "broadcast",
     "machine_learning/conv2d_group_norm_scale_max_pool_clamp": "broadcast",
     "machine_learning/conv2d_group_norm_tanh_hardswish_residual_add_logsumexp": "broadcast",
     "machine_learning/conv2d_hardswish_relu": "broadcast",
@@ -171,9 +183,7 @@ REFUSED: Dict[str, str] = {
     "machine_learning/convolutional_vision_transformer": "reassign",
     "machine_learning/cumsum_exclusive": "symbolic_or",
     "machine_learning/cumsum_reverse": "symbolic_or",
-    "machine_learning/densenet121": "reassign",
     "machine_learning/densenet121_transition_layer": "broadcast",
-    "machine_learning/densenet201": "reassign",
     "machine_learning/efficientnet_mb_conv": "broadcast",
     "machine_learning/gemm_bias_add_hardtanh_mish_group_norm": "clip_syntax",
     "machine_learning/gemm_group_norm_hardtanh": "symbol_data",
@@ -186,8 +196,6 @@ REFUSED: Dict[str, str] = {
     "machine_learning/kl_div_loss": "undefined",
     "machine_learning/lenet": "broadcast",
     "machine_learning/lstm_bidirectional": "broadcast",
-    "machine_learning/mamba2_return_final_state": "callback",
-    "machine_learning/mamba2_return_y": "callback",
     "machine_learning/matmul_avg_pool_gelu_scale_max": "where_scalars",
     "machine_learning/matmul_group_norm_leaky_relu_sum": "symbol_data",
     "machine_learning/matmul_max_pool_sum_scale": "keepdims",
@@ -214,18 +222,12 @@ REFUSED: Dict[str, str] = {
     "scientific_computing/sparse_linear_algebra/minres": "undefined",
     "scientific_computing/sparse_linear_algebra/spmm": "undefined",
     "scientific_computing/spectral_methods/cegterg": "keyerror",
-    "scientific_computing/spectral_methods/chebyshev_filter_subspace": "callback",
     "scientific_computing/spectral_methods/daubechies_dwt2d": "broadcast",
     "scientific_computing/spectral_methods/dwt2d": "broadcast",
     "scientific_computing/spectral_methods/ls3df_scf": "keyerror",
     "scientific_computing/spectral_methods/vexx": "broadcast",
     "scientific_computing/structured_grids/cloudsc": "hang",
-    "scientific_computing/structured_grids/laplacian_stencil_3d": "callback",
-    "scientific_computing/structured_grids/max_filter": "keyerror",
-    "scientific_computing/structured_grids/poisson_cg_3d": "callback",
-    "scientific_computing/structured_grids/vadv": "keyerror",
     "scientific_computing/unstructured_grids/lulesh": "reassign",
-    "scientific_computing/unstructured_grids/velocity_tendencies": "reassign",
 }
 
 
@@ -255,14 +257,20 @@ def parse_one(path: pathlib.Path) -> dict:
     -- are exactly the ones an in-process loop cannot survive to report.
     """
     argv = [sys.executable, "-m", "tests.dace_parse_probe", str(path)]
+    started = time.monotonic()
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(REPO), timeout=PARSE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return {"verdict": "timeout", "error": f"the frontend did not finish parsing in {PARSE_TIMEOUT_S:.0f}s"}
+        return {
+            "verdict": "timeout",
+            "error": f"the frontend did not finish parsing in {PARSE_TIMEOUT_S:.0f}s",
+            "seconds": time.monotonic() - started,
+        }
+    elapsed = time.monotonic() - started
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith("{"):
-            return json.loads(line)
-    return {"verdict": "crash", "error": (proc.stderr or proc.stdout)[-400:]}
+            return dict(json.loads(line), seconds=elapsed)
+    return {"verdict": "crash", "error": (proc.stderr or proc.stdout)[-400:], "seconds": elapsed}
 
 
 def kernel_of(path: pathlib.Path) -> str:
@@ -273,6 +281,23 @@ def kernel_of(path: pathlib.Path) -> str:
     each directory holds exactly one generated program, so it is a key per program.
     """
     return path.parent.relative_to(BENCHMARKS).as_posix()
+
+
+def ratchet_findings(items: Iterable[Tuple[str, dict]]) -> Tuple[List[str], Set[str]]:
+    """Split ``(kernel, verdict)`` pairs into the two ways the list can be wrong.
+
+    ``regressions`` are refusals nothing excuses; ``fixed`` are entries that parse and must come
+    off. A :data:`TIMEOUT_REASONS` entry never lands in ``fixed`` -- see the ratchet's docstring.
+    """
+    regressions: List[str] = []
+    fixed: Set[str] = set()
+    for kernel, verdict in items:
+        if verdict["verdict"] == "ok":
+            if kernel in REFUSED and REFUSED[kernel] not in TIMEOUT_REASONS:
+                fixed.add(kernel)
+        elif kernel not in REFUSED:
+            regressions.append(f"{kernel}: {verdict['verdict']}: {verdict.get('error', '')[:200]}")
+    return regressions, fixed
 
 
 @pytest.mark.dace_frontend
@@ -288,21 +313,65 @@ def test_the_refusal_list_names_kernels_that_exist() -> None:
 @pytest.mark.dace_frontend
 def test_every_generated_dace_program_parses_or_is_a_known_refusal() -> None:
     """The ratchet. A NEW refusal fails; a refusal that started parsing fails too, so the list can
-    only shrink, and it shrinks by fixing the generator."""
+    only shrink, and it shrinks by fixing the generator. Exception: a :data:`TIMEOUT_REASONS` entry
+    that parsed is runner speed, not a fix, so it does not fail the shrink direction."""
     programs = generated_programs()
     assert programs, "no generated DaCe programs found -- the glob or the corpus moved"
-    regressions: List[str] = []
-    fixed: Set[str] = set()
     with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as pool:
         verdicts = list(pool.map(parse_one, programs))
-    for path, verdict in zip(programs, verdicts):
-        kernel = kernel_of(path)
-        if verdict["verdict"] == "ok":
-            if kernel in REFUSED:
-                fixed.add(kernel)
-        elif kernel not in REFUSED:
-            regressions.append(f"{kernel}: {verdict['verdict']}: {verdict.get('error', '')[:200]}")
+    regressions, fixed = ratchet_findings((kernel_of(p), v) for p, v in zip(programs, verdicts))
+    # A timeout alone cannot tell a wedged frontend from a runner slower than the box the budget was
+    # measured on. The MEDIAN is what separates them: a uniformly slower runner moves it, and a
+    # kernel that alone went from 24 s to 274 s (esirkepov_deposition, CI 2026-08-17, while
+    # mobilenet_v2 came in FASTER than its local number) does not.
+    scale = ""
+    if any(": timeout:" in r for r in regressions):
+        times = sorted((v.get("seconds", 0.0) for v in verdicts if v["verdict"] == "ok"), reverse=True)
+        slowest = sorted(
+            ((v.get("seconds", 0.0), kernel_of(p)) for p, v in zip(programs, verdicts) if v["verdict"] == "ok"),
+            reverse=True)[:10]
+        median = times[len(times) // 2] if times else 0.0
+        scale = (f"\n{len(times)} parses finished, median {median:.1f}s, total {sum(times):.0f}s "
+                 f"(budget {PARSE_TIMEOUT_S:.0f}s, {PARSE_WORKERS} workers)\nslowest: " +
+                 ", ".join(f"{k} {s:.0f}s" for s, k in slowest))
     assert not regressions, ("the DaCe frontend refuses generated programs that used to parse:\n  " +
-                             "\n  ".join(sorted(regressions)))
+                             "\n  ".join(sorted(regressions)) + scale)
     assert not fixed, (f"these parse now and must come OFF the REFUSED list: {sorted(fixed)}. "
-                       "A list that keeps a fixed entry stops measuring the next regression.")
+                       "A list that keeps a fixed entry stops measuring the next regression. "
+                       f"(Reasons in {sorted(TIMEOUT_REASONS)} are exempt -- a parse that finished "
+                       "only says the runner was fast enough.)")
+
+
+@pytest.mark.dace_frontend
+def test_a_timeout_class_refusal_that_parsed_does_not_have_to_come_off_the_list() -> None:
+    """``hang`` is a wall-clock verdict. A runner fast enough to finish one inside the budget has
+    fixed nothing, so the shrink direction must not fire -- otherwise the ratchet goes red and
+    green with runner load, and a red that means nothing gets ignored when it means something."""
+    hung = sorted(k for k, why in REFUSED.items() if why in TIMEOUT_REASONS)
+    assert hung, "no TIMEOUT_REASONS entry left in REFUSED -- drop this test with the last one"
+    regressions, fixed = ratchet_findings((k, {"verdict": "ok"}) for k in hung)
+    assert not fixed
+    assert not regressions
+
+
+@pytest.mark.dace_frontend
+def test_a_real_refusal_that_parsed_must_come_off_the_list() -> None:
+    """The other side of the exemption: everything that is not a wall-clock verdict still shrinks
+    the moment it parses. A blanket exemption would stop the list measuring anything."""
+    real = sorted(k for k, why in REFUSED.items() if why not in TIMEOUT_REASONS)
+    assert real, "REFUSED holds nothing but timeouts -- the ratchet has no shrink direction left"
+    _, fixed = ratchet_findings((k, {"verdict": "ok"}) for k in real)
+    assert fixed == set(real)
+
+
+@pytest.mark.dace_frontend
+def test_an_unexcused_refusal_is_a_regression_whatever_the_verdict() -> None:
+    """A kernel off the list may not fail, and the verdict and error text reach the message: a
+    regression report naming only the kernel sends the reader back to the CI log to learn what
+    broke."""
+    regressions, fixed = ratchet_findings([("scientific_computing/brand_new", {
+        "verdict": "timeout",
+        "error": "the frontend did not finish parsing in 360s",
+    })])
+    assert not fixed
+    assert regressions == ["scientific_computing/brand_new: timeout: the frontend did not finish parsing in 360s"]

@@ -222,8 +222,9 @@ def test_harbor_grade_scores_the_reference_as_solved(tmp_path):
     src = reference_source(Task("tsvc_2_s212", "restricted", "c"))
     reward = harbor_grade.grade("tsvc_2_s212", "c", source=src, k=1, repeat=2)
     assert reward["solved"] is True
-    # Foundation defaults to auto-parallel C; without the clang+Polly toolchain it falls back to numpy.
-    assert reward["reward"] >= 1.0 and reward["baseline"] in (Baseline.C_AUTOPAR, Baseline.NUMPY)
+    # loop_level_reasoning times against the SERIAL C reference: numpy cannot run on this track, and
+    # c-autopar would race the candidate's own parallelisation to ~1.0.
+    assert reward["reward"] >= 1.0 and reward["baseline"] == Baseline.C
     assert reward["gsd"] >= 1.0 and isinstance(reward["iterations"], list)
 
 
@@ -374,8 +375,7 @@ def test_harbor_noop_agent_scores_tsvc_reference_as_solved_1x(tmp_path):
     ])
     assert rc == 0
     reward = json.loads(reward_file.read_text())
-    # Foundation defaults to auto-parallel C; without the clang+Polly toolchain it falls back to numpy.
-    assert reward["solved"] is True and reward["baseline"] in (Baseline.C_AUTOPAR, Baseline.NUMPY)
+    assert reward["solved"] is True and reward["baseline"] == Baseline.C  # serial C, per the track default
     assert 1.0 <= reward["reward"] < 2.0  # reference == baseline -> clamped/gsd-gated to ~1x
 
 
@@ -416,8 +416,8 @@ def test_distributed_test_sh_passes_loadable_kernel_and_distribution(tmp_path):
     """The verifier gets the loadable kernel stem, each artifact's --distribution, and --residency."""
     td = A.generate(str(tmp_path), selector="jacobi_2d", residency="distributed")[0]
     sh = (td / "tests" / "test.sh").read_text()
-    assert "--kernel jacobi_2d" in sh  # the BenchSpec.load-able stem, NOT the short_name jacobi2d
-    assert "--distribution /app/jacobi2d/distribution.json" in sh
+    assert "--kernel jacobi_2d" in sh  # the BenchSpec.load-able stem, NOT the short_name jacobi_2d
+    assert "--distribution /app/jacobi_2d/distribution.json" in sh
     assert "--residency distributed" in sh and "--baseline numpy" in sh
 
 
@@ -431,8 +431,8 @@ def test_distributed_instruction_references_files_and_mpi_contract(tmp_path):
     td = A.generate(str(tmp_path), selector="jacobi_2d", residency="distributed")[0]
     instr = (td / "instruction.md").read_text()
     assert "distributed MPI" in instr and "SPMD" in instr
-    assert "/app/jacobi2d/reference.py" in instr and "/app/jacobi2d/submission.c" in instr
-    assert "/app/jacobi2d/distribution.json" in instr
+    assert "/app/jacobi_2d/reference.py" in instr and "/app/jacobi_2d/submission.c" in instr
+    assert "/app/jacobi_2d/distribution.json" in instr
     assert mpi_symbol(binding_from_spec(spec)) in instr  # the Sec. 12 symbol to implement
     assert row.numpy_reference and row.numpy_reference not in instr  # leak-free (not inlined)
 
@@ -448,7 +448,7 @@ def test_distributed_task_toml_validates_against_real_harbor_model(tmp_path):
     assert cfg.metadata["residency"] == "distributed" and cfg.metadata["ranks"] == "4"
     assert cfg.metadata["baseline"] == "numpy"
     srcs = {a.source for a in cfg.artifacts}
-    assert "/app/jacobi2d/submission.c" in srcs and "/app/jacobi2d/distribution.json" in srcs
+    assert "/app/jacobi_2d/submission.c" in srcs and "/app/jacobi_2d/distribution.json" in srcs
 
 
 def test_distributed_generation_skips_non_mpi_kernels(tmp_path, capsys):

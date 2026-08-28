@@ -7,16 +7,16 @@ level: 2
 parameters:
   S:
     N: 16
-    niter: 40
+    niter: 25
   M:
     N: 128
-    niter: 50
+    niter: 25
   L:
     N: 286
-    niter: 50
+    niter: 25
   XL:
     N: 640
-    niter: 50
+    niter: 25
   fuzzed:
     N: [12, 200]
     niter: [10, 80]

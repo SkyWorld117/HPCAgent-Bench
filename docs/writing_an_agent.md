@@ -24,7 +24,7 @@ The fastest path: grade your own code in-process, using the pip-installed toolch
 ```python
 import hpcagent_bench
 
-k = hpcagent_bench.init("gemm", language="c")   # a handle on the kernel (mirrors GET /task/<kernel>)
+k = hpcagent_bench.init("gemm", language="c")   # a handle on the kernel (context built locally)
 print(k.reference)                         # the NumPy semantics you must reproduce
 print(k.signature)                         # the exact C-ABI to implement (symbol: gemm_fp64)
 print(k.baseline())                        # the reference time(s) to beat
@@ -121,7 +121,7 @@ hpcagent-bench prompt gemm --service --judge-url http://judge:8800 --judge-rank 
 scripts/run_agent_in_container.sh cpu -- <your-agent> --kernels gemm
 ```
 
-The agent reads `GET /task/<kernel>` + `/baseline/<kernel>` (the kernel is in the path -- one
+The agent reads `GET /baseline/<kernel>` (the kernel is in the path -- one
 judge serves many kernels), then iterates `POST /score` (public inputs only, never recorded) and
 finalizes with `POST /submit`, the terminal, recorded grade over public **and** hidden inputs
 (`POST /oracle` is a historical alias for `/submit`) -- over `curl` or the

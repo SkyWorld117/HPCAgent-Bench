@@ -9,9 +9,9 @@ parameters:
   M:
     N: 512
   L:
-    N: 724
+    N: 572
   XL:
-    N: 1023
+    N: 638
   fuzzed:
     N: [12, 320]
 init:

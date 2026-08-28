@@ -1,6 +1,5 @@
 # HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
 name: Azimuthal Integration - Naive
-short_name: azimnaiv
 kind: microapp
 level: 3
 parameters:

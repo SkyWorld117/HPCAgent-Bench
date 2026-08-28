@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_1D: 512
   M:
-    LEN_1D: 268435456
+    LEN_1D: 22567243
   L:
-    LEN_1D: 528756527
+    LEN_1D: 71330217
   XL:
-    LEN_1D: 1041529568
+    LEN_1D: 225459524
 config:
   K:
     value: 1

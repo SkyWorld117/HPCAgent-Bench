@@ -137,7 +137,7 @@ same span read 73.4% ("the device is saturated"), and kernel time over the untra
 1.2% ("the kernel is a rounding error"). All three are correct arithmetic answering different
 questions, 15x apart, straddling the threshold you were about to apply.
 
-## The copies -- the single most common finding
+## The copies
 
 `cuda_gpu_mem_time_sum` (how long) and `cuda_gpu_mem_size_sum` (how much) are separate reports,
 joined here per operation into `memory[]`: `direction` (`h2d`, `d2h`, `d2d`, `memset`, `other`),

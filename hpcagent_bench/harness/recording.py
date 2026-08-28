@@ -94,6 +94,28 @@ CREATE TABLE IF NOT EXISTS completions (
 );
 """
 
+#: The graded SOURCE, content-addressed beside the prompts and completions. Without it a campaign
+#: is not reproducible: a ``submissions`` row says a kernel scored 3.4x and the bytes that did it
+#: live only in the agent's run directory, which is on a purging scratch filesystem. Stored for
+#: EVERY grade, pass or fail, because the failures are what a post-hoc triage has to read.
+#:
+#: A row log keyed like ``completions``, not a column on ``submissions``/``attempts``: this schema
+#: is never ALTERed (see :func:`_ensure_schema`), so a new table is additive on an existing DB
+#: while a new column would silently not appear. It joins to either table on
+#: ``(run_id, benchmark, ts)`` -- the same stamp :func:`prepare_row` puts on both.
+_SOURCES_DDL = """
+CREATE TABLE IF NOT EXISTS sources (
+    id        INTEGER PRIMARY KEY,
+    hash      TEXT NOT NULL,               -- sha256 hex of the source bytes == file name
+    run_id    TEXT NOT NULL,
+    ts        INTEGER NOT NULL,            -- epoch ms (UTC); == the graded row's ts (the join key)
+    benchmark TEXT NOT NULL,
+    language  TEXT,                        -- what the agent actually DELIVERED
+    n_bytes   INTEGER NOT NULL,
+    path      TEXT NOT NULL                -- source file, RELATIVE to the store root (portable)
+);
+"""
+
 #: One row per INDEPENDENTLY-VERIFIED-correct submission (the leaderboard). A row
 #: existing already MEANS it passed build + correct (public+hidden) + the
 #: independent re-verify, so the per-row verification flags are redundant and not
@@ -189,9 +211,37 @@ CREATE TABLE IF NOT EXISTS calls (
     cpu         TEXT,
     commit_sha  TEXT,
     prompt_hash TEXT,                        -- -> prompts(hash) / the stored prompt file
-    execution   TEXT                         -- native | container (where the runtime was measured)
+    execution   TEXT,                        -- native | container (where the runtime was measured)
+    -- WHY this grade came out the way it did: the compiler log for a build_error, the mismatch
+    -- for an incorrect. The text exists at grade time and the agent is shown all of it
+    -- (harness.runner._feedback); recording it is what makes a campaign's failures classifiable
+    -- afterwards. Capped like attempts.detail -- a wall of linker output is not worth a database.
+    detail      TEXT
 );
 """
+
+#: Longest failure text stored per row (``attempts.detail``, ``calls.detail``). Enough to carry
+#: the first compiler diagnostics, which is what a failure is classified by; the agent is shown the
+#: whole log regardless (``harness.runner._feedback``), so nothing it needs depends on this cap.
+DETAIL_CAP = 2000
+#: Share of the cap kept from the FRONT. A compiler log is classified by its first diagnostics, but
+#: a python traceback names its exception on the LAST line -- head-only truncation threw away the
+#: one line that identified a judge-side failure (an ArrayMemoryError read as a wrong answer).
+DETAIL_HEAD_FRACTION = 0.7
+
+
+def cap_detail(text: str, cap: int = DETAIL_CAP) -> str:
+    """Trim ``text`` to ``cap`` keeping BOTH ends, so neither the first diagnostic nor the final
+    exception line is lost. Returns the text unchanged when it already fits."""
+    text = text or ""
+    if len(text) <= cap:
+        return text
+    marker = "\n[... %d characters elided ...]\n"
+    head = int(cap * DETAIL_HEAD_FRACTION)
+    tail = cap - head
+    elided = len(text) - head - tail
+    return text[:head] + (marker % elided) + text[-tail:]
+
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_sub_bench ON submissions(benchmark, preset, datatype)",
@@ -205,6 +255,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_calls_prompt ON calls(prompt_hash)",
     # the replay lookup: every reply of one run on one kernel, in round order
     "CREATE INDEX IF NOT EXISTS ix_compl_run ON completions(run_id, benchmark, round)",
+    # the reproducibility lookup: the source behind one graded row
+    "CREATE INDEX IF NOT EXISTS ix_sources_row ON sources(run_id, benchmark, ts)",
 )
 
 #: Rank-identity variables a launcher exports, in preference order. ``HPCAGENT_BENCH_DB_SHARD`` is
@@ -429,6 +481,29 @@ def store_prompt(conn: sqlite3.Connection,
     return digest
 
 
+def store_source(conn: sqlite3.Connection,
+                 source: str,
+                 benchmark: str,
+                 *,
+                 run_id: str,
+                 ts: int,
+                 language: Optional[str] = None,
+                 store_dir: Optional[str] = None) -> str:
+    """Log the source bytes behind one graded row; return their hash.
+
+    Shares the prompt store rather than owning one: the name is a sha256, so the three kinds of
+    blob cannot collide, and the existing shard merge (:func:`_merge_prompt_store`) already carries
+    them. Rows are appended, never deduped -- two kernels graded on identical text are two grades --
+    but the FILE dedups, so an agent resubmitting a near-identical body costs one row, not one copy.
+    """
+    digest, rel, data = store_blob(source, store_dir)
+    conn.execute(
+        """INSERT INTO sources(hash, run_id, ts, benchmark, language, n_bytes, path)
+           VALUES (?,?,?,?,?,?,?)""", (digest, run_id, int(ts), benchmark, language, len(data), rel))
+    conn.commit()
+    return digest
+
+
 def connect(path: Optional[str] = None) -> sqlite3.Connection:
     """Open the results DB: a 30 s busy timeout (the judge service is threaded, so
     concurrent ``/submit`` writers must not lose a row to ``SQLITE_BUSY``), WAL so
@@ -451,6 +526,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     cur.execute(_BENCHMARKS_DDL)
     cur.execute(_PROMPTS_DDL)
     cur.execute(_COMPLETIONS_DDL)
+    cur.execute(_SOURCES_DDL)
     cur.execute(_SUBMISSIONS_DDL)
     cur.execute(_ATTEMPTS_DDL)
     cur.execute(_CALLS_DDL)
@@ -705,6 +781,16 @@ def record(score: Score,
         spec, ts, cpu, sha, execution, prompt_hash = prepare_row(conn, task, prompt, prompt_hash, variant, language,
                                                                  source_mode, path)
 
+        # Before the verdict branches, so an UNGRADEABLE body is kept as well as a winning one.
+        if submission.source:
+            store_source(conn,
+                         submission.source,
+                         spec.short_name,
+                         run_id=run_id,
+                         ts=ts,
+                         language=language,
+                         store_dir=str(prompt_store_dir(path)))
+
         verified = bool(score.build_ok and score.correct and (verify is None or verify.ok))
         if verified:
             suspect = 1 if (verify is not None and verify.suspect) else 0
@@ -725,14 +811,16 @@ def record(score: Score,
         # condition runner.status_of uses, kept local here to avoid a recording->runner import.
         overfit = score.public_correct and not score.hidden_correct
         reason = (verify.reason if (verify is not None and not verify.ok) else
-                  ("build" if not score.build_ok else ("overfit" if overfit else "incorrect")))
+                  ("score_error" if score.harness_fault else ("build" if not score.build_ok else
+                                                              ("timeout" if score.timed_out else
+                                                               ("overfit" if overfit else "incorrect")))))
         conn.execute(
             """INSERT INTO attempts(
                 run_id, ts, benchmark, preset, datatype, language, source_mode, optimizer,
                 build_ok, correct, reason, detail, cpu, commit_sha, prompt_hash, execution)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, language, source_mode, optimizer, int(score.build_ok),
-             int(score.correct), reason, (score.detail or "")[:2000], cpu, sha, prompt_hash, execution))
+             int(score.correct), reason, cap_detail(score.detail or ""), cpu, sha, prompt_hash, execution))
         conn.commit()
         return "attempts", reason
     finally:
@@ -799,6 +887,8 @@ def record_call(score: Optional[Score],
                 datatype: str = "float64",
                 delivered_language: str = "",
                 compiler: Optional[str] = None,
+                tokens: int = 0,
+                detail: str = "",
                 path: Optional[str] = None) -> int:
     """Persist ONE served grade as a ``calls`` row; return its ``round`` (0 = not logged).
 
@@ -812,9 +902,15 @@ def record_call(score: Optional[Score],
     ``round`` is 1 + the calls already stored for ``(run_id, benchmark)``. A judge is the single
     writer of its own shard (see :func:`db_path`), so the COUNT is the whole sequence.
 
-    ``tokens`` is 0: the spend is the AGENT's and no judge request carries it, so a served row
-    logs a number it can see rather than inventing one (``record_trajectory`` has real tokens
-    because the runner it serves counted the calls itself).
+    ``tokens`` is the agent's CUMULATIVE spend at the moment it asked for this grade, as reported
+    in the request body; 0 when the caller sends none. It is cumulative rather than per-round
+    because the agent counts its own transcript and the judge cannot see the spend at all -- so
+    the cost of solving a kernel is the value on its LAST row, and a per-round cost is the
+    difference between consecutive rows.
+
+    ``detail`` is WHY the grade came out this way -- the compiler log behind a ``build_error``,
+    the mismatch behind an ``incorrect``. It defaults to the score's own detail, so a caller that
+    passes nothing still records the reason; capped at :data:`DETAIL_CAP`.
 
     ``score`` is ``None`` when the request produced no verdict at all (``status``
     ``score_error``): speedup 0, correct 0, no baseline. Gated on ``record.log_calls``.
@@ -831,12 +927,13 @@ def record_call(score: Optional[Score],
             """INSERT INTO calls(
                 run_id, ts, benchmark, preset, datatype, language, delivered_language, source_mode, optimizer,
                 round, tokens, speedup, correct, status, route, compiler, baseline, cpu, commit_sha, prompt_hash,
-                execution)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                execution, detail)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ts, spec.short_name, preset, datatype, task.language, delivered_language, task.source_mode,
-             optimizer, int(prior) + 1, 0, float(score.speedup if score is not None else 0.0),
+             optimizer, int(prior) + 1, int(tokens), float(score.speedup if score is not None else 0.0),
              int(bool(score.correct) if score is not None else 0), status, route, compiler,
-             (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution))
+             (score.baseline if score is not None else None), cpu, sha, prompt_hash, execution,
+             cap_detail(detail or (score.detail if score is not None else "") or "")))
         conn.commit()
         return int(prior) + 1
     finally:

@@ -68,6 +68,8 @@ array_args:
 - KE
 - PE
 output_args:
+- pos
+- vel
 - KE
 - PE
 taxonomy:

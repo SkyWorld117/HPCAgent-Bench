@@ -115,17 +115,35 @@ def main() -> int:
 
     # Private copies: the in-place outputs are read back out of exactly these arrays.
     call = {n: marshal(n, v, sdfg) for n, v in case["by"].items()}
+    # An argument spelled like a sympy callable is renamed by the emitter (see dace_emit); the
+    # compiled SDFG only answers to the new spelling, so the keywords are built under it.
+    renames = vars(module).get("__hpcagent_bench_renames__", {})
     kwargs: Dict[str, Any] = {}
     for name in case["input_args"]:
         if name in call:
-            kwargs[name] = call[name]
+            kwargs[renames.get(name, name)] = call[name]
         elif name in case["syms"]:
             # Real type, never int()-cast: a float parameter truncated to 0 is a phantom mismatch.
-            kwargs[name] = case["syms"][name]
+            kwargs[renames.get(name, name)] = case["syms"][name]
         else:
             rec["verdict"], rec["detail"] = "run_fail", f"unresolved argument {name!r}"
             print(json.dumps(rec), flush=True)
             return 0
+    # A PROMOTED RETURN is an output PARAMETER of the emitted program but not a manifest input: the
+    # numpy reference allocates it and returns it, so ``by`` has no entry and the loop above never
+    # bound it. nbody read ``Missing program argument "KE"`` for exactly this. Zero-filled, the way
+    # the reference's own ``np.zeros`` left it, and registered in ``call`` so the readback below
+    # reads the array the program actually wrote.
+    for name in case["compare"]:
+        spelling = renames.get(name, name)
+        if spelling in kwargs or spelling not in sdfg.arrays:
+            continue
+        if name not in call:
+            if name not in case["expected"]:
+                continue
+            call[name] = np.zeros_like(case["expected"][name])
+        kwargs[spelling] = call[name]
+
     # Free SDFG symbols the MANIFEST already names, bound before the shape matching below so a
     # ``__hpcagent_bench_symbol_defs__`` recipe can be evaluated over them as well.
     #
@@ -140,7 +158,9 @@ def main() -> int:
             kwargs[name] = case["syms"][name]
     recipes = vars(module).get("__hpcagent_bench_symbol_defs__", ())
     try:
-        kwargs.update(dace_framework.bind_free_symbols(sdfg, recipes, case["input_args"], call, kwargs))
+        args = [renames.get(a, a) for a in case["input_args"]]
+        bound_arrays = {renames.get(k, k): v for k, v in call.items()} if renames else call
+        kwargs.update(dace_framework.bind_free_symbols(sdfg, recipes, args, bound_arrays, kwargs))
     except BaseException as exc:  # noqa: BLE001
         return report(rec, "unbound_symbols", exc)
     unbound = sorted({str(s) for s in sdfg.free_symbols} - set(kwargs))

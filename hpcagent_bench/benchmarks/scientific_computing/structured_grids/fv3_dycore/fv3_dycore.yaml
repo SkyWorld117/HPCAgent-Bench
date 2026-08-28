@@ -31,13 +31,13 @@ parameters:
     nj: 384
     nk: 91
   L:
-    ni: 734
-    nj: 734
-    nk: 87
+    ni: 581
+    nj: 581
+    nk: 68
   XL:
-    ni: 1403
-    nj: 1403
-    nk: 83
+    ni: 878
+    nj: 878
+    nk: 51
 init:
   func_name: initialize
   input_args:
@@ -136,6 +136,7 @@ array_args:
 - dya
 - area
 output_args:
+- q
 - q_x_flux
 - q_y_flux
 taxonomy:

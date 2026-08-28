@@ -7,7 +7,7 @@ import dataclasses
 import json
 import pathlib
 import sys
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from hpcagent_bench import config
 from hpcagent_bench.harness.envelope import Submission

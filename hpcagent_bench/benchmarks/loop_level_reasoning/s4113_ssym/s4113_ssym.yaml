@@ -10,10 +10,10 @@ parameters:
     LEN_1D: 33554432
     SSYM: 2
   L:
-    LEN_1D: 93471831
+    LEN_1D: 52541112
     SSYM: 2
   XL:
-    LEN_1D: 260382392
+    LEN_1D: 82271351
     SSYM: 2
 init:
   arrays:
@@ -23,6 +23,7 @@ init:
     ip:
       shape: (LEN_1D,)
       dtype: int64
+      index_array: true
 output_args:
 - a
 taxonomy:

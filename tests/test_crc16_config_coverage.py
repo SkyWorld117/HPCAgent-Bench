@@ -13,7 +13,6 @@ correct at both values -- different checksums, related by the closing byte swap.
 import importlib.util
 import types
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 

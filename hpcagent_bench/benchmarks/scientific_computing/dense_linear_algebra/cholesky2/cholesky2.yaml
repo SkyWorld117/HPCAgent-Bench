@@ -8,9 +8,9 @@ parameters:
   M:
     N: 4000
   L:
-    N: 13565
+    N: 9554
   XL:
-    N: 46000
+    N: 22820
 init:
   input_args:
   - N

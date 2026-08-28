@@ -43,7 +43,7 @@ Compile (`gcc` block of `hpcagent_bench/envs/compilers.yaml`, `Mode.SINGLE_CORE`
 ```
 /usr/bin/ccache /usr/bin/gcc -O3 -march=native -fopenmp -fno-math-errno -fno-trapping-math \
   -fno-signed-zeros -fstrict-aliasing -fPIC -include <repo>/hpcagent_bench/envs/vecmath.h \
-  -Wall -Wextra -std=c17 -D_POSIX_C_SOURCE=199309L -fPIC \
+  -Wall -Wextra -std=c23 -D_POSIX_C_SOURCE=199309L -fPIC \
   -c gemm_fp64.c -o gemm_fp64.c.o -I/shared/include -g <your -I/-D tokens>
 ```
 

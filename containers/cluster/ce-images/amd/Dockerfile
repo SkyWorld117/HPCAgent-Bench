@@ -25,6 +25,12 @@ ARG PYTHON_REQUIREMENTS=requirements/amd.txt
 # in-place install loops below.
 ARG GCC_MAJOR=16
 ARG LLVM_MAJOR=22
+# MAJOR version only. A full-version pin makes the image un-buildable the moment an archive
+# rolls a point release -- 600505 died exactly there, on a gcc 16.1.0 pin against a PPA that had
+# moved to 16.0.1. The major is what decides which language features and which OpenMP level the
+# graded submissions get; the point release is not worth a broken build. What the image actually
+# resolved to is recorded in /usr/local/share/toolchain-provenance and printed by the gate, so a
+# point-release drift is visible rather than silent.
 # NVIDIA HPC SDK -- nvfortran/nvc++ for the OpenACC + `-stdpar` methods. OFF by default: the SDK
 # layer measures ~10-25 GB unpacked (the multi-arch CUDA payload dominates), which is several times
 # the rest of this image, and it is only reachable from a submission that requests `compiler: nvhpc`.
@@ -191,9 +197,25 @@ RUN set -eux; \
     playwright install --with-deps chromium; \
     chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"
 
+# DaCe is the TIP of spcl/dace@extended, never a pin (scripts/install_dace_extended.sh says the
+# same thing for a local tree). `git clone --branch extended` looks like it says that, but the layer
+# cache keys on the command STRING: it never changes, so every later rebuild reuses the first clone
+# and the image quietly ages into a pin nothing records. One tree ended up 10,748 commits behind
+# that way, reporting frontend refusals the branch had already fixed.
+#
+# So the builder resolves the tip and passes it in: DACE_COMMIT changes whenever extended moves,
+# which is what busts this layer, and the resolved sha is written into the image so a run can say
+# which dace graded it. Fetch the sha rather than the branch -- a shallow clone of `extended` can
+# race the resolve, and GitHub serves a reachable sha directly.
+ARG DACE_COMMIT
 RUN set -eux; \
-    git clone --depth 1 --recurse-submodules --shallow-submodules \
-      --branch extended https://github.com/spcl/dace.git /opt/dace; \
+    test -n "${DACE_COMMIT}" || { echo "DACE_COMMIT build-arg is required (build_sqsh.sh resolves it)" >&2; exit 2; }; \
+    git init -q /opt/dace; \
+    git -C /opt/dace remote add origin https://github.com/spcl/dace.git; \
+    git -C /opt/dace fetch -q --depth 1 origin "${DACE_COMMIT}"; \
+    git -C /opt/dace checkout -q FETCH_HEAD; \
+    git -C /opt/dace submodule update --init --recursive --depth 1 -q; \
+    git -C /opt/dace rev-parse HEAD > /opt/dace.commit; \
     PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir -e /opt/dace
 
 # Node 20 from nodesource, NOT the distro nodejs/npm: the Ubuntu 22.04 base ships node 12, and
@@ -207,6 +229,15 @@ RUN set -eux; \
     npm --version
 
 RUN npm install -g @anthropic-ai/claude-code
+
+# Docs for the libraries an agent may link. The ROCm base is a MINIMIZED Ubuntu: dpkg excludes strip
+# /usr/share/man and /usr/share/doc, so `man gsl_sf_bessel` fails on an image that ships libgsl.
+# After the library layer, so unminimize's reinstall restores their pages too.
+RUN set -eux; \
+    apt-get update; \
+    yes | unminimize || true; \
+    apt-get install -y --no-install-recommends man-db manpages manpages-dev; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY containers/agent /opt/optarena-agent
 COPY containers/judge /opt/optarena-judge
@@ -243,6 +274,17 @@ RUN set -eux; \
       || { echo "pinned LLVM ${LLVM_MAJOR} unavailable; image has ${llvm_major:-none}" >&2; exit 1; }; \
     gcc -dumpversion | cut -d. -f1 | grep -qx "${GCC_MAJOR}" \
       || { echo "pinned GCC ${GCC_MAJOR} unavailable; bare gcc is $(gcc -dumpfullversion)" >&2; exit 1; }; \
+    # Record what the majors actually resolved to. The install block above walks a fallback \
+    # chain, so "gcc 16" can be any point release and can come from more than one source; an \
+    # image that does not say which is an image whose graded numbers cannot be compared later. \
+    { \
+      echo "gcc $(gcc -dumpfullversion) $(readlink -f "$(command -v gcc)")"; \
+      echo "clang $(clang --version | head -1) $(readlink -f "$(command -v clang)")"; \
+      echo "flang $(flang --version | head -1) $(readlink -f "$(command -v flang)")"; \
+    } > /usr/local/share/toolchain-provenance; \
+    cat /usr/local/share/toolchain-provenance; \
+    man -w gcc >/dev/null \
+      || { echo "manpages missing: unminimize did not take" >&2; exit 1; }; \
     sh /stdpar-gate.sh; \
     python3 -c "import importlib; [importlib.import_module(name) for name in ('numpy', 'scipy', 'numba', 'pythran', 'torch', 'dace', 'mpi4py')]"; \
     LD_PRELOAD=/usr/local/lib/libmimalloc.so /bin/true \

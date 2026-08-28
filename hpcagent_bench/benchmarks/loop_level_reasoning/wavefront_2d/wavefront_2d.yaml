@@ -6,11 +6,11 @@ parameters:
   S:
     N: 16
   M:
-    N: 12288
+    N: 12289
   L:
-    N: 19135
+    N: 13462
   XL:
-    N: 29798
+    N: 14747
 init:
   arrays:
     aa: (N,N)

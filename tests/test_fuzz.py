@@ -3,7 +3,7 @@
 """Dimension-fuzzing sampler (hpcagent_bench.fuzz)."""
 import pytest
 
-from hpcagent_bench import fuzz
+from hpcagent_bench import config, fuzz
 
 # Validates the REAL size ranges/distributions -> opt out of the suite-wide small-size
 # cap (the autouse _cap_fuzz_sizes fixture in conftest). No speed cost: pure sampler.
@@ -275,8 +275,14 @@ def test_config_names_keep_the_declared_value_across_fuzz_iterations():
         p = fuzz.sample_params(CONFIG_AND_DIM_PARAMS, iteration=it, config_names=CONFIG_NAMES)
         assert p["seed"] == 7
         assert p["multrec_limit"] == 512
-        # Anchored on XL (100000 here), not spanning S..XL: every draw is within +-15% of it.
-        assert 85000 <= p["N"] <= 115000
+        # Anchored on XL (100000 here), not spanning S..XL. Bounds come from the SAME config the
+        # resolver reads, so this asserts the invariant -- a draw never leaves the configured
+        # band -- at whatever the band is set to, instead of re-encoding today's two literals
+        # and failing the next time they move.
+        xl = CONFIG_AND_DIM_PARAMS["XL"]["N"]
+        lo = int(xl * float(config.get("fuzz.xl_lo_mult", 0.85)))
+        hi = int(xl * float(config.get("fuzz.xl_hi_mult", 1.15)))
+        assert lo <= p["N"] <= hi
 
 
 def test_edge_shapes_never_perturbs_a_declared_config_knob():

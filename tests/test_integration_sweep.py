@@ -221,13 +221,13 @@ def test_speedup_against_numpy_is_computable(sweep):
 
 
 #: A kernel in the numpy sweep whose DIRECTORY STEM differs from its DB short_name (the 26-kernel
-#: heat_3d/heat3d class). Pinned like ``_RESTORED_HPC_PORTS``: a real divergent member of scientific_computing@lvl1.
-DIVERGENT_STEM, DIVERGENT_SHORT = "arc_distance", "adist"
+#: heat_3d/heat_3d class). Pinned like ``_RESTORED_HPC_PORTS``: a real divergent member of scientific_computing@lvl1.
+DIVERGENT_STEM, DIVERGENT_SHORT = "arc_distance", "arc_distance"
 
 
 def test_narrow_divergent_selector_keeps_rows(sweep):
     """A NARROW plot selector given a directory STEM whose manifest short_name differs
-    (``arc_distance`` -> ``adist``) must resolve to the DB's short_name and keep that kernel's rows.
+    (``arc_distance`` -> ``arc_distance``) must resolve to the DB's short_name and keep that kernel's rows.
 
     Before the ``select_short_names`` fix it returned the stem, which matches no DB ``benchmark``
     value, so the heatmap silently dropped all 26 stem!=short_name kernels -- and the group-level

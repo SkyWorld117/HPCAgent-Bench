@@ -6,11 +6,11 @@ parameters:
   S:
     LEN_1D: 512
   M:
-    LEN_1D: 57000000
+    LEN_1D: 5665449
   L:
-    LEN_1D: 121826911
+    LEN_1D: 17957345
   XL:
-    LEN_1D: 260382392
+    LEN_1D: 56918040
 init:
   arrays:
     x: (LEN_1D,)

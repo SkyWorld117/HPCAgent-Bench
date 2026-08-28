@@ -204,8 +204,10 @@ def test_scripted_tool_session_verify_then_score_and_submit(make_judge):
     _srv, url = make_judge(ServiceConfig(baseline="c", oracle="numpy", input_mode="any", repeat=2))
     client = tools.JudgeClient(url)
 
-    # 1. read the contract + the time to beat (the agent's read-only task context)
-    spec = client.task("gemm", "c")
+    # 1. read the contract + the time to beat. The contract is built locally (there is no
+    # /task route); only the time to beat needs the judge.
+    from hpcagent_bench.api import Kernel
+    spec = Kernel(Task("gemm", "restricted", "c")).info()
     assert spec["symbol"] and spec["signature"]
     assert client.baseline("gemm", "c", "S")["baselines"]["c"] > 0
 

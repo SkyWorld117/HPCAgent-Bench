@@ -76,8 +76,12 @@ def initialize(nproma, nlev, nblks_c, nblks_e, nblks_v, datatype=np.float64, rng
     # is in-range BY CONSTRUCTION -- the precondition pure random would break (OOB
     # gather -> segfault / undefined, making the equivalence compare meaningless).
     def _conn(owner_blk, tgt_blk, degree):
-        idx = (rng.integers(0, nproma, size=(nproma, owner_blk, degree), dtype=np.int64) + 1).astype(np.int32)
-        blki = (rng.integers(0, tgt_blk, size=(nproma, owner_blk, degree), dtype=np.int64) + 1).astype(np.int32)
+        # 0-based, like every index array in this corpus: the kernel subscripts them directly.
+        # ICON stores this connectivity 1-based upstream (mo_model_domain.f90) and the port carries
+        # the connectivity, not the numbering -- a 1-based language gets the +1 that every subscript
+        # already gets when the reference is lowered to it.
+        idx = rng.integers(0, nproma, size=(nproma, owner_blk, degree), dtype=np.int64).astype(np.int32)
+        blki = rng.integers(0, tgt_blk, size=(nproma, owner_blk, degree), dtype=np.int64).astype(np.int32)
         return idx, blki
 
     def _pentagon_conn(owner_blk, tgt_blk, degree):

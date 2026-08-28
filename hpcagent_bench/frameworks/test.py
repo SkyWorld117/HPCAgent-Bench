@@ -134,7 +134,7 @@ class Test(object):
             traceback.print_exception(e)
             self._last_failure = "runtime_error"
             ret = None
-        out = util.resolve_outputs(ret, plan.inout_values(), self.bench.info.get("output_args", []))
+        out = util.resolve_outputs(ret, plan.inout_values(), self.bench.info.get("output_args", []), plan.inout_names())
         return out, timelist, native_times
 
     def run(self,

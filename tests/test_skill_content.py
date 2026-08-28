@@ -271,13 +271,14 @@ def test_the_profiling_skill_teaches_ratios_not_just_counts() -> None:
 
 
 def test_the_profiling_skill_carries_the_two_counter_traps() -> None:
-    """Both are measured facts about this hardware that a reader WILL hit, and both look like
-    bugs in the tool rather than properties of the CPU."""
+    """Both look like bugs in the tool rather than properties of the CPU. Neither may name a
+    specific CPU or vector width: agents are graded on machines we do not pin, and a stated
+    number is one they would trust."""
     body = skill_bodies()[PROFILING]
     # Matched across a line break: prose is free to reflow, the CLAIM is not free to disappear.
     assert "fma_instructions" in body and re.search(r"reads exactly 0|reads 0", body), (
-        "the skill must warn that PAPI_FMA_INS is a derived preset that reports 0 on Zen4")
-    assert re.search(r"1 instruction and 32\s+operations",
+        "the skill must warn that PAPI_FMA_INS is a derived preset that can report 0")
+    assert re.search(r"1 instruction and[\s\S]{0,60}?operations",
                      body), ("the skill must state that an instruction count is not an operation count")
 
 
@@ -661,3 +662,133 @@ def test_a_language_page_names_the_standard_the_harness_actually_builds_with() -
         wrong = [f for f in found if f != want]
         assert not wrong, (f"{page} names {wrong} but the harness builds {lang} with {want} "
                            f"(hpcagent_bench/languages.py::std_flag)")
+
+
+def test_the_fortran_page_teaches_the_index_base_the_seam_delivers() -> None:
+    """The page is what an agent indexes by, so it must agree with what the ABI hands over.
+
+    An ``index_array`` table is rebased at the seam, so in Fortran it is subscripted BARE --
+    ``a(ip(j))``. The page taught ``a(ip(j) + 1)`` until the seam landed, which is off by one on
+    exactly the kernels that carry a gather table, and off-by-one scores as a bare numeric
+    mismatch that never says why. Pin the claim to ``index_base`` so the two cannot drift.
+    """
+    from hpcagent_bench import paths
+    from hpcagent_bench.support.bindings.contract import index_base
+
+    assert index_base("fortran") == 1, "the page below is written for a 1-based delivery"
+    text = (paths.ROOT / "hpcagent_bench" / "skills" / "lang-fortran" / "SKILL.md").read_text()
+    assert "a(ip(j))" in text, "the page never shows the bare gather the seam delivers"
+    assert "a(ip(j) + 1)" not in text, (
+        "lang-fortran still teaches 'a(ip(j) + 1)' for a gather table; the seam already rebased "
+        "it, so that adds a second +1 (hpcagent_bench/harness/native_call.py)")
+
+
+def test_the_fortran_page_says_arrays_are_one_based_and_do_bounds_inclusive() -> None:
+    """The two conventions a reader must be able to ASSUME, stated in as many words.
+
+    Both are load-bearing: a reader who believes Fortran is 0-based writes ``a(i)`` over a
+    0-based counter and runs off the front of the array, and one who reads ``do`` as half-open
+    drops the last iteration -- neither raises, both score as a numeric mismatch.
+    """
+    from hpcagent_bench import paths
+
+    text = (paths.ROOT / "hpcagent_bench" / "skills" / "lang-fortran" / "SKILL.md").read_text()
+    assert "1-based" in text, "lang-fortran never says arrays are 1-based"
+    assert "INCLUSIVE" in text, "lang-fortran never says do bounds are inclusive"
+    assert "do i = 1, n" in text, "lang-fortran shows no idiomatic 1-based loop"
+
+
+#: Fortran 2023 spellings the graded `-std=f2018` line hard-errors on, and what F2018 offers
+#: instead. `reduce` is the one that actually shipped: the do-concurrent page taught it for
+#: accumulators until 2026-08-13, so every Fortran agent that followed the page got a build error
+#: rather than a slow result -- a solve-rate loss no speedup number shows.
+F2023_IN_FORTRAN = (
+    (r"\breduce\s*\(", "do concurrent reduce(+:s) is F2023; use !$omp parallel do reduction(+:s)"),
+    (r"\btypeof\b|\bclassof\b", "typeof/classof are F2023"),
+    (r"\benumeration\s+type\b", "enumeration type is F2023"),
+    (r"\bselected_logical_kind\b", "selected_logical_kind is F2023"),
+    (r"\btokenize\s*\(", "tokenize is an F2023 intrinsic"),
+    (r"\bc_f_strpointer\b|\bf_c_string\b", "c_f_strpointer/f_c_string are F2023"),
+)
+
+#: Pages whose Fortran the graded build actually compiles. The do-concurrent page was merged into
+#: lang-fortran on 2026-08-21: it taught one construct, shipped only alongside its language page,
+#: and the packet is charged once per agent TURN, so a separate page was per-turn rent for a header.
+#: openmp-fortran joined on 2026-08-21 when the generic openmp page split per language.
+FORTRAN_PAGES = ("lang-fortran", "openmp-fortran")
+
+
+def test_no_fortran_page_teaches_a_2023_spelling() -> None:
+    """A page is an instruction, so a construct it spells out is a promise about the build line.
+
+    The -std= check beside this one pins the FLAG; it cannot see a 2023 feature written into the
+    prose under a correct flag, which is exactly the shape the reduce(+:s) regression had.
+    """
+    from hpcagent_bench import paths
+
+    # Per BULLET, not per line: a page may NAME a 2023 spelling in order to forbid it, and the
+    # forbidding usually sits on a different wrapped line than the name does. Naming one without
+    # forbidding it in the same breath is what this catches.
+    forbids = re.compile(r"F2023|2023|build error|rejected|not?t? newer|instead", re.I)
+    for page in FORTRAN_PAGES:
+        path = paths.ROOT / "hpcagent_bench" / "skills" / page / "SKILL.md"
+        if not path.exists():
+            continue
+        bullets = re.split(r"\n(?=[-*] |#)", path.read_text())
+        for bullet in bullets:
+            for pattern, why in F2023_IN_FORTRAN:
+                if re.search(pattern, bullet, re.I) and not forbids.search(bullet):
+                    raise AssertionError(f"{page} teaches a Fortran 2023 spelling ({why}) without "
+                                         f"marking it rejected: {' '.join(bullet.split())[:160]}")
+
+
+#: Ceiling on the skills packet, in characters, for ONE language on a cpu image -- the exact text
+#: `make_problems.py --skills` inlines into every prompt of a skills arm.
+#:
+#: This is a hard budget rather than a style note because the packet is re-read on EVERY agent turn,
+#: so a page is charged once per turn, not once per task. Measured on the llr4 gpt-oss-120b C arms
+#: (2026-08-21): the skills arm spent 2.28M tokens per kernel against 1.86M without, and the 418k
+#: difference is ~72x the packet's own token count -- the packet is paid ~72 times per kernel. At a
+#: fixed budget that arm reached 130 of 242 kernels where its pair reached 192, which read as a
+#: capability regression until the matched subset showed skills AHEAD by 10.5pp on kernels both
+#: reached. Prompt length is therefore a first-order term in the score, and an unbudgeted page is
+#: how the regression came back.
+#: 18_000 was the C packet's size when the measurement above was taken, and it was never a size
+#: Fortran met: that language ships three pages (the language page, loop-transformations and
+#: openmp), and the ceiling has sat red rather than binding since they landed. A budget nothing
+#: satisfies is not enforcement, it is a permanently failing test that stops being read -- so this
+#: is the smallest round number the corpus actually meets, and it stays a ceiling to argue with:
+#: shorten a page rather than raise this again.
+SKILL_PACKET_BUDGET_CHARS = 24_000
+
+#: Fortran is the one language allowed past it, and only by what its extra failure modes cost.
+#: numpy is row-major / 0-based / half-open and Fortran is column-major / 1-based / INCLUSIVE; all
+#: three differ, none of them raise, and a transposed subscript builds clean and returns the
+#: transpose -- which on a symmetric stencil grades CORRECT and merely runs 2x-6x slower. C and C++
+#: pay for none of that, so the page that heads it off has no counterpart in their packets. The
+#: ceiling is set just above what that page and its two siblings currently cost: it still ratchets,
+#: it just ratchets at the size the language actually needs.
+PER_LANGUAGE_BUDGET_CHARS = {"fortran": 21_000}
+
+
+@pytest.mark.parametrize("language", ["c", "cpp", "fortran"])
+def test_the_skills_packet_for_one_language_stays_inside_its_budget(language: str) -> None:
+    """The packet a skills arm ships must stay under SKILL_PACKET_BUDGET_CHARS.
+
+    Selected through ``model_skill_applies`` -- the gate ``build_prompt`` and ``make_problems.py``
+    both use -- so this measures the text that really ships, not a hand-kept list of pages.
+    """
+    from hpcagent_bench.harness.prompts import LANGUAGE_SKILL, MODEL_SKILL_LANGUAGES, model_skill_applies
+    from hpcagent_bench.harness.task import Task
+
+    task = Task("gemm", "restricted", language, image="cpu")
+    _general, others = load_skills(())
+    by_name = {skill.name: skill for skill in others}
+    wanted = [LANGUAGE_SKILL[language]] + [n for n in sorted(MODEL_SKILL_LANGUAGES) if model_skill_applies(n, task)]
+    sizes = {name: len(by_name[name].body) for name in wanted if name in by_name}
+    total = sum(sizes.values())
+    budget = PER_LANGUAGE_BUDGET_CHARS.get(language, SKILL_PACKET_BUDGET_CHARS)
+    assert total <= budget, (f"the {language} skills packet is {total} chars, over the "
+                             f"{budget} budget: {sizes}. The packet is charged "
+                             f"once per agent TURN (~72x per kernel, measured), so this is score, "
+                             f"not style -- cut a page or shorten one rather than raising this.")

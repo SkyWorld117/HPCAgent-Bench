@@ -35,6 +35,7 @@ array_args:
 - x
 - y
 output_args:
+- A
 - x
 - y
 taxonomy:

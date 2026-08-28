@@ -11,9 +11,9 @@ parameters:
   M:
     N: 8388608
   L:
-    N: 54794158
+    N: 26982993
   XL:
-    N: 357913941
+    N: 86794130
 init:
   input_args:
   - N

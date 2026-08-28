@@ -18,7 +18,7 @@ import pytest
 
 from hpcagent_bench.sizing import (PRESETS, XL_BYTE_CEILING, build_ladder, derive_ladder, fit_to_ceiling,
                                    footprint_symbols, interpolate, interpolate_symbol, ladder_violations,
-                                   parameters_span, rewrite_parameters, working_bytes)
+                                   parameters_span, rewrite_parameters, working_bytes, xl_ceiling)
 from hpcagent_bench.spec import KERNELS
 
 MANIFEST = """\
@@ -112,7 +112,28 @@ def test_a_ladder_that_shrinks_mid_way_is_reported():
     """A hand-edited middle rung that goes backwards makes M slower than L and inverts the
     fuzzer's ``[L, XL]`` interval, so it must not pass silently."""
     broken = {"S": {"N": 10}, "M": {"N": 900}, "L": {"N": 100}, "XL": {"N": 1000}}
-    assert ladder_violations(broken) == ["N: M=900 > L=100"]
+    assert ladder_violations(broken) == ["N: M=900 > L=100", "M->L: no symbol strictly increases, not a ladder"]
+
+
+def test_a_flat_ladder_is_rejected():
+    """Three presets at one size are one benchmark measured three times, not a ladder."""
+    flat = {"S": {"N": 1942}, "M": {"N": 1942}, "L": {"N": 1942}, "XL": {"N": 1942}}
+    assert ladder_violations(flat) == [
+        "M->L: no symbol strictly increases, not a ladder",
+        "L->XL: no symbol strictly increases, not a ladder",
+    ]
+
+
+def test_an_m_that_lands_on_the_kept_s_is_not_a_violation():
+    """seissol_batched_gemm's manifest S already sits at the batch the proposal names as M. S is
+    the smoke rung the test suite runs at, not a timed one, so that pair is not a broken ladder."""
+    assert ladder_violations({"S": {"N": 1024}, "M": {"N": 1024}, "L": {"N": 16384}, "XL": {"N": 524288}}) == []
+
+
+def test_a_ladder_growing_in_one_symbol_while_another_stays_fixed_is_accepted():
+    """TSTEPS is a fixed knob at every rung; N alone growing is enough to make a rung a rung."""
+    ladder = build_ladder({"N": 10, "TSTEPS": 20}, {"N": 100, "TSTEPS": 20}, {"N": 100000, "TSTEPS": 20})
+    assert ladder_violations(ladder) == []
 
 
 def test_rewriting_keeps_every_comment_and_touches_only_the_scalars():
@@ -182,11 +203,11 @@ def test_a_config_knob_is_not_demanded_of_the_proposal_either():
     correctly omits the knob must not be faulted for the omission."""
     spec = spec_for("seissol_batched_gemm")
     assert "order" in spec.parameters["S"]  # the merged view carries it
-    ladder, problems = derive_ladder(spec, {"batch": 4096}, {"batch": 524288})
+    ladder, problems = derive_ladder(spec, {"batch": 4096}, {"batch": 262144})
     assert problems == []
     # S is the manifest's own value, untouched; M and XL are the proposal; L is the midpoint.
     assert ladder["S"] == {"batch": spec.parameters["S"]["batch"]}
-    assert [ladder[p]["batch"] for p in PRESETS] == [1024, 4096, 65536, 524288]
+    assert [ladder[p]["batch"] for p in PRESETS] == [1024, 4096, 32768, 262144]
 
 
 def test_a_tile_size_is_not_a_footprint_symbol():
@@ -221,10 +242,16 @@ def test_a_proposal_that_moves_a_structural_knob_is_refused():
 
 
 def test_a_proposal_that_only_scales_sizes_is_accepted():
-    """The guard must not fault an honest proposal -- the same ladder with the knobs left alone."""
+    """The guard must not fault an honest proposal -- the same ladder with the knobs left alone.
+
+    The XL end is fitted to the track's CURRENT ceiling rather than a hardcoded multiple of M. A
+    plain ``LEN_2D * 2`` is 4x the bytes on a 2-D array, which sat just under the 8 GB llr ceiling
+    and broke the moment that ceiling moved to 4 GB -- failing on the size, which is not what this
+    test is about.
+    """
     spec = spec_for("jacobi2d_double_tiled_sym")
     small = dict(spec.parameters["M"])
-    large = {**small, "LEN_2D": small["LEN_2D"] * 2}
+    large = fit_to_ceiling(spec, {**small, "LEN_2D": small["LEN_2D"] * 2}, xl_ceiling(spec.track))
     _ladder, problems = derive_ladder(spec, small, large)
     assert problems == []
 
@@ -240,8 +267,17 @@ def test_a_manifest_constraint_must_hold_at_every_rung():
     rungs, not only at the ends the proposal names."""
     spec = spec_for("seissol_batched_gemm")
     assert spec.constraints  # the manifest states the tie; if it stops doing so this test is moot
-    _ladder, problems = derive_ladder(spec, {"batch": 1024}, {"batch": 524288})
+    _ladder, problems = derive_ladder(spec, {"batch": 1024}, {"batch": 262144})
     assert problems == []
+
+
+def test_an_xl_equal_to_m_is_refused_by_derive_ladder():
+    """The live apply path checks the problem SIZE, not the per-symbol series, and read == as
+    monotone. A fit anchored on a rung already slower than the target proposes an XL below M and
+    the per-symbol floor clamps it back to M, so every rung became one run measured four times."""
+    spec = spec_for("argmax_value")
+    _ladder, problems = derive_ladder(spec, {"LEN_1D": 1 << 20}, {"LEN_1D": 1 << 20})
+    assert any("does not grow" in p for p in problems)
 
 
 def test_an_xl_that_cannot_fit_an_accelerator_is_refused():
@@ -317,3 +353,48 @@ def test_the_single_core_rung_fits_one_core_of_an_ordinary_machine():
         if nbytes is not None and nbytes > S_BYTE_CEILING:
             over[key] = nbytes / 2**30
     assert over == {}, f"M over the {S_BYTE_CEILING / 2**30:.0f} GB single-core ceiling: {over}"
+
+
+def test_a_sparse_arrays_logical_shape_is_not_its_footprint():
+    """``bicg_solvers`` declares ``A: (N, N)`` and never materialises it: ``initialize`` builds a
+    scipy matrix and the binding unpacks it into csr buffers. Reading the declaration as a
+    footprint put XL at 4.29 GB against a matrix that is two megabytes."""
+    spec = spec_for("bicg_solvers")
+    values = spec.parameters["XL"]
+    n, nnz = values["N"], values["nnz"]
+    # indptr (N+1) int64 + indices nnz int64 + data nnz fp64, then b and x, which are dense.
+    assert working_bytes(spec, values) == 8 * (n + 1) + 16 * nnz + 2 * 8 * n
+    assert working_bytes(spec, values) * 100 < n * n * 8  # two orders below the logical shape
+
+
+def test_sparse_buffers_no_dense_shape_declares_are_counted():
+    """``spmv`` declares shapes for ``x`` and ``y`` only, so before the layouts were read its
+    indices and values -- the whole matrix -- weighed nothing and its XL sat five times over the
+    ceiling with nothing able to see it."""
+    spec = spec_for("spmv")
+    values = dict(spec.parameters["XL"])
+    dense_only = 2 * 8 * values["N"]
+    nbytes = working_bytes(spec, values)
+    assert nbytes > 10 * dense_only  # the matrix dominates the two dense vectors
+    doubled = working_bytes(spec, {**values, "nnz": values["nnz"] * 2})
+    assert doubled - nbytes == 16 * values["nnz"]  # indices int64 + data fp64, per nonzero
+
+
+def test_the_sparse_footprint_is_the_largest_declared_configuration():
+    """A kernel is graded at every configuration it declares, so the footprint is the worst of
+    them. ``sp_cg`` offers coo beside csr, and coo stores a row AND a column index per nonzero."""
+    spec = spec_for("sp_cg")
+    values = spec.parameters["XL"]
+    n, nnz = values["N"], values["nnz"]
+    csr, coo = 8 * (n + 1) + 16 * nnz, 24 * nnz
+    assert coo > csr
+    assert working_bytes(spec, values) == coo + 2 * 8 * n
+
+
+def test_a_sparse_layout_with_no_configuration_is_unknown_not_dense():
+    """No ``configurations:`` block names no graded format, and a format is what sets the buffer
+    sizes. Falling back to the dense declaration would report a number that is wrong by orders of
+    magnitude in whichever direction the manifest happened to declare."""
+    spec = dataclasses.replace(spec_for("bicg_solvers"), configurations={})
+    assert spec.sparse_layouts and not spec.configurations
+    assert working_bytes(spec, spec.parameters["XL"]) is None
