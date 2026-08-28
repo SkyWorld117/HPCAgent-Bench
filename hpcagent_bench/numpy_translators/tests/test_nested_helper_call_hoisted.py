@@ -5,7 +5,7 @@ out-param, because an array-returning helper has no by-value form. Fortran only 
 STATEMENT, so a call left nested in a larger expression would have to be a function reference and
 gfortran rejects the pair with ``FUNCTION attribute conflicts with SUBROUTINE attribute`` (this is
 nussinov's shape: its ``match`` sits inside a ``max(...)`` argument). Hoisting it to
-``__hcall<N> = h(...)`` puts it back on the shape the emitter already lowers to ``call h(...)``.
+``__fhoist<N> = h(...)`` puts it back on the shape the emitter already lowers to ``call h(...)``.
 C needs none of this -- it emits helpers as ordinary by-value functions.
 """
 import json

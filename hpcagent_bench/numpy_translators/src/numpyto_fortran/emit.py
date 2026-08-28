@@ -3465,7 +3465,7 @@ class _HoistHelperCallVisitor(ast.NodeTransformer):
         if not (isinstance(node.func, ast.Name) and node.func.id in self.helper_names):
             return node
         self.counter[0] += 1
-        temp = f"__hcall{self.counter[0]}"
+        temp = f"__fhoist{self.counter[0]}"
         self.temps[temp] = node.func.id
         self.pre_stmts.append(ast.Assign(targets=[ast.Name(id=temp, ctx=ast.Store())], value=node))
         return ast.Name(id=temp, ctx=ast.Load())
@@ -3479,8 +3479,8 @@ def hoist_nested_helper_calls(stmts: List[ast.stmt], helper_names, counter: List
     array-returning helper has no by-value form. Fortran only calls that as a STATEMENT, so a call
     left nested inside a larger expression would have to be a function reference and gfortran
     rejects the pair with ``FUNCTION attribute conflicts with SUBROUTINE attribute``. Hoisting it
-    to ``__hcall<N> = h(...)`` puts it back on the one shape ``_emit_assign`` rewrites to
-    ``call h(__hcall<N>, ...)``. C is unaffected -- it emits helpers as ordinary functions that
+    to ``__fhoist<N> = h(...)`` puts it back on the one shape ``_emit_assign`` rewrites to
+    ``call h(__fhoist<N>, ...)``. C is unaffected -- it emits helpers as ordinary functions that
     return by value -- so this runs on the FORTRAN-only tree copy, like :func:`_hoist_ifexp`.
 
     Recurses into nested blocks FIRST: a call inside a loop body must be re-evaluated every
