@@ -4,7 +4,7 @@ import torch
 from hpcagent_bench.support.helpers.sparse.triton_sparse import TritonSpMV
 
 
-def bicg(A, b, x, max_iter=100, tol=1e-6):
+def bicg(A, b, x, max_iter, tol):
     dt = str(b.dtype).split(".")[-1]
     spmv = TritonSpMV(A, dt)
     spmv_t = TritonSpMV(A.T.tocsr(), dt)

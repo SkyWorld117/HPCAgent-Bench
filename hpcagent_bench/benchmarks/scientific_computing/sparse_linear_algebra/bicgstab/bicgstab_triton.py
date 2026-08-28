@@ -4,7 +4,7 @@ import torch
 from hpcagent_bench.support.helpers.sparse.triton_sparse import TritonSpMV
 
 
-def bicgstab(A, b, x, max_iter=100, tol=1e-6):
+def bicgstab(A, b, x, max_iter, tol):
     dt = str(b.dtype).split(".")[-1]
     spmv = TritonSpMV(A, dt)
     r = b - spmv(x)

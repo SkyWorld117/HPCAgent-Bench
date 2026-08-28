@@ -2,7 +2,7 @@ import numpy as np
 
 
 # Solves A @ x = b where A is a Compressed Sparse Row matrix using the Biconjugate Gradient method
-def bicg(A, b, x, max_iter=100, tol=np.float64(1e-6)):
+def bicg(A, b, x, max_iter, tol):
     """Biconjugate gradient: a genuine Krylov recurrence, so the iteration stays a loop.
 
     Each step depends on the last, and the body is already matvecs and dot products -- the
