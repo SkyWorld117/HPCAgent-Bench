@@ -303,6 +303,18 @@ def rocm_driver(name: str) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=1, typed=True)
+def gpu_backend() -> str:
+    """``"hip"`` when this host's GPU toolchain is ROCm's, else ``"cuda"``.
+
+    Probed from the DRIVER that would have to compile, not from a device query: what the callers
+    need is which ``compilers.yaml`` block exists on this box, and a machine can carry an AMD card
+    with no hipcc (or hipcc with no card). ``cuda`` is the answer when neither is found, because a
+    column that names a language nothing installed still has to name one.
+    """
+    return "hip" if shutil.which("hipcc") else "cuda"
+
+
 def offload_probe(model: str, vendor: str, arch: str, *, run: bool) -> bool:
     """Whether ``arch`` links for ``model`` on ``vendor``, and with ``run`` whether it reaches a device.
 
