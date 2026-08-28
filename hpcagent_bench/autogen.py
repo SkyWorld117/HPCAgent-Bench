@@ -242,10 +242,10 @@ def _wrapper_src(spec) -> str:
         default_attr = None
         for cfg, base in targets:
             if cfg is None:
-                lines.append(f'kernel_{fw} = wrap_kernel(__file__, "{base}", "{fw}")')
+                lines.append(f'kernel_{fw} = wrap_kernel(__file__, "{base}", "{fw}", "{spec.short_name}")')
             else:
                 attr = f"kernel_{fw}_{cfg}"
-                lines.append(f'{attr} = wrap_kernel(__file__, "{base}", "{fw}")')
+                lines.append(f'{attr} = wrap_kernel(__file__, "{base}", "{fw}", "{spec.short_name}")')
                 if default_attr is None:
                     default_attr = attr
         if default_attr is not None:

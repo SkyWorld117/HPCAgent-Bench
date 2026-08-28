@@ -10,7 +10,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 from numpyto_fortran.intrinsics import literal_axis, reshape_dims
 from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
-from numpyto_common.emitter import BaseEmitter
+from numpyto_common.emitter import BaseEmitter, index_rank_error
 from numpyto_common.frontend import _names_used_as_int
 from numpyto_common.lowering import _MATH_INTRINSIC_NAMES, _walk_complex
 
@@ -780,6 +780,10 @@ class _FortranBodyEmitter(BaseEmitter):
             name: list(shape) if shape else ["1"]
             for name, shape in zeros.items()
         }
+        #: name -> declared shape, for the index-rank guard in :meth:`_emit_subscript`. Same
+        #: source the C emitter builds its own map from, so the two agree on what a rank is.
+        self.array_shapes: Dict[str, List[str]] = {a.name: list(a.shape) for a in kir.arrays}
+        self.array_shapes.update(self.local_arrays)
         #: Arrays whose shape is entirely size-1, scalarised to x(1) when read bare
         #: (mirrors the C emitter's x[0] scalarisation).
         self._size1_arrays: Set[str] = {a.name for a in kir.arrays if a.shape and all(str(s) == "1" for s in a.shape)}
@@ -1669,6 +1673,12 @@ class _FortranBodyEmitter(BaseEmitter):
             # Resolve the base array name so SIZE(arr, dim) works for negative indices.
             base_name = node.value.id if isinstance(node.value, ast.Name) else base
             rank = len(raw_elts)
+        # More axes than the array HAS is not an array section, it is uncompilable Fortran --
+        # the chained walk above happily merges arr[i, j, k][mask] into a 4-axis reference to a
+        # rank-3 array. Fewer axes is a legitimate section, so only the excess is refused.
+        declared = self.array_shapes.get(base_name)
+        if declared is not None and rank > len(declared):
+            raise NotImplementedError(index_rank_error(base_name, declared, rank))
         adjusted: List[str] = []
         for axis, e in enumerate(raw_elts):
             # Negative integer constant: arr[-K] -> SIZE - K + 1. After dim

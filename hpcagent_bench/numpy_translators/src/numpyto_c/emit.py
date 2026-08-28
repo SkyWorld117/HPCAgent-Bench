@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
 from numpyto_common.ordered import OrderedSet
-from numpyto_common.emitter import BaseEmitter
+from numpyto_common.emitter import BaseEmitter, index_rank_error
 from numpyto_common.frontend import _names_used_as_int
 from numpyto_common.lowering import _walk_complex
 
@@ -1348,10 +1348,7 @@ class _CBodyEmitter(BaseEmitter):
             # means the array's rank is unknown or disagrees with the index count -- almost always a
             # missing/incorrect init.shapes declaration (conv_2d's w_box was inferred 1D but indexed
             # 2D). Emitting the chained form silently shipped uncompilable C; fail loudly instead.
-            raise NotImplementedError(
-                f"cannot flatten a {len(indices)}-D index of {base_node.id!r}: its shape is "
-                f"{'unknown' if shape is None else shape} (rank {0 if shape is None else len(shape)}). "
-                f"Declare init.shapes[{base_node.id!r}] with the matching rank.")
+            raise NotImplementedError(index_rank_error(base_node.id, shape, len(indices)))
         return self._promote_read(node, f"{base}[{self._flatten_indices(shape, indices)}]")
 
     @staticmethod
