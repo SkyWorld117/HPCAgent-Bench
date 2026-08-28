@@ -139,11 +139,13 @@ def test_none_or_tuple_helper_wrong_guard_shape_still_refuses():
            "   lo, hi, ol_lo, ol_hi = tap\n"
            "   for idx in range(lo, hi):\n"
            "    out[ol_lo + (idx - lo) * stride] += x[idx] * weight[k]\n")
-    kir = _kir_for(src, "f", ["x", "weight", "stride", "padding", "dilation", "out"], ["out"], _TAP_RANGE_SHAPES,
-                   _TAP_RANGE_SYMS)
-    assert [h.kernel_name for h in kir.helpers] == ["_tap_range"]
-    with pytest.raises(NotImplementedError, match="None"):
-        emit_c(lower(kir), fn_name="f")
+    # The splice declines, so the helper has to become a real function -- and it cannot: C has one
+    # return slot and nothing classifies which member of ``lo, hi, ol_lo, ol_hi`` is an out-param.
+    # Refused while the helper is CLASSIFIED rather than while its body is emitted, so every
+    # backend gets the same answer from one place (the emit-time refusal was C's alone).
+    with pytest.raises(NotImplementedError, match=r"_tap_range.*returns a tuple"):
+        _kir_for(src, "f", ["x", "weight", "stride", "padding", "dilation", "out"], ["out"], _TAP_RANGE_SHAPES,
+                 _TAP_RANGE_SYMS)
 
 
 # --------------------------------------------------------------------------------------------- #

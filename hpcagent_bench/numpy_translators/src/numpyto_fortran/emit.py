@@ -440,6 +440,34 @@ def _scalar_decl(name: str, dtype: str, is_output: bool, assigned: bool = False)
     return f"{base}, value, intent(in) :: {name}"
 
 
+def pinned_const_decls(kir: KernelIR, safe) -> List[str]:
+    """``parameter`` declarations for the config knobs the manifest pinned to one value.
+
+    A pinned knob has one value for every preset and every fuzz draw, so it is a compile-time
+    constant, not a dummy argument: :meth:`KernelIR.param_order` leaves it out of the ABI and it
+    is declared here instead. They come FIRST in the declaration block, ahead of the arrays --
+    a ``parameter`` may size an array bound, and Fortran requires it to be declared before the
+    declaration that uses it.
+    """
+    decls: List[str] = []
+    type_of = {s.name: _fortran_type("int") for s in kir.symbols}
+    type_of.update({s.name: _fortran_type(s.dtype) for s in kir.scalars})
+    for name in sorted(kir.pinned_consts):
+        value = kir.pinned_consts[name]
+        decls.append(f"{type_of.get(name, _fortran_type('float64'))}, parameter :: "
+                     f"{safe(name)} = {fortran_literal(value)}")
+    return decls
+
+
+def fortran_literal(value) -> str:
+    """A pinned knob's value as a Fortran literal of its own kind."""
+    if isinstance(value, bool):
+        return ".true." if value else ".false."
+    if isinstance(value, int):
+        return f"{value}_8"
+    return f"{float(value)!r}_8"
+
+
 def _symbol_decl(name: str, assigned: bool = False) -> str:
     # Shape symbols are int64 passed by value, normally intent(in); but a kernel
     # may recompute a size symbol it also receives, and Fortran forbids intent(in)
@@ -2831,7 +2859,7 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
             (sca_int_decls if sca.dtype in ("int64", "int32", "int") else sca_real_decls).append(d)
         elif arg in arr_by_name:
             arr_decls.append(_array_decl(arr_by_name[arg]))
-    decls = sym_decls + sca_int_decls + arr_decls + sca_real_decls
+    decls = pinned_const_decls(kir, _safe_with_case) + sym_decls + sca_int_decls + arr_decls + sca_real_decls
 
     body_emitter = _FortranBodyEmitter(kir)
     body_emitter.parallel = parallel
@@ -2840,7 +2868,11 @@ def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = 
     body_emitter._helper_out = {_fortran_safe(h.kernel_name): h.return_kind for h in kir.helpers}
     for h in kir.helpers:
         h_order, h_ret = _helper_abi_order(h)
-        body_emitter._helper_ret_slot[_fortran_safe(h.kernel_name)] = h_order.index(h_ret)
+        # A VOID helper (writes through its array params, returns nothing) has no result dummy, so
+        # there is no slot to record. It is called as a bare statement, never as ``X = h(...)``,
+        # which is the only site that reads the slot.
+        if h_ret is not None:
+            body_emitter._helper_ret_slot[_fortran_safe(h.kernel_name)] = h_order.index(h_ret)
     # Pre-compute implicit-local int kinds before emit_block so the body emitter
     # can apply kind-matched bitwise literal suffixes.
     _pre_implicit = _collect_implicit_locals(kir)
@@ -3427,7 +3459,7 @@ def _emit_fortran_helper(hkir: KernelIR, parent: Optional["_FortranBodyEmitter"]
     arr_by = {a.name: a for a in hkir.arrays}
     sca_by = {s.name: s for s in hkir.scalars}
     # One order for definition and call; only the SPELLING is Fortran-specific.
-    ret_name = _fortran_safe(ret_orig)
+    ret_name = _fortran_safe(ret_orig) if ret_orig is not None else None
     param_names = [_fortran_safe(p) for p in abi_order]
     ret_decl = None
     if hkir.return_kind == "scalar":

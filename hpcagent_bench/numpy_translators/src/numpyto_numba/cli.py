@@ -13,10 +13,11 @@ import sys
 
 from numpyto_numba.emit import emit_numba
 from numpyto_common.emit_io import write_generated
+from numpyto_common.frontend import emit_with_inline_fallback
 from numpyto_common.naming import short_for
 
 
-def cmd_emit(args: argparse.Namespace) -> int:
+def emit_once(args: argparse.Namespace) -> int:
     src = args.kernel.read_text()
     flavor_map = {"n": "njit", "np": "njit_parallel"}
     flavor = flavor_map[args.suffix]
@@ -42,6 +43,16 @@ def cmd_emit(args: argparse.Namespace) -> int:
     status = write_generated(args.out / name, out_src, source=f"{short}_numpy.py")
     print(f"numpyto_numba: {status} {name}")
     return 0
+
+
+def cmd_emit(args: argparse.Namespace) -> int:
+    """Emit, retrying once with helper inlining forced on.
+
+    A level-3 kernel is parsed with its helpers KEPT as their own functions; when that form has no
+    emittable shape the failure lands here, in an emitter, not in the parse the frontend can retry
+    for itself. See :func:`numpyto_common.frontend.emit_with_inline_fallback`.
+    """
+    return emit_with_inline_fallback(lambda: emit_once(args))
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1632,6 +1632,17 @@ class BenchSpec:
         return paths.BENCHMARKS / self.relative_path / self.baseline.source
 
     @property
+    def pinned_config(self) -> Dict[str, Any]:
+        """``{symbol: value}`` for every ``config:`` knob the manifest PINNED to one value.
+
+        A pinned knob is a compile-time constant, not a runtime argument: it has one value for
+        every preset and every fuzz draw, so the native emitters declare it as a C ``constexpr`` /
+        Fortran ``parameter`` and leave it out of the ABI. A knob with a ``domain:`` is a fuzzable
+        axis and stays a real parameter, as does every entry of a curated ``config:`` LIST.
+        """
+        return {sym: knob.value for sym, knob in self.config.items() if knob.domain is None}
+
+    @property
     def resolved_level(self) -> Optional[int]:
         """The KernelBench difficulty level declared in the manifest (``level:``), or
         ``None`` if unset. Levels are curated static data, not derived at runtime: L1 =

@@ -312,3 +312,57 @@ def test_an_unresolvable_buffer_dtype_refuses():
     src = _DTYPE_OF_SRC.replace("dtype=x.dtype", "dtype=SOME_DTYPE")
     with pytest.raises(NotImplementedError, match="does not resolve to a known dtype"):
         _helper_kir(src, "float32")
+
+
+#: ``t = h(t, s)``: the target IS the first argument, so the helper reads and writes ONE buffer.
+_INOUT_SRC = ("import numpy as np\n"
+              "def scale_in_place(v, s):\n"
+              " if s < 0.0:\n"
+              "  return -v\n"
+              " return v * s\n"
+              "def f(x, thr, out):\n"
+              " t = np.zeros(8, dtype=x.dtype)\n"
+              " t[:] = x + 1.0\n"
+              " t = scale_in_place(t, thr)\n"
+              " out[:] = t\n")
+
+
+def test_inout_target_takes_one_abi_slot():
+    # An in-out buffer is ONE parameter. Appending a separate out-param put the same pointer in two
+    # slots, and in C both carry ``restrict`` -- a promise the call itself breaks, so the compiler
+    # is licensed to keep a stale copy of what the helper just wrote (vgg16's _maxpool2d(h, h, n)).
+    from numpyto_c.emit import emit_c
+    from numpyto_fortran.emit import emit_fortran
+    kir = _helper_kir(_INOUT_SRC)
+    helper = kir.helpers[0]
+    assert [a.name for a in helper.arrays] == ["v"], "the in-out buffer must not gain a second descriptor"
+    assert helper.return_kind == "v" and helper.arrays[0].is_output
+    assert helper.param_order() == ["v", "s"]
+    c = emit_c(kir, fn_name="f")
+    assert "static void scale_in_place(double *restrict v, const double s)" in c
+    assert "scale_in_place(t, thr);" in c
+    assert "scale_in_place(t, t," not in c, "the same buffer must not be passed twice"
+    f90 = emit_fortran(kir, fn_name="f")
+    assert "subroutine scale_in_place(v, s)" in f90
+    assert "call scale_in_place(t, thr)" in f90
+
+
+def test_helper_specialised_on_a_rebound_shape_is_refused():
+    # A local rebound to a DIFFERENT shape resolves to whichever binding came first, and the helper
+    # built from it bakes those extents in as literals. vgg16's _maxpool2d was emitted for
+    # (batch, 3, 224, 224) and called on (batch, 512, 14, 14): wrong numbers and reads past the end,
+    # reported by no compiler. Refuse while the inference cannot tell the two apart.
+    import pytest
+    src = ("import numpy as np\n"
+           "def half(v):\n"
+           " if v[0] > 0.0:\n"
+           "  return v[0:4]\n"
+           " return -v[0:4]\n"
+           "def f(x, thr, out):\n"
+           " t = np.zeros(8, dtype=x.dtype)\n"
+           " t[:] = x + 1.0\n"
+           " t = half(t)\n"
+           " t = half(t)\n"
+           " out[0:4] = t\n")
+    with pytest.raises(NotImplementedError, match="rebound to both"):
+        _helper_kir(src)

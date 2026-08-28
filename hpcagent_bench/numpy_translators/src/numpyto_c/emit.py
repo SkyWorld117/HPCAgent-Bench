@@ -2821,12 +2821,42 @@ def _emit_c_helper(hkir: KernelIR, cpp: bool = False, isopar: bool = False) -> s
     return f"static {signature} {{\n{body}\n}}\n\n"
 
 
+def pinned_const_block(kir: KernelIR) -> str:
+    """File-scope ``constexpr`` for each config knob the manifest pinned to one value.
+
+    A pinned knob has the same value for every preset and every fuzz draw, so passing it in would
+    be spelling a compile-time constant as a runtime argument: the loop bound, the stride and the
+    padding are all knowable while the kernel is being compiled, and only a constant lets the
+    compiler unroll on them. It is declared here, by NAME, rather than folded into a literal at
+    every use, so the emitted code still reads like the reference it came from.
+    """
+    if not kir.pinned_consts:
+        return ""
+    type_of = {s.name: dtypes.c_type("int") for s in kir.symbols}
+    type_of.update({s.name: _c_type(s.dtype) for s in kir.scalars})
+    lines = []
+    for name in sorted(kir.pinned_consts):
+        value = kir.pinned_consts[name]
+        lines.append(f"constexpr {type_of.get(name, _c_type('float64'))} {name} = {c_literal(value)};")
+    return "\n".join(lines) + "\n\n"
+
+
+def c_literal(value) -> str:
+    """A pinned knob's value as a C literal of its own kind (``true`` / ``100`` / ``1e-06``)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return repr(float(value))
+
+
 def emit_c(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     name = fn_name or f"{kir.kernel_name}_d_c"
     helpers = "".join(_emit_c_helper(h) for h in kir.helpers)
     signature = _emit_signature(kir, name)
     body = _emit_body(kir, indent="        ")
-    return f"{_C_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_C_PRELUDE}{body}\n{_C_EPILOGUE}}}\n"
+    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{helpers}{signature} {{\n"
+            f"{_C_PRELUDE}{body}\n{_C_EPILOGUE}}}\n")
 
 
 def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
@@ -2836,8 +2866,8 @@ def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     # restrict is a C99 keyword; C++ accepts it as __restrict__, so rewrite it for the C++ output.
     signature = signature.replace("*restrict ", "*__restrict__ ")
     body = _emit_body(kir, indent="        ")
-    return (f"{_CPP_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
-            f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
+    return (f"{_CPP_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{helpers}{signature} {{\n"
+            f"{_CPP_PRELUDE}{body}\n{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
 
 
 def emit_cpp_isopar(kir: KernelIR, fn_name: Optional[str] = None) -> str:
@@ -2949,5 +2979,5 @@ def emit_pluto(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     # inside, and the body already carries its own scop markers (see _CBodyEmitter.emit_block).
     decl_block = (decls + "\n") if decls else ""
     free_block = (frees + "\n") if frees else ""
-    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{signature} {{\n{_C_PRELUDE}"
+    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{signature} {{\n{_C_PRELUDE}"
             f"{decl_block}{body}\n{free_block}{_C_EPILOGUE}}}\n")
