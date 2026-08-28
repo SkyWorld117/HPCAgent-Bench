@@ -214,6 +214,6 @@ scontrol release <jobid>          # for launch failed requeued held
 
 `/capstor/scratch/cscs/ybudanaz/x86_64/venv-optarena-314` (3.14.7, pyenv global). The repo is
 MOUNTED, never pip-installed, so put it on `PYTHONPATH`. Rebuild with
-`tools/session-038c86bd/rebuild_venv.sh`. Keep caches off HOME -- that quota is INODES, not bytes.
+`tools/rebuild_venv.sh`. Keep caches off HOME -- that quota is INODES, not bytes.
 Note that `pre-commit`'s format hook needs the venv on `PATH` or it reports `missing formatter(s):
 yapf` even when yapf is installed.
