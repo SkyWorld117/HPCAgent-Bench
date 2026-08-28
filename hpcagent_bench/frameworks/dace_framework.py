@@ -26,6 +26,7 @@ import importlib.metadata
 
 # Imported at module level so a broken/absent DaCe is a real import error, not a silent skip.
 import dace
+from dace.codegen import common as dace_common
 
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
 import dace.dtypes as dace_dtypes
@@ -207,6 +208,31 @@ def mpi_rank() -> Optional[str]:
         if value is not None and value.isdigit():
             return value
     return None
+
+
+def pin_gpu_toolchain() -> None:
+    """Point DaCe's GPU build at the ROCm install this host actually has.
+
+    DaCe's generated CMake does ``find_package(HIP REQUIRED)``, which resolves through
+    ``CMAKE_PREFIX_PATH`` / ``HIP_DIR``. ROCm keeps its bin off ``PATH`` (that directory holds a
+    ``clang`` that would shadow every other build's compiler), so on a bare node nothing points
+    CMake at it and the configure step fails with "Add the installation prefix of HIP to
+    CMAKE_PREFIX_PATH" -- measured: every ``dace_gpu`` kernel declined for that reason alone. The
+    container image exports these; a node outside it does not, and the harness should not need one.
+
+    Only ever ADDS: an operator who set ``ROCM_PATH`` or ``CMAKE_PREFIX_PATH`` keeps their value,
+    and a host with no ROCm is left untouched so the CUDA path is unaffected.
+    """
+    root = pathlib.Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
+    if not (root / "lib" / "cmake" / "hip").is_dir():
+        return  # no ROCm here: a CUDA box, or a node without the SDK
+    os.environ.setdefault("ROCM_PATH", str(root))
+    os.environ.setdefault("HIP_PATH", str(root))
+    prefix = os.environ.get("CMAKE_PREFIX_PATH", "")
+    if str(root) not in prefix.split(os.pathsep):
+        os.environ["CMAKE_PREFIX_PATH"] = os.pathsep.join([str(root), prefix]) if prefix else str(root)
+    if dace.Config.get("compiler", "cuda", "backend") == "auto":
+        dace.Config.set("compiler", "cuda", "backend", value="hip")
 
 
 def pin_per_rank_build_dirs() -> None:
@@ -660,8 +686,16 @@ class DaceFramework(Framework):
         unblock_sigchld()
         pin_build_caching()
         if self.info["arch"] == "gpu":
+            pin_gpu_toolchain()
             if dace.Config.get('library', 'blas', 'default_implementation') != "pure":
-                dace.Config.set('library', 'blas', 'default_implementation', value='cuBLAS')
+                # The vendor BLAS is named per BACKEND: a hardcoded 'cuBLAS' on an AMD node names an
+                # expansion whose environment is not installed, and every BLAS node falls through to
+                # the serial 'pure' loop while the log still says the fast library was selected.
+                backend = dace_common.get_gpu_backend()
+                dace.Config.set('library',
+                                'blas',
+                                'default_implementation',
+                                value='rocBLAS' if backend == 'hip' else 'cuBLAS')
             pin_single_stream()
 
         self._pipeline_errors = []
