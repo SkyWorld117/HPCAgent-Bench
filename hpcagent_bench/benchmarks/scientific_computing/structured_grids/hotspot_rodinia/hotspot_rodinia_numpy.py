@@ -186,27 +186,16 @@ def hotspot_rodinia_step(temp, power, result, Cap_1, Rx_1, Ry_1, Rz_1, amb_temp)
     a Jacobi sweep and the traversal order does not affect the result.
     """
 
-    rows, cols = temp.shape
+    # Clamping a missing neighbour onto the cell itself IS edge padding, so the four shifted
+    # views of one padded copy carry upstream's corner and edge branches without a boundary case.
+    padded = np.pad(temp, 1, mode="edge")
+    north = padded[:-2, 1:-1]
+    south = padded[2:, 1:-1]
+    west = padded[1:-1, :-2]
+    east = padded[1:-1, 2:]
 
-    for r in range(rows):
-        north = r - 1
-        if north < 0:
-            north = 0
-        south = r + 1
-        if south > rows - 1:
-            south = rows - 1
-        for c in range(cols):
-            west = c - 1
-            if west < 0:
-                west = 0
-            east = c + 1
-            if east > cols - 1:
-                east = cols - 1
-
-            here = temp[r, c]
-            result[r, c] = here + (Cap_1 * (power[r, c] + (temp[south, c] + temp[north, c] - 2.0 * here) * Ry_1 +
-                                            (temp[r, east] + temp[r, west] - 2.0 * here) * Rx_1 +
-                                            (amb_temp - here) * Rz_1))
+    result[:] = temp + (Cap_1 * (power + (south + north - 2.0 * temp) * Ry_1 +
+                                 (east + west - 2.0 * temp) * Rx_1 + (amb_temp - temp) * Rz_1))
 
 
 def hotspot_rodinia(temp, power, niter, T, work):
@@ -229,9 +218,7 @@ def hotspot_rodinia(temp, power, niter, T, work):
     rows, cols = temp.shape
     Cap_1, Rx_1, Ry_1, Rz_1, _step = hotspot_rodinia_coefficients(rows, cols)
 
-    for r in range(rows):
-        for c in range(cols):
-            T[r, c] = temp[r, c]
+    T[:] = temp
 
     for _it in range(niter):
         hotspot_rodinia_step(T, power, work, Cap_1, Rx_1, Ry_1, Rz_1, HOTSPOT_AMB_TEMP)
