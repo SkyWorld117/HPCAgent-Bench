@@ -60,9 +60,7 @@ NO_SCALE = ("distribution_search", "gpt2_block", "raman_fitting", "seissol_batch
 CHAOTIC_FLOAT_TOLERANCE: Dict[str, Tuple[float, float]] = {"mandelbrot1": (1e-4, 1e-4)}
 
 #: Kernels out of scope for the static translators (control-flow search, not array math) -> documented skip.
-OUT_OF_SCOPE = {
-    "distribution_search": "skip:out-of-scope:control-flow-search",
-}
+OUT_OF_SCOPE: Dict[str, str] = {}
 
 #: Kernels the translator SHOULD emit and cannot yet, each naming the ONE missing feature.
 #:

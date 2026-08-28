@@ -2580,11 +2580,15 @@ def _record_ifexp_temp_dtypes(emitter: "_FortranBodyEmitter", temps: Dict[str, T
 
 
 class _FortranRenameTemps(ast.NodeTransformer):
-    """Rewrite every leading-underscore Name/For-target to a Fortran-safe form, and case-insensitive collisions to f_<name>."""
+    """Rewrite every leading-underscore Name/For-target to a Fortran-safe form, case-insensitive collisions to f_<name>,
+    and give each For-loop iterator a unique Fortran name so nested loops do not reuse the same DO variable."""
 
     def __init__(self, case_map: Optional[Dict[str, str]] = None):
         # case_map maps a lower-cased reserved name to its colliding f_-prefixed rewrite.
         self.case_map: Dict[str, str] = case_map or {}
+        # Stack of (original_id, unique_fortran_id) for currently active For-loop targets.
+        self._loop_stack: List[Tuple[str, str]] = []
+        self._loop_counter = 0
 
     def _safe(self, name: str) -> str:
         renamed = _fortran_safe(name)
@@ -2598,13 +2602,39 @@ class _FortranRenameTemps(ast.NodeTransformer):
         return renamed
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
+        # Inside an active loop body, references to the loop target name resolve to the
+        # innermost binding (Fortran does not allow the same DO variable in nested loops).
+        for orig, uniq in reversed(self._loop_stack):
+            if node.id == orig:
+                node.id = uniq
+                return node
         node.id = self._safe(node.id)
         return node
 
     def visit_For(self, node: ast.For) -> ast.AST:
+        # Visit the iterable before the loop variable is in scope.
+        self.visit(node.iter)
         if isinstance(node.target, ast.Name):
-            node.target.id = self._safe(node.target.id)
-        self.generic_visit(node)
+            base = self._safe(node.target.id)
+            # Uniqueify even simple names like 'i' because Fortran rejects nested DO
+            # variables with the same identifier in the same subroutine scope.
+            if base.startswith("x_"):
+                uniq = f"{base}_{self._loop_counter}"
+            else:
+                uniq = f"{base}_l{self._loop_counter}"
+            self._loop_counter += 1
+            self._loop_stack.append((node.target.id, uniq))
+            node.target.id = uniq
+            for stmt in node.body:
+                self.visit(stmt)
+            for stmt in node.orelse:
+                self.visit(stmt)
+            self._loop_stack.pop()
+        else:
+            for stmt in node.body:
+                self.visit(stmt)
+            for stmt in node.orelse:
+                self.visit(stmt)
         return node
 
 
@@ -3109,11 +3139,13 @@ def _collect_implicit_locals(kir: KernelIR) -> List[Tuple[str, str]]:
     BITWISE_OPS = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
 
     def _produces_bool(node) -> bool:
-        # A boolean-valued RHS: comparison/boolean op/not, or a numpy mask combine
-        # (& | ^ ~ on boolean operands) -- such a target is logical.
+        # A boolean-valued RHS: comparison/boolean op/not, a bare True/False literal,
+        # or a numpy mask combine (& | ^ ~ on boolean operands) -- such a target is logical.
         if isinstance(node, (ast.Compare, ast.BoolOp)):
             return True
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
             return True
         if isinstance(node, ast.BinOp) and isinstance(node.op, BITWISE_OPS):
             return _produces_bool(node.left) or _produces_bool(node.right)
