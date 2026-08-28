@@ -156,10 +156,11 @@ BIND=$([[ "${RANKS_PER_NODE}" -gt 1 ]] && echo "--cpu-bind=cores" || echo "--cpu
 srun "${CE[@]}" --ntasks="${RANKS}" --ntasks-per-node="${RANKS_PER_NODE}" "${BIND}" bash -c '
 set -euo pipefail
 rank="${SLURM_PROCID:-0}"
-# One accelerator per rank, by position on the node. Co-resident ranks would otherwise every one of
-# them take device 0 and time each other rather than themselves -- the GPU form of the core overlap
-# --cpu-bind=cores rules out. Both spellings, because the vendor is the image's business and not
-# this script's; on a node with no accelerator neither variable means anything.
+# One accelerator per rank, by position on the node. Co-resident ranks would otherwise all take
+# device 0 and time each other rather than themselves -- the GPU form of the core overlap that
+# --cpu-bind=cores rules out. Both spellings, because the vendor belongs to the image and not to
+# this script; on a node with no accelerator neither variable means anything.
+# NOTE: this block is single-quoted for srun, so no apostrophe may appear anywhere inside it.
 export CUDA_VISIBLE_DEVICES="${SLURM_LOCALID:-0}" HIP_VISIBLE_DEVICES="${SLURM_LOCALID:-0}"
 IFS="," read -r -a fws <<< "'"${FRAMEWORKS}"'"
 for fw in "${fws[@]}"; do
