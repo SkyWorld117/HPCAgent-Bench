@@ -2836,6 +2836,37 @@ def _fd_step(precision: Optional[str] = None) -> str:
     return repr(math.sqrt(dtypes.float_eps(_working_float_dtype(precision))))
 
 
+class _FinfoEpsFold(ast.NodeTransformer):
+    """``np.finfo(<anything>).eps`` -> the machine epsilon of the WORKING float dtype, as a literal.
+
+    A round-off BOUND (MINPACK's ftol/xtol at sqrt(eps), a finite-difference step) states "no better
+    than round-off is possible", so it has to follow the precision the kernel is lowered to. An
+    accuracy REQUIREMENT (a solver's ``tol=1e-6``) states what the solve must achieve and is a fixed
+    number at every width -- it must NOT go through here.
+
+    Folded rather than lowered because the emitters write source text: there is no ``finfo`` at
+    native run time, and the value is known once the precision is. Same reasoning and same registry
+    as :func:`_fd_step`.
+    """
+
+    def __init__(self, precision: Optional[str] = None):
+        self.eps = dtypes.float_eps(_working_float_dtype(precision))
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        call = node.value
+        if (node.attr == "eps" and isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "finfo" and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in ("np", "numpy")):
+            return ast.copy_location(ast.Constant(value=self.eps), node)
+        return node
+
+
+def fold_finfo_eps(tree: ast.Module, precision: Optional[str] = None) -> None:
+    """Fold every ``np.finfo(...).eps`` in ``tree`` to the working precision's epsilon."""
+    _FinfoEpsFold(precision).visit(tree)
+
+
 def _working_float_dtype(precision: Optional[str] = None) -> str:
     """The WORKING float dtype a lowering emits its own scratch in, from ``precision``.
 
