@@ -94,6 +94,14 @@ class Test(object):
             impl = frmwrk.optimize(impl, self.bench, bdata)
             self._measured_impl = impl
             plan = frmwrk.build_call(self.bench, impl, bdata)
+        except NotSupportedByFramework as e:
+            # Same decline the measure seam below honours: a framework that cannot produce this
+            # kernel reports UNSUPPORTED and no row, rather than a traceback or a timed fallback.
+            print("UNSUPPORTED: {}".format(e))
+            self._last_failure = "unsupported"
+            if not ignore_errors:
+                raise
+            return None, None, None
         except Exception as e:
             print("Failed to load the {} implementation.".format(report_str))
             traceback.print_exception(e)
