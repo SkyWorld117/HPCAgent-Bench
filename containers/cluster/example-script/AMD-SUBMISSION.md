@@ -131,13 +131,26 @@ the vLLM path that builds on first request and dies.
 `ThreadPoolExecutor(max_workers=workers)` with a submit per problem, so that many start and each
 finisher launches the next. It is not a barrier.
 
-| model | agents | kernels | passes | `AGENT_TIMEOUT_SECONDS` |
-|---|---|---|---|---|
-| oss120b | 40 | 40 | 1 | 14400 (4h) |
-| qwen3.8 | 20 | 40 | 2 | 14400 (4h) |
-| Kimi K2.7 | 12 | 20 per half | 2 halves | 28800 (8h) |
+| model | agents | kernels | passes | `AGENT_TIMEOUT_SECONDS` | worst case | `--time` |
+|---|---|---|---|---|---|---|
+| oss120b | 40 | 40 | 1 | 14400 (4h) | 4h | 08:00:00 |
+| qwen3.8 | 20 | 40 | 2 | 14400 (4h) | 8h | 14:00:00 |
+| Kimi K2.7 | 12 | 20 per half | 1 per half | 28800 (8h) | 8h | 14:00:00 |
 
 Kimi cannot hold 40 kernels in one arm at 12 agents, which is why C is split into `-a` / `-b`.
+
+**Size `--time` from passes, not from the per-agent cap.** A pass is `ceil(kernels / agents)`, and
+the pool runs them back to back, so the floor is `passes x AGENT_TIMEOUT_SECONDS` and the arm still
+has to bring the server up before it and drain the judge after it. qwen3.8's two passes make its
+floor 8h, which the default `TIME=08:00:00` cannot cover -- 610664/610666 were submitted that way
+and cancelled 9 minutes in for it. Give every arm at least its floor plus half again:
+
+```bash
+MODEL=qwen38 CAMPAIGN=llr8w2 TIME=14:00:00 ./submit-llr8.sh
+```
+
+A limit can be LOWERED with `scontrol` after the fact and never raised, so an arm submitted short
+has to be resubmitted -- cheap in the first minutes, an entire wall clock later.
 
 ## Effort levels -- per model, not a shared dial
 
