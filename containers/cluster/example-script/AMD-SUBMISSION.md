@@ -92,6 +92,7 @@ tool calls are swallowed and the run is logged as a success that submitted nothi
 | qwen3.8 `fp8kv` on vLLM | served, then decoded 0.0 tok/s |
 | aiter MLA on gfx942 | `fmha_v3_varlen_fwd invalid argument` (600662) |
 | `INFERENCE_ENGINE=sglang` with a vLLM `INFERENCE_CE_ENV` | `/opt/venv/bin/python3` in that image has neither sglang nor huggingface_hub; 610646/610647 died in 31 s resolving the model path |
+| qwen3.8 with an explicit `AGENT_EFFORT` on SGLang | SGLang's Anthropic adapter rewrites any effort to `max`; the Qwen3.8 template raises `Unexpected reasoning effort max` and the arm dies on its first agent request. 610654/610655/610657, ~10 min in |
 | `AGENTS_PER_NODE=120` | a coding agent spends most of its wall clock in tools or a compile, so the batch never filled |
 
 The aiter row is one mechanism, not nine bugs. A job that dies mid-build **leaves its lock**, and
@@ -143,7 +144,7 @@ Kimi cannot hold 40 kernels in one arm at 12 agents, which is why C is split int
 | model | value | why |
 |---|---|---|
 | oss120b | `high` | ladder is low/medium/high, and the template renders `Reasoning: <v>` VERBATIM with no guard -- a wrong value is pasted into the system prompt rather than refused |
-| qwen3.8 | `xhigh` | ladder is low/medium/xhigh; the template RAISES on anything else |
+| qwen3.8 | *(empty)* | the ladder is low/medium/xhigh, but on SGLang an explicit value is rewritten to `max` and the template raises. Empty leaves the template on its OWN default, which IS xhigh -- the level we wanted, without the rewrite |
 | Kimi K2.7 | *(empty)* | no ladder at all -- `reasoning_effort` is a K3-only field |
 
 Set it EMPTY, never delete the line: `agent_driver.py` defaults a MISSING `AGENT_EFFORT` to
