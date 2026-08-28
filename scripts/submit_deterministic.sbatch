@@ -60,7 +60,20 @@ RANKS_PER_NODE="${SLURM_NTASKS_PER_NODE:-${RANKS_PER_NODE:-1}}"
 RANKS_PER_NODE="${RANKS_PER_NODE%%(*}"   # Slurm may report "4(x2)"; the leading count is the one
 RANKS="${SLURM_NTASKS:-$(( "${SLURM_JOB_NUM_NODES:-1}" * RANKS_PER_NODE ))}"   # kernel shards, not nodes
 
-REPO="${HPCAGENT_BENCH_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Where the repo is. Under sbatch the script runs from Slurm's SPOOL copy, so BASH_SOURCE points at
+# /var/spool and every repo-relative read below lands nowhere -- the reason this tries the submit
+# directory first and checks each candidate carries the tree rather than trusting any one of them.
+for candidate in "${HPCAGENT_BENCH_REPO:-}" "${SLURM_SUBMIT_DIR:-}" \
+                 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"; do
+    if [[ -n "${candidate}" && -f "${candidate}/hpcagent_bench/container_backends.txt" ]]; then
+        REPO="${candidate}"
+        break
+    fi
+done
+if [[ -z "${REPO:-}" ]]; then
+    echo "cannot locate the repo: set HPCAGENT_BENCH_REPO, or submit from the repo root" >&2
+    exit 2
+fi
 cd "${REPO}"
 export HPCAGENT_BENCH_REPO="${REPO}"   # an EDF interpolates this for its bind mount and workdir
 
