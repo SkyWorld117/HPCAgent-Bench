@@ -39,15 +39,23 @@ def edit(path: pathlib.Path, subs: list[tuple[str, str]], append: str = "") -> N
         if n != 1:
             raise SystemExit(f"{path.name}: {pattern!r} matched {n} times")
         text = new
-    path.write_text(text + append)
+    # Appending twice would hand the server two copies of every flag, so the block goes on only
+    # once however often this runs.
+    if append and "INFERENCE_ENGINE=sglang" not in text:
+        text += append
+    path.write_text(text)
     print(f"wrote {path.name}")
 
 
-for arm in ("c", "c-skills"):
+for arm in ("c", "c-skills", "fortran", "fortran-skills"):
     # 163 tok/s over 20 agents is 8.2 each, at the >=8 tok/s per-agent floor the judge sizing
     # assumes. 120 was a vLLM-era number for a server that never reached this rate.
+    # The image moves WITH the engine. Naming SGLANG_PYTHON while leaving this on a vLLM image
+    # points /opt/venv/bin/python3 at an interpreter with neither sglang nor huggingface_hub, and
+    # the run dies resolving the model path (610646/610647).
     edit(HERE / f".env.llr8-qwen38-{arm}", [(r"^RUN_ROOT=.*$", RUN_ROOT.replace("\\", "\\\\")),
-                                            (r"^AGENTS_PER_NODE=.*$", "AGENTS_PER_NODE=20")],
+                                            (r"^AGENTS_PER_NODE=.*$", "AGENTS_PER_NODE=20"),
+                                            (r"^INFERENCE_CE_ENV=.*$", "INFERENCE_CE_ENV=sglang-rocm-mi30x")],
          append=SGLANG_BLOCK)
 
 for src, dst, problems, campaign_arm in (
@@ -58,3 +66,9 @@ for src, dst, problems, campaign_arm in (
     target.write_text((HERE / f".env.llr8-kimi27sglang-{src}").read_text())
     edit(target, [(r"^PROBLEMS_FILE=.*$", f"PROBLEMS_FILE={problems}"),
                   (r"^CAMPAIGN_ARM=.*$", f"CAMPAIGN_ARM={campaign_arm}")])
+
+# oss120b serves fine on vLLM once AITER's master switch is off (97ff5d4f), so these arms keep the
+# engine they have always completed on and only pick up the wave root and the agent count.
+for arm in ("fortran", "fortran-skills"):
+    edit(HERE / f".env.llr8-oss120b-{arm}", [(r"^RUN_ROOT=.*$", RUN_ROOT.replace("\\", "\\\\")),
+                                             (r"^AGENTS_PER_NODE=.*$", "AGENTS_PER_NODE=40")])
