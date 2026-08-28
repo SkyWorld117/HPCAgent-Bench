@@ -573,16 +573,22 @@ CLANG_OPT_REPORT = ("-Rpass=loop-vectorize|slp-vectorizer -Rpass-missed=loop-vec
 # is appended by the framework after :func:`detect_sm` / :func:`detect_gfx`.
 # ---------------------------------------------------------------------------
 
-#: NVCC baseline -- device-side ``-O3 --use_fast_math``; the host compiler pass
-#: receives the full CPU relax set via ``-Xcompiler`` (mirrors the SC26-Layout-AD
-#: canonical GPU flag set). ``-arch=sm_<SM>`` is appended per-host by
-#: :func:`compose_cuda` after :func:`detect_sm`.
-CUDA_BASELINE = (f"-O3 --use_fast_math -Xcompiler='-O3 -march=native -ffast-math {_FP_RELAX} -fPIC'")
+#: NVCC baseline -- the host pass receives the CPU relax set via ``-Xcompiler`` and the device
+#: pass keeps nvcc's IEEE defaults (``-prec-div``/``-prec-sqrt`` true, no flush-to-zero).
+#: ``-arch=sm_<SM>`` is appended per-host by :func:`compose_cuda` after :func:`detect_sm`.
+#:
+#: NO ``--use_fast_math`` and no host ``-ffast-math``: rule (1) at the top of this module is not
+#: a CPU rule. Both were carried over from an external GPU flag set, and they made a GPU
+#: submission's arithmetic differ from the NumPy oracle it is graded against -- and from the CPU
+#: baseline it is compared against -- while the prompt promised agents that fast-math is never
+#: passed. ``_FP_RELAX`` is the whole of the licence, on either side of the PCIe bus.
+CUDA_BASELINE = (f"-O3 -Xcompiler='-O3 -march=native {_FP_RELAX} -fPIC'")
 
-#: HIP (AMD) baseline -- hipcc is clang-based and takes the relax flags natively
-#: (no ``-Xcompiler``); mirrors the SC26-Layout-AD hipcc set. ``--offload-arch=
-#: <gfx>`` is appended per-host by :func:`compose_hip` after :func:`detect_gfx`.
-HIP_BASELINE = (f"-O3 -march=native -ffast-math {_FP_RELAX} -fPIC")
+#: HIP (AMD) baseline -- hipcc is clang-based and takes the relax flags natively (no
+#: ``-Xcompiler``), so one spelling covers its host and device passes. ``--offload-arch=<gfx>``
+#: is appended per-host by :func:`compose_hip` after :func:`detect_gfx`. No ``-ffast-math``, for
+#: the reason on :data:`CUDA_BASELINE`.
+HIP_BASELINE = (f"-O3 -march=native {_FP_RELAX} -fPIC")
 
 # Directive-offload flag sets; ``{arch}`` filled by :func:`languages.offload_flags` from the arch
 # :func:`languages.offload_arch` PROBED, never from a constant. One toolchain owns each model:
