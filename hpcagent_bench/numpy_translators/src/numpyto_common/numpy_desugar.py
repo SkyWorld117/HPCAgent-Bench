@@ -286,6 +286,13 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
             return None if base is None or axes is None else base - axes
         if attr == "matmul" and len(value.args) == 2:
             return expr_rank(ast.BinOp(left=value.args[0], op=ast.MatMult(), right=value.args[1]), ranks)
+        if attr == "tensordot" and len(value.args) >= 2:
+            # A contraction, not a broadcast: the fallback below reported ``max(operand ranks)``,
+            # which read ls3df's ``tensordot(row, X)`` (2 and 4, one axis contracted) as rank 2 and
+            # built a 2-entry ``moveaxis`` permutation for a rank-4 result. Unknown stays unknown.
+            la, lb = expr_rank(value.args[0], ranks), expr_rank(value.args[1], ranks)
+            n = _tensordot_contracted(value)
+            return None if la is None or lb is None or n is None else la + lb - 2 * n
         # rank-preserving methods ``x.astype(dt)`` / ``x.copy()`` (receiver's rank).
         if (isinstance(value.func, ast.Attribute) and value.func.attr in ("astype", "copy", "ravel")):
             return expr_rank(value.func.value, ranks) if value.func.attr != "ravel" else 1
@@ -309,6 +316,24 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
         if attr is not None:
             rs = [expr_rank(a, ranks) for a in value.args]
             return max([r for r in rs if r is not None], default=None)
+    return None
+
+
+def _tensordot_contracted(value: ast.Call) -> Optional[int]:
+    """Axes each operand of ``np.tensordot`` contracts: an integer ``axes`` contracts that many, a
+    pair of axis sequences contracts one per listed axis, a pair of bare ints contracts one."""
+    kw = {k.arg: k.value for k in value.keywords}
+    axes = kw["axes"] if "axes" in kw else (value.args[2] if len(value.args) > 2 else None)
+    if axes is None:
+        return 2  # numpy's own default
+    n = _const_int(axes)
+    if n is not None:
+        return n
+    if isinstance(axes, (ast.Tuple, ast.List)) and len(axes.elts) == 2:
+        first = axes.elts[0]
+        if isinstance(first, (ast.Tuple, ast.List)):
+            return len(first.elts)
+        return None if _const_int(first) is None else 1
     return None
 
 

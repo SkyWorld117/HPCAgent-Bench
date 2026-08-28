@@ -804,24 +804,49 @@ def _drop_dead_none_bindings(fn: ast.FunctionDef) -> None:
     ``__inl1_stride`` genuinely IS read later on, just never through this dead write. Adjacency makes
     that safe to see without a full liveness pass: nothing between the two statements can read the
     ``None``, so whatever the second statement writes is the only value that ever reaches a reader.
+
+    A third case needs no liveness either: a name some BRANCH rebinds with a real value, that no
+    surviving test compares against ``None``. Every read of such a name is a read of its VALUE, and
+    numpy raises on any path that reaches one with the sentinel still live -- so the sentinel write
+    is unobservable in every run the kernel is defined for (warpx's ``sx_new = ... = None`` declared
+    ahead of the per-geometry branches that fill them). A name still tested against ``None`` is left
+    alone: there the sentinel IS the value being read.
     """
     read = OrderedSet(n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
+    tested: OrderedSet = OrderedSet()
+    for cmp in ast.walk(fn):
+        if isinstance(cmp, ast.Compare) and any(
+                isinstance(c, ast.Constant) and c.value is None for c in cmp.comparators):
+            tested.update(n.id for n in ast.walk(cmp) if isinstance(n, ast.Name))
+    rebound: OrderedSet = OrderedSet()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign) or (isinstance(node.value, ast.Constant) and node.value.value is None):
+            continue
+        for tgt in node.targets:
+            elts = tgt.elts if isinstance(tgt, (ast.Tuple, ast.List)) else [tgt]
+            rebound.update(e.id for e in elts if isinstance(e, ast.Name))
 
-    def none_bind_target(stmt: ast.stmt) -> Optional[str]:
-        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
-                and isinstance(stmt.value, ast.Constant) and stmt.value.value is None):
-            return stmt.targets[0].id
-        return None
+    def none_bind_targets(stmt: ast.stmt) -> List[str]:
+        # ``a = b = None`` declares a whole run of sentinels at once (warpx spells all six shape
+        # buffers that way), so a chained bind is the same statement, not a different idiom.
+        if (isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+                and all(isinstance(t, ast.Name) for t in stmt.targets)):
+            return [t.id for t in stmt.targets]
+        return []
 
     def rebinds(stmt: ast.stmt, name: str) -> bool:
         return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                 and stmt.targets[0].id == name)
 
+    def dead(name: str, i: int, stmts: List[ast.stmt]) -> bool:
+        return (name not in read or (i + 1 < len(stmts) and rebinds(stmts[i + 1], name))
+                or (name in rebound and name not in tested))
+
     def prune(stmts: List[ast.stmt]) -> List[ast.stmt]:
         out: List[ast.stmt] = []
         for i, stmt in enumerate(stmts):
-            name = none_bind_target(stmt)
-            if name is not None and (name not in read or (i + 1 < len(stmts) and rebinds(stmts[i + 1], name))):
+            names = none_bind_targets(stmt)
+            if names and all(dead(n, i, stmts) for n in names):
                 continue
             out.append(stmt)
         return out

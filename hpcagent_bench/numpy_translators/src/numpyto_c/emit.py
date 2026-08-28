@@ -936,6 +936,7 @@ class _CBodyEmitter(BaseEmitter):
         return "\n".join([self._emit_assign(assign, indent), *frees, f"{indent}return;"])
 
     def _emit_if(self, node: ast.If, indent: str) -> str:
+        hoisted = self._declare_inline_locals_before(node, indent)
         then = self._branch_block(node.body, indent + "  ")
         chained = bool(node.orelse) and len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If)
         else_str = ""
@@ -946,7 +947,7 @@ class _CBodyEmitter(BaseEmitter):
         if not then.strip() and not else_str.strip():
             return ""
         cond = self.emit_expr(node.test)
-        out = [f"{indent}if ({cond}) {{", then, f"{indent}}}"]
+        out = ([hoisted] if hoisted else []) + [f"{indent}if ({cond}) {{", then, f"{indent}}}"]
         if node.orelse:
             if chained:
                 out.append(f"{indent}else " + else_str.lstrip())
@@ -955,6 +956,32 @@ class _CBodyEmitter(BaseEmitter):
                 out.append(else_str)
                 out.append(f"{indent}}}")
         return "\n".join(out)
+
+    def _declare_inline_locals_before(self, node: ast.If, indent: str) -> str:
+        """Declare, ahead of the ``if``, any inline VLA local one of its branches allocates.
+
+        The declaration is otherwise emitted wherever the allocation marker happens to sit, which
+        for a once-only guard is inside the ``if`` branch -- so the ``else`` branch, and everything
+        after the ``if``, referenced a name out of scope and the C would not build. Moving it to the
+        enclosing block keeps every loop variable its extent names in scope, since the ``if`` sits
+        inside those loops already.
+        """
+        inline_locals = vars(self).get("inline_local_decls", {})
+        if not inline_locals:
+            return ""
+        decls = []
+        for stmt in ast.walk(node):
+            if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id in inline_locals):
+                continue
+            name = stmt.targets[0].id
+            shape = inline_locals.pop(name)
+            local_dtypes = vars(self).get("local_dtypes_for_inline", {})
+            size_tokens = [f"({_c_shape_token(s)})" for s in shape] if shape else []
+            size = " * ".join(size_tokens) if size_tokens else "1"
+            c_type = _c_type(local_dtypes.get(name, _default_float_dtype(self.kir)))
+            decls.append(f"{indent}{c_type} {name}[{size}];")
+        return "\n".join(decls)
 
     def _branch_block(self, stmts: List[ast.stmt], indent: str) -> str:
         """Emit one ``if`` branch, then free the buffers that branch declared.
@@ -1236,7 +1263,15 @@ class _CBodyEmitter(BaseEmitter):
                                   f"(line {vars(node).get('lineno', '?')}): {ast.unparse(node)[:120]}")
 
     def _unchain_subscript(self, node: ast.Subscript) -> Tuple[ast.AST, List[str]]:
-        """Collapse a subscript chain a[i][j]... into (base_node, [i, j, ...]) for row-major flattening."""
+        """Collapse a subscript chain a[i][j]... into (base_node, [i, j, ...]) for row-major flattening.
+
+        Concatenating the levels is numpy's combined basic indexing only while every index BELOW
+        the outermost is scalar. A surviving slice there makes the outer index relative to the
+        sliced range -- ``a[1:3][0]`` is ``a[1]``, not ``a[1:3, 0]`` -- so concatenating it drops
+        the offset and returns the wrong row from code that compiles clean. The bare-``:`` case is
+        composed upstream (``_ChainedSubscriptFlattener``); anything still chained here is refused
+        rather than guessed at.
+        """
         chain: List[str] = []
         cur: ast.AST = node
         # Index texts are marked so a pluto scop can hoist a call out of one (see pluto_call_free).
@@ -1244,10 +1279,12 @@ class _CBodyEmitter(BaseEmitter):
         try:
             while isinstance(cur, ast.Subscript):
                 sl = cur.slice
-                if isinstance(sl, ast.Tuple):
-                    chain = [self.emit_expr(e) for e in sl.elts] + chain
-                else:
-                    chain = [self.emit_expr(sl)] + chain
+                elts = list(sl.elts) if isinstance(sl, ast.Tuple) else [sl]
+                if cur is not node and any(isinstance(e, ast.Slice) for e in elts):
+                    raise NotImplementedError(f"chained subscript {ast.unparse(node)[:80]} slices an inner level, "
+                                              f"so the outer index is relative to that slice and cannot be "
+                                              f"concatenated onto it")
+                chain = [self.emit_expr(e) for e in elts] + chain
                 cur = cur.value
         finally:
             self._index_depth -= 1
