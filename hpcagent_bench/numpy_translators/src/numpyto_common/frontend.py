@@ -319,11 +319,11 @@ class _ArrayLiteralToFill(ast.NodeTransformer):
     def visit_Assign(self, node: ast.Assign):
         if self.fn is None or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             return node
-        parsed = _array_literal(node.value)
+        name = node.targets[0].id
+        parsed = _array_literal(node.value) or _bare_index_list(self.fn, node.value, name)
         if parsed is None:
             return node
         elts, dtype = parsed
-        name = node.targets[0].id
         if dtype is None:
             attr = _literal_elt_dtype(elts)
             if attr is None and _reads_only_as_index(self.fn, name):
@@ -363,6 +363,24 @@ def _array_literal(value: ast.expr) -> Optional[Tuple[List[ast.expr], Optional[a
     if any(isinstance(elt, (ast.List, ast.Tuple, ast.Starred)) for elt in elts):
         return None
     return elts, next((kw.value for kw in value.keywords if kw.arg == "dtype"), None)
+
+
+def _bare_index_list(fn: ast.FunctionDef, value: ast.expr, name: str) -> Optional[Tuple[List[ast.expr], None]]:
+    """``corners = [n0, n1, n2, n3]`` read only through a subscript's index slot.
+
+    numpy indexes with a plain list exactly as it does with ``np.array`` of that list, so this is
+    the same index vector spelled without the constructor -- lulesh's face-corner fancy add
+    ``normal[:, corners, 0] += areaX[:, None]``. A TUPLE is deliberately not accepted here: in an
+    index slot a tuple is a MULTI-AXIS index, not a fancy one. Nor is a name anything appends to,
+    which is a growable list and no array at all.
+    """
+    if not isinstance(value, ast.List) or not value.elts:
+        return None
+    if any(isinstance(e, (ast.List, ast.Tuple, ast.Starred)) for e in value.elts):
+        return None
+    if name in _list_mutated_names(fn) or not _reads_only_as_index(fn, name):
+        return None
+    return list(value.elts), None
 
 
 def _is_num_literal(node: ast.expr) -> bool:
@@ -3089,6 +3107,50 @@ def alloc_call_shape(fn: ast.FunctionDef, call: ast.Call, arr_by: Dict[str, Arra
     return tuple(ast.unparse(d) for d in dims)
 
 
+def _shape_tuple_string(tokens: Tuple[str, ...]) -> str:
+    """Shape tokens as the parenthesised string the harvest's helpers read (1-D keeps its comma)."""
+    inner = ", ".join(str(t) for t in tokens)
+    return f"({inner},)" if len(tokens) == 1 else f"({inner})"
+
+
+def _expr_array_dtype(node: ast.expr, arr_by: Dict[str, ArrayDesc]) -> Optional[str]:
+    """dtype of an array expression: the first declared array it reads, or ``None``.
+
+    Guessing here is not safe -- the dtype decides the buffer's width, so an expression built only
+    from locals stays unresolved rather than defaulting to a float.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id in arr_by:
+            return arr_by[sub.id].dtype
+    return None
+
+
+def _shape_from_expression(fn: ast.FunctionDef, node: ast.expr,
+                           arr_by: Dict[str, ArrayDesc]) -> Optional[Tuple[Tuple[str, ...], str]]:
+    """``(shape, dtype)`` of an array-valued EXPRESSION, or ``None``.
+
+    A local bound from a numpy expression rather than an allocation or an alias -- mamba2's
+    ``a_blocks = np.transpose(np.reshape(A, ...), (0, 3, 1, 2))`` -- resolved to nothing, so a
+    helper called on it had its array parameter typed by-value and the helper body's own
+    ``x.shape`` reached the emitter with no shape behind it. The derivation for these already
+    exists; this is the route from the resolver to it.
+    """
+    if not isinstance(node, (ast.Call, ast.BinOp, ast.UnaryOp)):
+        return None
+    dtype = _expr_array_dtype(node, arr_by)
+    if dtype is None:
+        return None
+    # Declared arrays only. The body-wide shape harvest resolves more, but it reaches this
+    # resolver back through the constructor dtype path, and a table built per unresolved
+    # expression re-sweeps the whole body -- neither is worth what it adds here.
+    declared = {n: _shape_tuple_string(tuple(str(s) for s in a.shape)) for n, a in arr_by.items()}
+    shape_str = _shape_from_iter_extent(node, declared, route_calls=True)
+    if shape_str is None:
+        return None
+    toks = _parse_shape_expression(shape_str)
+    return (toks, dtype) if toks else None
+
+
 def _resolve_array_ref(fn: ast.FunctionDef,
                        node: ast.expr,
                        arr_by: Dict[str, ArrayDesc],
@@ -3111,7 +3173,7 @@ def _resolve_array_ref(fn: ast.FunctionDef,
         kept = _apply_subscript_axes(list(shape), node.slice)
         return (tuple(kept), dtype) if kept else None
     if not isinstance(node, ast.Name):
-        return None
+        return _shape_from_expression(fn, node, arr_by)
     name = node.id
     if name in arr_by:
         a = arr_by[name]
@@ -3230,6 +3292,150 @@ def _helper_return_array_shape(lhs, arr_by, fn):
         return None, None
     res = _resolve_array_ref(fn, lhs, arr_by)
     return (list(res[0]), res[1]) if res is not None else (None, None)
+
+
+def _call_arg_key(arg: ast.expr, kernel_fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> Any:
+    """What a call argument contributes to a helper's specialisation key.
+
+    A constant is folded into the body, and an array's extents are emitted as constants, so two
+    sites disagreeing on either need two helpers. Keying on the argument's NAME instead would
+    split sites that agree, and keying on nothing (the argument's shape being unresolvable) merges
+    sites that do not -- mamba2 calls ``_segsum`` on two differently shaped locals, and one body
+    cannot serve both.
+    """
+    if isinstance(arg, ast.Constant):
+        return arg.value
+    resolved = _resolve_array_ref(kernel_fn, arg, arr_by)
+    return resolved[0] if resolved is not None else ast.unparse(arg)
+
+
+def _specialise_helpers_by_call_signature(tree: ast.Module, kernel_fn: ast.FunctionDef,
+                                          helper_defs: List[ast.FunctionDef], arr_by) -> bool:
+    """Give each distinct set of constant call arguments its own copy of the helper.
+
+    A kept helper folds its call site's literal arguments into its body, so one emitted function
+    serves exactly one set of them. resnet101 calls ``_conv2d(x, w, 1, 0)`` and
+    ``_conv2d(h, w, 2, 3)``; specialising on the first and calling it from the second would run a
+    stride-1 body for a stride-2 call. That used to refuse outright, naming the fix -- this is that
+    fix: the second signature gets ``_conv2d__s2``, a verbatim copy whose own call sites point at
+    it, and every later pass sees two ordinary helpers each with one consistent signature.
+
+    Keyed on constant arguments and on the DECLARED shape of any array argument the parent names,
+    since the body is specialised on both. A local rebound to several shapes across the body still
+    refuses: which shape reaches which call site is not decidable before lowering, so there is
+    nothing to key on. Returns whether anything was cloned.
+    """
+    existing = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    cloned = False
+    for hdef in helper_defs:
+        pnames = [a.arg for a in hdef.args.args]
+        sites = [
+            node for node in ast.walk(kernel_fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == hdef.name
+        ]
+        by_key: Dict[Tuple, List[ast.Call]] = {}
+        for site in sites:
+            if len(site.args) != len(pnames) or site.keywords:
+                by_key.clear()  # an arity/keyword mismatch is a different failure; leave it be
+                break
+            key = tuple((pn, _call_arg_key(a, kernel_fn, arr_by)) for pn, a in zip(pnames, site.args))
+            by_key.setdefault(key, []).append(site)
+        if len(by_key) < 2:
+            continue
+        # The first key keeps the original name, so a helper called one way is untouched.
+        for index, key in enumerate(list(by_key)[1:], start=2):
+            name = f"{hdef.name}__s{index}"
+            while name in existing:
+                index += 1
+                name = f"{hdef.name}__s{index}"
+            existing.add(name)
+            clone = copy.deepcopy(hdef)
+            clone.name = name
+            tree.body.append(clone)
+            for site in by_key[key]:
+                site.func.id = name
+            cloned = True
+    if cloned:
+        ast.fix_missing_locations(tree)
+        ast.fix_missing_locations(kernel_fn)
+    return cloned
+
+
+def _propagate_local_extents(hfn: ast.FunctionDef, table: Dict[str, Tuple[str, ...]]) -> None:
+    """Extend ``table`` with each local of ``hfn`` that :func:`_iter_extent_of` can size.
+
+    Statement order matters: a local is sized against the names bound before it, so one sweep
+    forward resolves a chain (``cumulative`` from ``x``, then ``seg`` from ``cumulative``). A name
+    that stops resolving is dropped rather than left holding a stale extent.
+    """
+    for stmt in hfn.body:
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            continue
+        name = stmt.targets[0].id
+        ext = _iter_extent_of(stmt.value, table)
+        if ext is None:
+            table.pop(name, None)
+        else:
+            table[name] = tuple(ast.unparse(d) for d in ext)
+
+
+def _extent_operands_resolved(value: ast.expr, hfn: ast.FunctionDef, table: Dict[str, Tuple[str, ...]]) -> bool:
+    """Whether every name the expression uses AS AN ARRAY has an extent in ``table``.
+
+    Only the positions that carry an extent are checked -- a direct operand of an arithmetic
+    BinOp, and a subscript base. A name in any other position is a scalar (mamba2's ``span``
+    inside ``np.full((span, span), ...)``), and demanding an extent for it declines helpers that
+    are perfectly resolvable.
+    """
+    operands: List[ast.expr] = []
+    for node in ast.walk(value):
+        if isinstance(node, ast.BinOp) and not isinstance(node.op, ast.MatMult):
+            operands.extend([node.left, node.right])
+        elif isinstance(node, ast.Subscript):
+            operands.append(node.value)
+    return not any(isinstance(op, ast.Name) and op.id not in table for op in operands)
+
+
+def _helper_return_shape_from_body(hfn, pnames, args, arr_by, sca_by, sym_by, fn=None):
+    """``(shape_strings, dtype)`` for a helper whose RETURN EXPRESSION is array-valued.
+
+    The call-site target is the first authority on this, but it only exists when some call writes
+    the result into a named array. A helper called solely as another call's argument has no such
+    target, and defaulting to a by-value scalar return is not a neutral guess -- it produces a
+    function typed ``double`` that returns a pointer.
+
+    The helper's own parameters are enough to size it: their shapes come from the call site, and
+    :func:`_iter_extent_of` already resolves a return expression against them. Rank 0 means the
+    return really is scalar, so ``(None, None)`` keeps the existing path.
+    """
+    returns = [n.value for n in ast.walk(hfn) if isinstance(n, ast.Return) and n.value is not None]
+    if not returns:
+        return None, None
+    arrays, _, _ = _infer_helper_params(pnames, args, arr_by, sca_by, sym_by, fn)
+    if not arrays:
+        return None, None
+    table = {a.name: tuple(str(s) for s in a.shape) for a in arrays}
+    # A return expression is built from the helper's own locals (mamba2's
+    # ``return seg + np.triu(__full1, 1)``), not from its parameters directly, so sizing it needs
+    # those locals too -- propagated forward, since each is sized against the ones before it.
+    _propagate_local_extents(hfn, table)
+    if any(not _extent_operands_resolved(value, hfn, table) for value in returns):
+        # ``_iter_extent_of`` answers a BinOp with the operand it COULD size when the other comes
+        # back None. That is a serviceable broadcast hint and a wrong allocation: mamba2's
+        # ``seg + np.triu(...)`` reported the triangle's ``(span, span)`` for a 4-D result, which
+        # sizes the out-param two ranks short of what the body writes into it.
+        return None, None
+    extents = [_iter_extent_of(value, table) for value in returns]
+    if not extents or any(e is None for e in extents):
+        return None, None
+    shapes = {tuple(ast.unparse(dim) for dim in ext) for ext in extents}
+    if len(shapes) != 1:
+        # Two returns of different extents need two out-params; one pointer cannot carry both.
+        return None, None
+    shape = list(shapes.pop())
+    # The result takes the dtype of the array operand it is computed from -- the same rule
+    # ``_helper_return_array_shape`` gets for free from the target it writes into.
+    return shape, arrays[0].dtype
 
 
 def _infer_helper_params(pnames, args, arr_by, sca_by, sym_by, fn=None):
@@ -3659,7 +3865,17 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
     helper_defs = _collect_called_helper_defs(tree, kernel_fn)
     if not helper_defs:
         return []
+    # Every rewrite below keys off a call site that is the direct RHS of an assignment: that is
+    # where the result's target lives, and the target is what says whether the return is an array.
+    # A helper called only as another call's ARGUMENT (resnet101's ``_batch_norm(_conv2d(..), ..)``)
+    # has no such site, so it was classified by-value and its shape-changing calls were left inside
+    # a bare ``return`` where no expander reaches them. Lift each nested call into its own
+    # assignment first -- the same lift the INLINE path already performs, for the same reason.
     arr_by = {a.name: a for a in parent.arrays}
+    _HoistMultiStmtHelpers({h.name: h for h in helper_defs}).visit(kernel_fn)
+    ast.fix_missing_locations(kernel_fn)
+    if _specialise_helpers_by_call_signature(tree, kernel_fn, helper_defs, arr_by):
+        helper_defs = _collect_called_helper_defs(tree, kernel_fn)
     sca_by = {s.name: s for s in parent.scalars}
     sym_by = {s.name: s for s in parent.symbols}
     # First call site of each helper in the KERNEL body, plus its enclosing
@@ -3715,6 +3931,16 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
         # form, and a helper that is NOT inlined never passed through the caller-side pass that
         # consumes it (lulesh's face-node loops, which only surface once its helpers survive).
         _unroll_const_list_loops(hfn)
+
+        if hret_shape is None:
+            # No call site stores the result into an array -- ``_conv2d(...)`` is only ever an
+            # ARGUMENT to another helper (resnet101's ``_batch_norm(_conv2d(x, w, 1, 0), ...)``).
+            # The helper's own body still says what it returns, and reading that wrong classifies
+            # an array return as by-value: no out-param is added, the returns stay as
+            # ``return <expr>``, and every shape-changing call inside one reaches the emitter
+            # unlowered, because the expanders only ever see assignments.
+            hret_shape, hret_dtype = _helper_return_shape_from_body(hfn, pnames, call.args, arr_by, sca_by, sym_by,
+                                                                    kernel_fn)
 
         if hret_shape is None:
             # SCALAR (by-value) return -- params inferred straight from the call. A compile-time

@@ -541,7 +541,10 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # bare-Name expander rejects it -- gpt2_block's causal-mask
             # ``np.triu(np.ones((seq, seq), np.float32), 1)``. ``*_like`` aliases take
             # an array, not a shape -- mirror that operand's extent instead.
-            if attr in NP_ZEROS_ALIASES and expr.args:
+            # ``np.full`` states its extent exactly as the zeros aliases do, but it is not one of
+            # them: it carries a fill VALUE that the alias rewriter would drop, turning a -inf pad
+            # into a zero pad. Sized here, aliased nowhere.
+            if (attr in NP_ZEROS_ALIASES or attr in ("full", "full_like")) and expr.args:
                 if attr.endswith("_like"):
                     return _iter_extent_of(expr.args[0], shape_table)
                 shape_arg = expr.args[0]
