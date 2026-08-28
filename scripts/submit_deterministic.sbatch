@@ -100,6 +100,11 @@ HARNESS=(python -m hpcagent_bench)
 # and the ranks here never talk to each other (the shard index comes from SLURM_PROCID, not MPI).
 export UCX_VFS_ENABLE=n HWLOC_COMPONENTS=-opencl,-levelzero,-gl
 
+# DaCe's own iteration order falls back to set order in places, and set order is seeded per process.
+# Left unpinned two ranks handed the SAME kernel emit different C++, so a rerun of a shard is not a
+# rerun -- which is the one property a deterministic column exists to have.
+export PYTHONHASHSEED=0
+
 # DaCe builds one .so per SDFG variant per kernel. Keep that off the parallel FS, which turns
 # thousands of small compiler writes into the bottleneck, and off /tmp, which is tmpfs on many
 # nodes (the build would then compete with the run for RAM).
