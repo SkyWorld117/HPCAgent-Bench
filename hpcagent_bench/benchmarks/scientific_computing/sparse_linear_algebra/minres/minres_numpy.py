@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def hand_minres(A, b, x, max_iter=100, tol=1e-6):
+def hand_minres(A, b, x, max_iter, tol):
     """MINRES on a CSR operator.
 
     A Krylov recurrence, so the iteration stays a loop and its body is already matvecs and

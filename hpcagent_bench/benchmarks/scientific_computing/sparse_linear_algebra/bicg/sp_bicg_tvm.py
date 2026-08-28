@@ -31,5 +31,5 @@ def _solve(A, b, x, max_iter, tol, target_fn, device):
     return x
 
 
-def bicg(A, b, x, max_iter=100, tol=1e-6):
+def bicg(A, b, x, max_iter, tol):
     return _solve(A, b, x, max_iter, tol, *active_target_device())
