@@ -69,6 +69,19 @@ GPU_LANGUAGES = (Language.CUDA.value, Language.HIP.value)
 DEFAULT_LANGUAGES = tuple(lang.value for lang in Language if lang.value not in GPU_LANGUAGES)
 
 
+def default_residency(language: str) -> str:
+    """Where a graded submission's buffers belong for ``language``.
+
+    A GPU language grades on the DEVICE. The dataclass default is ``host`` because a Task is also
+    built for the compiled C reference, which is always host-resident, so the field cannot default
+    per-language. The grading routes construct their task from a request instead, and a GPU
+    submission handed host pointers is not a failure anyone sees: on an APU (MI300A) host memory is
+    device-addressable, so the kernel runs, the numbers verify, and the measurement is of the wrong
+    thing. Deciding it here keeps the rule beside GPU_LANGUAGES rather than at each call site.
+    """
+    return Residency.DEVICE.value if language in GPU_LANGUAGES else Residency.HOST.value
+
+
 @dataclass(frozen=True)
 class Task:
     """One agent assignment. ``kernel`` is a registry key (short name / path)."""
