@@ -41,8 +41,8 @@ from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRollSlice, _DropValidationGuards,
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _FillDiagonalInline, _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer,
-                                          REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, rank_table,
-                                          rewrite_curve_fit)
+                                          REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, fold_finfo_eps,
+                                          rank_table, rewrite_curve_fit)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -850,6 +850,10 @@ def parse_kernel(numpy_py: pathlib.Path,
     # array curve_fit conceptually passes; the fixpoint below then inlines
     # the LM's calls to the model.
     rewrite_curve_fit(tree, fn, precision)
+
+    # A round-off bound written as ``np.finfo(y.dtype).eps`` becomes that precision's
+    # epsilon literal. An accuracy requirement is a plain number and never comes here.
+    fold_finfo_eps(tree, precision)
 
     # Strip every top-level helper's give-up paths: bail-only exception
     # handlers (``except np.linalg.LinAlgError: return None``) and
