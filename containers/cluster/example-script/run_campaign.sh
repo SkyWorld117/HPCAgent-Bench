@@ -92,5 +92,8 @@ problems=$(wc -l <"${SCRIPT_DIR}/${PROBLEMS_FILE}")
 cp "${ENV_FILE}" "${SCRIPT_DIR}/.env"
 
 echo "variant=${VARIANT} nodes=${nodes} problems=${problems} time=${time_limit}"
+# --job-name is the ARM. beverin.sbatch carries a generic default, so without this every arm of a
+# campaign shows up in squeue under the same name and the only way to tell eight running arms apart
+# is to read each job's environment.
 CLUSTER_SCRIPT_DIR="${SCRIPT_DIR}" CLUSTER_ENV_FILE="${ENV_FILE}" \
-    sbatch --nodes="${nodes}" --time="${time_limit}" "$@" "${SCRIPT_DIR}/beverin.sbatch"
+    sbatch --job-name="${VARIANT}" --nodes="${nodes}" --time="${time_limit}" "$@" "${SCRIPT_DIR}/beverin.sbatch"
