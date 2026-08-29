@@ -34,7 +34,7 @@ from dace.sdfg import propagation
 from dace.transformation.dataflow import MapCollapse, MapFusion
 from dace.transformation.interstate import LoopToMap
 
-from hpcagent_bench import languages, perf_reports
+from hpcagent_bench import flags as bench_flags, languages, perf_reports
 from hpcagent_bench.frameworks import Benchmark, Framework
 from hpcagent_bench.frameworks import utilities as util
 from hpcagent_bench.frameworks.framework import TimingResult, Timer
@@ -139,6 +139,60 @@ def report_flags_for(compiler: str) -> str:
         return ""
     family = "clangpp" if "clang" in proc.stdout.lower() else "gpp"
     return languages.report_flags("cpp", compiler=family)
+
+
+#: Environment override naming the toolchain FAMILY dace's host build uses -- one of
+#: ``languages.family_names()`` (gcc / llvm / nvhpc / oneapi). Unset means
+#: :func:`languages.default_family`, which is gcc, matching the native ``cc`` column's default.
+#: A family rather than a driver, because the family is what selects the ``compilers.yaml`` block,
+#: and the BLOCK is what carries the flags -- so "dace built with llvm" and the native ``cc_llvm``
+#: column really do mean the same compiler and the same flag string.
+DACE_FAMILY_ENV = "OPTARENA_DACE_COMPILER_FAMILY"
+
+#: Flags dace supplies itself, stripped from the baseline before it reaches ``compiler.cpu.args``.
+#: Its config schema documents both exclusions: the optimization level is the sole property of
+#: ``compiler.build_type`` (Release -> -O3), and position independence comes from CMake's
+#: ``CMAKE_POSITION_INDEPENDENT_CODE``. Passing them again is at best redundant and at worst
+#: fights what CMake already put on the line.
+DACE_SUPPLIED_FLAGS = (bench_flags.OPT_LEVEL, "-fPIC")
+
+
+def pin_host_compiler(family: Optional[str] = None) -> Optional[str]:
+    """Build dace's generated C++ with the SAME driver and flags a native arm of ``family`` uses.
+
+    Half of every dace-vs-native comparison is the same kernel compiled two ways, so a dace arm
+    whose host compiler is not the one the native arm names measures the compiler rather than the
+    pipeline. Both halves are pinned here:
+
+    * ``compiler.cpu.executable`` -- the resolved driver for the family's C++ block.
+    * ``compiler.cpu.args``       -- that block's baseline, minus :data:`DACE_SUPPLIED_FLAGS`.
+
+    This is not cosmetic. Dace's DEFAULT ``compiler.cpu.args`` carries ``-freciprocal-math``, which
+    the harness baselines deliberately do NOT (see ``flags._FP_RELAX``): unpinned, the dace arm was
+    compiled under a wider FP licence than the native arm it is divided by. ``-ffp-contract`` is
+    the same class of divergence and reaches the dace build through the baseline for the same
+    reason.
+
+    Same override discipline as :func:`pin_cpp_standard`: the value set here wins over a user's
+    ``~/.dace.conf``, so a stray config cannot silently regrade an experiment.
+
+    :returns: the ``compilers.yaml`` block name pinned, or ``None`` when this image wires no C++
+        block for the family (the build is then left on dace's own resolution, unchanged).
+    """
+    family = family or os.environ.get(DACE_FAMILY_ENV) or languages.default_family()
+    block = languages.compiler_for_family("cpp", family)
+    if block is None:
+        return None
+    driver = languages.resolve_compiler(languages.compiler_driver(block))
+    if driver is None:
+        return None
+    if dace.Config.get("compiler", "cpu", "executable") != driver:
+        dace.Config.set("compiler", "cpu", "executable", value=driver)
+    baseline = languages.baseline_flags_for_block(block)
+    args = " ".join(tok for tok in baseline.split() if tok not in DACE_SUPPLIED_FLAGS)
+    if dace.Config.get("compiler", "cpu", "args") != args:
+        dace.Config.set("compiler", "cpu", "args", value=args)
+    return block
 
 
 def pin_cpp_standard(arch: str = "cpu") -> None:
@@ -691,6 +745,7 @@ class DaceFramework(Framework):
         """Build this flavor's pipelines, verify + score each, and return the fastest correct compiled variant."""
         ctx = self._build_context()
         pin_cpp_standard(self.info["arch"])
+        pin_host_compiler()
         pin_per_rank_build_dirs()
         pin_build_caching()
         if self.info["arch"] == "gpu":

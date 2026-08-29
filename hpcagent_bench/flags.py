@@ -60,6 +60,32 @@ class Mode(enum.Enum):
 # often-absent default libomp; gcc/icpx/flang keep plain -fopenmp (own runtime present).
 _FP_RELAX = "-fno-math-errno -fno-trapping-math -fno-signed-zeros"
 
+#: FP contraction, pinned rather than inherited from each driver's default.
+#:
+#: Measured on the AMD CE image (2026-08-29), one cross-statement contraction
+#: (``double t = a * b; return t + c;``), counting fma instructions in ``-S`` output:
+#:
+#:     gcc 16    default -> 1    clang 22  default -> 0    icx 2026.1 default -> 1
+#:
+#: gcc and icx default to ``fast`` (contract across statements), clang to ``on`` (within one
+#: expression only). Left unstated, the compiler columns are therefore not comparable: one fuses
+#: a multiply-add the other keeps as two instructions, and the difference is read as a pipeline
+#: result. ``fast`` is the pin because it is also what makes a DaCe-generated kernel comparable to
+#: the hand-written one -- the two differ in how many STATEMENTS an expression is split across,
+#: which is exactly the axis ``on`` is sensitive to and ``fast`` is not.
+#:
+#: This is not ``-ffast-math`` and does not imply it: contraction is the one relaxation IEEE
+#: itself sanctions (fma is a single correctly-rounded operation). Associative math stays
+#: rejected -- see the fast-math note above.
+_FP_CONTRACT = "-ffp-contract=fast"
+
+#: nvc's spelling of the same thing. NVHPC has no ``-ffp-contract=``; ``-Mfma`` is the documented
+#: knob and is on by default at ``-O2`` and above, so this states the default rather than changing
+#: it. UNVERIFIED here -- the NVIDIA HPC SDK is not in the image yet (INSTALL_NVHPC) -- so
+#: ``containers/parallelizer-gate.sh`` checks it at image build rather than a campaign discovering
+#: a rejected flag.
+_FP_CONTRACT_NVHPC = "-Mfma"
+
 # OS/arch-aware pieces of the CPU baselines, so the matrix is correct on Linux, macOS,
 # and WSL2 (== Linux) instead of assuming glibc + x86. (1) ``-march=native`` everywhere
 # except Apple-Silicon macOS, where Apple clang rejects it for arm64 and wants
@@ -98,13 +124,15 @@ OPT_LEVEL = "-O3"
 #: OpenMP is pinned to GNU ``libgomp`` (like POLLY_PAR/PLUTO_PAR -- clang's default
 #: ``libomp`` is a separate, frequently-absent package) and glibc's ``libmvec`` is added;
 #: on macOS both are dropped (neither exists there -- see the OS-aware pieces above).
-CPU_BASELINE_CLANG = (f"-O3 {ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_CLANG}")
+CPU_BASELINE_CLANG = (f"-O3 {ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} {_FP_CONTRACT} "
+                      f"-fstrict-aliasing -fPIC{_VECLIB_CLANG}")
 
 #: GCC baseline for C / C++: -O3 + native arch + OpenMP + vectorized libm (no fast-math).
 #: The libmvec half arrives as a decl header, not a flag -- gcc has no -fveclib. This line
 #: previously claimed "libmvec implicit on glibc"; it is not, and was not: glibc's decls
 #: need __FAST_MATH__, so gcc built every libm call scalar while clang vectorized it.
-CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC{_VECLIB_GCC}")
+CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_CONTRACT} "
+                    f"-fstrict-aliasing -fPIC{_VECLIB_GCC}")
 
 #: GCC baseline for Fortran -- CPU_BASELINE_GCC minus the C decl header. gfortran cannot
 #: consume one ("valid for C/C++/... but not for Fortran"): a warning on every compile, and
@@ -114,12 +142,13 @@ CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -
 #: pre-include is a distro spec, not upstream gcc, so it is a host property rather than
 #: something we can assert from here: tests/test_vecmath.py checks gfortran really does
 #: vectorize libm, and fails loudly on a host whose spec omits it.
-CPU_BASELINE_GFORTRAN = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} -fstrict-aliasing -fPIC")
+CPU_BASELINE_GFORTRAN = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_CONTRACT} "
+                         f"-fstrict-aliasing -fPIC")
 
 #: NVHPC baseline for C / C++ / Fortran. ``_FP_RELAX`` has no nvc spelling and needs none: nvc
 #: relaxes errno, trapping and signed zeros by default, and ``-Kieee`` is the flag that would turn
 #: that OFF. ``-tp=native`` is its ``-march=native``, ``-mp`` its host ``-fopenmp``.
-CPU_BASELINE_NVHPC = "-O3 -tp=native -mp -fPIC"
+CPU_BASELINE_NVHPC = f"-O3 -tp=native -mp {_FP_CONTRACT_NVHPC} -fPIC"
 
 #: nvc++ implements ``<execution>`` itself -- ``-stdpar=multicore`` is what makes ``par`` parallel,
 #: and it is needed at COMPILE as well as at link. Without it ``par`` silently takes the sequential
@@ -132,7 +161,19 @@ STDPAR_LINK_NVHPC = "-stdpar=multicore"
 NVHPC_OPT_REPORT = "-Minfo=all"
 
 #: icx defaults to fp-model=fast; precise must come first (last spelling wins over _FP_RELAX).
-CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -fopenmp {_FP_RELAX} -fPIC -qopt-zmm-usage=high")
+#:
+#: ``-qopenmp``, not ``-fopenmp``: Intel accepts both and warns ``-Wrecommended-option`` on the
+#: latter. Measured equivalent on ifx -- a ``do concurrent`` loop emits the same three OpenMP
+#: runtime calls either way -- so this is the vendor's spelling of the same thing, not a change of
+#: behaviour.
+#:
+#: ``-Wno-overriding-option`` because ``-ffp-contract=fast`` deliberately overrides the contraction
+#: half of ``-fp-model=precise``, and Intel says so on every compile. The override is the intent
+#: (see ``_FP_CONTRACT``: every vendor contracts, or the columns are not comparable), so the notice
+#: is silenced here rather than printed once per translation unit. Nothing else about ``precise``
+#: is relaxed.
+CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -qopenmp {_FP_RELAX} {_FP_CONTRACT} "
+                     f"-Wno-overriding-option -fPIC -qopt-zmm-usage=high")
 
 #: Appended to a PROFILED build (``Sandbox.build(debug=True)``, the /profile endpoint) so perf can
 #: name the symbols it samples. Only ``-g``: it emits DWARF beside the code without changing it, so
@@ -155,7 +196,7 @@ PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX}{_VECLIB_GCC}
 #: the Fortran companion to the clang C/C++ baseline (``CPU_BASELINE_CLANG``).
 #: Mirrors the clang intent (O3 + native arch + OpenMP + PIC; no fast-math -- see the
 #: CPU baseline note); flang does not accept every gcc FP-relax spelling.
-FLANG_BASELINE = f"-O3 {ARCH_NATIVE} -fopenmp -fPIC"
+FLANG_BASELINE = f"-O3 {ARCH_NATIVE} -fopenmp {_FP_CONTRACT} -fPIC"
 
 #: flang's route to glibc's vector libm. Unlike gfortran -- which gets libmvec from the distro
 #: driver spec pre-including glibc's Fortran directives -- flang has no such spec, so the flag is
@@ -519,6 +560,38 @@ def gcc_autopar_capability() -> AutoparProbe:
     return probe_autopar("gcc", composed, GCC_AUTOPAR_OUTLINE_PATTERN)
 
 
+#: NVHPC's parallel runtime, for :func:`nvhpc_autopar_capability`. Wider than
+#: :data:`OMP_RUNTIME_CALL_PATTERN` because ``-Mconcur`` enters NVIDIA's own runtime
+#: (``__nv_*`` / ``_mp_*``) rather than libgomp, and which of the two an ``-Mconcur`` object
+#: references is not something this tree can assert without the SDK installed.
+NVHPC_RUNTIME_CALL_PATTERN = r"GOMP_|__kmpc_|__nv_|_mp_"
+
+
+def nvhpc_autopar_capability() -> AutoparProbe:
+    """The measured :class:`AutoparProbe` for THIS host's nvc + :data:`NVHPC_CONCUR`.
+
+    Gates the ``cc_nvhpc_autopar`` column the same way :func:`polly_capability` gates Polly's, and
+    for the same reason: ``-Mconcur`` is a request, not a guarantee, and an nvc that declines every
+    loop hands back a serial object under a parallel label. Returns ``REJECTED`` when nvc is simply
+    absent, which is the normal state of an image built without ``INSTALL_NVHPC=1``.
+
+    UNVERIFIED against a real nvc -- the SDK is not in either CE image at the time of writing.
+    That is precisely why this is a probe and not an assumption.
+    """
+    composed = compose_autopar(CPU_BASELINE_NVHPC, NVHPC_CONCUR, Mode.MULTI_CORE)
+    return probe_autopar("nvc", composed, NO_OUTLINE_PATTERN, runtime_pattern=NVHPC_RUNTIME_CALL_PATTERN)
+
+
+# Intel oneAPI has NO auto-parallelizer column, and that is a measurement rather than an omission.
+# icc-classic's ``-parallel`` does not exist in the LLVM-based icx: on icx 2026.1.1 it is accepted
+# with ``command line warning #10430: Unsupported command line options encountered``, exit code 0,
+# and the object carries ZERO OpenMP runtime references from a plain parallelizable nest. The only
+# ``-parallel*`` icx documents is ``-parallel-source-info``, a diagnostic. So there is no
+# ``ICX_AUTOPAR`` constant here: writing one would register a column that publishes serial numbers
+# under an auto-parallelizer's name, which is the exact failure this module exists to prevent.
+# The oneAPI arm is therefore baseline-only (``cc_oneapi``), and the methodology says why.
+
+
 def pluto_capability() -> AutoparProbe:
     """The measured :class:`AutoparProbe` for THIS host's clang at the Pluto column's REAL build
     flags (:data:`CPU_BASELINE_CLANG_PLUTO` + :data:`PLUTO_PAR`).
@@ -567,6 +640,59 @@ GCC_OPT_REPORT = "-fopt-info-vec-optimized -fopt-info-vec-missed"
 #: location (only the serialized YAML record needs debug info for its DebugLoc).
 CLANG_OPT_REPORT = ("-Rpass=loop-vectorize|slp-vectorizer -Rpass-missed=loop-vectorize|slp-vectorizer "
                     "-Rpass-analysis=loop-vectorize")
+
+#: Intel oneAPI (icx / icpx / ifx) vectorization + parallelization report. Both phases are named:
+#: ``vec`` is the counterpart of the two above, and ``par`` says what the OpenMP layer did, which
+#: is the only route to threads this vendor has (see the note on the absent ``ICX_AUTOPAR``).
+#: Verified accepted on icx 2026.1.1; ``-parallel`` next to it is NOT (warning #10430).
+ICX_OPT_REPORT = "-qopt-report=3 -qopt-report-phase=par,vec"
+
+# ---------------------------------------------------------------------------
+# Vectorizer cost model, per vendor.
+#
+# Three named settings, so a study selects one by name instead of assembling flags: CHEAP is the
+# graded default, UNLIMITED is the knob a vectorization-rate study turns, OFF is the control.
+#
+# Every spelling below was probed on the AMD CE image (2026-08-29) rather than taken from a
+# manual. Two of the four vendors do not have the dial the others do, and saying so here is the
+# point of the table:
+#
+# * gcc has a real cost model with named levels, so all three settings are exact.
+# * clang has NO ``-fvect-cost-model=`` -- ``clang -fvect-cost-model=none`` is
+#   ``error: unknown argument`` on clang 22. What it has is a width preference and pass switches,
+#   so CHEAP caps the width and UNLIMITED asks the vectorizer to maximize the element type it
+#   picks. These are the nearest real knobs, NOT a translation of gcc's levels.
+# * icx accepts ``-vec-threshold<n>``/``-no-vec`` (rc=0, no #10430), but none of the three moved
+#   the emitted vector width on the probe kernel, so their EFFECT here is unverified even though
+#   their acceptance is not. Treated as declared-but-unproven and gated the same way the autopar
+#   flags are, rather than published as if measured.
+# * nvhpc is unprobed entirely -- the SDK is not in the image yet. Spellings are the documented
+#   ones and ``containers/parallelizer-gate.sh`` checks acceptance at image build.
+#
+# OFF is not ``-O0`` for clang, contra the original request: ``-fno-vectorize`` measurably drops
+# the loop from ymm to xmm on this image, and adding ``-fno-slp-vectorize`` removes the rest --
+# so the control keeps ``-O3`` and every other optimization instead of turning them all off.
+# ---------------------------------------------------------------------------
+
+#: The width CHEAP caps clang to: one NEON register on aarch64, one AVX2 register on x86-64.
+#: Named from the host rather than written down twice, since the two images are different arches.
+_PREFER_VECTOR_WIDTH = 128 if osinfo.is_arm() else 256
+
+VECT_COST_GCC_CHEAP = "-fvect-cost-model=cheap"
+VECT_COST_GCC_UNLIMITED = "-fvect-cost-model=unlimited"
+VECT_COST_GCC_OFF = "-fno-tree-vectorize -fno-tree-slp-vectorize"
+
+VECT_COST_CLANG_CHEAP = f"-mprefer-vector-width={_PREFER_VECTOR_WIDTH}"
+VECT_COST_CLANG_UNLIMITED = "-mllvm -vectorizer-maximize-bandwidth"
+VECT_COST_CLANG_OFF = "-fno-vectorize -fno-slp-vectorize"
+
+VECT_COST_ICX_CHEAP = "-vec-threshold100"
+VECT_COST_ICX_UNLIMITED = "-vec-threshold0"
+VECT_COST_ICX_OFF = "-no-vec"
+
+VECT_COST_NVHPC_CHEAP = "-Mvect"
+VECT_COST_NVHPC_UNLIMITED = "-Mvect=simd"
+VECT_COST_NVHPC_OFF = "-Mnovect"
 
 # ---------------------------------------------------------------------------
 # GPU baselines. The arch suffix (``-arch=sm_<SM>`` / ``--offload-arch=<gfx>``)
