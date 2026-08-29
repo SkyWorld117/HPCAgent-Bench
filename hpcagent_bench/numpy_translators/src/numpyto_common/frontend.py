@@ -43,7 +43,8 @@ from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRoll
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _FillDiagonalInline, _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer,
                                           REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, fold_finfo_eps,
-                                          rank_table, rewrite_curve_fit)
+                                          extent_tokens, name_value_pairs, rank_table, rewrite_curve_fit,
+                                          shape_table)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -2367,8 +2368,13 @@ class _FoldTupleLocals(ast.NodeTransformer):
     local into its uses and fold ``(a, b) + (c,)`` concatenation to a single
     literal ``(a, b, c)`` so ``reshape`` sees an ordinary shape tuple.
 
-    Conservative: only a top-level ``name = <Tuple>`` bound exactly once and not
-    a parameter is inlined.
+    Conservative: only a ``name = <Tuple>`` bound exactly once and not a parameter is inlined, and
+    only when the tuple is built from values that do not change under a loop. A binding NESTED in a
+    loop counts: ls3df_scf's ``shp = Y.shape`` sits in the per-fragment loop, and a top-level-only
+    scan left ``reshape(shp)`` reading a name that both the rank table and the extent oracle then
+    sized as a single dimension. What makes that safe to lift out of the loop is the second half of
+    the rule -- an element naming a loop VARIABLE has a different value each iteration, so the
+    definition and its uses are not interchangeable and the local stays.
     """
 
     def __init__(self, params) -> None:
@@ -2376,15 +2382,23 @@ class _FoldTupleLocals(ast.NodeTransformer):
         self.subst: Dict[str, ast.Tuple] = {}
 
     def collect(self, fn: ast.FunctionDef) -> None:
+        loop_vars = {
+            n.id
+            for node in ast.walk(fn) if isinstance(node, (ast.For, ast.comprehension))
+            for n in ast.walk(node.target) if isinstance(n, ast.Name)
+        }
         binds: Dict[str, int] = {}
-        for s in fn.body:
+        for s in ast.walk(fn):
             if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
                 binds[s.targets[0].id] = binds.get(s.targets[0].id, 0) + 1
-        for s in fn.body:
-            if (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
+        for s in ast.walk(fn):
+            if not (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
                     and isinstance(s.value, ast.Tuple) and s.targets[0].id not in self.params
                     and binds.get(s.targets[0].id) == 1):
-                self.subst[s.targets[0].id] = s.value
+                continue
+            if any(n.id in loop_vars for n in ast.walk(s.value) if isinstance(n, ast.Name)):
+                continue
+            self.subst[s.targets[0].id] = s.value
 
     def visit_Assign(self, node: ast.Assign):
         if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in self.subst
@@ -2404,6 +2418,21 @@ class _FoldTupleLocals(ast.NodeTransformer):
         if isinstance(node.op, ast.Add) and isinstance(node.left, ast.Tuple) and isinstance(node.right, ast.Tuple):
             return ast.copy_location(ast.Tuple(elts=[*node.left.elts, *node.right.elts], ctx=ast.Load()), node)
         return node
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        """``shp[-1]`` on a literal the substitution just produced -> that element.
+
+        Inlining ``shp`` is what creates the pattern: ``k = shp[-1]`` becomes ``k = (a, b, c, d)[-1]``,
+        and nothing downstream reads a tuple, so the index has to be taken here or the substitution
+        trades a tuple-valued name for a tuple-valued expression.
+        """
+        self.generic_visit(node)
+        if not isinstance(node.value, ast.Tuple):
+            return node
+        axis = _literal_axis(node.slice)
+        if axis is None or axis >= len(node.value.elts) or axis < -len(node.value.elts):
+            return node
+        return ast.copy_location(copy.deepcopy(node.value.elts[axis]), node)
 
 
 def _resolve_call_args(call: ast.Call, helper: ast.FunctionDef) -> Optional[List[ast.expr]]:
@@ -3261,43 +3290,141 @@ def resolve_shape_reads(fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> Li
     unresolved read stays as it is.
     """
 
+    seed = {n: tuple(str(s) for s in a.shape) for n, a in arr_by.items()}
+    # Store context, not "an Assign whose target is a Name": the CheFSI swap
+    # ``X, Y, sigma = Y, Ynew, sigma_new`` rebinds all three through a TUPLE target, and counting
+    # only Name targets reported every one of them as bound exactly once.
+    binds: Dict[str, int] = {}
+    for stmt in ast.walk(fn):
+        if isinstance(stmt, ast.Name) and isinstance(stmt.ctx, (ast.Store, ast.Del)):
+            binds[stmt.id] = binds.get(stmt.id, 0) + 1
+    rebound = frozenset(n for n, c in binds.items() if c > 1)
+    tuple_locals = frozenset(n for n, v in name_value_pairs(fn) if isinstance(v, (ast.Tuple, ast.List)))
+
     class Rewriter(ast.NodeTransformer):
 
-        def __init__(self) -> None:
+        def __init__(self, shapes: Dict[str, Tuple[str, ...]]) -> None:
+            self.shapes = shapes
             self.changed = False
             self.unresolved: List[str] = []
 
-        def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
-            self.generic_visit(node)
-            base = node.value
-            if not (isinstance(base, ast.Attribute) and base.attr == "shape"):
-                return node
-            axis = _literal_axis(node.slice)
-            if axis is None:
-                self.unresolved.append(ast.unparse(node))
-                return node
+        def extent(self, node: ast.expr) -> Optional[Tuple[str, ...]]:
             try:
-                res = _resolve_array_ref(fn, base.value, arr_by)
+                return resolve_extent_of(fn, node, arr_by, self.shapes, rebound, tuple_locals)
             except NotImplementedError:
                 # The resolver refuses a construct it cannot type (an unresolvable ``dtype=``
                 # expression). This pass only reads the shape half of its answer and must not
                 # decide which kernels are refused: leave the read alone and let the refusal fire
                 # at the site that owns it.
-                res = None
-            if res is None or axis >= len(res[0]) or axis < -len(res[0]):
+                return None
+
+        def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+            base = node.value
+            if not (isinstance(base, ast.Attribute) and base.attr == "shape"):
+                self.generic_visit(node)
+                return node
+            # Resolved BEFORE descending, and left whole when it does not resolve: ``visit_Attribute``
+            # would otherwise expand the ``.shape`` underneath into a tuple literal, and a
+            # non-literal axis would be left indexing that tuple at run time -- which is the runtime
+            # tuple this whole pass exists to remove.
+            axis = _literal_axis(node.slice)
+            shape = self.extent(base.value) if axis is not None else None
+            if shape is None or axis >= len(shape) or axis < -len(shape):
                 self.unresolved.append(ast.unparse(node))
                 return node
             self.changed = True
-            return ast.copy_location(ast.parse(str(res[0][axis]), mode="eval").body, node)
+            return ast.copy_location(ast.parse(str(shape[axis]), mode="eval").body, node)
 
-    for _ in range(8):  # a shape spelled through a shape read; 8 is far past any real chain
-        rw = Rewriter()
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            """A WHOLE ``x.shape`` becomes the tuple of its declared extents.
+
+            Reaching only ``x.shape[k]`` leaves the bare read standing as a name with no rank, and
+            ls3df_scf's ``shp = Y.shape; ... .reshape(shp)`` is what that costs: both the rank table
+            and the extent oracle read the tuple-valued local as ONE dimension, so the reshaped
+            block came back rank 1 and every extent derived from it was built on that.
+            """
+            self.generic_visit(node)
+            if node.attr != "shape":
+                return node
+            shape = self.extent(node.value)
+            if shape is None:
+                self.unresolved.append(ast.unparse(node))
+                return node
+            self.changed = True
+            elts = [ast.parse(str(tok), mode="eval").body for tok in shape]
+            return ast.copy_location(ast.Tuple(elts=elts, ctx=ast.Load()), node)
+
+    # The table and the rewrite are one fixpoint, not two passes: a local's own extent can be
+    # spelled through a shape read, so the table cannot be built until that read is rewritten, and
+    # the read cannot be rewritten until the table knows the local. Each round rebuilds the table
+    # from a body whose reads are one level more resolved than the last.
+    #
+    # The tuple fold belongs INSIDE the loop for the same reason. ls3df_scf binds ``shp = Y.shape``
+    # and reshapes with it; until that tuple is inlined the extent oracle sees ``reshape(shp)`` and
+    # reads the tuple-valued name as a SINGLE dimension, so the block came back rank 1 and the wrong
+    # rank was then substituted into every shape read that resolved against it.
+    params = {a.arg for a in fn.args.args}
+    for _ in range(8):
+        rw = Rewriter(shape_table(fn, seed))
         rw.visit(fn)
+        ast.fix_missing_locations(fn)
+        folder = _FoldTupleLocals(params)
+        folder.collect(fn)
+        folder.visit(fn)
         ast.fix_missing_locations(fn)
         fold_extent_locals(fn, arr_by)
         if not rw.changed:
             break
     return rw.unresolved
+
+
+def resolve_extent_of(fn: ast.FunctionDef,
+                      node: ast.expr,
+                      arr_by: Dict[str, ArrayDesc],
+                      shapes: Dict[str, Tuple[str, ...]],
+                      rebound: FrozenSet[str] = frozenset(),
+                      tuple_locals: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, ...]]:
+    """Shape tokens of an array-valued expression, forward table first, or ``None``.
+
+    Shape only. :func:`_resolve_array_ref` answers with a dtype as well and stays the fallback for
+    what the table cannot hold, but the forward table has no dtype to give and no caller here needs
+    one -- inventing a placeholder to fit that signature would put a wrong dtype within reach of
+    every other caller of it.
+
+    A NAME is the table's to answer or nobody's. The fallback walks BACKWARD to the first
+    definition it reaches, which is not a second opinion about a name with several -- it is one
+    binding's answer given for all of them. ls3df_scf's ``X`` is bound by two Rayleigh-Ritz calls;
+    answering from the first wrote that shape into the second, and once written the fixpoint cannot
+    take it back. Everything the walk knew about a name -- allocations, aliases, chains -- the
+    forward table derives anyway, and derives it from every binding rather than one.
+    """
+
+    def usable(shape: Optional[Tuple[str, ...]]) -> Optional[Tuple[str, ...]]:
+        # Same two rejects as the table's own: a token still spelled as a shape read is the extent
+        # under another name, and a token naming a tuple-valued local is a whole rank collapsed
+        # into one dimension.
+        if shape is None:
+            return None
+        toks = tuple(str(t) for t in shape)
+        return None if any(".shape" in t or t in tuple_locals for t in toks) else toks
+
+    if isinstance(node, ast.Name):
+        if node.id in arr_by:
+            return tuple(str(s) for s in arr_by[node.id].shape)
+        got = shapes.get(node.id)
+        return tuple(got) if got is not None else None
+    elif isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Subscript)):
+        base = resolve_extent_of(fn, node.value, arr_by, shapes, rebound, tuple_locals)
+        if base is not None:
+            kept = _apply_subscript_axes(list(base), node.slice)
+            if kept:
+                return tuple(kept)
+    else:
+        ext = extent_tokens(node, shapes, tuple_locals)
+        if ext is not None:
+            return ext
+    res = _resolve_array_ref(fn, node, arr_by)
+    return usable(None if res is None else res[0])
 
 
 def fold_extent_locals(fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> None:
