@@ -181,6 +181,23 @@ def assigned_names(node: ast.AST) -> OrderedSet:
     return out
 
 
+def own_targets(node: ast.stmt) -> OrderedSet:
+    """The names this ONE statement rebinds, not counting the blocks nested under it.
+
+    :func:`assigned_names` answers the whole subtree, which is the right kill set for a branch but
+    the wrong question when a scan needs to know where in source order a write lands.
+    """
+    targets: List[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For)):
+        targets = [node.target]
+    out = OrderedSet()
+    for tgt in targets:
+        out |= _target_names(tgt)
+    return out
+
+
 def const_value(node: ast.AST) -> Any:
     """The literal a node denotes, or :data:`NO_VALUE` when it is not a literal."""
     return node.value if isinstance(node, ast.Constant) else NO_VALUE
@@ -231,6 +248,8 @@ class TupleDesugar:
         self.ranks: Dict[str, int] = dict(ranks or {})
         #: Counter for the locals :meth:`capture_self_reference` mints.
         self.aliases = 0
+        #: ``(alias, name)`` per capture, for :func:`collapse_capture_aliases` to fold back.
+        self.captured: List[Tuple[str, str]] = []
 
     # -- kinds ------------------------------------------------------------- #
     def kind(self, node: ast.AST, env: Env) -> Optional[str]:
@@ -454,6 +473,7 @@ class TupleDesugar:
             return elements, []
         self.aliases += 1
         alias = f"__ta{self.aliases}_{name}"
+        self.captured.append((alias, name))
         captured = [_substitute(copy.deepcopy(e), name, ast.Name(id=alias, ctx=ast.Load())) for e in elements]
         bind = ast.copy_location(
             ast.Assign(targets=[ast.Name(id=alias, ctx=ast.Store())], value=ast.Name(id=name, ctx=ast.Load())), at)
@@ -469,12 +489,22 @@ class TupleDesugar:
         this way. Returns ``None`` -- leaving the statement exactly as it is -- when the right-hand
         side is not a compile-time tuple of matching length, which is the only case where splitting
         it would be a guess.
+
+        It also returns ``None`` on a simultaneous bind whose elements still read a target the
+        split would have overwritten (``a, b = b, a + b``). A sequential split reads the NEW ``a``
+        and the kernel computes the wrong numbers with no diagnostic. Left standing, the statement
+        reaches ``lowering._TupleAssignRewriter``, which stages the elements through temps.
         """
         targets = stmt.targets[0].elts
         if not all(isinstance(t, ast.Name) for t in targets):
             return None
         elements = self.tuple_of(self.fold(stmt.value, env), env)
         if elements is None or len(elements) != len(targets):
+            return None
+        # Positional self-copies never race: they write back what they read.
+        changed = [i for i, e in enumerate(elements) if not (isinstance(e, ast.Name) and e.id == targets[i].id)]
+        read = {n.id for i in changed for n in ast.walk(elements[i]) if isinstance(n, ast.Name)}
+        if {targets[i].id for i in changed} & read:
             return None
         out: List[ast.stmt] = []
         for target, value in zip(targets, elements):
@@ -647,11 +677,22 @@ class _Folder(ast.NodeTransformer):
         return self.interp.rank(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        """``x.ndim`` -> the rank literal; ``x.shape`` -> ``(x.shape[0], ..., x.shape[r-1])``.
+
+        The shape expansion fires wherever the attribute stands, not only where a tuple context
+        already forced it. A ``.shape`` left whole carries no compile-time rank, so the shape
+        resolver cannot size the statement that consumes it and leaves the target's PREVIOUS extent
+        recorded. Group-norm's ``y = (...).reshape(x.shape)`` is the live case: ``y`` kept the
+        rank-5 extent of the line above, whose trailing axis then read past the end of a rank-3
+        broadcast shape and fell out of sympy as a bare ``IndexError``. The rank is what becomes
+        compile-time here; the extents stay symbolic.
+        """
         self.generic_visit(node)
-        if node.attr != "ndim":
-            return node
-        ndim = self._ndim(node.value)
-        return node if ndim is None else ast.copy_location(ast.Constant(value=ndim), node)
+        if node.attr == "ndim":
+            ndim = self._ndim(node.value)
+            return node if ndim is None else ast.copy_location(ast.Constant(value=ndim), node)
+        elts = self.interp.shape_tuple(node)
+        return node if elts is None else self._materialize(elts, node)
 
     def _isinstance(self, node: ast.Call) -> Optional[ast.AST]:
         """``isinstance(x, T)`` decided from x's kind -- the exact Python answer, never a guess: a
@@ -786,8 +827,62 @@ def desugar_tuples(fn: ast.FunctionDef,
     interp = TupleDesugar(int_scalars, float_scalars, arrays, ranks)
     env = Env(bound=set(int_scalars) | set(float_scalars) | set(arrays))
     fn.body = interp.run(fn.body, env)
+    collapse_capture_aliases(fn, interp.captured)
     _drop_dead_none_bindings(fn)
     ast.fix_missing_locations(fn)
+
+
+def collapse_capture_aliases(fn: ast.FunctionDef, captured: List[Tuple[str, str]]) -> None:
+    """Fold ``__taN_x = x`` back into ``x`` where the fold left ``x`` with no store of its own.
+
+    :meth:`TupleDesugar.capture_self_reference` mints the alias so that ``x = (x,)`` cannot fold
+    its own element back into the tuple it is binding. That is a hygiene device for the fold, not a
+    value the kernel needs: once the tuple is gone the alias is a plain copy of a name nothing ever
+    writes, and the copy is what a reader of the emitted source -- and the emitter's own scalar
+    declaration pass -- trips over.
+
+    Sound on the same condition that makes it pointless. Nothing may write ``x`` from the bind
+    onwards -- not later in the body, and not anywhere inside a loop the bind sits in, since that
+    body runs again after it. Then ``x`` holds one value over the alias's whole live range and the
+    two names denote the same thing at every read. A name written after the bind keeps its alias:
+    there the copy is the only thing pinning the pre-store value.
+    """
+    minted: Dict[str, int] = {}
+    for _, name in captured:
+        minted[name] = minted.get(name, 0) + 1
+
+    def is_bind(stmt: ast.stmt, alias: str, name: str) -> bool:
+        return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == alias and isinstance(stmt.value, ast.Name) and stmt.value.id == name)
+
+    def written_from(alias: str, name: str) -> bool:
+        state = {"seen": False, "written": False}
+
+        def walk(stmts: List[ast.stmt], in_loop: bool) -> None:
+            for stmt in stmts:
+                if is_bind(stmt, alias, name):
+                    state["seen"] = True
+                    continue
+                if name in own_targets(stmt) and (state["seen"] or in_loop):
+                    state["written"] = True
+                for field, value in ast.iter_fields(stmt):
+                    if isinstance(value, list) and any(isinstance(v, ast.stmt) for v in value):
+                        walk(value, in_loop or isinstance(stmt, (ast.For, ast.While)))
+
+        walk(fn.body, False)
+        return state["written"] or not state["seen"]
+
+    for alias, name in captured:
+        # Two captures of one name would chain through each other; leave both alone.
+        if minted[name] != 1 or written_from(alias, name):
+            continue
+        for node in ast.walk(fn):
+            for field, value in ast.iter_fields(node):
+                if isinstance(value, list) and any(isinstance(v, ast.stmt) for v in value):
+                    setattr(node, field, [s for s in value if not is_bind(s, alias, name)])
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name) and node.id == alias:
+                node.id = name
 
 
 def _drop_dead_none_bindings(fn: ast.FunctionDef) -> None:
@@ -804,24 +899,49 @@ def _drop_dead_none_bindings(fn: ast.FunctionDef) -> None:
     ``__inl1_stride`` genuinely IS read later on, just never through this dead write. Adjacency makes
     that safe to see without a full liveness pass: nothing between the two statements can read the
     ``None``, so whatever the second statement writes is the only value that ever reaches a reader.
+
+    A third case needs no liveness either: a name some BRANCH rebinds with a real value, that no
+    surviving test compares against ``None``. Every read of such a name is a read of its VALUE, and
+    numpy raises on any path that reaches one with the sentinel still live -- so the sentinel write
+    is unobservable in every run the kernel is defined for (warpx's ``sx_new = ... = None`` declared
+    ahead of the per-geometry branches that fill them). A name still tested against ``None`` is left
+    alone: there the sentinel IS the value being read.
     """
     read = OrderedSet(n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
+    tested: OrderedSet = OrderedSet()
+    for cmp in ast.walk(fn):
+        if isinstance(cmp, ast.Compare) and any(
+                isinstance(c, ast.Constant) and c.value is None for c in cmp.comparators):
+            tested.update(n.id for n in ast.walk(cmp) if isinstance(n, ast.Name))
+    rebound: OrderedSet = OrderedSet()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign) or (isinstance(node.value, ast.Constant) and node.value.value is None):
+            continue
+        for tgt in node.targets:
+            elts = tgt.elts if isinstance(tgt, (ast.Tuple, ast.List)) else [tgt]
+            rebound.update(e.id for e in elts if isinstance(e, ast.Name))
 
-    def none_bind_target(stmt: ast.stmt) -> Optional[str]:
-        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
-                and isinstance(stmt.value, ast.Constant) and stmt.value.value is None):
-            return stmt.targets[0].id
-        return None
+    def none_bind_targets(stmt: ast.stmt) -> List[str]:
+        # ``a = b = None`` declares a whole run of sentinels at once (warpx spells all six shape
+        # buffers that way), so a chained bind is the same statement, not a different idiom.
+        if (isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+                and all(isinstance(t, ast.Name) for t in stmt.targets)):
+            return [t.id for t in stmt.targets]
+        return []
 
     def rebinds(stmt: ast.stmt, name: str) -> bool:
         return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                 and stmt.targets[0].id == name)
 
+    def dead(name: str, i: int, stmts: List[ast.stmt]) -> bool:
+        return (name not in read or (i + 1 < len(stmts) and rebinds(stmts[i + 1], name))
+                or (name in rebound and name not in tested))
+
     def prune(stmts: List[ast.stmt]) -> List[ast.stmt]:
         out: List[ast.stmt] = []
         for i, stmt in enumerate(stmts):
-            name = none_bind_target(stmt)
-            if name is not None and (name not in read or (i + 1 < len(stmts) and rebinds(stmts[i + 1], name))):
+            names = none_bind_targets(stmt)
+            if names and all(dead(n, i, stmts) for n in names):
                 continue
             out.append(stmt)
         return out

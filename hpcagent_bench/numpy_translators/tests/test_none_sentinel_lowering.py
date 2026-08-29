@@ -39,7 +39,7 @@ from _op_oracle import _bench_info, run_op
 from numpyto_common.frontend import parse_kernel
 from numpyto_common.lowering import lower
 from numpyto_c.emit import emit_c
-from numpyto_common.tuple_desugar import desugar_tuples
+from numpyto_common.tuple_desugar import _drop_dead_none_bindings, desugar_tuples
 
 _NATIVE = ("c", "cpp", "fortran")
 
@@ -139,11 +139,13 @@ def test_none_or_tuple_helper_wrong_guard_shape_still_refuses():
            "   lo, hi, ol_lo, ol_hi = tap\n"
            "   for idx in range(lo, hi):\n"
            "    out[ol_lo + (idx - lo) * stride] += x[idx] * weight[k]\n")
-    kir = _kir_for(src, "f", ["x", "weight", "stride", "padding", "dilation", "out"], ["out"], _TAP_RANGE_SHAPES,
-                   _TAP_RANGE_SYMS)
-    assert [h.kernel_name for h in kir.helpers] == ["_tap_range"]
-    with pytest.raises(NotImplementedError, match="None"):
-        emit_c(lower(kir), fn_name="f")
+    # The splice declines, so the helper has to become a real function -- and it cannot: C has one
+    # return slot and nothing classifies which member of ``lo, hi, ol_lo, ol_hi`` is an out-param.
+    # Refused while the helper is CLASSIFIED rather than while its body is emitted, so every
+    # backend gets the same answer from one place (the emit-time refusal was C's alone).
+    with pytest.raises(NotImplementedError, match=r"_tap_range.*returns a tuple"):
+        _kir_for(src, "f", ["x", "weight", "stride", "padding", "dilation", "out"], ["out"], _TAP_RANGE_SHAPES,
+                 _TAP_RANGE_SYMS)
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -259,12 +261,13 @@ def test_default_argument_sentinel_numeric():
     assert res == {"c": "ok", "cpp": "ok", "fortran": "ok"}, res
 
 
-def test_default_argument_sentinel_broken_adjacency_still_refuses():
-    # NEGATIVE: an unrelated statement (``unrelated = other + 1.0``) sits between the reassigned
-    # param's ``None`` init and the guard that resolves it, breaking the STRICT adjacency
-    # :func:`tuple_desugar._drop_dead_none_bindings` requires before dropping a dead ``None`` bind
-    # -- so the dead init is left standing (it IS read again, through the guard's own rebind, so
-    # the "no readers anywhere" fallback does not catch it either) and correctly refuses.
+def test_default_argument_sentinel_survives_broken_adjacency():
+    # An unrelated statement (``unrelated = other + 1.0``) sits between the reassigned param's
+    # ``None`` init and the guard that resolves it, so the STRICT adjacency rule does not fire and
+    # the init IS read again through the guard's own rebind. This used to refuse; the branch-rebind
+    # rule now settles it, because the folded guard rebinds ``stride`` and no surviving test
+    # inspects the sentinel. Checked numerically -- the whole point is that the value the rebind
+    # writes is the only one any reader ever sees.
     src = ("import numpy as np\n"
            "def _default_stride(stride, k, other):\n"
            " unrelated = other + 1.0\n"
@@ -274,8 +277,32 @@ def test_default_argument_sentinel_broken_adjacency_still_refuses():
            "def f(x, k, other, out):\n"
            " out[0] = _default_stride(None, k, other)\n")
     kir = _kir_for(src, "f", ["x", "k", "other", "out"], ["out"], {"x": "(N,)", "out": "(1,)"}, {"N": 4})
-    with pytest.raises(NotImplementedError, match="None"):
-        emit_c(lower(kir), fn_name="f")
+    assert "None" not in emit_c(lower(kir), fn_name="f")
+    res = run_op(src,
+                 "f", {
+                     "x": np.zeros(4),
+                     "k": 3,
+                     "other": 2.5
+                 }, {"out": (1, )}, {"N": 4},
+                 shapes={
+                     "x": "(N,)",
+                     "out": "(1,)"
+                 },
+                 backends=_NATIVE)
+    assert res == {"c": "ok", "cpp": "ok", "fortran": "ok"}, res
+
+
+def test_a_sentinel_an_is_none_test_still_inspects_is_kept():
+    # NEGATIVE: here the ``None`` IS the value being read, so the branch-rebind rule must stand
+    # back -- dropping the write would change what the surviving test sees.
+    fn = ast.parse("def h(a, out):\n"
+                   " seen = None\n"
+                   " if a[0] > 0:\n"
+                   "  seen = a[0]\n"
+                   " if seen is not None:\n"
+                   "  out[0] = seen\n").body[0]
+    _drop_dead_none_bindings(fn)
+    assert "seen = None" in ast.unparse(fn)
 
 
 # --------------------------------------------------------------------------------------------- #

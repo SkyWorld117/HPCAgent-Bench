@@ -18,7 +18,6 @@ parameters:
     nnz: 6553600
 config:
   max_iter: {value: 100, selects: iteration}
-  tol: {value: 1.0e-06, selects: tolerance}
 init:
   input_args:
   - N

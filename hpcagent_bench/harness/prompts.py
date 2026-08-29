@@ -933,13 +933,26 @@ def build_context(task: Task,
     def _fmt(items):
         return ", ".join(f"{i['name']} {i['version']}" if i.get("version") else i["name"] for i in items)
 
-    # restricted: the sandbox writes the agent's source to ``<symbol>.<ext>`` and
-    # compiles+links it to ``lib<short>.so`` (hpcagent_bench.harness.sandbox).
-    source_filename = f"{symbol}.{ext}"
+    # restricted: the sandbox writes the agent's source to these names and compiles+links them to
+    # ``lib<short>.so`` (hpcagent_bench.harness.sandbox). Read from the language registry rather
+    # than spelled again here, so the prompt cannot name a file the sandbox does not write -- a GPU
+    # language is TWO units (host entry, device kernels), every other language one.
+    units = languages.source_units(task.language, symbol)
+    source_filename = units[0][1]
+    device_source_filename = units[-1][1] if len(units) > 1 else ""
     lib_name = f"lib{spec.short_name}.so"
     context = {
         "kernel": spec.short_name,
         "language": task.language,
+        # The device half of a GPU delivery; "" for a host language, which the templates gate on.
+        "device_source_filename": device_source_filename,
+        "device_language": task.language if device_source_filename else "",
+        # The vendor's transfer call, named so the device-residency section can talk about the
+        # cost of moving data back to the host without the template knowing the vendor.
+        "transfer_call": {
+            "cuda": "cudaMemcpy",
+            "hip": "hipMemcpy"
+        }.get(task.language, "memcpy"),
         "precision": task.precision.value,
         "source_mode": task.source_mode,
         # The judge's submission policy (service.input_mode). It is what makes a track

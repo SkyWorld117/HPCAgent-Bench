@@ -480,12 +480,15 @@ def vexx_all_paths(psi,
                 if ibnd == 0 or ibnd > m:
                     continue
                 # occupied-orbital range [jmin, jmax]: a masked min/max over the fixed-size
-                # egrp_pairs table, replacing the incremental scan (matches sibling vexx).
+                # egrp_pairs table, replacing the incremental scan (matches sibling vexx). The
+                # mask SELECTS, never compacts -- a boolean-indexed gather has a length known
+                # only at runtime, which neither native emitter can express.
                 match = egrp_pairs[0, :max_pairs, eg] == ibnd
                 if not np.any(match):
                     continue
-                jvs = egrp_pairs[1, :max_pairs, eg][match]
-                jmin, jmax = int(jvs.min()), int(jvs.max())
+                jv = egrp_pairs[1, :max_pairs, eg]
+                jmin = int(np.min(np.where(match, jv, np.max(jv))))
+                jmax = int(np.max(np.where(match, jv, np.min(jv))))
                 jstart = max(jmin, all_start_tmp)
                 jend = min(jmax, all_end_tmp)
                 if jend < jstart:

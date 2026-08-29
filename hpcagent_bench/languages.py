@@ -58,6 +58,29 @@ LANG_EXT: Dict[str, str] = {
     "hip": "hip",
 }
 
+#: GPU language -> the host language its C-ABI entry is written in. A GPU submission is TWO
+#: translation units: the host half holds the entry point the harness dlopens and the launch
+#: configuration, the device half the kernels. Both are compiled by the GPU compiler (nvcc/hipcc
+#: drive a C++ host TU perfectly well), so this map is about which FILE the agent writes what in,
+#: not about which compiler runs. Membership also answers "is this a GPU language" -- the one
+#: place that is stated, so adding a GPU target is still the two edits this module documents.
+GPU_HOST_LANG: Dict[str, str] = {"cuda": "cpp", "hip": "cpp"}
+
+
+def source_units(language: str, stem: str) -> Tuple[Tuple[str, str], ...]:
+    """The ``(language, filename)`` translation units a ``language`` submission is delivered as.
+
+    One for a host language; TWO for a GPU language -- ``<stem>.cpp`` (host entry) and
+    ``<stem>.cu`` / ``<stem>.hip`` (device kernels). Single source of truth for the names, so the
+    prompt tells the agent exactly what the sandbox writes and what the judge compiles.
+    """
+    if language not in LANG_EXT:
+        raise KeyError(f"unknown language {language!r}; expected one of {sorted(LANG_EXT)}")
+    device = (language, f"{stem}.{LANG_EXT[language]}")
+    host = GPU_HOST_LANG.get(language)
+    return ((host, f"{stem}.{LANG_EXT[host]}"), device) if host else (device, )
+
+
 #: Language token -> the TRANSLATOR target that emits its reference. C and C++ share one emitter
 #: (the C ABI is the contract, not the source dialect), so this is not the identity map and is not
 #: derivable from :data:`LANG_EXT`. Lives here because the emitter choice is a property of the
@@ -178,6 +201,21 @@ OFFLOAD_DRIVER: Dict[Tuple[str, str], str] = {
 #: pinned toolchain is reached without putting it on ``PATH`` and leaking it into every other build.
 OFFLOAD_CC_ENV = "HPCAGENT_BENCH_OFFLOAD_CC_{family}_{vendor}"
 
+#: Search-path variables a compile must NOT inherit from whoever started the harness. clang resolves
+#: the OpenMP DEVICE bitcode (``libomptarget-amdgpu-<gfx>.bc``) through ``LIBRARY_PATH``, so a login
+#: shell exporting ``$HOME/.local/lib`` makes an offload link fail with a missing-file error naming a
+#: directory nobody configured -- measured on this cluster, where clearing it is the whole fix and
+#: the region then runs on the device. The include variables are the same hazard one step earlier:
+#: they decide which headers a graded build compiles against. Cleared rather than overridden, so the
+#: toolchain uses its own defaults.
+OFFLOAD_ENV_STRIP: Tuple[str, ...] = ("LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH")
+
+
+def toolchain_env() -> Dict[str, str]:
+    """``os.environ`` without the inherited search paths in :data:`OFFLOAD_ENV_STRIP`."""
+    return {k: v for k, v in os.environ.items() if k not in OFFLOAD_ENV_STRIP}
+
+
 #: Env override for a probed arch, per vendor -- the escape hatch for a build host whose GPU is not
 #: the target, mirroring ``HPCAGENT_BENCH_SM`` / ``HPCAGENT_BENCH_GFX``.
 OFFLOAD_ARCH_ENV = "HPCAGENT_BENCH_OFFLOAD_ARCH_{vendor}"
@@ -239,7 +277,30 @@ def offload_driver(model: str, vendor: str) -> str:
     if pinned:
         return pinned if os.access(pinned, os.X_OK) else ""
     name = OFFLOAD_DRIVER.get((family, vendor))
-    return shutil.which(name) or "" if name else ""
+    if not name:
+        return ""
+    return shutil.which(name) or (rocm_driver(name) if vendor == "amd" else "")
+
+
+#: Where ROCm installs its own clang, relative to the ROCm root (6.x and 7.x differ).
+ROCM_LLVM_BIN: Tuple[str, ...] = ("llvm/bin", "lib/llvm/bin")
+
+
+def rocm_driver(name: str) -> str:
+    """Absolute path to ``name`` inside the ROCm install, or ``""`` when it is not there.
+
+    ROCm ships ``amdclang`` -- the only driver that offloads OpenMP to an AMD GPU, since a stock
+    LLVM has no AMDGPU device runtime (measured: spack clang 22 links and then fails) -- and
+    deliberately keeps its bin directory off ``PATH``, because that directory also holds a ``clang``
+    that would shadow the one every other build uses. Resolved by its canonical location so the leg
+    works on a ROCm box without an env pin and without putting ROCm on anyone's ``PATH``.
+    """
+    root = pathlib.Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
+    for rel in ROCM_LLVM_BIN:
+        candidate = root / rel / name
+        if os.access(candidate, os.X_OK):
+            return str(candidate)
+    return ""
 
 
 def offload_probe(model: str, vendor: str, arch: str, *, run: bool) -> bool:
@@ -257,12 +318,13 @@ def offload_probe(model: str, vendor: str, arch: str, *, run: bool) -> bool:
         exe = pathlib.Path(tmp) / "probe"
         src.write_text(OFFLOAD_PROBE[model])
         cmd = [driver, *shlex.split(offload_flags(model, vendor, arch=arch)), str(src), "-o", str(exe)]
+        env = toolchain_env()
         try:
-            if subprocess.run(cmd, capture_output=True, timeout=300).returncode != 0:
+            if subprocess.run(cmd, capture_output=True, timeout=300, env=env).returncode != 0:
                 return False
             if not run:
                 return True
-            done = subprocess.run([str(exe)], capture_output=True, timeout=120)
+            done = subprocess.run([str(exe)], capture_output=True, timeout=120, env=env)
         except subprocess.TimeoutExpired:
             return False
         return done.returncode == 0 and done.stdout.strip() == b"1"
@@ -1301,6 +1363,7 @@ def build_shared_lib_commands(
         compiler: Optional[str] = None,
         extra_compile: Sequence[str] = (),
         extra_link: Sequence[str] = (),
+        extra_sources: Sequence[pathlib.Path] = (),
 ) -> List[List[str]]:
     """Compile+link argv(s) that turn one source file into ``out_so`` -- the
     sandbox path (caller-chosen, workdir-local paths; the repo tree is untouched).
@@ -1324,6 +1387,11 @@ def build_shared_lib_commands(
     caller restricts these to dependency tokens (see
     :func:`hpcagent_bench.harness.sandbox.split_build`).
 
+    ``extra_sources`` are further translation units compiled by the SAME block and linked in
+    alongside ``src`` -- a GPU submission's host half beside its device half
+    (:func:`source_units`), where nvcc/hipcc drive both. ``lang`` therefore stays the language
+    that picks the compiler, which for a GPU submission is the DEVICE one.
+
     :returns: a list of argv lists to run in order; the last produces ``out_so``.
     """
     if lang not in LANG_EXT:
@@ -1342,11 +1410,18 @@ def build_shared_lib_commands(
     # sharing a stem in one workdir do not clobber each other's object.
     obj = src.with_name(src.name + ".o")
     baseline = _resolve_baseline(block, mode)
-    subst = subst_map(block["cc"], baseline=baseline, src=src, obj=obj, objs=obj, lib=out_so)
+    # Extension-inclusive object names again, so a GPU submission's <stem>.cpp and <stem>.hip
+    # produce <stem>.cpp.o and <stem>.hip.o rather than one clobbering the other.
+    units = [pathlib.Path(src)] + [pathlib.Path(u) for u in extra_sources]
+    objs = [u.with_name(u.name + ".o") for u in units]
+    subst = subst_map(block["cc"], baseline=baseline, src=src, obj=obj, objs=" ".join(str(o) for o in objs), lib=out_so)
 
-    cmds: List[List[str]] = [_render_argv(block["compile"], subst, cacheable_lang=lang)]
-    if extra_compile:
-        cmds[0].extend(extra_compile)  # first argv compiles the source (sees -I/-D)
+    cmds: List[List[str]] = []
+    for unit, unit_obj in zip(units, objs):
+        step = subst_map(block["cc"], baseline=baseline, src=unit, obj=unit_obj, objs=str(unit_obj), lib=out_so)
+        argv = _render_argv(block["compile"], step, cacheable_lang=lang)
+        argv.extend(extra_compile)  # every compile step sees the -I/-D set
+        cmds.append(argv)
     link = block.get("link")
     if link:
         link_argv = _render_argv(link, subst)

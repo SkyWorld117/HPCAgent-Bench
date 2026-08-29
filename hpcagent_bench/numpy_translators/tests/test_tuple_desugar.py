@@ -225,3 +225,51 @@ def test_a_none_binding_that_is_still_read_survives():
             out[0] = f(s)
         """)
     assert "s = None" in got
+
+
+def test_a_bare_shape_expands_wherever_it_stands():
+    """``.reshape(x.shape)`` -- the argument is not a tuple context, so nothing used to force the
+    expansion, and the reshape reached lowering with no compile-time rank. Group-norm then kept the
+    PREVIOUS statement's rank-5 extent for the target and indexed past the end of it."""
+    got = desugared("""
+        def k(x, p, out):
+            out[:] = x.reshape(x.shape)
+        """)
+    assert "x.reshape((x.shape[0], x.shape[1], x.shape[2], x.shape[3]))" in got
+
+
+def test_a_shape_of_unknown_rank_is_left_alone():
+    """Only the LENGTH is compile-time here. With no rank there is no length, and inventing one
+    would emit a reshape to a shape the kernel does not have."""
+    got = desugared("""
+        def k(x, p, out):
+            out[:] = q.reshape(q.shape)
+        """)
+    assert "q.reshape(q.shape)" in got
+
+
+def test_a_simultaneous_bind_is_not_split_sequentially():
+    """``a, b = b, a + b`` binds both from the OLD values. A sequential split reads the new ``a``
+    and the kernel computes a different sequence with no diagnostic, so the statement is left for
+    the staging rewriter in ``lowering`` rather than split here."""
+    got = desugared("""
+        def k(x, p, out):
+            a = x[0]
+            b = x[1]
+            for i in range(3):
+                a, b = b, a + b
+            out[0] = a
+        """)
+    assert "a, b = (b, a + b)" in got
+    assert "a = b" not in got
+
+
+def test_an_unpack_with_no_hazard_still_splits():
+    """The decline is the hazard case only: a plain unpack must still scalarize away."""
+    got = desugared("""
+        def k(x, p, out):
+            oh, ow = (p, p + 1)
+            out[0] = oh + ow
+        """)
+    assert "oh = p" in got and "ow = p + 1" in got
+    assert "oh, ow = " not in got  # the tuple itself is gone, not just its uses

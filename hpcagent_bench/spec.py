@@ -1581,9 +1581,12 @@ class BenchSpec:
         # explicitly given (e.g. the ``module_name != stem`` cases).
         p = pathlib.Path(source)
         if p.suffix in (".yaml", ".yml"):
-            if "relative_path" not in raw and "benchmarks" in p.parts:
-                idx = len(p.parts) - 1 - p.parts[::-1].index("benchmarks")
-                raw["relative_path"] = "/".join(p.parts[idx + 1:-1])
+            # Anchored on the corpus root, never on a path component that happens to spell
+            # "benchmarks" -- a checkout living under such a directory matches that scan too.
+            # Same derivation as :func:`_scan_kernels`, which builds the key this fills in for.
+            corpus, here = paths.BENCHMARKS.resolve(), p.resolve().parent
+            if "relative_path" not in raw and here.is_relative_to(corpus):
+                raw["relative_path"] = here.relative_to(corpus).as_posix()
             raw.setdefault("module_name", p.stem)
             # A benchmark has ONE name and it is the manifest stem, which is unique across the
             # corpus and is the name every other identity field is derived from. A manifest may
@@ -1630,6 +1633,17 @@ class BenchSpec:
         if self.baseline is None:
             return None
         return paths.BENCHMARKS / self.relative_path / self.baseline.source
+
+    @property
+    def pinned_config(self) -> Dict[str, Any]:
+        """``{symbol: value}`` for every ``config:`` knob the manifest PINNED to one value.
+
+        A pinned knob is a compile-time constant, not a runtime argument: it has one value for
+        every preset and every fuzz draw, so the native emitters declare it as a C ``constexpr`` /
+        Fortran ``parameter`` and leave it out of the ABI. A knob with a ``domain:`` is a fuzzable
+        axis and stays a real parameter, as does every entry of a curated ``config:`` LIST.
+        """
+        return {sym: knob.value for sym, knob in self.config.items() if knob.domain is None}
 
     @property
     def resolved_level(self) -> Optional[int]:

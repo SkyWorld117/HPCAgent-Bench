@@ -26,6 +26,8 @@ import importlib.metadata
 
 # Imported at module level so a broken/absent DaCe is a real import error, not a silent skip.
 import dace
+
+from hpcagent_bench.frameworks.errors import NotSupportedByFramework
 import dace.dtypes as dace_dtypes
 import dace.transformation.auto.auto_optimize as dace_auto_opt
 from dace.sdfg import propagation
@@ -515,6 +517,10 @@ class DaceFramework(Framework):
         self._native_cursor: int = 0
         # Datatype selected via set_datatype; read by verify() for the tolerance band.
         self.datatype: Optional[str] = None
+        #: Why each pipeline died this optimize() call -- the reason the decline carries when none
+        #: of them yields a compilable SDFG. Reset per call, declared here so the attribute always
+        #: exists whatever order the build helpers run in.
+        self._pipeline_errors: List[str] = []
 
     #: DaCe searches for the fastest SDFG in optimize(), so it is an Optimizer.
     is_optimizer = True
@@ -625,6 +631,7 @@ class DaceFramework(Framework):
                 produced[pipe.name] = sdfg
             except Exception as exc:
                 print(f"DaCe {pipe.name} pipeline failed: {exc}")
+                self._pipeline_errors.append(f"{pipe.name}: {type(exc).__name__}: {exc}")
         return produced
 
     def _prepare_gpu(self, sdfg: Any, ctx: Dict[str, Any]) -> None:
@@ -657,11 +664,16 @@ class DaceFramework(Framework):
                 dace.Config.set('library', 'blas', 'default_implementation', value='cuBLAS')
             pin_single_stream()
 
+        self._pipeline_errors = []
         sdfgs = self._build_sdfgs(program, ctx, bench)
         compiled = self.compile_variants(sdfgs, ctx)
         if not compiled:
-            print("DaCe optimize: no variant compiled; returning the unoptimized program")
-            return program
+            # Returning ``program`` here timed the UNOPTIMIZED SDFG and recorded the median under
+            # this column's name -- a wrong measurement, not a failed one, and indistinguishable in
+            # the results from a pipeline that worked and won nothing. Decline instead: the run
+            # records the kernel as unsupported, with the pipeline's own error as the reason.
+            why = "; ".join(self._pipeline_errors) or "every pipeline produced no compilable SDFG"
+            raise NotSupportedByFramework(self.fname, bench.info.get("short_name", "?"), why)
 
         reference = self.reference_outputs(bench, bdata)
         return self.select_fastest(compiled, reference, bench, bdata)
@@ -906,7 +918,19 @@ class DaceFramework(Framework):
     def call_args(self, bench: Benchmark, impl: Callable, resolved, bdata):
         """DaCe compiled programs take the inputs AND the symbol params as keywords (``A=..., NI=...``)."""
         renames = self.arg_renames(bench)
-        kwargs = {renames.get(a, a): resolved[a] for a in bench.info["input_args"]}
+        # The compiled signature takes a sparse array as its expanded buffers, never the logical name.
+        # ``resolved`` is keyed by the MANIFEST's input_args, so it holds the logical entry and none
+        # of the buffers; it still wins where it has a name, since it carries the per-run mutable copy.
+        from hpcagent_bench.initialize import abi_input_args
+        source = {**bdata, **resolved}
+        # The SDFG's own arglist is the authority on what the signature takes: abi_input_args adds
+        # declared OUTPUT buffers, which a program that returns them instead does not accept.
+        declared = set(impl.sdfg.arglist()) if isinstance(impl, TimedCompiledSDFG) else None
+        wanted = [
+            a for a in abi_input_args(bench.spec, bdata)
+            if a in source and (declared is None or renames.get(a, a) in declared)
+        ]
+        kwargs = {renames.get(a, a): source[a] for a in wanted}
         for p in self.params(bench, impl):
             kwargs[renames.get(p, p)] = bdata[p]
         kwargs.update(self.shape_symbols(impl, bench, resolved, kwargs))
