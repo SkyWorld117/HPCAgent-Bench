@@ -3020,6 +3020,32 @@ class _ShapeArithFolder(ast.NodeTransformer):
         return node
 
 
+def _scaled_term(coefficient: int, term: ast.expr) -> ast.expr:
+    """``term`` for a coefficient of 1, else ``coefficient * term``."""
+    if coefficient == 1:
+        return term
+    return ast.BinOp(left=ast.Constant(value=coefficient), op=ast.Mult(), right=term)
+
+
+def _combine_like_terms(terms: List[Tuple[int, ast.expr]]) -> List[Tuple[int, ast.expr]]:
+    """Sum the signs of structurally identical terms, dropping any that cancel to zero.
+
+    ``span - (-span)`` is ``2 * span`` and ``a - a`` is nothing at all. Keyed on ``ast.dump``, so
+    only terms spelled the same combine -- this decides no equality the text does not already make
+    obvious. First-appearance order is kept, since the emitted extent is read by people.
+    """
+    order: List[str] = []
+    coefficients: Dict[str, int] = {}
+    nodes: Dict[str, ast.expr] = {}
+    for sign, term in terms:
+        key = ast.dump(term)
+        if key not in coefficients:
+            order.append(key)
+            nodes[key] = term
+        coefficients[key] = coefficients.get(key, 0) + sign
+    return [(coefficients[key], nodes[key]) for key in order if coefficients[key]]
+
+
 def _gather_add_chain(node: ast.BinOp) -> ast.expr:
     """``((h + 6) - 7) + 1`` -> ``h + 0`` -> ``h``: sum the literals in one ``+``/``-`` chain.
 
@@ -3027,6 +3053,12 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
     / ``- kernel`` / ``+ 1``, so the literals arrive interleaved with the symbol and no single
     rewrite sees ``x + 0``; folding the chain is what makes a five-deep conv output-size expression
     collapse instead of growing one parenthesised layer per helper.
+
+    A unary minus is part of the chain, and repeated terms COMBINE: ``(span + 1) - (-span)`` is
+    ``2 * span + 1``, which is how cp2k_grid_integrate spells one length twice -- once as
+    ``nrel = 2 * span + 1`` and once as the extent of ``np.arange(-span, span + 1)``. Left apart,
+    the two became separate minted symbols the frontend could not prove equal. Both rewrites are
+    ordinary integer identities, like everything else here.
     """
     terms: List[Tuple[int, ast.expr]] = []
     total = 0
@@ -3037,6 +3069,9 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
             walk(expr.left, sign)
             walk(expr.right, sign if isinstance(expr.op, ast.Add) else -sign)
             return
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.UAdd, ast.USub)):
+            walk(expr.operand, sign if isinstance(expr.op, ast.UAdd) else -sign)
+            return
         value = _const_int(expr)
         if value is None:
             terms.append((sign, expr))
@@ -3044,14 +3079,15 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
             total += sign * value
 
     walk(node, 1)
+    terms = _combine_like_terms(terms)
     if not terms or all(sign < 0 for sign, _ in terms):
         return node  # a bare literal, or a fully-negated chain -- rebuilding it gains nothing
     lead = next(i for i, (sign, _) in enumerate(terms) if sign > 0)
-    out = terms[lead][1]
+    out = _scaled_term(*terms[lead])
     for i, (sign, term) in enumerate(terms):
         if i == lead:
             continue
-        out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=term)
+        out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=_scaled_term(abs(sign), term))
     if total:
         out = ast.BinOp(left=out, op=ast.Add() if total > 0 else ast.Sub(), right=ast.Constant(value=abs(total)))
     return ast.copy_location(ast.fix_missing_locations(out), node)

@@ -207,7 +207,15 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
             # axis in, one out), so its net drop is ``1 - its own rank``, not the flat ``1`` a
             # scalar loop index costs. Unknown-rank index defaults to the scalar reading, same as
             # every kernel that reached this line before a fancy index needed distinguishing.
+            # Advanced indices BROADCAST against each other rather than each contributing their own
+            # axes: ``A[ia, ib]`` with both rank 2 is rank 2, not 4. Summing them per index made
+            # field_gather's ``ey_arr[:, :, 0, 0][ia_b, ib_b]`` rank 4, the product it feeds rank 4
+            # too, and the reduction over it emitted a nest reading ``.shape[5]`` off it. So the
+            # whole advanced block consumes one base axis per index and gives back ONE broadcast
+            # shape -- ``n_adv - max(rank)``. An integer index is the rank-0 case of the same
+            # formula, and an unknown rank keeps reading as one, exactly as before.
             drop = 0
+            adv_ranks = []
             for e in sl.elts:
                 if isinstance(e, ast.Slice) or _is_ellipsis(e):
                     continue
@@ -215,7 +223,9 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
                     drop -= 1
                     continue
                 idx_rank = expr_rank(e, ranks)
-                drop += 1 if idx_rank is None else 1 - idx_rank
+                adv_ranks.append(0 if idx_rank is None else idx_rank)
+            if adv_ranks:
+                drop += len(adv_ranks) - max(adv_ranks)
             return base - drop
         if isinstance(sl, ast.Call) and isinstance(sl.func, ast.Name) and sl.func.id == "tuple":
             # ``A[tuple(axes)]`` is the WHOLE index, one entry per axis -- not the single scalar
@@ -274,6 +284,14 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
             n = _tuple_len(value.args[1])
             if n is not None:
                 return n
+        if attr == "diag" and value.args:
+            # The one numpy call whose rank moves in BOTH directions: 2-D in extracts the diagonal
+            # (1-D out), 1-D in builds the matrix (2-D out). The elementwise fallback below reports
+            # the operand's rank, so raman_fitting's ``scale = np.diag(normal).copy()`` came back
+            # rank 2 and ``scale[scale <= 0] = 1.0`` was lowered as a two-deep nest reading
+            # ``scale.shape[1]`` off a vector.
+            base = expr_rank(value.args[0], ranks)
+            return {1: 2, 2: 1}.get(base)
         if attr in ("copy", "ascontiguousarray", "asarray", "array") and value.args:
             return expr_rank(value.args[0], ranks)
         if attr == "take" and len(value.args) >= 2:

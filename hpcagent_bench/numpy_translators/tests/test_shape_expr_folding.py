@@ -44,6 +44,12 @@ CASES = [
     ("3 * ((3 * K + 2) // 3) + 1", "3 * K + 1"),
     ("(6 * K + 4) // 3", "2 * K + 1"),
     ("(4 * a + 2 * b + 3) // 2", "2 * a + b + 1"),
+    # A unary minus belongs to the +/- chain, and terms spelled the same combine. cp2k spells one
+    # length twice -- ``nrel = 2 * span + 1`` and the extent of ``np.arange(-span, span + 1)`` --
+    # and apart they became two symbols nothing could prove equal.
+    ("(span + 1) - (-span)", "2 * span + 1"),
+    ("x + x", "2 * x"),
+    ("a + b - a", "b"),
 ]
 
 #: Numerators the rule above must NOT touch, with why. Sharper than the general
@@ -91,6 +97,13 @@ def test_folding_preserves_value_for_negative_operands_too(expr, _expected):
     for combo in itertools.product(range(-9, 3), repeat=len(names)):
         env = dict(zip(names, combo))
         assert eval(folded, {}, env) == eval(expr, {}, env), (expr, folded, env)
+
+
+def test_a_chain_that_cancels_completely_is_left_alone():
+    """``a - a`` is 0, but rebuilding it as one needs a term to lead with and there is none. The
+    folder returns the node untouched rather than inventing a literal -- an extent of 0 from a
+    rewrite would be far worse than an unfolded one."""
+    assert fold_shape_expr("a - a") == "a - a"
 
 
 def test_shrinks_the_nested_form():
