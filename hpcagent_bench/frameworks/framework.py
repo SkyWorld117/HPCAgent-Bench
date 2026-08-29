@@ -203,6 +203,20 @@ FRAMEWORK_META: Dict[str, Dict[str, Any]] = {
     # transformations, so this flavor runs on stock DaCe as well as on spcl/dace@extended, and is
     # the only column that can be measured on both to separate "the fork's optimizer is better"
     # from "the fork's DaCe is different".
+    # ``simplify`` alone, no optimizer. Isolates the one question "does every SDFG in the track
+    # survive simplification with its numbers intact" from every later pipeline that could mask a
+    # simplify defect by rewriting the same graph again.
+    "dace_cpu_simplify": {
+        "base": "dace",
+        "full_name": "DaCe CPU simplify",
+        "prefix": "dc",
+        "postfix": "dace",
+        "arch": "cpu",
+        "pipelines": ("strict", ),
+        "column": "dace_cpu",
+        "flavor": "simplify",
+        "precisions": frozenset({Precision.FP64, Precision.FP32, Precision.FP16}),
+    },
     "dace_cpu_parallel": {
         "base": "dace",
         "full_name": "DaCe CPU parallel",

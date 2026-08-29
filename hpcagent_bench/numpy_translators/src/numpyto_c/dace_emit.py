@@ -9,7 +9,8 @@ from typing import Dict, List, Optional
 from numpyto_common import dtypes
 from numpyto_common.frontend import fold_shape_expr
 from numpyto_common.ir import KernelIR
-from numpyto_common.numpy_desugar import desugar_for_python_backend
+from numpyto_common.lowering import lower
+from numpyto_common.numpy_desugar import _AUG_OP_SRC, desugar_for_python_backend, expr_rank, rank_table
 from numpyto_common.ordered import OrderedSet
 
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
@@ -315,6 +316,35 @@ class _RewriteFrameworkDtype(ast.NodeTransformer):
         return None
 
 
+#: Python builtin used as a numpy dtype -> the spelling dace accepts. numpy reads the builtin as its
+#: default of that kind, so these are the same dtype written a way dace's property setter takes.
+_BUILTIN_DTYPE = {"bool": "np.bool_", "int": "np.int64"}
+
+
+class RewriteBuiltinDtype(ast.NodeTransformer):
+    """Spell a ``dtype=bool`` / ``dtype=int`` / ``dtype=float`` argument the way dace accepts.
+
+    numpy takes the builtin as its default dtype of that kind. dace hands it to the descriptor's
+    dtype property as a plain ``str`` and the property rejects it -- ``Received str for property
+    dtype of type dace.dtypes.typeclass``, from inside ``data.Array.__init__``, naming no allocation
+    and no kernel. ``float`` routes through the precision-driven global, like every other float the
+    emitter declares, so the fp32 leg does not allocate an fp64 workspace.
+    """
+
+    def __init__(self, float_dtype: str):
+        self.float_dtype = float_dtype
+
+    def visit_keyword(self, node: ast.keyword):
+        self.generic_visit(node)
+        if node.arg != "dtype" or not isinstance(node.value, ast.Name):
+            return node
+        spelled = _BUILTIN_DTYPE.get(node.value.id) or (self.float_dtype if node.value.id == "float" else None)
+        if spelled is None:
+            return node
+        node.value = ast.copy_location(ast.parse(spelled, mode="eval").body, node.value)
+        return node
+
+
 class _TernaryValueHoister(ast.NodeTransformer):
     """Hoist each ternary-used-as-value to a scalar temp assigned by a guarding if/else appended to prelude."""
 
@@ -377,6 +407,117 @@ class _DesugarTernary(ast.NodeTransformer):
             out.extend(prelude)
             out.append(new_stmt)
         return out
+
+
+class _MethodReceiverHoister(ast.NodeTransformer):
+    """Bind a method call's non-Name receiver to a temp, appended to ``prelude``."""
+
+    def __init__(self, owner: "BindMethodReceiver", prelude: List[ast.stmt]):
+        self.owner = owner
+        self.prelude = prelude
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)  # innermost receiver first, so a chain unwinds bottom-up
+        if not isinstance(node.func, ast.Attribute):
+            return node
+        base = node.func.value
+        while isinstance(base, ast.Attribute):
+            base = base.value
+        if isinstance(base, ast.Name):
+            return node
+        tmp = f"__hpcagent_bench_recv{self.owner.ctr}"
+        self.owner.ctr += 1
+        self.prelude.append(
+            ast.copy_location(ast.Assign(targets=[ast.Name(id=tmp, ctx=ast.Store())], value=node.func.value), node))
+        node.func.value = ast.copy_location(ast.Name(id=tmp, ctx=ast.Load()), node)
+        return node
+
+
+class BindMethodReceiver(ast.NodeTransformer):
+    """Give every method call a receiver dace can NAME.
+
+    ``dace.frontend.python.astutils.rname`` resolves a method call by walking the attribute chain
+    down to a Name; anything else (a call, a subscript) raises "Unsupported AST <node> nested inside
+    AST call node" before the frontend looks at what the call means. ``np.asarray(npw).reshape(-1)``
+    is refused for the receiver, not the reshape, so binding the receiver to a temporary is the
+    desugaring -- the value computed is identical.
+
+    A ``while`` test is left alone: its receiver is re-evaluated per iteration, and hoisting it
+    before the loop would freeze the first value. That construct stays refused, which is honest.
+    """
+
+    def __init__(self):
+        self.ctr = 0
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        node.body = self.process_body(node.body)
+        return node
+
+    def visit_For(self, node: ast.For):
+        node.body = self.process_body(node.body)
+        node.orelse = self.process_body(node.orelse)
+        return node
+
+    def visit_While(self, node: ast.While):
+        node.body = self.process_body(node.body)
+        node.orelse = self.process_body(node.orelse)
+        return node
+
+    def visit_If(self, node: ast.If):
+        node.body = self.process_body(node.body)
+        node.orelse = self.process_body(node.orelse)
+        return node
+
+    def process_body(self, stmts: List[ast.stmt]) -> List[ast.stmt]:
+        out: List[ast.stmt] = []
+        for stmt in stmts:
+            prelude: List[ast.stmt] = []
+            if isinstance(stmt, ast.For):
+                stmt.iter = _MethodReceiverHoister(self, prelude).visit(stmt.iter)
+                out.extend(prelude)  # the iterable is evaluated once, at loop entry
+                out.append(self.visit(stmt))
+                continue
+            if isinstance(stmt, ast.If):
+                stmt.test = _MethodReceiverHoister(self, prelude).visit(stmt.test)
+                out.extend(prelude)
+                out.append(self.visit(stmt))
+                continue
+            if isinstance(stmt, ast.While):
+                out.append(self.visit(stmt))
+                continue
+            out.append(_MethodReceiverHoister(self, prelude).visit(stmt))
+            out[-1:] = prelude + out[-1:]
+        return out
+
+
+#: numpy constructors that are the IDENTITY on an argument that is already an ndarray.
+_ASARRAY_IDENTITY = ("asarray", "ascontiguousarray", "asanyarray")
+
+
+class DropIdentityAsarray(ast.NodeTransformer):
+    """Drop ``np.asarray(x)`` when ``x`` is already an array.
+
+    dace registers no ``asarray`` replacement at all, so the call survives into the frontend as an
+    opaque object and the next method on it reports a type nobody wrote (``Method "reshape" is not
+    registered for object type "Scalar"``). On an ndarray the call is numpy's own identity, so
+    dropping it emits the same numbers with a receiver dace can trace. An argument of unknown rank
+    keeps its call: there the constructor is doing real work.
+    """
+
+    def __init__(self, ranks: Dict[str, int]):
+        self.ranks = ranks
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr in _ASARRAY_IDENTITY
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in ("np", "numpy")):
+            return node
+        if len(node.args) != 1 or node.keywords:
+            return node  # a dtype/order argument makes it a CONVERSION, not an identity
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and (self.ranks.get(arg.id) or 0) >= 1:
+            return ast.copy_location(arg, node)
+        return node
 
 
 class DesugarChainedCompare(ast.NodeTransformer):
@@ -446,6 +587,37 @@ class ResolveInferredReshape(ast.NodeTransformer):
         size = " * ".join(f"({tok})" for tok in self.arr_shapes[base])
         extent = size if divisor == 1 else f"({size}) // {divisor}"
         dims[inferred[0]] = ast.parse(extent, mode="eval").body
+        return ast.fix_missing_locations(node)
+
+
+class NormalizeReshape(ast.NodeTransformer):
+    """Spell a reshape the two ways dace can follow: a tuple shape, and ``ravel`` for a bare ``-1``.
+
+    numpy takes ``a.reshape(6)`` and ``a.reshape((6,))`` as the same call. dace's
+    ``_ndarray_reshape`` unconditionally unwraps its varargs to the first element and then iterates
+    it, so a single scalar extent reaches ``reshape`` as a bare symbol and dies with ``'symbol'
+    object is not iterable`` -- a message that names no reshape and no kernel.
+
+    A lone ``-1`` cannot become a tuple: dace takes the shape literally and allocates a negative
+    extent. It is numpy's flatten-to-1-D, which is exactly ``ravel``, and dace does register that.
+    """
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)
+        base, args = _reshape_target(node)
+        if base is None or len(args) == 0:
+            return node
+        numpy_form = (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                      and node.func.value.id in ("np", "numpy"))
+        dims = args[0].elts if len(args) == 1 and isinstance(args[0], (ast.Tuple, ast.List)) else list(args)
+        if len(dims) == 1 and _is_negative_one(dims[0]):
+            receiver = node.args[0] if numpy_form else node.func.value
+            ravel = ast.Call(func=ast.Attribute(value=receiver, attr="ravel", ctx=ast.Load()), args=[], keywords=[])
+            return ast.fix_missing_locations(ast.copy_location(ravel, node))
+        if len(args) == 1 and isinstance(args[0], (ast.Tuple, ast.List)):
+            return node
+        shape = ast.Tuple(elts=list(args), ctx=ast.Load())
+        node.args = [node.args[0], shape] if numpy_form else [shape]
         return ast.fix_missing_locations(node)
 
 
@@ -611,6 +783,94 @@ class _MaterializeDynamicFlip(ast.NodeTransformer):
         loop = f"for {fi} in range({length}):\n    {ws}[{fi}] = {base}[({hi_src}) - 1 - {fi}]"
         prelude.append(ast.parse(loop).body[0])
         return ast.parse(f"{ws}[0:{length}]", mode="eval").body
+
+
+def loop_target_ranks(fn_ast: ast.AST) -> Dict[str, int]:
+    """Rank 0 for every ``for`` target name.
+
+    :func:`numpyto_common.numpy_desugar.rank_table` only walks assignments, so a name the loop
+    binds has no rank at all -- and a consumer that reads "unknown" as "array" indexes a scalar.
+    Iterating a rank-1 value (a range, an index vector, a tuple of coefficients) yields rank-0
+    elements; iteration over an array VALUE is already rewritten to an indexed range by
+    :class:`_DesugarArrayIteration` before this is read.
+    """
+    ranks: Dict[str, int] = {}
+    for node in ast.walk(fn_ast):
+        if not isinstance(node, ast.For):
+            continue
+        targets = node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
+        for t in targets:
+            if isinstance(t, ast.Name):
+                ranks[t.id] = 0
+    return ranks
+
+
+class PointwiseScatterToLoop(ast.NodeTransformer):
+    """``A[i, j] = / += rhs`` with INDEX ARRAYS -> the explicit point-wise loop.
+
+    numpy zips the index vectors: element ``p`` of the selection is ``A[i[p], j[p]]``. dace does not
+    lower that write at all -- it produced a uniform garbage value across the whole array for
+    chebyshev's ``lap[idx, (idx + m) % N] += w``, a SILENT wrong answer rather than a refusal, which
+    is why this lowers here instead of waiting for dace to grow the write.
+
+    Only the point-wise WRITE is lowered, and only when every index is a scalar or a rank-1 array:
+    a slice or an Ellipsis among the indices is a mixed basic/advanced selection whose result axes
+    are not the zip, and a rank>=2 index selects a grid. A repeated value inside one index vector
+    ACCUMULATES here where numpy's gather-add-scatter applies the update once -- the same caveat
+    :class:`numpyto_common.numpy_desugar._IxWriteToLoop` carries, and undetectable statically.
+    """
+
+    def __init__(self, ranks: Dict[str, int]):
+        self.ranks = ranks
+        self.ctr = 0
+
+    def lower(self, node: ast.stmt, target: ast.expr, op: str):
+        if not (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                and isinstance(target.slice, ast.Tuple)):
+            return node
+        elts = target.slice.elts
+        if any(isinstance(e, (ast.Slice, ast.Starred)) for e in elts):
+            return node
+        if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
+            return node
+        ranks = [expr_rank(e, self.ranks) for e in elts]
+        if any(r is None or r > 1 for r in ranks) or 1 not in ranks:
+            return node
+        prefix = f"__hpcagent_bench_scatter{self.ctr}"
+        self.ctr += 1
+        lines: List[str] = []
+
+        def bind(expr: ast.expr, tmp: str) -> str:
+            """Name the operand once, before the nest: numpy evaluates the whole right-hand side
+            before the scattered store, and an in-loop array expression would rebuild it per point."""
+            if isinstance(expr, ast.Name):
+                return expr.id
+            lines.append(f"{tmp} = {ast.unparse(expr)}")
+            return tmp
+
+        names = [ast.unparse(e) if r == 0 else bind(e, f"{prefix}_x{k}") for k, (e, r) in enumerate(zip(elts, ranks))]
+        value_rank = expr_rank(node.value, self.ranks)
+        if value_rank is None or value_rank > 1:
+            return node  # an unknown or grid-shaped rhs: guessing how it lines up would be a miscompile
+        value = ast.unparse(node.value) if value_rank == 0 else bind(node.value, f"{prefix}_v")
+        driver = names[ranks.index(1)]
+        it = f"{prefix}_i"
+        index = ", ".join(nm if r == 0 else f"{nm}[{it}]" for nm, r in zip(names, ranks))
+        rhs = value if value_rank == 0 else f"{value}[{it}]"
+        lines.append(f"for {it} in range({driver}.shape[0]):")
+        lines.append(f"    {target.value.id}[{index}] {op} {rhs}")
+        return [ast.copy_location(stmt, node) for stmt in ast.parse("\n".join(lines)).body]
+
+    def visit_Assign(self, node: ast.Assign):
+        self.generic_visit(node)
+        if len(node.targets) != 1:
+            return node
+        return self.lower(node, node.targets[0], "=")
+
+    def visit_AugAssign(self, node: ast.AugAssign):
+        self.generic_visit(node)
+        op = _AUG_OP_SRC.get(type(node.op))
+        return node if op is None else self.lower(node, node.target, op)
 
 
 class _DesugarBroadcastAugAssign(ast.NodeTransformer):
@@ -1748,8 +2008,26 @@ def bound_names(body: List[ast.stmt]) -> OrderedSet:
     return names
 
 
+def names_logical_sparse(kir: KernelIR) -> bool:
+    """True when the body still spells a LOGICAL sparse matrix (``A @ x``), i.e. the kir is raw.
+
+    The frontend expands ``A`` into its physical CSR buffers in the SIGNATURE, but only
+    :func:`numpyto_common.lowering.lower` rewrites the BODY onto those buffers; a raw kir therefore
+    reaches dace with a signature and a body that disagree, and dace answers ``Use of undefined
+    variable "A"``. A buffer-style kernel (spmv) names no logical matrix and must NOT be lowered:
+    its data-dependent slice is expressible through dace's symbolic shapes, and lowering it would
+    make a variable-length copy dace cannot allocate.
+    """
+    if not kir.sparse:
+        return False
+    logical = set(kir.sparse)
+    return any(isinstance(n, ast.Name) and n.id in logical for n in ast.walk(kir.tree))
+
+
 def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     """Return the source of a ``<short>_dace.py`` module for ``kir``."""
+    if names_logical_sparse(kir):
+        kir = lower(kir)
     name = fn_name or kir.kernel_name
     arrays = {a.name: a for a in kir.arrays}
     scalars = {s.name: s for s in kir.scalars}
@@ -1797,12 +2075,19 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # Rewrite leaked np_float/np_complex tokens to the dace precision global the module binds.
     framework_dtype = _RewriteFrameworkDtype()
     fn_ast = framework_dtype.visit(fn_ast)
+    # ``np.asarray`` has no dace replacement; on an array it is numpy's own identity, so it goes.
+    fn_ast = DropIdentityAsarray(rank_table(fn_ast, {a.name: len(a.shape) for a in kir.arrays})).visit(fn_ast)
     # dace's frontend has no conditional expression (RHS or nested value): lower both to if/else.
     fn_ast = _DesugarTernary().visit(fn_ast)
     # dace's frontend takes one comparator per Compare: split a chained range test into its links.
     fn_ast = DesugarChainedCompare().visit(fn_ast)
+    # dace names a method call by its receiver chain: a call/subscript receiver is refused outright.
+    fn_ast = BindMethodReceiver().visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
     # numpy infers a reshape's -1 from the size; dace takes the shape literally, so spell it out.
     fn_ast = ResolveInferredReshape(arr_shapes).visit(fn_ast)
+    # dace unwraps a reshape's varargs then iterates them; a lone -1 is numpy's ravel.
+    fn_ast = NormalizeReshape().visit(fn_ast)
     # dace has no np.outer and rejects negative-stride subscripts; rewrite both to forms dace accepts.
     fn_ast = _DesugarUnreplacedCalls().visit(fn_ast)
     fn_ast = _DesugarReverseSlice().visit(fn_ast)
@@ -1819,6 +2104,11 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # A broadcasting in-place augassign builds an invalid SDFG; rewrite to an explicit write-back binop.
     fn_ast = _DesugarBroadcastAugAssign(set(arrays)).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
+    # dace does not lower a point-wise fancy-index WRITE; it answers garbage rather than refusing.
+    scatter_ranks = rank_table(fn_ast, {a.name: len(a.shape) for a in kir.arrays})
+    scatter_ranks.update(loop_target_ranks(fn_ast))
+    fn_ast = PointwiseScatterToLoop(scatter_ranks).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
     # Turn __hpcagent_bench_zeros__() markers into np.zeros/np.ones with the declared initial value.
     zeros_locals = kir.zeros_locals
     zeros_fills = kir.zeros_fills
@@ -1828,6 +2118,8 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # np.empty's dace replacement has no dtype default (unlike zeros/ones/full): a bare call means
     # numpy's own float64 default, so fill in the precision-driven float global explicitly.
     fn_ast = _AnnotateEmptyDtype(_dace_dtype(default_dtype)).visit(fn_ast)
+    # A builtin used as a dtype reaches dace's descriptor as a str, which its dtype property rejects.
+    fn_ast = RewriteBuiltinDtype(_dace_dtype(default_dtype)).visit(fn_ast)
     # A promoted return is a PARAMETER here; re-allocating it in the body would leave it unwritten.
     out_params = {a: [t.replace(" ", "") for t in arr_shapes[a]] for a in kir.input_args if a in arrays}
     fn_ast = _FillOutputParamRealloc(out_params).visit(fn_ast)

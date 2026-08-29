@@ -335,8 +335,13 @@ class SdfgPipeline:
 
 
 def pipeline_strict(sdfg: Any, ctx: Dict[str, Any]) -> None:
-    """Phase 1 -- baseline strict transformations."""
-    sdfg.apply_strict_transformations()
+    """Phase 1 -- ``simplify`` and nothing else.
+
+    ``apply_strict_transformations`` was the old spelling and forwards to ``simplify`` with a
+    DeprecationWarning; call the real name. A wrong number from THIS pipeline is in the emitted
+    DaCe program or in simplify, since no optimizer has run.
+    """
+    sdfg.simplify()
 
 
 def pipeline_fusion(sdfg: Any, ctx: Dict[str, Any]) -> None:
@@ -660,6 +665,10 @@ class DaceFramework(Framework):
         sdfgs = self._build_sdfgs(program, ctx, bench)
         compiled = self.compile_variants(sdfgs, ctx)
         if not compiled:
+            # A GPU flavor is handed device arrays, so the unoptimized host program cannot run on
+            # them: falling back reports a runtime error for what is really a pipeline failure.
+            if self.info["arch"] == "gpu":
+                raise RuntimeError(f"no {self.fname} variant compiled; the GPU pipeline failed")
             print("DaCe optimize: no variant compiled; returning the unoptimized program")
             return program
 
