@@ -1,30 +1,20 @@
 # Copyright 2026 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Adapted from ECMWF dwarf-p-cloudsc (github.com/ecmwf-ifs/dwarf-p-cloudsc, Apache-2.0),
-# via the lu_solver_microphysics extract in the "How Well Do Compilers Vectorize?" artifacts.
+# the lu_solver_microphysics extract; see REFERENCES.md.
 # Reimplemented in NumPy as the HPCAgent-Bench correctness reference.
 """CLOUDSC's per-column LU solve: factor and solve KLON independent NCLV x NCLV systems.
 
-Four loop groups, in the order the Fortran runs them: Gaussian elimination, forward
-substitution, the last-variable divide, and backward substitution.
+Four loop groups in the Fortran's order: elimination, forward substitution, the
+last-variable divide, backward substitution.
 
-LAYOUT. The Fortran declares ``ZQLHS(KLON, NCLV, NCLV)`` and indexes ``ZQLHS(JL, JM, JN)``
-with ``JL`` innermost, so column-major makes ``JL`` unit stride. Transcribing those
-subscripts into a row-major numpy array puts ``jl`` on the FIRST axis at stride
-``NCLV*NCLV``; neither GCC nor LLVM could prove that stride and the loop did not vectorize.
-The port therefore reverses every index tuple -- ``ZQLHS(JL, JM, JN)`` becomes
-``zqlhs[jn, jm, jl]`` over ``(NCLV, NCLV, KLON)`` -- which is the same bytes in the same
-order and puts ``jl`` back on the fastest-varying axis. Measured at 8.4x on the elimination
-nest alone.
+Row-major: every Fortran index tuple is reversed, so ZQLHS(JL, JM, JN) is zqlhs[jn, jm, jl]
+and the column index jl stays the unit-stride axis it is in the column-major original. A
+literal transcription puts jl at stride NCLV*NCLV and neither vectorizer can prove it.
 
-LOOPS. Only ``jl`` is data-parallel. The ``jn`` / ``jm`` / ``ik`` structure is a genuine
-loop-carried dependence -- each elimination step reads the multipliers the previous one
-wrote, and each substitution step reads the variable solved just before it -- so the nest
-stays a nest. There is no reduction here to reassociate and no array op that preserves the
-recurrence.
+Only jl is data-parallel: the jn / jm / ik structure is a loop-carried dependence, not a
+reduction, so the nest stays a nest.
 """
-
-import numpy as np
 
 
 def lu_solver(zqlhs, zqxn, NCLV, KLON):
