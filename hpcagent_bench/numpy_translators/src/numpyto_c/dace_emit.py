@@ -2024,8 +2024,34 @@ def names_logical_sparse(kir: KernelIR) -> bool:
     return any(isinstance(n, ast.Name) and n.id in logical for n in ast.walk(kir.tree))
 
 
+def called_helpers(body: List[ast.stmt], helpers) -> OrderedSet:
+    """Kept-helper names ``body`` still calls. A specialised helper is spelled ``<name>__s<N>``,
+    so the match is the name or that prefix -- never a substring, which would claim ``relu_scale``."""
+    names = OrderedSet(h.kernel_name for h in helpers)
+    called = OrderedSet()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                fid = node.func.id
+                if any(fid == n or fid.startswith(f"{n}__") for n in names):
+                    called.add(fid)
+    return called
+
+
 def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
-    """Return the source of a ``<short>_dace.py`` module for ``kir``."""
+    """Return the source of a ``<short>_dace.py`` module for ``kir``.
+
+    Refuses a body that still CALLS a kept helper. The emitted module is one ``@dc.program`` built
+    from ``kir.tree`` alone, so such a call survives as a name the module never binds and the
+    frontend answers ``Use of undefined variable "relu"`` -- at PARSE time, long after the emit
+    reported success. Raising instead puts the decision back where it is retryable:
+    :func:`numpyto_common.frontend.emit_with_inline_fallback` re-renders with the helpers inlined,
+    which is a form this emitter can express. The C and Fortran legs are unaffected -- they emit a
+    real function per helper, which is why the un-inlined form exists. The test is the CALL and not
+    ``kir.helpers``: a kernel whose helpers were all folded into the body during lowering keeps
+    the un-inlined parse, whose symbol promotion is the better one (gmres' ``max_iter`` stays a
+    runtime argument there and becomes a dc.symbol under inlining).
+    """
     if names_logical_sparse(kir):
         kir = lower(kir)
     name = fn_name or kir.kernel_name
@@ -2188,6 +2214,10 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)):
         body = body[1:]
+    unbound = called_helpers(body, kir.helpers)
+    if unbound:
+        raise ValueError(f"{kir.kernel_name}: the DaCe module is one @dc.program and binds no helper, "
+                         f"but the body calls {sorted(unbound)}; render it inlined")
 
     # A bound name that collides with a sympy callable is not a variable to dace (see
     # sympy_reserved). Rename every one of them and record the map: the emitted program is the only

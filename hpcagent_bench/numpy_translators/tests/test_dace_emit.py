@@ -26,7 +26,7 @@ from numpyto_c.dace_emit import (BindMethodReceiver, DesugarChainedCompare, Drop
                                  _widen_int_seeds, emit_dace, copy_view_bindings, loop_target_ranks, mixed_view_names,
                                  names_logical_sparse, shape_argument, version_reallocations,
                                  version_rebound_views)  # noqa: E402
-from numpyto_common.frontend import parse_kernel  # noqa: E402
+from numpyto_common.frontend import emit_with_inline_fallback, parse_kernel  # noqa: E402
 
 _KERNELS = foundation_kernels()
 
@@ -45,10 +45,15 @@ def emitted_renames(src: str) -> dict:
 
 def _emit(short):
     # Drive off the co-located YAML (bench_info/*.json is gone); emit_bridge
-    # synthesizes the transient JSON the emitter reads.
-    with bench_info_for(short) as (_, numpy_py, bi):
-        kir = parse_kernel(numpy_py, bi)
-    return kir, emit_dace(kir)
+    # synthesizes the transient JSON the emitter reads. Through the inline fallback, exactly like
+    # autogen._emit_dace: a level-3 kernel keeps its helpers at parse time and the DaCe module --
+    # one @dc.program -- can only render the inlined form, so the PARSE has to sit inside the retry.
+    def render():
+        with bench_info_for(short) as (_, numpy_py, bi):
+            kir = parse_kernel(numpy_py, bi)
+        return kir, emit_dace(kir)
+
+    return emit_with_inline_fallback(render)
 
 
 @pytest.mark.skipif(not _KERNELS, reason="no loop_level_reasoning kernels")
@@ -411,7 +416,7 @@ def test_gmres_emits_promoted_symbols_ternary_and_split():
     solver manifests listed it under ``parameters:``, where a size preset then overwrote the
     solver's own iteration count; moving it to ``init.scalars`` is what fixed that, and this
     test asserted the broken arrangement. The signature check below pins the correct one."""
-    src = emit_dace(kir_for("gmres", config="csr", do_lower=True))
+    src = emit_with_inline_fallback(lambda: emit_dace(kir_for("gmres", config="csr", do_lower=True)))
     assert "nnz, N, m = " in src  # m promoted; n inlined to N; max_iter is not a symbol
     assert "max_iter: dc.int64" in src  # ... it is a runtime argument
     assert "max_iter, m = (dc.symbol" not in src  # ... and must not drift back into the symbol tuple
