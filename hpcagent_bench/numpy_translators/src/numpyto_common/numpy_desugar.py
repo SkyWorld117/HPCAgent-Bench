@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from numpyto_common import dtypes
-from numpyto_common.lib_nodes import _iter_extent_of, _parse_einsum_subscripts, extent_is_scalar
+from numpyto_common.lib_nodes import _const_int, _iter_extent_of, _parse_einsum_subscripts, extent_is_scalar
 from numpyto_common.ordered import OrderedSet
 
 
@@ -200,17 +200,22 @@ def expr_rank(value: ast.AST, ranks: Dict[str, int]) -> Optional[int]:
         if _is_ellipsis(sl):
             return base  # a[...] keeps every axis
         if isinstance(sl, ast.Tuple):
-            # slices keep a dim, newaxis adds one, an integer/array index removes
-            # one, and an ellipsis (``a[..., i]``) expands to full slices over
-            # all otherwise-unindexed axes -- it drops NOTHING.
+            # slices keep a dim, newaxis adds one, a SCALAR index removes one, and an ellipsis
+            # (``a[..., i]``) expands to full slices over all otherwise-unindexed axes -- it drops
+            # NOTHING. A 1-D fancy index amid slices is neither: it consumes the base axis and
+            # reinserts its own (``suffix[:, idx]`` with ``idx = np.arange(W)`` stays rank 2, one
+            # axis in, one out), so its net drop is ``1 - its own rank``, not the flat ``1`` a
+            # scalar loop index costs. Unknown-rank index defaults to the scalar reading, same as
+            # every kernel that reached this line before a fancy index needed distinguishing.
             drop = 0
             for e in sl.elts:
                 if isinstance(e, ast.Slice) or _is_ellipsis(e):
                     continue
                 if _is_newaxis(e):
                     drop -= 1
-                else:
-                    drop += 1
+                    continue
+                idx_rank = expr_rank(e, ranks)
+                drop += 1 if idx_rank is None else 1 - idx_rank
             return base - drop
         if isinstance(sl, ast.Call) and isinstance(sl.func, ast.Name) and sl.func.id == "tuple":
             # ``A[tuple(axes)]`` is the WHOLE index, one entry per axis -- not the single scalar
@@ -372,10 +377,12 @@ def name_value_pairs(tree: ast.AST) -> Iterator[Tuple[str, ast.expr]]:
                     yield t.id, v
 
 
-def extent_tokens(value: ast.AST,
-                  table: Dict[str, Tuple[str, ...]],
-                  tuple_locals: FrozenSet[str] = frozenset(),
-                  arrays: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, ...]]:
+def extent_tokens(
+    value: ast.AST,
+    table: Dict[str, Tuple[str, ...]],
+    tuple_locals: FrozenSet[str] = frozenset(),
+    arrays: FrozenSet[str] = frozenset()
+) -> Optional[Tuple[str, ...]]:
     """``value``'s shape as unparsed tokens, or ``None`` when this round cannot say.
 
     An extent still spelled through a ``.shape`` read is reported as unknown rather than recorded:
@@ -419,9 +426,9 @@ def shape_table(tree: ast.AST, seed: Dict[str, Tuple[str, ...]]) -> Dict[str, Tu
     hand every consumer one shape at every program point. A declared array keeps its declared shape
     whatever a rebinding makes it.
     """
-    tuple_locals = frozenset(node.targets[0].id for node in ast.walk(tree)
-                             if isinstance(node, ast.Assign) and len(node.targets) == 1
-                             and isinstance(node.targets[0], ast.Name) and isinstance(node.value, (ast.Tuple, ast.List)))
+    tuple_locals = frozenset(
+        node.targets[0].id for node in ast.walk(tree) if isinstance(node, ast.Assign) and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name) and isinstance(node.value, (ast.Tuple, ast.List)))
     pairs = list(name_value_pairs(tree))
     # Which names are ARRAYS, from the rank table -- the only question asked of it here, and the one
     # it answers without needing an extent. A name it cannot rank counts as an array: refusing to
@@ -775,13 +782,44 @@ def _pad_inline_stmts(target: str, arr: ast.AST, widths, rank: int, ctr: int) ->
     return ast.parse("\n".join(src)).body
 
 
+def _widths_all_literal(widths) -> bool:
+    """True iff every (lo, hi) pair is a compile-time int -- the form dace's own ``np.pad``
+    replacement already lowers natively."""
+    return all(_const_int(lo) is not None and _const_int(hi) is not None for lo, hi in widths)
+
+
+def _pad_constant_inline_stmts(target: str, arr: ast.AST, widths, fill: ast.AST, ctr: int) -> List[ast.stmt]:
+    """Inline ``<target> = np.pad(arr, ..., mode="constant")`` as allocate-then-copy, for a
+    SYMBOLIC pad width dace's own replacement cannot take: it casts every width through
+    ``int()`` before using it in an f-string that would have accepted a symbolic expression just
+    as well, so a runtime-only width (this kernel's padded-out-to-a-block-boundary tail) raises
+    ``TypeError: Cannot convert symbols to int`` instead of compiling. ``np.full`` and a slice
+    assignment both already take symbolic extents (dace compiles the edge-mode loop nest above
+    with the same kind of bound), so this performs the identical fill-then-copy with no cast."""
+    p = f"__pdc{ctr}"
+    xv = f"{p}_x"
+    src = [f"{xv} = {ast.unparse(arr)}"]
+    dims = [f"{xv}.shape[{i}] + {ast.unparse(lo)} + {ast.unparse(hi)}" for i, (lo, hi) in enumerate(widths)]
+    src.append(f"{target} = np.full(({', '.join(dims)},), {ast.unparse(fill)}, {xv}.dtype)")
+    interior = ", ".join(f"{ast.unparse(lo)}:{ast.unparse(lo)} + {xv}.shape[{i}]" for i, (lo, _) in enumerate(widths))
+    src.append(f"{target}[{interior}] = {xv}")
+    return ast.parse("\n".join(src)).body
+
+
 class _PadInline(ast.NodeTransformer):
     """Replace ``name = np.pad(x, pad_width=..., mode="edge")`` with an inline
     edge-pad loop nest. Only the bare-assign form is handled; np.pad nested in a
-    larger expression is left verbatim (no misfire)."""
+    larger expression is left verbatim (no misfire).
 
-    def __init__(self, ranks: Dict[str, int]):
+    ``mode="constant"`` is left to the backend's own ``np.pad`` EXCEPT for dace with a
+    non-literal width (:data:`lower_symbolic_constant`): numba/pythran/dace all compile a
+    literal-width constant pad already, and dace compiles a symbolic-width one everywhere except
+    its own ``np.pad`` -- see :func:`_pad_constant_inline_stmts`.
+    """
+
+    def __init__(self, ranks: Dict[str, int], lower_symbolic_constant: bool = False):
         self.ranks = ranks
+        self.lower_symbolic_constant = lower_symbolic_constant
         self.changed = False
         self._ctr = 0
 
@@ -792,8 +830,9 @@ class _PadInline(ast.NodeTransformer):
         call = node.value
         kw = {k.arg: k.value for k in call.keywords}
         mode = kw.get("mode")
-        if not (isinstance(mode, ast.Constant) and mode.value == "edge") or not call.args:
-            return node  # only edge mode, array as first positional
+        mode_value = mode.value if isinstance(mode, ast.Constant) else None
+        if mode_value not in ("edge", "constant") or not call.args:
+            return node  # array as first positional, mode this pass knows how to lower
         arr = call.args[0]
         rank = expr_rank(arr, self.ranks)
         if rank is None or rank < 1:
@@ -802,8 +841,16 @@ class _PadInline(ast.NodeTransformer):
         widths = _const_pair_widths(pad_width, rank) if pad_width is not None else None
         if widths is None:
             return node
+        if mode_value == "edge":
+            self.changed = True
+            stmts = _pad_inline_stmts(node.targets[0].id, arr, widths, rank, self._ctr)
+            self._ctr += 1
+            return stmts
+        if not self.lower_symbolic_constant or _widths_all_literal(widths):
+            return node  # a literal-width constant pad compiles through dace's own np.pad
         self.changed = True
-        stmts = _pad_inline_stmts(node.targets[0].id, arr, widths, rank, self._ctr)
+        fill = kw.get("constant_values", ast.Constant(value=0))
+        stmts = _pad_constant_inline_stmts(node.targets[0].id, arr, widths, fill, self._ctr)
         self._ctr += 1
         return stmts
 
@@ -5319,7 +5366,7 @@ def desugar_for_python_backend(source: str, kir, backend: Optional[str] = None) 
             _LinalgInline(ranks, dtypes, lower_linalg, lower_solve_rhs_ranks),
             _ReshapeMatmulInline(ranks),
             _BatchedMatmulToLoop(ranks),
-            _PadInline(ranks),
+            _PadInline(ranks, lower_symbolic_constant=backend == "dace"),
             _EinsumInline(),
             _FftInline(ranks, kir_array_dtypes),
             _MgridInline(),

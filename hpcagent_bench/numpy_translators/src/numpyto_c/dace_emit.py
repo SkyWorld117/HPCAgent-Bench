@@ -1631,7 +1631,16 @@ def _widen_int_seeds(fn_ast: ast.AST, floats: set, skip: set) -> None:
 
 
 def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
-    """True iff node is a shape expression dace can evaluate as a symbol (names, int consts, + - * // %, min/max)."""
+    """True iff node is a shape expression dace can evaluate as a symbol (names, int consts, + - * // %, min/max).
+
+    A ``.shape[k]`` read is included whatever its receiver: dace's own array descriptor already
+    carries a symbolic shape, so reading one axis of it is exactly as "symbol" as a name already in
+    ``allowed`` -- max_filter's ``nblocks = -(-length // w)`` feeds a reshape, and ``length`` itself
+    is one array's ``shape[0]`` plus two symbols, which used to make the WHOLE chain look
+    data-dependent and left ``nblocks`` a plain scalar reshape then auto-promoted and collided with.
+    """
+    if _is_shape_subscript(node):
+        return True
     if isinstance(node, ast.Name):
         return node.id in allowed
     if isinstance(node, ast.Constant):
@@ -1645,12 +1654,12 @@ def _is_symbol_expr(node: ast.AST, allowed: set) -> bool:
     return False
 
 
-#: Where each call keeps the shape the caller asked for. ``reshape`` is included because DaCe NAMES
-#: the container it builds after the shape EXPRESSION -- ``batch_size * oh * ow`` becomes
-#: ``batch_size_oh_times_ow`` -- and then wants a symbol of that same name, which is the
-#: "Cannot create symbol X, the name is used by a data descriptor" refusal. A shape that is one
-#: plain name gives it nothing to mint.
-SHAPE_ARG_INDEX = {"zeros": 0, "empty": 0, "ones": 0, "full": 0, "reshape": 1}
+#: Where each ALLOCATION call keeps the shape the caller asked for. ``reshape`` is handled
+#: separately below: DaCe NAMES the container it builds after the shape EXPRESSION --
+#: ``batch_size * oh * ow`` becomes ``batch_size_oh_times_ow`` -- and then wants a symbol of that
+#: same name, which is the "Cannot create symbol X, the name is used by a data descriptor"
+#: refusal. A shape that is one plain name gives it nothing to mint.
+SHAPE_ARG_INDEX = {"zeros": 0, "empty": 0, "ones": 0, "full": 0}
 
 
 def reshape_argument(node: ast.AST):
@@ -1659,10 +1668,16 @@ def reshape_argument(node: ast.AST):
     An ALLOCATION takes a compound extent happily (``np.zeros((N, m + 1))`` always worked). It is
     ``reshape`` that makes DaCe name the container after the expression and then collide with it, so
     hoisting anywhere else would mint symbols that buy nothing.
+
+    The shape is always the LAST argument, one tuple/list: :class:`NormalizeReshape` runs before
+    this and leaves every reshape call in exactly that form, whether it started as the method
+    (``x.reshape(a, b)``, one arg after normalizing) or the function (``np.reshape(x, a, b)``, two
+    -- the receiver stays first). Indexing a fixed position instead read the receiver as the shape
+    for the method form and refused every kernel that reshapes by method rather than by function.
     """
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "reshape"
-            and len(node.args) > 1):
-        return node.args[1]
+            and node.args and isinstance(node.args[-1], (ast.Tuple, ast.List))):
+        return node.args[-1]
     return None
 
 
@@ -1670,6 +1685,8 @@ def shape_argument(node: ast.AST):
     """The shape argument of an allocation or reshape call, or None."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
         return None
+    if node.func.attr == "reshape":
+        return reshape_argument(node)
     index = SHAPE_ARG_INDEX.get(node.func.attr)
     if index is None or len(node.args) <= index:
         return None
