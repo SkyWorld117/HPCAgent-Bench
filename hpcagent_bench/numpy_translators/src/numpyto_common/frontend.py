@@ -43,8 +43,7 @@ from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRoll
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _FillDiagonalInline, _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer,
                                           REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, fold_finfo_eps,
-                                          extent_tokens, name_value_pairs, rank_table, rewrite_curve_fit,
-                                          shape_table)
+                                          extent_tokens, name_value_pairs, rank_table, rewrite_curve_fit, shape_table)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -461,6 +460,16 @@ class _AxisReshapeToIndexing(ast.NodeTransformer):
         rank = expr_rank(node.args[0], self.ranks)
         axes = self._literal_axes(node)
         if rank is None or axes is None:
+            return node
+        if name in ("moveaxis", "swapaxes") and isinstance(node.args[0], ast.Call):
+            # These two build a PERMUTATION out of the rank alone, and a rank read off a nested
+            # call is a guess. ls3df_scf's ``np.moveaxis(np.tensordot(row, X, axes=([1], [1])),
+            # 0, 1)`` is rank 4; a mis-read rank builds a perm of the wrong LENGTH, which
+            # expand_transpose refuses ("perm size != ndim") -- and that refusal is swallowed, so
+            # the kernel fails much later as "call to np.transpose not supported". Lowering knows
+            # the real shape (the call hoister spills the operand to a sized temp first), so leave
+            # the call for it. A Name/Subscript operand keeps the rewrite: that is the helper-
+            # parameter case this pass exists for.
             return node
         if rank == 0 and name != "expand_dims":
             # Every rewrite below normalises its axis with ``% rank``, which a 0-d operand has no
@@ -2384,8 +2393,8 @@ class _FoldTupleLocals(ast.NodeTransformer):
     def collect(self, fn: ast.FunctionDef) -> None:
         loop_vars = {
             n.id
-            for node in ast.walk(fn) if isinstance(node, (ast.For, ast.comprehension))
-            for n in ast.walk(node.target) if isinstance(n, ast.Name)
+            for node in ast.walk(fn) if isinstance(node, (ast.For, ast.comprehension)) for n in ast.walk(node.target)
+            if isinstance(n, ast.Name)
         }
         binds: Dict[str, int] = {}
         for s in ast.walk(fn):
@@ -3378,12 +3387,14 @@ def resolve_shape_reads(fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> Li
     return rw.unresolved
 
 
-def resolve_extent_of(fn: ast.FunctionDef,
-                      node: ast.expr,
-                      arr_by: Dict[str, ArrayDesc],
-                      shapes: Dict[str, Tuple[str, ...]],
-                      rebound: FrozenSet[str] = frozenset(),
-                      tuple_locals: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, ...]]:
+def resolve_extent_of(
+    fn: ast.FunctionDef,
+    node: ast.expr,
+    arr_by: Dict[str, ArrayDesc],
+    shapes: Dict[str, Tuple[str, ...]],
+    rebound: FrozenSet[str] = frozenset(),
+    tuple_locals: FrozenSet[str] = frozenset()
+) -> Optional[Tuple[str, ...]]:
     """Shape tokens of an array-valued expression, forward table first, or ``None``.
 
     Shape only. :func:`_resolve_array_ref` answers with a dtype as well and stays the fallback for
