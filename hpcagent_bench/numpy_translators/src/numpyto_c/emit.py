@@ -1028,10 +1028,14 @@ class _CBodyEmitter(BaseEmitter):
                 deferred = vars(self).get("deferred_malloc_decls", {})
                 if t in deferred:
                     size, c_type, fill = deferred[t]
-                    # Reallocate only when the buffer doesn't exist or its size changed; a same-size __reassign__ must reuse in place.
+                    # Reallocate only when the buffer doesn't exist or its size changed; a same-size
+                    # __reassign__ may reuse in place only when the size is a literal constant. When the
+                    # size is symbolic (e.g. ``kdim * nbase`` and ``nbase`` grows in a loop), the textual
+                    # size stays the same while the runtime footprint changes, so force a fresh allocation.
                     sizes = vars(self).setdefault("_deferred_alloc_size", {})
                     prev = sizes.get(t)
-                    if prev == size:
+                    symbolic_size = any(c.isalpha() for c in size)
+                    if prev == size and not (is_reassign and symbolic_size):
                         # Reuse in place: a reassign reads its own old values (no refill); a genuine reset still refills.
                         if is_reassign or fill is None:
                             return ""
@@ -1428,6 +1432,9 @@ class _CBodyEmitter(BaseEmitter):
             # Python int(x) is a typecast to int64_t (a 32-bit cast would truncate past 2^31).
             if fn == "int" and len(node.args) == 1:
                 return f"(({_c_type('int')})({self.emit_expr(node.args[0])}))"
+            # Python bool(x) is a typecast to C bool (_Bool via stdbool.h).
+            if fn == "bool" and len(node.args) == 1:
+                return f"(({_c_type('bool')})({self.emit_expr(node.args[0])}))"
             # np.sign: numpy sign(nan) == nan (the naive form gives 0 and double-evaluates) -> the __npb_sign helper.
             if fn == "__npb_sign" and len(node.args) == 1:
                 return f"__npb_sign({self.emit_expr(node.args[0])})"
