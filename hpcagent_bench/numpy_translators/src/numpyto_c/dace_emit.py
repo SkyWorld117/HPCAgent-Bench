@@ -1994,6 +1994,19 @@ class RenameNames(ast.NodeTransformer):
         return node
 
 
+class SubstituteNames(ast.NodeTransformer):
+    """Replace each Name in ``values`` by its literal. Used on a symbol RECIPE, which the caller
+    evaluates in its own namespace -- a name that only exists inside the emitted module has to be
+    gone by then, not merely defined here."""
+
+    def __init__(self, values: Dict[str, ast.expr]) -> None:
+        self.values = values
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        replacement = self.values.get(node.id)
+        return ast.copy_location(copy.deepcopy(replacement), node) if replacement is not None else node
+
+
 def bound_names(body: List[ast.stmt]) -> OrderedSet:
     """The names the body BINDS -- the only ones a rename may touch.
 
@@ -2234,6 +2247,21 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         symbol_defs = [(renames.get(n, n), ast.unparse(RenameNames(renames).visit(ast.parse(e, mode="eval")).body))
                        for n, e in symbol_defs]
 
+    # A PINNED CONFIG knob is a constant, not a symbol: the C leg spells it ``constexpr int64_t
+    # max_iter = 100``, and lowering having promoted it (it sizes a workspace) must not turn it into
+    # a dc.symbol here. Nothing binds such a symbol -- ``bind_free_symbols`` recovers a symbol from
+    # an array's shape or from a recipe, and a config knob is neither -- so gmres' compiled SDFG
+    # died on "Missing program argument". Substituted into the recipes too, because the CALLER
+    # evaluates those outside this module, where the name does not exist.
+    pinned = {n: v for n, v in (kir.pinned_consts or {}).items() if n in symbol_names}
+    if pinned:
+        symbol_names = [n for n in symbol_names if n not in pinned]
+        literals = {n: ast.Constant(value=v) for n, v in pinned.items()}
+        symbol_defs = [(n, ast.unparse(SubstituteNames(literals).visit(ast.parse(e, mode="eval")).body))
+                       for n, e in symbol_defs]
+        named = {node.id for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Name)}
+        pinned = {n: v for n, v in pinned.items() if n in named}
+
     out: List[str] = []
     out.append('"""DaCe program auto-generated from the numpy reference '
                'by numpyto_c.dace_emit."""')
@@ -2247,6 +2275,12 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     out.append("import math")
     out.append("from math import sin, cos, log, exp, pow, sqrt")
     out.append("")
+    for const_name, const_value in pinned.items():
+        # Module scope, which the dace frontend reads as a compile-time constant, so the body keeps
+        # the manifest's spelling instead of an inlined literal.
+        out.append(f"{const_name} = {const_value!r}")
+    if pinned:
+        out.append("")
     if symbol_names:
         names = ", ".join(symbol_names)
         srcs = ", ".join(f"'{s}'" for s in symbol_names)
