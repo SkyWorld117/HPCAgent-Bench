@@ -42,11 +42,11 @@ from numpyto_common import dtypes
 from numpyto_common.ir import _COMPLEX_FOR_FLOAT, KernelIR, SymbolDesc
 from numpyto_common.ordered import OrderedSet
 from numpyto_common.numpy_desugar import _np_linalg_attr
-from numpyto_common.lib_nodes import (DIM_IDENT_RE, SHAPE_READ_RE, LibNodeRewriter, MESHGRID_AXIS_KW, NP_ZEROS_ALIASES,
-                                      UNARY_C_MATH, _broadcast_extents, _const_int, _is_integer_expr, _iter_extent_of,
-                                      _scalarize_at_iters, _slice_step_any, _step_is_negative, _step_node,
-                                      expand_meshgrid, extent_is_scalar, reset_temp_counters, shape_exprs_equal,
-                                      substitute_dim_aliases)
+from numpyto_common.lib_nodes import (ArrayMethodRewriter, DIM_IDENT_RE, SHAPE_READ_RE, LibNodeRewriter,
+                                      MESHGRID_AXIS_KW, NP_ZEROS_ALIASES, UNARY_C_MATH, _broadcast_extents, _const_int,
+                                      _is_integer_expr, _iter_extent_of, _scalarize_at_iters, _slice_step_any,
+                                      _step_is_negative, _step_node, expand_meshgrid, extent_is_scalar,
+                                      reset_temp_counters, shape_exprs_equal, substitute_dim_aliases)
 from numpyto_common.frontend import (_collect_inlined_scalar_defs, _dtype_from_constructor, _resolve_shape_attr_tokens,
                                      _substitute_inlined_scalar_defs, fold_shape_expr)
 
@@ -8216,6 +8216,9 @@ def _lp_libnode_expand(ctx: LoweringContext) -> None:
     # AFTER the FFT idiom match (which consumes its own reshape chains) so the
     # single expand_reshape path serves lulesh's varargs spelling.
     _ReshapeMethodRewriter().visit(tree)
+    # ... and the reduction methods, for the same reason: one function-form path per op instead of
+    # a receiver-shape special case in every expander.
+    ArrayMethodRewriter(set(ctx.original_kir.sparse or {})).visit(tree)
     ast.fix_missing_locations(tree)
     # Seed the INTEGER/UINT element dtype of every kernel-parameter array into
     # ``local_dtypes`` so the library-node hoister can see, e.g., that ``idx`` in

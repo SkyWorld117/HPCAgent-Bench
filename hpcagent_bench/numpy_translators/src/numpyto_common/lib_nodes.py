@@ -393,6 +393,46 @@ ARRAY_METHOD_SHAPE_OPS: FrozenSet[str] = frozenset({
     "diagonal", "swapaxes"
 })
 
+#: Array REDUCTION methods with the same property. Kept beside the shape ops rather than merged
+#: into them: a reduction CHANGES the rank and a shape op does not, and the sizer routes the two
+#: differently. ``sort`` is absent on purpose -- the METHOD sorts in place and ``np.sort`` returns
+#: a copy, so they are not the same call.
+ARRAY_METHOD_REDUCTIONS: FrozenSet[str] = frozenset(
+    {"sum", "prod", "mean", "max", "min", "argmax", "argmin", "std", "var", "any", "all", "ptp"})
+
+
+class ArrayMethodRewriter(ast.NodeTransformer):
+    """Normalize ``X.<m>(...)`` to ``np.<m>(X, ...)`` for every array method whose numpy function
+    twin takes the array first (:data:`lib_nodes.ARRAY_METHOD_REDUCTIONS`).
+
+    The method spelling only ever reached the expanders when the RECEIVER was a bare Name; an
+    expression receiver walked straight through to the emitter, where correlation's
+    ``((data - mean) ** 2).sum(axis=0)`` and nbody's ``(mass[i, 0] * vel[i, j]).sum()`` both died
+    as "call to <expr>.sum not supported". One rewrite here serves every backend and every
+    receiver shape, and the reduction expanders keep their single function-form path.
+
+    A LOGICAL SPARSE receiver keeps its method: its buffers are not a dense array, and
+    ``np.sum(A)`` over them would index a CSR triple as a 2-D matrix.
+    """
+
+    def __init__(self, sparse_names=None):
+        self.sparse_names = set(sparse_names or ())
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr in ARRAY_METHOD_REDUCTIONS):
+            return node
+        recv = func.value
+        if isinstance(recv, ast.Name) and (recv.id in ("np", "numpy") or recv.id in self.sparse_names):
+            return node
+        if isinstance(recv, ast.Subscript) and isinstance(recv.value, ast.Name) and recv.value.id in self.sparse_names:
+            return node
+        return ast.copy_location(
+            ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()), attr=func.attr, ctx=ast.Load()),
+                     args=[recv] + list(node.args),
+                     keywords=list(node.keywords)), node)
+
 
 def _np_call_attr(func: ast.expr) -> Optional[str]:
     """``np.foo`` -> ``"foo"``, ``np.foo.bar`` -> ``"foo.bar"``, anything else -> ``None``."""
@@ -589,8 +629,8 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # jitter term and took the whole Rayleigh-Ritz block with it.
             if attr in ("eye", "identity") and expr.args:
                 n = copy.deepcopy(expr.args[0])
-                return (n, copy.deepcopy(expr.args[1])) if attr == "eye" and len(expr.args) >= 2 and not _const_int(
-                    expr.args[1]) is None else (n, copy.deepcopy(n))
+                return (n, copy.deepcopy(expr.args[1])) if attr == "eye" and len(
+                    expr.args) >= 2 and not _const_int(expr.args[1]) is None else (n, copy.deepcopy(n))
             if attr == "arange" and len(expr.args) == 1:
                 return (copy.deepcopy(expr.args[0]), )
             if attr in ("linalg.inv", "linalg.cholesky") and expr.args:
