@@ -47,10 +47,10 @@ def _reference(tmp_path):
     return fn
 
 
-@pytest.mark.parametrize("KLEV,KLON,NCLV", [(16, 512, 5), (137, 37, 5), (1, 8, 2)])
+@pytest.mark.parametrize("KLEV,KLON,NCLV", [(137, 512, 5), (137, 37, 5), (1, 8, 2)])
 def test_numpy_matches_upstream_reference(tmp_path, KLEV, KLON, NCLV) -> None:
-    """The manifest's S preset, an IFS-depth column with a width no vector divides, and the
-    degenerate single-level two-species case (one CLV species plus vapour)."""
+    """The manifest's S preset, a column count no vector width divides, and the degenerate
+    single-level two-species case (one CLV species plus vapour)."""
     initialize = _load("cloudsc_init").initialize
     cloudsc_init = _load("cloudsc_init_numpy").cloudsc_init
     reference = _reference(tmp_path)

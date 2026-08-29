@@ -50,10 +50,10 @@ def _reference(tmp_path):
     return fn
 
 
-@pytest.mark.parametrize("KLEV,KLON", [(16, 512), (137, 37), (1, 3)])
+@pytest.mark.parametrize("KLEV,KLON", [(137, 512), (137, 37), (1, 3)])
 def test_numpy_matches_upstream_reference(tmp_path, KLEV, KLON) -> None:
-    """The manifest's S preset, an IFS-depth column with a width no vector divides, and a
-    three-cell single level."""
+    """The manifest's S preset, a column count no vector width divides, and a three-cell
+    single level."""
     initialize = _load("cloudsc_tidy").initialize
     cloudsc_tidy = _load("cloudsc_tidy_numpy").cloudsc_tidy
     reference = _reference(tmp_path)
