@@ -9,6 +9,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
+from hpcagent_bench.languages import gpu_backend
 
 #: framework -> source language it compiles. Polly IS a flag preset on the same cpp source as
 #: ``llvm``; Pluto is NOT -- it compiles polycc's output, which is C (VLA parameters and the
@@ -23,7 +24,9 @@ FRAMEWORK_LANG: Dict[str, str] = {
     "flang": "fortran",
     "polly": "cpp",
     "pluto": "c",
-    "ppcg": "cuda",
+    # ppcg's CUDA is hipified before it is compiled on a ROCm host, so the language -- and through
+    # compilers.yaml the compiler -- follows the toolchain, not the tool (hpcagent_bench.ppcg_transform).
+    "ppcg": gpu_backend(),
 }
 
 #: framework -> forced compiler override; every cpp framework must be listed or it silently falls back to g++.

@@ -11,7 +11,6 @@ import os
 import pathlib
 import shlex
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -26,6 +25,7 @@ import importlib.metadata
 
 # Imported at module level so a broken/absent DaCe is a real import error, not a silent skip.
 import dace
+from dace.codegen import common as dace_common
 
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
 import dace.dtypes as dace_dtypes
@@ -209,6 +209,57 @@ def mpi_rank() -> Optional[str]:
     return None
 
 
+def pin_gpu_toolchain() -> None:
+    """Point DaCe's GPU build at the ROCm install this host actually has.
+
+    DaCe's generated CMake does ``find_package(HIP REQUIRED)``, which resolves through
+    ``CMAKE_PREFIX_PATH`` / ``HIP_DIR``. ROCm keeps its bin off ``PATH`` (that directory holds a
+    ``clang`` that would shadow every other build's compiler), so on a bare node nothing points
+    CMake at it and the configure step fails with "Add the installation prefix of HIP to
+    CMAKE_PREFIX_PATH" -- measured: every ``dace_gpu`` kernel declined for that reason alone. The
+    container image exports these; a node outside it does not, and the harness should not need one.
+
+    Only ever ADDS: an operator who set ``ROCM_PATH`` or ``CMAKE_PREFIX_PATH`` keeps their value,
+    and a host with no ROCm is left untouched so the CUDA path is unaffected.
+    """
+    root = pathlib.Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
+    if not (root / "lib" / "cmake" / "hip").is_dir():
+        return  # no ROCm here: a CUDA box, or a node without the SDK
+    os.environ.setdefault("ROCM_PATH", str(root))
+    os.environ.setdefault("HIP_PATH", str(root))
+    prefix = os.environ.get("CMAKE_PREFIX_PATH", "")
+    if str(root) not in prefix.split(os.pathsep):
+        os.environ["CMAKE_PREFIX_PATH"] = os.pathsep.join([str(root), prefix]) if prefix else str(root)
+    if dace.Config.get("compiler", "cuda", "backend") == "auto":
+        dace.Config.set("compiler", "cuda", "backend", value="hip")
+    if not dace.Config.get("compiler", "cuda", "hip_arch"):
+        arch = local_gpu_arch(root)
+        if arch:
+            dace.Config.set("compiler", "cuda", "hip_arch", value=arch)
+
+
+def local_gpu_arch(rocm_root: pathlib.Path) -> str:
+    """The AMD ISA this node compiles for, as a comma list, or ``""`` when nothing answers.
+
+    DaCe's CMake detects this by compiling and RUNNING a probe with hipcc, and on a node whose
+    visible devices are masked -- which is every rank here, since each takes one GPU -- that probe
+    comes back empty and CMake fails outright with "HIP_ARCHITECTURES is empty". Asked instead of
+    hardcoded: ``amdgpu-arch`` is the ROCm tool that answers it, and the two environment variables
+    below are what a ROCm image already declares, so no gfx number is written down in this repo.
+    """
+    probe = rocm_root / "llvm" / "bin" / "amdgpu-arch"
+    if probe.is_file():
+        try:
+            out = subprocess.run([str(probe)], capture_output=True, text=True, timeout=30, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        found = sorted({line.strip() for line in out.splitlines() if line.strip()})
+        if found:
+            return ",".join(found)
+    declared = os.environ.get("HCC_AMDGPU_TARGET") or os.environ.get("PYTORCH_ROCM_ARCH") or ""
+    return ",".join(part for part in (p.strip() for p in declared.replace(";", ",").split(",")) if part)
+
+
 def pin_per_rank_build_dirs() -> None:
     """Give every rank its own build folder and its own precompiled-header cache.
 
@@ -258,22 +309,6 @@ def pin_per_rank_build_dirs() -> None:
         base = (shm / f"dace_build_cache_{getpass.getuser()}"
                 if shm.is_dir() and os.access(shm, os.W_OK) else pathlib.Path.home() / ".cache/dace/build_cache")
         os.environ["DACE_BUILD_CACHE_DIR"] = str(base / f"rank{rank}")
-
-
-def unblock_sigchld() -> None:
-    """Let the build see its own children exit.
-
-    srun/mpirun start their tasks with SIGCHLD blocked; the mask survives fork AND exec, and CPython
-    does NOT reset it for a subprocess -- so cmake inherits the block, and KWSys, which learns that
-    the helpers it spawns during configure have exited by receiving SIGCHLD, waits for it in
-    ``select()`` forever. Measured: cmake 4.3.4 configure times out with SIGCHLD blocked and exits 0
-    without it. Doing it here rather than in a launcher wrapper covers every way the job is started
-    (``srun python -m ...`` execs the interpreter directly, so no shell is around to clear the mask).
-
-    Masks are per-THREAD and a child inherits the FORKING thread's, so this must run on the thread
-    that goes on to build -- which is why it sits with the other pins in ``optimize``.
-    """
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
 
 
 def pin_build_caching() -> None:
@@ -657,11 +692,18 @@ class DaceFramework(Framework):
         ctx = self._build_context()
         pin_cpp_standard(self.info["arch"])
         pin_per_rank_build_dirs()
-        unblock_sigchld()
         pin_build_caching()
         if self.info["arch"] == "gpu":
+            pin_gpu_toolchain()
             if dace.Config.get('library', 'blas', 'default_implementation') != "pure":
-                dace.Config.set('library', 'blas', 'default_implementation', value='cuBLAS')
+                # The vendor BLAS is named per BACKEND: a hardcoded 'cuBLAS' on an AMD node names an
+                # expansion whose environment is not installed, and every BLAS node falls through to
+                # the serial 'pure' loop while the log still says the fast library was selected.
+                backend = dace_common.get_gpu_backend()
+                dace.Config.set('library',
+                                'blas',
+                                'default_implementation',
+                                value='rocBLAS' if backend == 'hip' else 'cuBLAS')
             pin_single_stream()
 
         self._pipeline_errors = []
