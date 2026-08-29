@@ -83,7 +83,7 @@ RUN set -eu; \
       libmumps-seq-dev libhypre-dev libsundials-dev libboost-all-dev libblis-dev libucx-dev \
       liblapacke-dev libomp-dev libtbb-dev libsleef-dev libxsimd-dev libhwy-dev libnuma-dev \
       libhwloc-dev libarmadillo-dev libfftw3-mpi-dev \
-      make cmake pkg-config; \
+      make cmake pkg-config ninja-build; \
     if [ "$HW" = "nvidia" ]; then \
       apt-get install -y --no-install-recommends nvidia-cuda-toolkit libnccl2 libnccl-dev; \
     fi; \
