@@ -811,9 +811,10 @@ def record(score: Score,
         # condition runner.status_of uses, kept local here to avoid a recording->runner import.
         overfit = score.public_correct and not score.hidden_correct
         reason = (verify.reason if (verify is not None and not verify.ok) else
-                  ("score_error" if score.harness_fault else ("build" if not score.build_ok else
-                                                              ("timeout" if score.timed_out else
-                                                               ("overfit" if overfit else "incorrect")))))
+                  ("score_error" if score.harness_fault else
+                   ("build" if not score.build_ok else
+                    ("too_slow" if score.too_slow else "timeout" if score.timed_out else
+                     ("overfit" if overfit else "incorrect")))))
         conn.execute(
             """INSERT INTO attempts(
                 run_id, ts, benchmark, preset, datatype, language, source_mode, optimizer,

@@ -156,6 +156,18 @@ def compiler_for_family(lang: str, family: str) -> Optional[str]:
     return None
 
 
+def compiler_block(name: str) -> Dict[str, Any]:
+    """One ``compilers.yaml`` block, by name -- the public read of the table.
+
+    Exposed so an out-of-package caller (the image's ``containers/parallelizer-gate.sh``) can walk
+    the graded blocks without reaching into the loader, and so it walks the SAME table the build
+    runs from rather than a second list that can drift.
+
+    :raises KeyError: for an unknown block name.
+    """
+    return _load_compilers()[name]
+
+
 def compiler_driver(name: str) -> str:
     """The driver command a ``compilers.yaml`` block invokes (``g++``, ``clang++``, ...)."""
     return _load_compilers()[name].get("cc", "")
@@ -803,6 +815,19 @@ def baseline_flags(lang: str) -> str:
     """
     _, block = _compiler_for_lang(_load_compilers(), lang)
     return _resolve_baseline(block, Mode.SINGLE_CORE)
+
+
+def baseline_flags_for_block(name: str) -> str:
+    """The resolved single-core baseline for ONE ``compilers.yaml`` block, named directly.
+
+    :func:`baseline_flags` answers for a LANGUAGE, so it always resolves the first block of that
+    language -- the default vendor. A caller that has already PINNED a vendor (a non-default
+    native flavor, or dace's host build via ``dace_framework.pin_host_compiler``) needs the block
+    it actually selected, or the two arms it is comparing are built with different flags.
+
+    :raises KeyError: for an unknown block name.
+    """
+    return _resolve_baseline(_load_compilers()[name], Mode.SINGLE_CORE)
 
 
 def std_flag(lang: str) -> str:

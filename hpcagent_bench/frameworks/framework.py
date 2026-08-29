@@ -312,6 +312,67 @@ FRAMEWORK_META: Dict[str, Dict[str, Any]] = {
         "flags": "cc_autopar",
         "precisions": IEEE_PRECISIONS,
     },
+    # The C family across the four graded vendors. Named `cc_<vendor>` rather than the bare vendor
+    # name because `llvm` and `polly` already mean the C++/clang and C++/clang-Polly columns; taking
+    # those names for C would silently change what every historical row of them means. Flat names,
+    # like `cc_autopar`, so the DB grouping of the existing C rows does not move either.
+    #
+    # There is deliberately no `cc_oneapi_autopar`: icx has no auto-parallelizer (icc-classic's
+    # `-parallel` is accepted with warning #10430 and outlines nothing -- measured; see the note in
+    # flags.py where ICX_AUTOPAR would live), so the arm would publish serial numbers under a
+    # parallel name. Seven variants, not eight, and the methodology says why.
+    "cc_llvm": {
+        "base": "native",
+        "full_name": "C (clang)",
+        "prefix": "cc_llvm",
+        "postfix": "cpp",
+        "arch": "cpu",
+        "language": "c",
+        "compiler": "clang",
+        "precisions": IEEE_PRECISIONS,
+    },
+    "cc_llvm_autopar": {
+        "base": "native",
+        "full_name": "C Polly (clang)",
+        "prefix": "cc_llvm_autopar",
+        "postfix": "cpp",
+        "arch": "cpu",
+        "language": "c",
+        "compiler": "clang",
+        "flags": "cc_llvm_autopar",
+        "precisions": IEEE_PRECISIONS,
+    },
+    "cc_oneapi": {
+        "base": "native",
+        "full_name": "C (icx)",
+        "prefix": "cc_oneapi",
+        "postfix": "cpp",
+        "arch": "cpu",
+        "language": "c",
+        "compiler": "icx",
+        "precisions": IEEE_PRECISIONS,
+    },
+    "cc_nvhpc": {
+        "base": "native",
+        "full_name": "C (nvc)",
+        "prefix": "cc_nvhpc",
+        "postfix": "cpp",
+        "arch": "cpu",
+        "language": "c",
+        "compiler": "nvc",
+        "precisions": IEEE_PRECISIONS,
+    },
+    "cc_nvhpc_autopar": {
+        "base": "native",
+        "full_name": "C autopar (nvc)",
+        "prefix": "cc_nvhpc_autopar",
+        "postfix": "cpp",
+        "arch": "cpu",
+        "language": "c",
+        "compiler": "nvc",
+        "flags": "cc_nvhpc_autopar",
+        "precisions": IEEE_PRECISIONS,
+    },
     "llvm": {
         "base": "native",
         "full_name": "C++ (clang)",

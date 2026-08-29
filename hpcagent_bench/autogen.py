@@ -189,6 +189,12 @@ def ensure(key: str, targets: Iterable[str]) -> None:
 NATIVE_FRAMEWORKS = {
     "cc": "c",
     "cc_autopar": "c",  # same emitted C as ``cc``; the delta is gcc's autopar flags
+    # Same emitted C as ``cc`` for all five; the delta is the vendor driver and its autopar flags.
+    "cc_llvm": "c",
+    "cc_llvm_autopar": "c",
+    "cc_oneapi": "c",
+    "cc_nvhpc": "c",
+    "cc_nvhpc_autopar": "c",
     "llvm": "cpp",
     "fortran": "fortran",
     "fortran_autopar": "fortran",  # same emitted Fortran as ``fortran``; delta is autopar

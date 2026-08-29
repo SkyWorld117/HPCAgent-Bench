@@ -9,14 +9,31 @@ and polly, vs Pluto as its own toolchain, and APPy fully removed.
 from hpcagent_bench.frameworks import NativeFramework, PlutoFramework
 from hpcagent_bench.frameworks.framework import FRAMEWORK_META, framework_flavors, generate_framework
 
+#: The C family, one flavor per (vendor, autopar) pair. Seven, not eight: icx has no
+#: auto-parallelizer (icc-classic's ``-parallel`` is accepted with warning #10430 and outlines
+#: nothing), so there is deliberately no ``cc_oneapi_autopar``. Pinned here so a vendor arm cannot
+#: be dropped, or a serial one added back, without this test saying so.
+C_FAMILY = ["cc", "cc_autopar", "cc_llvm", "cc_llvm_autopar", "cc_oneapi", "cc_nvhpc", "cc_nvhpc_autopar"]
+
 
 def test_native_family_is_the_base_languages_their_autopar_and_polly():
     # Each base language (c/cpp/fortran) plus its auto-parallelizing variant, plus polly.
-    # cc_autopar/fortran_autopar are the gcc autopar route; flang is LLVM Fortran; polly is
-    # the clang polyhedral autopar. All build through the one NativeFramework wrapper.
-    assert framework_flavors("native") == ["cc", "cc_autopar", "llvm", "fortran", "fortran_autopar", "flang", "polly"]
+    # The C family spans four vendors (C_FAMILY); cc_autopar/fortran_autopar are the gcc autopar
+    # route; flang is LLVM Fortran; llvm/polly are the C++ clang pair. All build through the one
+    # NativeFramework wrapper.
+    assert framework_flavors("native") == C_FAMILY + ["llvm", "fortran", "fortran_autopar", "flang", "polly"]
     for name in framework_flavors("native"):
         assert type(generate_framework(name)) is NativeFramework
+
+
+def test_the_oneapi_arm_has_no_autopar_flavor():
+    """icx has no auto-parallelizer, so registering one would publish serial numbers under a
+    parallel name. Pinned separately from the inventory above so the reason survives a rename."""
+    from hpcagent_bench import flags
+    assert "cc_oneapi_autopar" not in FRAMEWORK_META
+    assert not hasattr(flags, "ICX_AUTOPAR"), (
+        "an ICX_AUTOPAR constant is back; icx accepts -parallel with warning #10430 and outlines "
+        "nothing, so any column built on it would be silently serial")
 
 
 def test_pluto_is_its_own_base_and_a_native_subclass():
