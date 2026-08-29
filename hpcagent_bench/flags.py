@@ -337,17 +337,19 @@ LINK_MIMALLOC = "-lmimalloc"
 #: property of the clang build. Re-measured on Ubuntu clang 22.1.8 against the gate's own probe
 #: (``a[i] = b[i] * 2.0 + 1.0``), each step adding one option to the line above:
 #:
-#:     -polly -polly-parallel                              GOMP=0  polly_subfn=0
-#:     ... -polly-parallel-force                           GOMP=0  polly_subfn=0
-#:     ... -polly-parallel-force -polly-process-unprofitable  GOMP=4  polly_subfn=1
+#:     -polly -polly-parallel                                    GOMP=0  polly_subfn=0
+#:     ... + -polly-process-unprofitable                          GOMP=0  polly_subfn=0
+#:     ... + -polly-parallel-force                                GOMP=0  polly_subfn=0
+#:     ... + BOTH                                                 GOMP=4  polly_subfn=1
 #:
-#: So Polly was there all along and its PROFITABILITY heuristic was declining the SCoP -- which is
-#: why the earlier note above reads as "this clang build cannot parallelize". It can. Without this
-#: option the column is serial ``-O3`` under an autopar label on every loop Polly deems not worth
-#: it, which on this corpus is most of them. ``-polly-parallel-force`` alone changes nothing and is
-#: therefore NOT included: it forces parallel codegen for loops Polly already accepted, not the
-#: acceptance itself.
-POLLY_PAR = f"-mllvm -polly -mllvm -polly-parallel -mllvm -polly-process-unprofitable {_OPENMP_CLANG}"
+#: So Polly was there all along -- which is why the note above reads as "this clang build cannot
+#: parallelize". It can. BOTH options are needed and NEITHER works alone, which is the whole 2x2
+#: above and not an inference from the last row: ``-polly-process-unprofitable`` gets the SCoP past
+#: the profitability heuristic that was rejecting it, and ``-polly-parallel-force`` is what then
+#: emits parallel code for it. Without the pair the column is serial ``-O3`` under an autopar label
+#: on every loop Polly deems not worth it, which on this corpus is most of them.
+POLLY_PAR = (f"-mllvm -polly -mllvm -polly-parallel -mllvm -polly-parallel-force "
+             f"-mllvm -polly-process-unprofitable {_OPENMP_CLANG}")
 
 #: GCC autopar + Graphite, the gcc counterpart of POLLY_PAR.
 #:
