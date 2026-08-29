@@ -33,12 +33,15 @@ CHILD = textwrap.dedent('''
         fw = Framework("numpy")
         bench = Benchmark(name)
         impl, _ = fw.implementations(bench)[0]
+        # ONE shared globals dict for the whole file: a helper compiled against its own original
+        # globals still resolves the NEXT helper to a plain function, so a kernel -> helper ->
+        # helper chain reports "Untyped global name" for a file that is otherwise fine.
         g = dict(impl.__globals__)
+        rebind = lambda f: types.FunctionType(f.__code__, g, f.__name__, f.__defaults__, f.__closure__)
         for n, v in list(g.items()):
             if isinstance(v, types.FunctionType) and v.__module__ == impl.__module__:
-                g[n] = njit(v)
-        patched = types.FunctionType(impl.__code__, g, impl.__name__, impl.__defaults__, impl.__closure__)
-        compiled = njit(patched)
+                g[n] = njit(rebind(v))
+        compiled = njit(rebind(impl))
         plan = fw.build_call(bench, compiled, bench.get_data(preset="S"))
         plan.before_each()
         plan.run()
