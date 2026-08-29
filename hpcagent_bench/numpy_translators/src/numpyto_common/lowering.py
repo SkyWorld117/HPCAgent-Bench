@@ -1991,7 +1991,7 @@ def _ssa_rename_reassigned(tree: ast.AST, arrays_shapes: Dict[str, List[str]]) -
                                     f"inside conditional control flow and read again afterwards; "
                                     f"which buffer that read sees is not decidable statically. Hoist "
                                     f"the re-binding to function scope, or give the two shapes "
-                                    f"separate names.")
+                                    f"separate names. Bound as {list(version[orig])}, now {shape_toks}.")
                             n = len(version[orig])
                             name_for_shape = f"{orig}__v{n}"
                         version[orig][shape_toks] = name_for_shape
