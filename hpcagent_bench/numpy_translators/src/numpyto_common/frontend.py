@@ -2900,6 +2900,68 @@ def _exact_multiple_factor(numerator: ast.expr, denominator: ast.expr) -> Option
     return None
 
 
+def _divide_multiple_term(term: ast.expr, divisor: int) -> Optional[ast.expr]:
+    """``term / divisor`` iff ``term`` is literally a constant multiple of it, else ``None``."""
+    if not isinstance(term, ast.BinOp) or not isinstance(term.op, ast.Mult):
+        return None
+    for const_side, other in ((term.left, term.right), (term.right, term.left)):
+        factor = _const_int(const_side)
+        if factor is None or factor % divisor:
+            continue
+        quotient = factor // divisor
+        return other if quotient == 1 else ast.BinOp(left=ast.Constant(value=quotient), op=ast.Mult(), right=other)
+    return None
+
+
+def _exact_quotient_with_remainder(numerator: ast.expr, divisor: int) -> Optional[ast.expr]:
+    """``(d*A + c) // d`` -> ``A + c//d`` -- true for EVERY integer ``A`` and ``c``.
+
+    Not the distribution the folder refuses below: that one splits a numerator whose terms are not
+    multiples of the divisor, and is wrong exactly because the division is inexact. Here every
+    non-constant term is a LITERAL multiple, so ``floor((d*A + c)/d) == A + floor(c/d)`` regardless
+    of either sign -- the leftover constant carries whatever it contributes and nothing is rounded
+    away. raman_fitting's jacobian is allocated ``3 * ((3 * K + 2) // 3) + 1`` and its columns
+    written through slices of the same shape; unfolded, the frontend saw ``K`` on one side and
+    ``int_floor(3*K + 2, 3)`` on the other and could not prove the two equal.
+    """
+    if divisor <= 0:
+        return None
+    terms: List[Tuple[int, ast.expr]] = []
+    constant = 0
+
+    def walk(expr: ast.expr, sign: int) -> None:
+        nonlocal constant
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub)):
+            walk(expr.left, sign)
+            walk(expr.right, sign if isinstance(expr.op, ast.Add) else -sign)
+            return
+        value = _const_int(expr)
+        if value is None:
+            terms.append((sign, expr))
+        else:
+            constant += sign * value
+
+    walk(numerator, 1)
+    if not terms:
+        return None
+    quotients = [(sign, _divide_multiple_term(term, divisor)) for sign, term in terms]
+    if any(q is None for _sign, q in quotients):
+        return None
+    lead = next((i for i, (sign, _q) in enumerate(quotients) if sign > 0), None)
+    if lead is None:
+        return None  # the identity still holds; there is just no leading term to rebuild the sum from
+    out = quotients[lead][1]
+    for i, (sign, quotient) in enumerate(quotients):
+        if i != lead:
+            out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=quotient)
+    remainder = constant // divisor  # floor division, so a negative constant carries its own -1
+    if remainder:
+        out = ast.BinOp(left=out,
+                        op=ast.Add() if remainder > 0 else ast.Sub(),
+                        right=ast.Constant(value=abs(remainder)))
+    return out
+
+
 class _ShapeArithFolder(ast.NodeTransformer):
     """Simplify a shape expression using integer identities that hold for EVERY value.
 
@@ -2926,6 +2988,10 @@ class _ShapeArithFolder(ast.NodeTransformer):
             factor = _exact_multiple_factor(node.left, node.right)
             if factor is not None:
                 return ast.copy_location(ast.Constant(value=factor), node)
+        if isinstance(node.op, ast.FloorDiv) and right is not None:
+            quotient = _exact_quotient_with_remainder(node.left, right)
+            if quotient is not None:
+                return ast.copy_location(ast.fix_missing_locations(quotient), node)
         # Identities. Commutative ones match either side; ``x - 0`` and ``x // 1`` only the right,
         # since ``0 - x`` negates and ``1 // x`` does not simplify.
         if isinstance(node.op, (ast.Add, ast.Mult)):

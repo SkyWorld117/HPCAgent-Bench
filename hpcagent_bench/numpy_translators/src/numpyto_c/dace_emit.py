@@ -988,6 +988,25 @@ def view_slice_binding(node: ast.stmt) -> Optional[str]:
     return target.id
 
 
+def bare_alias_binding(node: ast.stmt) -> Optional[str]:
+    """The bound name of ``name = other`` -- the whole-array spelling numpy answers with a view.
+
+    ``arr[...]`` is not the only way to reach a View node: dace makes one for a bare rebinding too,
+    and refuses the next one exactly the same way. esirkepov's ``idx`` is bound to ``j`` in two arms
+    of a five-way branch and to ``j - 1`` in the rest, which comes back as ``Variable __inl11_idx
+    has been already defined`` (or ``Cannot reassign View`` when both arms are bare).
+    """
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+        return None
+    target, value = node.targets[0], node.value
+    return target.id if isinstance(target, ast.Name) and isinstance(value, ast.Name) else None
+
+
+def view_binding(node: ast.stmt) -> Optional[str]:
+    """Either spelling that leaves dace holding a View: a kept-dimension slice or a bare alias."""
+    return view_slice_binding(node) or bare_alias_binding(node)
+
+
 def statement_lists(root: ast.AST) -> List[List[ast.stmt]]:
     """Every statement list in the subtree -- the blocks a name's live range can be confined to."""
     blocks = []
@@ -1058,7 +1077,7 @@ def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
         return
     for block in statement_lists(fn):
         for stmt in block:
-            if view_slice_binding(stmt) in names:
+            if view_binding(stmt) in names:
                 copied = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
                                                      attr="copy",
                                                      ctx=ast.Load()),
@@ -1084,7 +1103,7 @@ def mixed_view_names(fn: ast.FunctionDef) -> set:
             for target in stmt.targets:
                 if not isinstance(target, ast.Name):
                     continue
-                (views if view_slice_binding(stmt) == target.id else valued).add(target.id)
+                (views if view_binding(stmt) == target.id else valued).add(target.id)
     for node in ast.walk(fn):
         target = node.target if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For)) else None
         if isinstance(target, ast.Name):
@@ -1833,6 +1852,31 @@ def mintable_int_locals(fn_ast: ast.AST, symbols: set, known: set) -> set:
         cand |= grown
 
 
+class StripIdentityIntCasts(ast.NodeTransformer):
+    """Drop ``int(...)`` where the operand is already an integer symbol expression.
+
+    Every dc.symbol is minted int64 and :func:`_is_symbol_expr` admits only integer-valued forms,
+    so the cast computes nothing -- but it hides an alias from the inliner, which is what costs the
+    kernel. warpx_field_gather's ``o = int(depos_order)`` stayed a body local; ``__inl1_o + 1`` then
+    reached one allocation as an expression over the minted ``__sym___inl1_o`` and another as the
+    whole-expression symbol ``__sym___inl1_o_plus_1``, and the frontend cannot prove one equals the
+    other. With the cast gone ``o`` folds to ``depos_order`` and both spellings become the same one.
+
+    Only that case: ``int()`` on a float is a truncation and its operand fails ``_is_symbol_expr``,
+    so it is left alone.
+    """
+
+    def __init__(self, symbols: set) -> None:
+        self.symbols = symbols
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if (isinstance(node.func, ast.Name) and node.func.id == "int" and len(node.args) == 1 and not node.keywords
+                and _is_symbol_expr(node.args[0], self.symbols)):
+            return node.args[0]
+        return node
+
+
 def loop_induction_symbols(fn_ast: ast.AST) -> OrderedSet:
     """Names bound by ``for <name> in range(...)`` -- symbols to dace, not data.
 
@@ -2242,6 +2286,10 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # Induction variables count as symbols here and NOWHERE else: they are atoms the inliner may fold
     # through, but promoting one to a dc.symbol the caller binds would fix it at one iteration.
     loop_syms = set(loop_induction_symbols(fn_ast))
+    # Before the inliner runs, not after: an identity int() cast makes an alias unrecognisable, and
+    # the whole point of the inliner is that one quantity keeps one spelling.
+    fn_ast = StripIdentityIntCasts(set(symbol_names) | loop_syms).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
     fn_ast = _inline_symbol_aliases(fn_ast,
                                     set(symbol_names) | loop_syms,
                                     set(arrays) | set(scalars) | set(symbol_names))
@@ -2324,7 +2372,11 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         literals = {n: ast.Constant(value=v) for n, v in pinned.items()}
         symbol_defs = [(n, ast.unparse(SubstituteNames(literals).visit(ast.parse(e, mode="eval")).body))
                        for n, e in symbol_defs]
+        # The SIGNATURE counts as a use, not only the body: seissol's ``nb`` sizes ``Q[batch, nb, 9]``
+        # and appears nowhere else, so a body-only scan dropped both its symbol declaration and its
+        # constant, leaving the annotation reading a name the module never binds.
         named = {node.id for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Name)}
+        named |= {ident for param in params for ident in _IDENT_RE.findall(param)}
         pinned = {n: v for n, v in pinned.items() if n in named}
 
     out: List[str] = []
