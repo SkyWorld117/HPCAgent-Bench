@@ -2228,7 +2228,10 @@ def _alloc_marker(name: str) -> ast.Assign:
                                      keywords=[]))
 
 
-def expand_copy(target: ast.expr, args: List[ast.expr], shape_table: Dict[str, Tuple[str, ...]]) -> List[ast.stmt]:
+def expand_copy(target: ast.expr,
+                args: List[ast.expr],
+                shape_table: Dict[str, Tuple[str, ...]],
+                local_dtypes: Optional[Dict[str, str]] = None) -> List[ast.stmt]:
     """``out = np.copy(a)`` -> elementwise copy loop into the LHS. Source may be
     a bare Name (``np.copy(a)``) or an array-valued Subscript (``grid[0].copy()``
     -- a row lowered into a fresh local); for the Subscript case the iteration
@@ -2249,6 +2252,20 @@ def expand_copy(target: ast.expr, args: List[ast.expr], shape_table: Dict[str, T
     # The emitter treats a static-shape target's marker as a no-op stack
     # declaration, so emitting it unconditionally is safe for both.
     shape_table.setdefault(target.id, tuple(ast.unparse(e) for e in shape))
+    if local_dtypes is not None:
+        src_name = None
+        if isinstance(src, ast.Name):
+            src_name = src.id
+        elif isinstance(src, ast.Subscript):
+            base = src.value
+            while isinstance(base, ast.Subscript):
+                base = base.value
+            if isinstance(base, ast.Name):
+                src_name = base.id
+        if src_name:
+            src_dt = local_dtypes.get(src_name)
+            if src_dt:
+                local_dtypes[target.id] = src_dt
     iters = [f"__r{i}" for i in range(len(shape))]
     iter_nodes = [_name(i) for i in iters]
     idx = (iter_nodes[0] if len(iters) == 1 else ast.Tuple(elts=iter_nodes, ctx=ast.Load()))
@@ -5543,7 +5560,10 @@ def _lstsq_index1d(name: str, i: ast.expr, base) -> ast.Subscript:
     return ast.Subscript(value=_name(name), slice=slot, ctx=ast.Load())
 
 
-def expand_cholesky(target: ast.expr, args: List[ast.expr], shape_table: Dict[str, Tuple[str, ...]]) -> List[ast.stmt]:
+def expand_cholesky(target: ast.expr,
+                    args: List[ast.expr],
+                    shape_table: Dict[str, Tuple[str, ...]],
+                    local_dtypes: Optional[Dict[str, str]] = None) -> List[ast.stmt]:
     """``L = np.linalg.cholesky(A)`` -> Cholesky-Banachiewicz triple loop.
     Computes ``L`` such that ``L @ L.T == A`` for symmetric positive-definite
     ``A``. Naive O(n^3), no blocking::
@@ -5565,6 +5585,11 @@ def expand_cholesky(target: ast.expr, args: List[ast.expr], shape_table: Dict[st
     a_shape = shape_table.get(a.id)
     if not a_shape or len(a_shape) != 2:
         raise NotImplementedError("cholesky: only 2-D arg")
+    if local_dtypes is not None:
+        a_dt = local_dtypes.get(a.id)
+        if a_dt:
+            local_dtypes[target.id] = a_dt
+            local_dtypes.setdefault("__s", a_dt)
     n = a_shape[0]
     n_ast = _const_or_name(n)
     inner_k = [
@@ -5837,12 +5862,14 @@ def expand_linalg_solve(target: ast.expr,
     n_ast = _const_or_name(n)
     # Same Gauss-Jordan body as expand_linalg_inv, but the row ops apply to
     # ``b`` (not the identity), giving x = A^-1 @ b. ``__sol_aw`` is the
-    # working copy of A.
+    # working copy of A. A fixed name would alias across call sites with
+    # different sizes, so number it like ``expand_linalg_inv`` does.
+    aw_name = f"__sol_aw{_LINALG_AW[0]}"
+    _LINALG_AW[0] += 1
     out: List[ast.stmt] = []
-    aw = lambda r, c: ast.Subscript(
-        value=_name("__sol_aw"), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Load())
+    aw = lambda r, c: ast.Subscript(value=_name(aw_name), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Load())
     aw_store = lambda r, c: ast.Subscript(
-        value=_name("__sol_aw"), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Store())
+        value=_name(aw_name), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Store())
     # ``b`` indexing depends on rank.
     is_2d = len(b_shape) == 2
 
@@ -5857,20 +5884,21 @@ def expand_linalg_solve(target: ast.expr,
         return ast.Subscript(value=_name(target.id), slice=r, ctx=ast.Store())
 
     # Publish working-buffer shape + dtype + fresh-local alloc so the emit
-    # declares ``__sol_aw`` as a flat 2-D buffer of A's element dtype (same
+    # declares the buffer as a flat 2-D buffer of A's element dtype (same
     # logic as ``expand_linalg_inv``).
-    shape_table["__sol_aw"] = (n, n)
+    shape_table[aw_name] = (n, n)
     a_dt = None
     if local_dtypes is not None:
         a_dt = local_dtypes.get(a.id) or local_dtypes.get(b.id)
         if a_dt is not None:
-            local_dtypes["__sol_aw"] = a_dt
+            local_dtypes[aw_name] = a_dt
+            local_dtypes[target.id] = a_dt
             for nm in ("__sol_tmp", "__sol_factor"):
                 local_dtypes.setdefault(nm, a_dt)
     if fresh_local_allocs is not None:
-        fresh_local_allocs["__sol_aw"] = (n, n)
+        fresh_local_allocs[aw_name] = (n, n)
     out.append(
-        ast.Assign(targets=[_store("__sol_aw")],
+        ast.Assign(targets=[_store(aw_name)],
                    value=ast.Call(func=_name("__hpcagent_bench_zeros__"), args=[], keywords=[])))
     # Init: copy A into __sol_aw and b into target.
     if is_2d:
@@ -6084,6 +6112,7 @@ def expand_linalg_inv(target: ast.expr,
         a_dt = local_dtypes.get(a.id)
         if a_dt is not None:
             local_dtypes[aw_name] = a_dt
+            local_dtypes[target.id] = a_dt
             # Scalar swap / pivot temps carry A's dtype too.
             for nm in ("__inv_tmp", "__inv_factor"):
                 local_dtypes.setdefault(nm, a_dt)
@@ -6853,7 +6882,11 @@ def sympify_shape(text: str):
             names[m.group()] = sympy.Symbol(m.group(), integer=True, nonnegative=True)
     try:
         return sympy.sympify(text, locals=names)
-    except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
+    except (SyntaxError, TypeError, AttributeError, ValueError, IndexError, sympy.SympifyError):
+        # ``sympify`` EVALUATES the token, so any exception the expression can raise is on this
+        # path: a token that reads past the end of a tuple literal arrives as a bare ``IndexError``
+        # from inside sympy's parser. Unresolvable is None, which the callers read as "not equal"
+        # and decline on -- the safe direction, per :func:`dims_agree`.
         return None
 
 
