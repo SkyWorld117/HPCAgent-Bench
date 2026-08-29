@@ -852,14 +852,26 @@ class DaceFramework(Framework):
         return sorted(series)[len(series) // 2]
 
     def reference_outputs(self, bench: Benchmark, bdata: Dict[str, Any]) -> Optional[List[Any]]:
-        """Compute the NumPy reference outputs for ``bdata``, or ``None`` if unavailable (skips the gate)."""
+        """Compute the NumPy reference outputs for ``bdata``, or ``None`` if unavailable (skips the gate).
+
+        On a GPU flavor the reference is staged to the device ONCE here, not per variant. The oracle
+        is still numpy on the host -- only its result crosses -- so what is graded is unchanged; what
+        changes is that a flavor searching three pipelines pays one H2D instead of three D2H, and the
+        comparison itself runs at device bandwidth over arrays that are already there.
+        """
         try:
             numpy_fw = Framework("numpy")
             np_impl, _ = numpy_fw.implementations(bench)[0]
-            return self.collect_outputs(numpy_fw, np_impl, bench, bdata)
+            reference = self.collect_outputs(numpy_fw, np_impl, bench, bdata)
         except Exception as exc:
             print(f"DaCe optimize: numpy reference unavailable ({exc}); verification skipped")
             return None
+        if self.info["arch"] != "gpu":
+            return reference
+        to_device = self.copy_func()
+        # Only a dense ndarray has a device form here; a scipy sparse output or a python scalar stays
+        # on the host and compare_arrays moves it, which is one small operand rather than the buffers.
+        return [to_device(a) if isinstance(a, np.ndarray) else a for a in reference]
 
     def collect_outputs(self, frmwrk: Framework, impl: Callable, bench: Benchmark, bdata: Dict[str, Any]) -> List[Any]:
         """Run ``impl`` once and collect its outputs (returns, else the in-place mutated output buffers)."""

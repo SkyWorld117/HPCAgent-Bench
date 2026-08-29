@@ -7,10 +7,12 @@ was only ever exercised end-to-end, where a wrong ``max_rel_error`` is invisible
 fail flag is what gates the run. The reported error is not decoration: it is what a submission is
 ranked and thresholded on, so the non-finite cases below are pinned as tightly as the numeric ones.
 """
+import sys
+
 import numpy as np
 import pytest
 
-from hpcagent_bench.frameworks.utilities import compare_arrays
+from hpcagent_bench.frameworks.utilities import array_module, compare_arrays, validate
 
 INF = float("inf")
 
@@ -195,3 +197,74 @@ def test_mixed_int_reference_and_float_value_still_uses_the_float_path():
     # rounding, or every float kernel with an integer reference would fail.
     ok, _, _ = compare_arrays(np.array([1, 2], np.int64), np.array([1.0, 2.0 + 1e-12]))
     assert ok is True
+
+
+# ----- Device-array dispatch ------------------------------------------------
+#
+# The GPU track produces its outputs on the device. compare_arrays runs in whichever array module
+# the operands are already in, so those are graded where they were produced and the host reference
+# is the operand that crosses. A stub module stands in for cupy so the dispatch itself is tested on
+# a machine with no GPU; the test below it runs the same comparisons through the real cupy when one
+# is present, which is what pins the cupy API this depends on.
+
+
+class DeviceArray(np.ndarray):
+    """Stands in for ``cupy.ndarray``: a distinct type that behaves like the host array it wraps."""
+
+
+@pytest.fixture
+def stub_cupy(monkeypatch):
+    """Install a numpy-backed module under the name ``cupy`` for the duration of one test."""
+    import types
+
+    stub = types.ModuleType("cupy")
+    stub.__dict__.update(vars(np))
+    stub.ndarray = DeviceArray
+    stub.asarray = lambda a, dtype=None: np.asarray(a, dtype=dtype).view(DeviceArray)
+    monkeypatch.setitem(sys.modules, "cupy", stub)
+    return stub
+
+
+def test_array_module_is_numpy_without_a_device_operand(stub_cupy):
+    assert array_module(_arr(1.0), _arr(1.0)) is np
+
+
+def test_array_module_follows_either_operand(stub_cupy):
+    device = _arr(1.0).view(DeviceArray)
+    assert array_module(_arr(1.0), device) is stub_cupy
+    assert array_module(device, _arr(1.0)) is stub_cupy
+
+
+@pytest.mark.parametrize("ref, val", [
+    ([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]),
+    ([1.0, 2.0, 3.0], [1.0, 2.0, 3.5]),
+    ([1.0, INF, 3.0], [1.0, INF, 3.0]),
+    ([1.0, np.nan, 3.0], [1.0, np.nan, 3.0]),
+    ([1.0, np.nan, 3.0], [1.0, 2.0, 3.0]),
+    ([1.0, INF, 3.0], [1.0, -INF, 3.0]),
+])
+def test_a_device_value_grades_exactly_as_its_host_twin(stub_cupy, ref, val):
+    """The verdict and the reported error must not depend on which side of the bus the value is on."""
+    host = compare_arrays(_arr(*ref), _arr(*val))
+    device = compare_arrays(_arr(*ref), _arr(*val).view(DeviceArray))
+    assert device == host
+
+
+def test_validate_does_not_need_a_host_copy(stub_cupy):
+    assert validate([_arr(1.0, 2.0)], [_arr(1.0, 2.0).view(DeviceArray)])
+    assert not validate([_arr(1.0, 2.0)], [_arr(1.0, 9.0).view(DeviceArray)])
+
+
+@pytest.mark.parametrize("ref, val", [
+    ([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]),
+    ([1.0, 2.0, 3.0], [1.0, 2.0, 3.5]),
+    ([1.0, np.nan, 3.0], [1.0, np.nan, 3.0]),
+    ([1.0, INF, 3.0], [1.0, -INF, 3.0]),
+])
+def test_real_cupy_grades_as_the_host_does(ref, val):
+    """Runs only where cupy is installed (the GPU images). This is the test that pins the cupy API
+    compare_arrays leans on -- notably ``allclose(..., equal_nan=True)``, which the NaN cases need."""
+    cupy = pytest.importorskip("cupy")
+    host = compare_arrays(_arr(*ref), _arr(*val))
+    device = compare_arrays(_arr(*ref), cupy.asarray(_arr(*val)))
+    assert device == host
