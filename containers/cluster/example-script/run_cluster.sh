@@ -215,16 +215,19 @@ run_vllm_node() {
         "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${TORCH_EXTENSIONS_DIR}" 2>/dev/null || true
 
     if [[ "${INFERENCE_ENGINE:-vllm}" != "sglang" ]]; then
-        # AITER's master switch defaults OFF while every component behind it -- linear, fp8bmm,
-        # moe, mha, rmsnorm, tgemm -- defaults ON, so with the master unset every is_*_enabled()
-        # reads False (probes 602359/602360) and the campaign served every model on Triton. That is
-        # what vLLM warns about when a MoE or block-FP8 config is missing for MI300A: those are the
-        # TRITON path's per-shape tables, and aiter's CK/assembly kernels need none of them
-        # (610165: 20 such warnings with the master off, 0 with it on).
-        # MLA is the one component with a recorded gfx942 failure (600662, fmha_v3_varlen_fwd
-        # invalid argument). No vLLM arm serves an MLA model -- kimi moved to SGLang -- and any
-        # that does must set VLLM_ROCM_USE_AITER_MLA=0 in its env file.
-        export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
+        # AITER's master switch stays OFF, which is what every arm that has ever finished ran on:
+        # oss120b completed on Triton at 603448, 603833 and 604731. Turning it on is what broke
+        # 610251/610252 -- aiter JIT-builds its kernels on the FIRST REQUEST, not at load, behind a
+        # baton lock in AITER_JIT_DIR, and that build outlives the engine's RPC deadline:
+        # `TimeoutError: RPC call to sample_tokens timed out` with step_counter=0, so not one token
+        # was ever decoded. It fails the same way everywhere it has been tried -- MLA prefill on
+        # gfx942 (600662), all three qwen38 legs (610203/610204: DID NOT SERVE), oss120b above.
+        # The cost of leaving it off is per-shape MoE/block-FP8 warnings from the Triton path
+        # (610165: 20 of them), which are noise, not failures.
+        # An arm that wants to retry aiter sets VLLM_ROCM_USE_AITER=1 in its own env file, and
+        # needs a warm AITER_JIT_DIR first -- see ce-images/inference/prebuild-aiter-jit.sbatch --
+        # because nothing here makes that first-request build fit inside the deadline.
+        export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-0}"
     fi
 
     # aiter ships no prebuilt .so and JIT-builds module_aiter_core on first import, which left

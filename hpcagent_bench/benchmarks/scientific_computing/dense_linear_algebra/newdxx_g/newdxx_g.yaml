@@ -1,0 +1,192 @@
+# HPCAgent-Bench benchmark manifest -- adding a benchmark: see README.md.
+name: QE EXX ultrasoft potential projection (newdxx_g)
+short_name: newdxx_g
+module_name: newdxx_g
+func_name: newdxx_g
+kind: microkernel
+level: 2
+parameters:
+  S:
+    ngrid: 30
+    nat: 2
+    nh: 19
+  M:
+    ngrid: 40
+    nat: 5
+    nh: 19
+  L:
+    ngrid: 50
+    nat: 10
+    nh: 19
+  XL:
+    ngrid: 64
+    nat: 20
+    nh: 19
+  fuzzed:
+    ngrid: [8, 64]
+    nat: [1, 20]
+    nh: [2, 19]
+init:
+  func_name: initialize
+  input_args:
+  - ngrid
+  - nat
+  - nh
+  output_args:
+  - vc
+  - deexx
+  - becphi_c
+  - xk
+  - xkq
+  - tau
+  - ityp
+  - tvanp
+  - nh_type
+  - ofsbeta
+  - nij_type
+  - ijtoh
+  - qgm
+  - mill
+  - eigts1
+  - eigts2
+  - eigts3
+  - nl
+  - omega
+  - ngms
+  - nnr
+  - nr1
+  - nr2
+  - nr3
+  - nat
+  - ntyp
+  - nkb
+  - nhm
+  - nij_tot
+  arrays:
+    vc:
+      shape: (nnr,)
+      dtype: complex128
+    deexx:
+      shape: (nkb,)
+      dtype: complex128
+    becphi_c:
+      shape: (nkb,)
+      dtype: complex128
+    xk:
+      shape: (3,)
+      dtype: float64
+    xkq:
+      shape: (3,)
+      dtype: float64
+    tau:
+      shape: (3, nat)
+      dtype: float64
+    ityp:
+      shape: (nat,)
+      dtype: int64
+    tvanp:
+      shape: (ntyp,)
+      dtype: int64
+    nh_type:
+      shape: (ntyp,)
+      dtype: int64
+    ofsbeta:
+      shape: (nat,)
+      dtype: int64
+    nij_type:
+      shape: (ntyp,)
+      dtype: int64
+    ijtoh:
+      shape: (nhm, nhm, ntyp)
+      dtype: int64
+    qgm:
+      shape: (ngms, nij_tot)
+      dtype: complex128
+    mill:
+      shape: (3, ngms)
+      dtype: int64
+    eigts1:
+      shape: (2 * nr1 + 1, nat)
+      dtype: complex128
+    eigts2:
+      shape: (2 * nr2 + 1, nat)
+      dtype: complex128
+    eigts3:
+      shape: (2 * nr3 + 1, nat)
+      dtype: complex128
+    nl:
+      shape: (ngms,)
+      dtype: int64
+  dtypes:
+    ngms: int64
+    nnr: int64
+    nr1: int64
+    nr2: int64
+    nr3: int64
+    nat: int64
+    ntyp: int64
+    nkb: int64
+    nhm: int64
+    nij_tot: int64
+input_args:
+- vc
+- deexx
+- becphi_c
+- xk
+- xkq
+- tau
+- ityp
+- tvanp
+- nh_type
+- ofsbeta
+- nij_type
+- ijtoh
+- qgm
+- mill
+- eigts1
+- eigts2
+- eigts3
+- nl
+- omega
+- ngms
+- nnr
+- nr1
+- nr2
+- nr3
+- nat
+- ntyp
+- nkb
+- nhm
+- nij_tot
+array_args:
+- vc
+- deexx
+- becphi_c
+- xk
+- xkq
+- tau
+- ityp
+- tvanp
+- nh_type
+- ofsbeta
+- nij_type
+- ijtoh
+- qgm
+- mill
+- eigts1
+- eigts2
+- eigts3
+- nl
+output_args:
+- deexx
+taxonomy:
+  track: scientific_computing
+  subtrack: qe
+  dwarf: dense_linear_algebra
+  domain: Materials
+  tags:
+  - quantum_espresso
+  - exact_exchange
+  - ultrasoft
+  - augmentation
+  - projection

@@ -352,25 +352,6 @@ INSTRUMENT_SKILLS = frozenset({
     "opt-reports",
     "nsys",
     "rocprof",
-    "ncu",
-    "linuxperf",
-    "papi-cpu",
-    "papi-gpu",
-    "linuxperf-judge",
-    "papi-cpu-judge",
-    "papi-gpu-judge",
-    "nsys-judge",
-    "ncu-judge",
-    # AMD. Same shape as the NVIDIA set: a trace tool, a kernel-analysis tool, and a counter
-    # component, each shipping standalone and judge-delegating variants.
-    "rocprofv3",
-    "rocprofv3-judge",
-    "rocprof-compute",
-    "rocprof-compute-judge",
-    "papi-gpu-amd",
-    "papi-gpu-amd-judge",
-    # Compile-time tool, same shape as opt-reports: you run it, it reports, you read the report.
-    "static-analysis",
 })
 
 #: The language pages, gated on the SUBMISSION LANGUAGE rather than on a profiling knob.
@@ -392,23 +373,11 @@ LANGUAGE_SKILLS = frozenset({"lang-c", "lang-cpp", "lang-cuda", "lang-fortran", 
 #: tokens in EVERY prompt, so leaving one ungated has to be a decision somebody made on purpose --
 #: :func:`tests.test_prompt_skills.test_every_manual_sized_page_is_gated` requires each one to be in
 #: this set or in :data:`INSTRUMENT_SKILLS`, and refuses to let a new one drift in unclassified.
-ALWAYS_INLINE_MANUALS = frozenset({
-    # DRAFT (docs/skills_draft): the ORDER of operations -- what to try, when, and what each step
-    # costs the next. If it ships it rides along whole, because gating it behind a profiling knob
-    # would hide the sequencing from exactly the agent most likely to transform in the wrong order.
-    # The SHIPPED short form of this content is containers/agent/hints.md, injected into the
-    # campaign's main prompt ({{HINTS}}), not a skill page at all.
-    "optimization-hints",
-    # PARKED, and a PORTING skill rather than an optimization one. It should not reach an
-    # optimizing agent's prompt at all; listed here so the size gate does not silently absorb it
-    # into the instrument set while that decision is still open.
-    "pytorch-to-numpy",
-    # DRAFT (docs/skills_draft): a REPO-TOOL page. Nothing in this module selects it, so shipping it
-    # under hpcagent_bench/skills would put 100 lines in EVERY prompt for a subcommand no prompt
-    # mentions. It stays drafted until an MPR task axis exists to gate it on; listed here so the
-    # size gate does not absorb it into the instrument set meanwhile.
-    "mpr",
-})
+#:
+#: Empty since the draft pages were removed. Every skill that ships is now either an instrument
+#: manual or a per-language page, both gated; a page that is neither has to justify riding along in
+#: every prompt, and none currently does.
+ALWAYS_INLINE_MANUALS: FrozenSet[str] = frozenset()
 
 #: Submission language -> the page that governs writing it.
 #:
@@ -933,13 +902,26 @@ def build_context(task: Task,
     def _fmt(items):
         return ", ".join(f"{i['name']} {i['version']}" if i.get("version") else i["name"] for i in items)
 
-    # restricted: the sandbox writes the agent's source to ``<symbol>.<ext>`` and
-    # compiles+links it to ``lib<short>.so`` (hpcagent_bench.harness.sandbox).
-    source_filename = f"{symbol}.{ext}"
+    # restricted: the sandbox writes the agent's source to these names and compiles+links them to
+    # ``lib<short>.so`` (hpcagent_bench.harness.sandbox). Read from the language registry rather
+    # than spelled again here, so the prompt cannot name a file the sandbox does not write -- a GPU
+    # language is TWO units (host entry, device kernels), every other language one.
+    units = languages.source_units(task.language, symbol)
+    source_filename = units[0][1]
+    device_source_filename = units[-1][1] if len(units) > 1 else ""
     lib_name = f"lib{spec.short_name}.so"
     context = {
         "kernel": spec.short_name,
         "language": task.language,
+        # The device half of a GPU delivery; "" for a host language, which the templates gate on.
+        "device_source_filename": device_source_filename,
+        "device_language": task.language if device_source_filename else "",
+        # The vendor's transfer call, named so the device-residency section can talk about the
+        # cost of moving data back to the host without the template knowing the vendor.
+        "transfer_call": {
+            "cuda": "cudaMemcpy",
+            "hip": "hipMemcpy"
+        }.get(task.language, "memcpy"),
         "precision": task.precision.value,
         "source_mode": task.source_mode,
         # The judge's submission policy (service.input_mode). It is what makes a track

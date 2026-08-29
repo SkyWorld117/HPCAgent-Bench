@@ -9,6 +9,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hpcagent_bench.frameworks.errors import NotSupportedByFramework
+from hpcagent_bench.languages import gpu_backend
 
 #: framework -> source language it compiles. Polly IS a flag preset on the same cpp source as
 #: ``llvm``; Pluto is NOT -- it compiles polycc's output, which is C (VLA parameters and the
@@ -23,7 +24,9 @@ FRAMEWORK_LANG: Dict[str, str] = {
     "flang": "fortran",
     "polly": "cpp",
     "pluto": "c",
-    "ppcg": "cuda",
+    # ppcg's CUDA is hipified before it is compiled on a ROCm host, so the language -- and through
+    # compilers.yaml the compiler -- follows the toolchain, not the tool (hpcagent_bench.ppcg_transform).
+    "ppcg": gpu_backend(),
 }
 
 #: framework -> forced compiler override; every cpp framework must be listed or it silently falls back to g++.
@@ -262,12 +265,18 @@ def _ctype_for(dtype):
     return ctype_for(name)
 
 
-def index_rebase(wrapper_file: str, short: str, framework: str) -> Tuple[int, ...]:
+def index_rebase(kernel: str, framework: str) -> Tuple[int, ...]:
     """Per-argument delta to the 0-based numpy buffers for a 1-based target language.
 
     An index array is delivered in the CALLING language's base, so the Fortran emitter subscripts
     with the value as-is (``a(ip(j))``). ``native_call`` shifts at its ABI seam; this path had
     none, so every Fortran gather read one element low. Empty for every 0-based language.
+
+    ``kernel`` is the manifest's ``short_name``, which :meth:`BenchSpec.from_yaml` pins to the
+    manifest stem and so is unique corpus-wide. It is passed in rather than recovered from the
+    wrapper's path or its artifact stem: neither identifies a manifest, since five sparse-solver
+    directories hold two manifests each and seven native stems (``cg_csr``, ``sp_bicg_csr``, ...)
+    are produced by two.
     """
     from hpcagent_bench.support.bindings.contract import index_base
     base = index_base(FRAMEWORK_LANG[framework])
@@ -275,17 +284,19 @@ def index_rebase(wrapper_file: str, short: str, framework: str) -> Tuple[int, ..
         return ()
     from hpcagent_bench.spec import BenchSpec
     from hpcagent_bench.support.bindings import binding_from_spec
-    # Keyed on the DIRECTORY, not on ``short``: a sparse kernel wraps one sub-benchmark per
-    # configuration (``spmv_csr``, ``spmv_csc``) and only the directory carries a manifest.
-    parts = pathlib.Path(wrapper_file).resolve().parts
-    here = parts[parts.index("benchmarks") + 1:-1]
-    args = binding_from_spec(BenchSpec.load("/".join(here + (here[-1], )))).args
+    args = binding_from_spec(BenchSpec.load(kernel)).args
     deltas = tuple(base if (a.kind == "ptr" and a.is_index) else 0 for a in args)
     return deltas if any(deltas) else ()
 
 
-def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
-    """Build a Python callable for a native ``framework`` build of ``short``."""
+def wrap_kernel(wrapper_file: str, short: str, framework: str, kernel: str) -> Callable:
+    """Build a Python callable for a native ``framework`` build of ``short``.
+
+    Each argument answers exactly one question and none is derived from another: ``wrapper_file``
+    locates the build directory, ``short`` names the artifact stem (which layout), ``kernel`` names
+    the manifest (see :func:`index_rebase`). The generator holds all three -- see
+    ``autogen._wrapper_src`` -- so none of them is reconstructed here.
+    """
     import numpy as np
     if framework not in FRAMEWORK_LANG:
         raise ValueError(f"unknown native framework {framework!r}; "
@@ -294,7 +305,7 @@ def wrap_kernel(wrapper_file: str, short: str, framework: str) -> Callable:
         "loaded": False,
         "syms": {},
         "bound": set(),
-        "rebase": index_rebase(wrapper_file, short, framework),
+        "rebase": index_rebase(kernel, framework),
     }
 
     from hpcagent_bench.dtypes import ctype_for as _registry_ctype

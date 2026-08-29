@@ -44,12 +44,18 @@ def _file_for(module_name: str, target: str) -> str:
 
 
 def _emit_dace(numpy_py: pathlib.Path, bench_info: pathlib.Path, out: pathlib.Path) -> str:
-    from numpyto_common.frontend import parse_kernel
+    from numpyto_common.frontend import emit_with_inline_fallback, parse_kernel
     from numpyto_c.dace_emit import emit_dace
     from numpyto_common.emit_io import write_generated
-    src = emit_dace(parse_kernel(numpy_py, bench_info))
-    ast.parse(src)  # syntactic self-check before writing
-    return write_generated(out, src, source=numpy_py.name)
+
+    def render() -> str:
+        rendered = emit_dace(parse_kernel(numpy_py, bench_info))
+        ast.parse(rendered)  # syntactic self-check before writing
+        return rendered
+
+    # A level-3 kernel keeps its helpers; if that form has no emittable shape the failure lands in
+    # the emitter, so the whole render is repeated once with inlining forced back on.
+    return write_generated(out, emit_with_inline_fallback(render), source=numpy_py.name)
 
 
 def _emit_jax(numpy_py: pathlib.Path, bench_info: pathlib.Path, out: pathlib.Path) -> str:
@@ -236,10 +242,10 @@ def _wrapper_src(spec) -> str:
         default_attr = None
         for cfg, base in targets:
             if cfg is None:
-                lines.append(f'kernel_{fw} = wrap_kernel(__file__, "{base}", "{fw}")')
+                lines.append(f'kernel_{fw} = wrap_kernel(__file__, "{base}", "{fw}", "{spec.short_name}")')
             else:
                 attr = f"kernel_{fw}_{cfg}"
-                lines.append(f'{attr} = wrap_kernel(__file__, "{base}", "{fw}")')
+                lines.append(f'{attr} = wrap_kernel(__file__, "{base}", "{fw}", "{spec.short_name}")')
                 if default_attr is None:
                     default_attr = attr
         if default_attr is not None:

@@ -83,14 +83,16 @@ def _conj_transpose(A, m, n):
 def _hermitianize(hc, sc, nbase, nb1=1):
     """Make the reduced ``hc`` / ``sc`` exactly Hermitian (cegterg.f90:730-737 and
     :489-506): strictly-real diagonal, upper triangle mirrored from the lower one
-    by conjugation.  ``nb1`` (1-based) is the first freshly-computed row.  This is
+    by conjugation.  ``nb1`` (1-based) is the first freshly-computed row/column.  This is
     the step ``cegterg_reference.cpp`` reproduces.  Mutates in place."""
-    nb1_0 = nb1 - 1  # 0-based first fresh row
+    nb1_0 = nb1 - 1  # 0-based first fresh column
     for i in range(nb1_0, nbase):
         hc[i, i] = hc[i, i].real
         sc[i, i] = sc[i, i].real
-    for i in range(nb1_0, nbase):
-        for j in range(i + 1, nbase):
+    # The fresh COLUMNS are mirrored for every row, not only the fresh rows: the zgemm above
+    # fills rows nb1..nbase only, so the old rows' coupling to the new vectors lives nowhere else.
+    for i in range(nbase):
+        for j in range(max(i + 1, nb1_0), nbase):
             hc[i, j] = np.conj(hc[j, i])
             sc[i, j] = np.conj(sc[j, i])
 
@@ -125,8 +127,9 @@ def _diaghg(hc, sc, n, nvec, w_out, v_out):
     chol = np.linalg.cholesky(b)  # sc = L L^H, lower
     chol_inv = np.linalg.inv(chol)
     chol_h = _conj_transpose(chol, n, n)
+    chol_inv_h = _conj_transpose(chol_inv, n, n)
     __t = chol_inv @ a
-    reduced = __t @ chol_h
+    reduced = __t @ chol_inv_h
     # Symmetrise the reduced matrix as well.
     for i in range(n):
         for j in range(i + 1, n):

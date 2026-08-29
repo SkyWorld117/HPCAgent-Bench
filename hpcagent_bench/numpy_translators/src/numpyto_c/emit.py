@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 from numpyto_common.ir import ArrayDesc, KernelIR
 from numpyto_common import dtypes, narrow_int, operators, parallelism
 from numpyto_common.ordered import OrderedSet
-from numpyto_common.emitter import BaseEmitter
+from numpyto_common.emitter import BaseEmitter, index_rank_error
 from numpyto_common.frontend import _names_used_as_int
 from numpyto_common.lowering import _walk_complex
 
@@ -936,6 +936,7 @@ class _CBodyEmitter(BaseEmitter):
         return "\n".join([self._emit_assign(assign, indent), *frees, f"{indent}return;"])
 
     def _emit_if(self, node: ast.If, indent: str) -> str:
+        hoisted = self._declare_inline_locals_before(node, indent)
         then = self._branch_block(node.body, indent + "  ")
         chained = bool(node.orelse) and len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If)
         else_str = ""
@@ -946,7 +947,7 @@ class _CBodyEmitter(BaseEmitter):
         if not then.strip() and not else_str.strip():
             return ""
         cond = self.emit_expr(node.test)
-        out = [f"{indent}if ({cond}) {{", then, f"{indent}}}"]
+        out = ([hoisted] if hoisted else []) + [f"{indent}if ({cond}) {{", then, f"{indent}}}"]
         if node.orelse:
             if chained:
                 out.append(f"{indent}else " + else_str.lstrip())
@@ -955,6 +956,32 @@ class _CBodyEmitter(BaseEmitter):
                 out.append(else_str)
                 out.append(f"{indent}}}")
         return "\n".join(out)
+
+    def _declare_inline_locals_before(self, node: ast.If, indent: str) -> str:
+        """Declare, ahead of the ``if``, any inline VLA local one of its branches allocates.
+
+        The declaration is otherwise emitted wherever the allocation marker happens to sit, which
+        for a once-only guard is inside the ``if`` branch -- so the ``else`` branch, and everything
+        after the ``if``, referenced a name out of scope and the C would not build. Moving it to the
+        enclosing block keeps every loop variable its extent names in scope, since the ``if`` sits
+        inside those loops already.
+        """
+        inline_locals = vars(self).get("inline_local_decls", {})
+        if not inline_locals:
+            return ""
+        decls = []
+        for stmt in ast.walk(node):
+            if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id in inline_locals):
+                continue
+            name = stmt.targets[0].id
+            shape = inline_locals.pop(name)
+            local_dtypes = vars(self).get("local_dtypes_for_inline", {})
+            size_tokens = [f"({_c_shape_token(s)})" for s in shape] if shape else []
+            size = " * ".join(size_tokens) if size_tokens else "1"
+            c_type = _c_type(local_dtypes.get(name, _default_float_dtype(self.kir)))
+            decls.append(f"{indent}{c_type} {name}[{size}];")
+        return "\n".join(decls)
 
     def _branch_block(self, stmts: List[ast.stmt], indent: str) -> str:
         """Emit one ``if`` branch, then free the buffers that branch declared.
@@ -1240,7 +1267,15 @@ class _CBodyEmitter(BaseEmitter):
                                   f"(line {vars(node).get('lineno', '?')}): {ast.unparse(node)[:120]}")
 
     def _unchain_subscript(self, node: ast.Subscript) -> Tuple[ast.AST, List[str]]:
-        """Collapse a subscript chain a[i][j]... into (base_node, [i, j, ...]) for row-major flattening."""
+        """Collapse a subscript chain a[i][j]... into (base_node, [i, j, ...]) for row-major flattening.
+
+        Concatenating the levels is numpy's combined basic indexing only while every index BELOW
+        the outermost is scalar. A surviving slice there makes the outer index relative to the
+        sliced range -- ``a[1:3][0]`` is ``a[1]``, not ``a[1:3, 0]`` -- so concatenating it drops
+        the offset and returns the wrong row from code that compiles clean. The bare-``:`` case is
+        composed upstream (``_ChainedSubscriptFlattener``); anything still chained here is refused
+        rather than guessed at.
+        """
         chain: List[str] = []
         cur: ast.AST = node
         # Index texts are marked so a pluto scop can hoist a call out of one (see pluto_call_free).
@@ -1248,10 +1283,12 @@ class _CBodyEmitter(BaseEmitter):
         try:
             while isinstance(cur, ast.Subscript):
                 sl = cur.slice
-                if isinstance(sl, ast.Tuple):
-                    chain = [self.emit_expr(e) for e in sl.elts] + chain
-                else:
-                    chain = [self.emit_expr(sl)] + chain
+                elts = list(sl.elts) if isinstance(sl, ast.Tuple) else [sl]
+                if cur is not node and any(isinstance(e, ast.Slice) for e in elts):
+                    raise NotImplementedError(f"chained subscript {ast.unparse(node)[:80]} slices an inner level, "
+                                              f"so the outer index is relative to that slice and cannot be "
+                                              f"concatenated onto it")
+                chain = [self.emit_expr(e) for e in elts] + chain
                 cur = cur.value
         finally:
             self._index_depth -= 1
@@ -1315,10 +1352,7 @@ class _CBodyEmitter(BaseEmitter):
             # means the array's rank is unknown or disagrees with the index count -- almost always a
             # missing/incorrect init.shapes declaration (conv_2d's w_box was inferred 1D but indexed
             # 2D). Emitting the chained form silently shipped uncompilable C; fail loudly instead.
-            raise NotImplementedError(
-                f"cannot flatten a {len(indices)}-D index of {base_node.id!r}: its shape is "
-                f"{'unknown' if shape is None else shape} (rank {0 if shape is None else len(shape)}). "
-                f"Declare init.shapes[{base_node.id!r}] with the matching rank.")
+            raise NotImplementedError(index_rank_error(base_node.id, shape, len(indices)))
         return self._promote_read(node, f"{base}[{self._flatten_indices(shape, indices)}]")
 
     @staticmethod
@@ -2828,12 +2862,42 @@ def _emit_c_helper(hkir: KernelIR, cpp: bool = False, isopar: bool = False) -> s
     return f"static {signature} {{\n{body}\n}}\n\n"
 
 
+def pinned_const_block(kir: KernelIR) -> str:
+    """File-scope ``constexpr`` for each config knob the manifest pinned to one value.
+
+    A pinned knob has the same value for every preset and every fuzz draw, so passing it in would
+    be spelling a compile-time constant as a runtime argument: the loop bound, the stride and the
+    padding are all knowable while the kernel is being compiled, and only a constant lets the
+    compiler unroll on them. It is declared here, by NAME, rather than folded into a literal at
+    every use, so the emitted code still reads like the reference it came from.
+    """
+    if not kir.pinned_consts:
+        return ""
+    type_of = {s.name: dtypes.c_type("int") for s in kir.symbols}
+    type_of.update({s.name: _c_type(s.dtype) for s in kir.scalars})
+    lines = []
+    for name in sorted(kir.pinned_consts):
+        value = kir.pinned_consts[name]
+        lines.append(f"constexpr {type_of.get(name, _c_type('float64'))} {name} = {c_literal(value)};")
+    return "\n".join(lines) + "\n\n"
+
+
+def c_literal(value) -> str:
+    """A pinned knob's value as a C literal of its own kind (``true`` / ``100`` / ``1e-06``)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return repr(float(value))
+
+
 def emit_c(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     name = fn_name or f"{kir.kernel_name}_d_c"
     helpers = "".join(_emit_c_helper(h) for h in kir.helpers)
     signature = _emit_signature(kir, name)
     body = _emit_body(kir, indent="        ")
-    return f"{_C_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_C_PRELUDE}{body}\n{_C_EPILOGUE}}}\n"
+    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{helpers}{signature} {{\n"
+            f"{_C_PRELUDE}{body}\n{_C_EPILOGUE}}}\n")
 
 
 def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
@@ -2843,8 +2907,8 @@ def emit_cpp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     # restrict is a C99 keyword; C++ accepts it as __restrict__, so rewrite it for the C++ output.
     signature = signature.replace("*restrict ", "*__restrict__ ")
     body = _emit_body(kir, indent="        ")
-    return (f"{_CPP_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
-            f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
+    return (f"{_CPP_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{helpers}{signature} {{\n"
+            f"{_CPP_PRELUDE}{body}\n{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
 
 
 def emit_cpp_isopar(kir: KernelIR, fn_name: Optional[str] = None) -> str:
@@ -2956,5 +3020,5 @@ def emit_pluto(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     # inside, and the body already carries its own scop markers (see _CBodyEmitter.emit_block).
     decl_block = (decls + "\n") if decls else ""
     free_block = (frees + "\n") if frees else ""
-    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{signature} {{\n{_C_PRELUDE}"
+    return (f"{_C_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{signature} {{\n{_C_PRELUDE}"
             f"{decl_block}{body}\n{free_block}{_C_EPILOGUE}}}\n")

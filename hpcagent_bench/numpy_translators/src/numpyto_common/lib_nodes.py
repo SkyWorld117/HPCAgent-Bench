@@ -92,12 +92,18 @@ def _simplify_sub(hi: ast.AST, lo: ast.AST) -> Optional[ast.AST]:
     if _ast_eq(hi, lo):
         return ast.Constant(value=0)
     if isinstance(hi, ast.BinOp) and isinstance(hi.op, ast.Add):
-        # ``(lo + K) - lo`` -> K
-        if _ast_eq(hi.left, lo):
-            return hi.right
-        # ``(K + lo) - lo`` -> K
-        if _ast_eq(hi.right, lo):
-            return hi.left
+        # ``(lo + K) - lo`` -> K, at ANY depth of the ``+`` chain. A convolution tap slice spells
+        # its upper bound ``ky + (oh - 1) * stride + 1``, which puts ``lo`` one level down where the
+        # top-level match missed it. The extent is the same number either way, but the unsimplified
+        # form NAMES the tap loop's variable, and the buffer it sizes is declared outside that loop
+        # -- so the emitted C does not compile (alexnet, lenet5).
+        for near, far in ((hi.left, hi.right), (hi.right, hi.left)):
+            if _ast_eq(near, lo):
+                return far
+            inner = _simplify_sub(near, lo)
+            if inner is not None:
+                # ``(near - lo) + far`` is ``(near + far) - lo``, which is ``hi - lo``.
+                return ast.BinOp(left=inner, op=ast.Add(), right=far)
     # ``(K - lo) - lo`` and other forms don't simplify in general.
     return None
 
@@ -379,6 +385,15 @@ def _np_fft_attr(call: ast.Call) -> Optional[str]:
     return None
 
 
+#: Array methods whose numpy function twin takes the array first and means the same thing, so the
+#: method spelling can be routed to it instead of growing a second branch. ``reshape`` is absent on
+#: purpose: it has a method branch of its own that resolves a ``-1`` against the receiver.
+ARRAY_METHOD_SHAPE_OPS: FrozenSet[str] = frozenset({
+    "copy", "transpose", "squeeze", "clip", "round", "conj", "conjugate", "cumsum", "cumprod", "take", "repeat",
+    "diagonal", "swapaxes"
+})
+
+
 def _np_call_attr(func: ast.expr) -> Optional[str]:
     """``np.foo`` -> ``"foo"``, ``np.foo.bar`` -> ``"foo.bar"``, anything else -> ``None``."""
     if not isinstance(func, ast.Attribute):
@@ -532,6 +547,26 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
         # ``np.<x>`` and the two-level ufunc-method spellings ``np.<ufunc>.<method>`` alike. The
         # dotted form never reached here, so the ``maximum.accumulate`` branch below was
         # unreachable and every ``np.<op>.outer`` came back with its first operand's extent.
+        # Method spelling of a shape op: the receiver IS the operand, so ``rho.copy()`` says what
+        # ``np.copy(rho)`` says. Routed once, here, rather than as a method branch per op -- the
+        # two spellings had already diverged for reshape and for the reductions above, each fixed
+        # separately after a kernel came back sized off a broadcast partner instead. ``astype`` and
+        # ``flatten`` have no numpy function twin to route to and answer directly.
+        if (isinstance(expr.func, ast.Attribute)
+                and not (isinstance(expr.func.value, ast.Name) and expr.func.value.id in ("np", "numpy"))):
+            method = expr.func.attr
+            if method == "astype":
+                return _iter_extent_of(expr.func.value, shape_table)  # dtype only, never the shape
+            if method in ("ravel", "flatten"):
+                base = _iter_extent_of(expr.func.value, shape_table)
+                return None if base is None else (_mul_exts(base), )
+            if method in ARRAY_METHOD_SHAPE_OPS:
+                routed = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
+                                                     attr=method,
+                                                     ctx=ast.Load()),
+                                  args=[expr.func.value] + list(expr.args),
+                                  keywords=list(expr.keywords))
+                return _iter_extent_of(ast.copy_location(routed, expr), shape_table)
         attr = _np_call_attr(expr.func)
         if attr is not None:
             # An array CONSTRUCTOR states its extent in its shape argument -- read it
@@ -541,7 +576,28 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             # bare-Name expander rejects it -- gpt2_block's causal-mask
             # ``np.triu(np.ones((seq, seq), np.float32), 1)``. ``*_like`` aliases take
             # an array, not a shape -- mirror that operand's extent instead.
-            if attr in NP_ZEROS_ALIASES and expr.args:
+            # ``np.full`` states its extent exactly as the zeros aliases do, but it is not one of
+            # them: it carries a fill VALUE that the alias rewriter would drop, turning a -inf pad
+            # into a zero pad. Sized here, aliased nowhere.
+            # ``np.linalg`` is a TWO-level attribute, so every single-level branch below reads it
+            # as nothing. ``inv``/``cholesky`` are shape-preserving factors; ``solve`` returns x
+            # with b's shape. Sized here and not only in lowering's harvest, because a shape read
+            # that resolves against a factorisation is asked at parse time -- ls3df_scf reaches its
+            # whole Rayleigh-Ritz block through ``Linv``, and an unsized factor breaks that chain.
+            # Square identities and the 1-D generators state their extent in an argument, same as
+            # the zeros aliases do; unsized, ls3df_scf's ``s_sub`` chain broke on the ``np.eye(k)``
+            # jitter term and took the whole Rayleigh-Ritz block with it.
+            if attr in ("eye", "identity") and expr.args:
+                n = copy.deepcopy(expr.args[0])
+                return (n, copy.deepcopy(expr.args[1])) if attr == "eye" and len(expr.args) >= 2 and not _const_int(
+                    expr.args[1]) is None else (n, copy.deepcopy(n))
+            if attr == "arange" and len(expr.args) == 1:
+                return (copy.deepcopy(expr.args[0]), )
+            if attr in ("linalg.inv", "linalg.cholesky") and expr.args:
+                return _iter_extent_of(expr.args[0], shape_table)
+            if attr == "linalg.solve" and len(expr.args) >= 2:
+                return _iter_extent_of(expr.args[1], shape_table)
+            if (attr in NP_ZEROS_ALIASES or attr in ("full", "full_like")) and expr.args:
                 if attr.endswith("_like"):
                     return _iter_extent_of(expr.args[0], shape_table)
                 shape_arg = expr.args[0]
@@ -922,6 +978,16 @@ def _iter_extent_of(expr: ast.expr, shape_table: Dict[str, Tuple[str, ...]]) -> 
             for i in range(src_axis, len(shape)):
                 ext.append(_const_or_name(shape[i]))
         return tuple(ext) if ext else None
+    if isinstance(expr, ast.Attribute):
+        # ``A.T`` reverses the axes; ``.real`` / ``.imag`` pick a component and keep them. The
+        # ``np.transpose`` branch above already claims to answer for ``x.T``, but an attribute is
+        # never a Call and never reached it -- so a transpose spelled the short way resolved in the
+        # RANK table and to nothing here, and the two disagreed about the same expression.
+        if expr.attr == "T":
+            base = _iter_extent_of(expr.value, shape_table)
+            return None if base is None else tuple(reversed(base))
+        if expr.attr in ("real", "imag"):
+            return _iter_extent_of(expr.value, shape_table)
     return None
 
 
@@ -6873,7 +6939,11 @@ def sympify_shape(text: str):
             names[m.group()] = sympy.Symbol(m.group(), integer=True, nonnegative=True)
     try:
         return sympy.sympify(text, locals=names)
-    except (SyntaxError, TypeError, AttributeError, ValueError, sympy.SympifyError):
+    except (SyntaxError, TypeError, AttributeError, ValueError, IndexError, sympy.SympifyError):
+        # ``sympify`` EVALUATES the token, so any exception the expression can raise is on this
+        # path: a token that reads past the end of a tuple literal arrives as a bare ``IndexError``
+        # from inside sympy's parser. Unresolvable is None, which the callers read as "not equal"
+        # and decline on -- the safe direction, per :func:`dims_agree`.
         return None
 
 

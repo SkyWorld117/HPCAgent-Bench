@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 
 from hpcagent_bench import config
 from hpcagent_bench.frameworks import Benchmark
+from hpcagent_bench.languages import gpu_backend
 from hpcagent_bench.precision import Precision, float_complex_for
 
 # The fp64 pair set_datatype resolves for a datatype of None, so a kernel that reads these before
@@ -386,8 +387,12 @@ FRAMEWORK_META: Dict[str, Dict[str, Any]] = {
         "prefix": "ppcg",
         "postfix": "cpp",
         "arch": "gpu",
-        "language": "cuda",
-        "compiler": "nvcc",
+        # ppcg only ever emits CUDA; which language this column COMPILES is the local GPU
+        # toolchain's (hipify runs in between on ROCm -- see hpcagent_bench.ppcg_transform).
+        # The compiler is not restated: compilers.yaml already maps the language to its block
+        # (cuda -> nvcc, hip -> hipcc), and restating it is what left this entry saying nvcc on
+        # an AMD node.
+        "language": gpu_backend(),
         "precisions": IEEE_PRECISIONS,
     },
     "triton": {
