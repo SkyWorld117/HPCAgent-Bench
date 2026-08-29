@@ -183,7 +183,11 @@ tools/pluto_affine_survey_results.txt
 scripts/cscs/env.toml
 
 # Per-checkout agent / IDE config (Claude Code, etc.) -- machine-local, never committed.
-.claude/
+# EXCEPT .claude/skills/: those are REPO-MAINTENANCE skills (porting a kernel, de-pythonizing one),
+# used by whoever works on this tree. They are deliberately not under hpcagent_bench/skills/, which
+# ships to the benchmark agents -- a porting page has no business in an optimizing agent's prompt.
+.claude/*
+!.claude/skills/
 
 # Native (no-container) run scratch -- keep the folder, ignore its contents.
 hpcagent_bench/native_runs/*
