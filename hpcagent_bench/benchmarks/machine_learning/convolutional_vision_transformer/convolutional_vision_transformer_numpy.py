@@ -14,7 +14,7 @@ LN_EPS = 1e-5
 
 def softmax(z):
     shifted = z - np.max(z, axis=-1, keepdims=True)
-    np.exp(shifted, out=shifted)
+    shifted[:] = np.exp(shifted)
     shifted /= np.sum(shifted, axis=-1, keepdims=True)
     return shifted
 
@@ -72,7 +72,7 @@ def convolutional_vision_transformer(x, num_heads, conv1_weight, conv1_bias, pro
         attn_out += tokens
         resid = layernorm(attn_out, norm1_weight[layer], norm1_bias[layer])
         hidden = resid @ np.transpose(linear1_weight[layer]) + linear1_bias[layer]
-        np.maximum(hidden, 0.0, out=hidden)
+        hidden[:] = np.maximum(hidden, 0.0)
         feed = hidden @ np.transpose(linear2_weight[layer]) + linear2_bias[layer]
         feed += resid
         tokens = layernorm(feed, norm2_weight[layer], norm2_bias[layer])

@@ -47,7 +47,7 @@ def _union_oracle(A_indptr, A_indices, B_indptr, B_indices):
             acc.update(B_indices[B_indptr[a_col]:B_indptr[a_col + 1]].tolist())
         rows.append(sorted(acc))
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
-    np.cumsum([len(r) for r in rows], out=indptr[1:])
+    indptr[1:] = np.cumsum([len(r) for r in rows])
     return indptr, np.array([c for r in rows for c in r], dtype=np.int64)
 
 

@@ -66,7 +66,7 @@ def _maxpool3d(x, kernel_size, stride, padding):
             ysl = slice(ky, ky + oh * stride[1], stride[1])
             for kx in range(kernel_size[2]):
                 xsl = slice(kx, kx + ow * stride[2], stride[2])
-                np.maximum(out, padded[:, :, zsl, ysl, xsl], out=out)
+                out[:] = np.maximum(out, padded[:, :, zsl, ysl, xsl])
     return out
 
 

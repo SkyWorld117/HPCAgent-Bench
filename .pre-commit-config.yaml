@@ -36,6 +36,13 @@ repos:
         name: block files > 500 KiB
         entry: python scripts/check_large_files.py
         language: system
+      # A kernel may not write through numpy's out= keyword: numba rejects it, pythran accepts
+      # it and silently does nothing. Write the store as a store -- X[:] = np.f(a, b).
+      - id: hpcagent_bench-no-out-kwarg
+        name: no numpy out= in kernel sources
+        entry: python scripts/check_no_out_kwarg.py
+        language: system
+        files: '^hpcagent_bench/benchmarks/.*\.py$'
       # Co-located kernel reference sources must be canonically named <stem>_reference.<ext>
       # (the prompt glob + test_<stem>_reference.py both key on it); ban _original/_orig/_golden/...
       - id: hpcagent_bench-reference-naming

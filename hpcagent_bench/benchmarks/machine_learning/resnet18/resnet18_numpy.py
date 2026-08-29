@@ -39,8 +39,8 @@ def _maxpool2d(x, kernel, stride, padding):
     out = np.full((n, c, oh, ow), -np.inf, x.dtype)
     for ky in range(kernel):
         for kx in range(kernel):
-            np.maximum(out, padded[:, :, ky:ky + (oh - 1) * stride + 1:stride,
-                                   kx:kx + (ow - 1) * stride + 1:stride], out=out)
+            out[:] = np.maximum(out, padded[:, :, ky:ky + (oh - 1) * stride + 1:stride,
+                                            kx:kx + (ow - 1) * stride + 1:stride])
     return out
 
 

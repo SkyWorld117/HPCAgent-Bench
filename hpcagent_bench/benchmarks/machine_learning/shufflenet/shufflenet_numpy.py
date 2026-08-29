@@ -50,10 +50,10 @@ def depthwise_core(x, weight, stride, padding, oh, ow):
             patch = padded[:, :, ky:ky + (oh - 1) * stride + 1:stride, kx:kx + (ow - 1) * stride + 1:stride]
             scale = np.reshape(weight[:, 0, ky, kx], (1, c, 1, 1))
             if first:
-                np.multiply(patch, scale, out=acc)
+                acc[:] = np.multiply(patch, scale)
                 first = False
             else:
-                np.multiply(patch, scale, out=scratch)
+                scratch[:] = np.multiply(patch, scale)
                 acc += scratch
     return acc
 
@@ -82,7 +82,7 @@ def maxpool_core(x, kernel, stride, padding, oh, ow):
             if out is None:
                 out = patch.copy()
             else:
-                np.maximum(out, patch, out=out)
+                out[:] = np.maximum(out, patch)
     return out
 
 

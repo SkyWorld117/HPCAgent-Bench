@@ -51,7 +51,7 @@ def _maxpool3d(x, kernel_size):
             for kx in range(kernel_size):
                 window = x[:, :, kz:kz + span_d:kernel_size, ky:ky + span_h:kernel_size,
                            kx:kx + span_w:kernel_size]
-                np.maximum(out, window, out=out)
+                out[:] = np.maximum(out, window)
     return out
 
 

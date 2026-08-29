@@ -158,7 +158,7 @@ def generate_random_minife_inputs(
     row_lengths = np.empty(nrows, dtype=index_dtype)
     for row in range(nrows):
         row_lengths[row] = len(_neighbors_27(row, nx_nodes, ny_nodes, nz_nodes))
-    np.cumsum(row_lengths, out=row_offsets[1:])
+    row_offsets[1:] = np.cumsum(row_lengths)
 
     nnz = int(row_offsets[-1])
     packed_cols = np.empty(nnz, dtype=index_dtype)

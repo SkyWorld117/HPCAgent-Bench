@@ -114,7 +114,7 @@ def initialize(NV, NE, datatype=np.int64, rng: Optional[np.random.Generator] = N
     esrc = src[keep].astype(np.int64)
     colidx = dst[keep].astype(np.int64)
     rowptr = np.zeros(NV + 1, dtype=np.int64)
-    np.cumsum(np.bincount(esrc, minlength=NV).astype(np.int64), out=rowptr[1:])
+    rowptr[1:] = np.cumsum(np.bincount(esrc, minlength=NV).astype(np.int64))
 
     total = np.zeros(1, dtype=np.int64)
     return colidx, esrc, rowptr, total

@@ -20,6 +20,6 @@ def pathfinder(grid, dp):
         padded[1:-1] = dp
         padded[0] = dp[0]
         padded[-1] = dp[-1]
-        np.minimum(padded[:-2], padded[1:-1], out=m)
-        np.minimum(m, padded[2:], out=m)
-        np.add(grid[i], m, out=dp)
+        m[:] = np.minimum(padded[:-2], padded[1:-1])
+        m[:] = np.minimum(m, padded[2:])
+        dp[:] = np.add(grid[i], m)

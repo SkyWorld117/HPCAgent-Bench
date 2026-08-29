@@ -57,7 +57,7 @@ def maxpool_core(x, kernel, stride, padding, oh, ow):
             if out is None:
                 out = patch.copy()
             else:
-                np.maximum(out, patch, out=out)
+                out[:] = np.maximum(out, patch)
     return out
 
 

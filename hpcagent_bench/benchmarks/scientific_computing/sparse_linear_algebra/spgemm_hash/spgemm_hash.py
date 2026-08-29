@@ -29,7 +29,7 @@ def _row_lengths(rows, nnz, rng):
 
     weights = rng.random(rows) * (high - low) + low
     lengths = np.floor(nnz * weights / weights.sum()).astype(np.int64)
-    np.clip(lengths, low, high, out=lengths)
+    lengths[:] = np.clip(lengths, low, high)
 
     # Flooring (and the clip) leaves a shortfall; hand it to the rows that still have
     # headroom, deterministically and a whole pass at a time.
@@ -50,7 +50,7 @@ def _csr(rows, cols, nnz, rng):
     """A boolean CSR matrix (indptr, indices) with ``nnz`` entries and sorted rows."""
     lengths = _row_lengths(rows, nnz, rng)
     indptr = np.zeros(rows + 1, dtype=np.int64)
-    np.cumsum(lengths, out=indptr[1:])
+    indptr[1:] = np.cumsum(lengths)
 
     # Band the columns around the diagonal. This is what makes the product interesting:
     # the B-rows one A-row selects then have OVERLAPPING column windows, so their union has

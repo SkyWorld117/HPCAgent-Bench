@@ -136,7 +136,7 @@ def _calc_elem_char_length(x, y, z, volume):
     for (a, b, d, e) in faces:
         ar = _area_face(c(x, a), c(x, b), c(x, d), c(x, e), c(y, a), c(y, b), c(y, d), c(y, e), c(z, a), c(z, b),
                         c(z, d), c(z, e))
-        np.maximum(ar, charl, out=charl)
+        charl[:] = np.maximum(ar, charl)
     return 4.0 * volume / np.sqrt(charl)
 
 
