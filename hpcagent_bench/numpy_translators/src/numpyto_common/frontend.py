@@ -685,7 +685,18 @@ def version_rebound_locals(fn: ast.FunctionDef, skip: FrozenSet[str]) -> None:
             for sub in ast.walk(stmt):
                 if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
                     nested.add(sub.id)
-    targets = {n for n, c in counts.items() if c > 1 and n not in nested and n not in skip}
+    # Only a name whose SHAPE is asked for. One descriptor per name is a problem exactly when
+    # something reads the shape and gets the wrong binding's answer; where nothing does, a second
+    # name buys nothing and costs the in-out helper ABI. ``t = scale_in_place(t, thr)`` is one
+    # buffer read and written -- one parameter -- and renaming the target to ``t__s2`` makes the
+    # target stop being the argument, so the helper gains a second descriptor and both sides carry
+    # ``restrict`` over what the call itself aliases (vgg16's ``_maxpool2d(h, h, n)``).
+    shape_read = {
+        node.value.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name)
+    }
+    targets = {n for n, c in counts.items() if c > 1 and n not in nested and n not in skip and n in shape_read}
     if not targets:
         return
     seen: Dict[str, int] = {}
@@ -4790,6 +4801,16 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
     return out
 
 
+#: Statements a helper body may hold and still be spliceable into its caller.
+#: ``Assert``/``Pass`` earn their place the same way they do downstream: a kernel runs on
+#: oracle-validated inputs, so an ``assert groups == 1`` never fires, and both the emitter and
+#: ``numpy_desugar`` already drop one. Excluding them here did not make the helper safer -- it made
+#: it UNINLINABLE, and a helper that is not inlined survives as a call into a ``@dc.program``,
+#: which binds no helper at all: conv_pointwise_2d and kl_div_loss emitted no DaCe program because
+#: of one precondition line apiece.
+INLINABLE_STMTS = (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While, ast.Assert, ast.Pass)
+
+
 def _collect_inlinable_helpers(tree: ast.Module, kernel_fn: ast.FunctionDef) -> Dict[str, ast.FunctionDef]:
     """Return a name -> FunctionDef map for every top-level helper
     eligible for inlining.
@@ -4823,13 +4844,12 @@ def _collect_inlinable_helpers(tree: ast.Module, kernel_fn: ast.FunctionDef) -> 
         # ``np.add.at(fx, nodelist, sfx)`` scatters then ``return determ``).
         if isinstance(body[-1], ast.Return) and body[-1].value is not None:
             mid = body[:-1]
-            if all(isinstance(s, (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While)) for s in mid):
+            if all(isinstance(s, INLINABLE_STMTS) for s in mid):
                 if not any(isinstance(sub, ast.Return) for s in mid for sub in ast.walk(s)):
                     return True
         # Form 4: void helper -- simple Assign / AugAssign / For / While / If / Expr
         # statements with NO Return (in-place writes to argument arrays).
-        _SIMPLE = (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While)
-        if all(isinstance(s, _SIMPLE) for s in body):
+        if all(isinstance(s, INLINABLE_STMTS) for s in body):
             if not any(isinstance(sub, ast.Return) for s in body for sub in ast.walk(s)):
                 return True
         return False
