@@ -1833,6 +1833,25 @@ def mintable_int_locals(fn_ast: ast.AST, symbols: set, known: set) -> set:
         cand |= grown
 
 
+def loop_induction_symbols(fn_ast: ast.AST) -> OrderedSet:
+    """Names bound by ``for <name> in range(...)`` -- symbols to dace, not data.
+
+    An induction variable is an atom the alias inliner must count as symbolic, or a scalar derived
+    from one stays a body local and lands in a slice bound as DATA. dace then mints a fresh symbol
+    for the whole bound and has nothing left to relate it to the start: conv3d's
+    ``padded_g[:, icg, iz0:iz0 + span_d]`` came out as an extent
+    ``-__sym___inl1_iz0 + __sym___inl1_iz0_plus_depth_1_kernel_size_1_1_1_1_1``, which the frontend
+    cannot prove equal to the accumulator's ``depth - kernel_size + 1``. With ``iz0 = kz * 1``
+    folded to its induction variable the extent is the span expression itself, spelled once.
+    """
+    names: OrderedSet = OrderedSet()
+    for node in ast.walk(fn_ast):
+        if (isinstance(node, ast.For) and isinstance(node.target, ast.Name) and isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Name) and node.iter.func.id == "range"):
+            names.add(node.target.id)
+    return names
+
+
 #: Bound on alias-inliner rounds; each exposes names one definition deeper.
 _INLINE_ALIAS_ROUNDS = 25
 
@@ -2220,7 +2239,12 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     fn_ast = BroadcastScalarWhere(value_shapes).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # Inline a shape scalar that's a pure symbolic alias of an existing dc.symbol, rather than promoting a fresh one.
-    fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names), set(arrays) | set(scalars) | set(symbol_names))
+    # Induction variables count as symbols here and NOWHERE else: they are atoms the inliner may fold
+    # through, but promoting one to a dc.symbol the caller binds would fix it at one iteration.
+    loop_syms = set(loop_induction_symbols(fn_ast))
+    fn_ast = _inline_symbol_aliases(fn_ast,
+                                    set(symbol_names) | loop_syms,
+                                    set(arrays) | set(scalars) | set(symbol_names))
     # Inline a transient's own .shape read used to size an accumulator (dace forbids name-as-both).
     fn_ast = _inline_transient_shape_scalars(fn_ast, set(arrays) | set(scalars) | set(symbol_names))
     # Name any compound shape expression first, so promotion has a single name to work on.
@@ -2235,7 +2259,7 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         if set(promotable) == previous:
             break  # nothing new was exposed: another round would substitute the same names again
         previous = set(promotable)
-        fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names) | set(promotable), known)
+        fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names) | set(promotable) | loop_syms, known)
     # dace forbids a data-dependent array shape; promote body-computed size scalars to dc.symbols the caller binds.
     promoted, symbol_defs, reassigned = _plan_size_promotion(fn_ast,
                                                              set(arrays) | set(scalars) | set(symbol_names),

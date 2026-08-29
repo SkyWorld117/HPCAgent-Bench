@@ -6227,7 +6227,7 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
                         body=out,
                         orelse=[])
             ]
-        # Prepend a ``Name = __hpcagent_bench_zeros__("__reassign__")`` marker so
+        # Prepend a ``Name = __hpcagent_bench_zeros__("__reassign__", self_ref)`` marker so
         # the source-order shape resolver (``_ResolveArrShape``) can pick
         # up the THEN-current shape of the LHS. The marker is a no-op at
         # emit-time -- the emitter declares the LHS once at the function
@@ -6237,10 +6237,16 @@ class _WholeArrayAssignRewriter(ast.NodeTransformer):
         # the emitter must NOT re-zero (memset) the buffer first -- doing
         # so corrupts a self-referential reassignment like bicgstab's
         # ``p = r + beta * (p - omega * v)`` (the loop reads the old p).
+        # ``self_ref`` says the same about a symbolic size: rayleigh_ritz's ``U = U * np.sign(...)``
+        # reads the OLD U at every index, so a deferred-malloc emitter may not realloc it either.
         if op is None:
+            self_ref = any(isinstance(n, ast.Name) and n.id == target.id for n in ast.walk(value))
             marker = ast.Assign(targets=[ast.Name(id=target.id, ctx=ast.Store())],
                                 value=ast.Call(func=ast.Name(id="__hpcagent_bench_zeros__", ctx=ast.Load()),
-                                               args=[ast.Constant(value="__reassign__")],
+                                               args=[
+                                                   ast.Constant(value="__reassign__"),
+                                                   ast.Constant(value=self_ref),
+                                               ],
                                                keywords=[]))
             self._reassign_shapes.setdefault(target.id, []).append(tuple(shape))
             out = [marker] + out
