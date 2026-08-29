@@ -767,6 +767,9 @@ def perf_sampling(spec) -> dict:
 _REF_PHRASE = {
     "numpy":
     "the NumPy reference",
+    "numba":
+    "the parallel Numba reference (the NumPy reference compiled by "
+    "@numba.njit(parallel=True))",
     "c":
     "the compiled C reference (NumpyToX-generated from the NumPy reference)",
     "both":
