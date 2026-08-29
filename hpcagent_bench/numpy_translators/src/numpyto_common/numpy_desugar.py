@@ -2291,8 +2291,9 @@ class _SearchsortedMaterialize(ast.NodeTransformer):
 class _HistogramHoister(ast.NodeTransformer):
     """Replace ``np.histogram(a, bins[, lo, hi][, weights=w])[0]`` with a fresh
     temp Name, emitting the numpy-histogram loop into ``self.pre``: a min/max scan
-    for the default range, then per-element binning ``b = int((a-lo)*bins/(hi-lo))``
-    clamped to ``[0, bins-1]`` accumulating ``1`` (or ``w[i]``). numba has no
+    for the default range, the ``np.linspace(lo, hi, bins + 1)`` edge array, then per-element
+    binning ``b = int((a-lo)*bins/(hi-lo))`` clamped to ``[0, bins-1]``, walked one step against
+    those edges (numpy's own correction) and accumulating ``1`` (or ``w[i]``). numba has no
     np.histogram; this is the same loop the C/Fortran backends lower (azimint_hist)."""
 
     def __init__(self, ctr: int):
@@ -2337,6 +2338,22 @@ class _HistogramHoister(ast.NodeTransformer):
             if not isinstance(weights, ast.Name):
                 lines.append(f"{wname} = {ast.unparse(weights)}")
             wdtype, add = f"{wname}.dtype", f"{wname}[{p}_i]"
+        # numpy's bin is defined by its EDGE ARRAY, not by the closed form below: it truncates
+        # the same index and then walks it one step against linspace's edges. The two round
+        # apart, and without the walk 6 of azimint_hist's 400000 fp32 samples land one bin over
+        # -- 0.2% on a bin ratio, past the fp32 band. So the edges are rebuilt with linspace's
+        # own arithmetic and, crucially, in the SAMPLE dtype, one rounding per statement: half
+        # an ulp of edge is worth ~20 misbinned samples at this count. Only edges 0..bins-1 are
+        # read (the walk up stops at bins-1), hence ``bins`` entries and no top edge.
+        edges = f"{p}_e"
+        lines += [
+            f"{edges} = np.zeros({bins}, {a}.dtype)",
+            f"{edges}[0] = ({hi_s} - {lo_s}) / {bins}",
+            f"{p}_st = {edges}[0]",
+            f"for {p}_j in range({bins}):",
+            f"    {edges}[{p}_j] = {p}_j * {p}_st",
+            f"    {edges}[{p}_j] = {edges}[{p}_j] + {lo_s}",
+        ]
         # numpy drops samples outside [lo, hi] (only the last bin is closed); the clamp alone
         # would fold them into bin 0 / bin-1 instead. Guard the increment. For an auto lo/hi
         # (a.min()/a.max()) every element is in range, so the guard is a no-op there.
@@ -2345,6 +2362,8 @@ class _HistogramHoister(ast.NodeTransformer):
             f"    if {lo_s} <= {a}[{p}_i] and {a}[{p}_i] <= {hi_s}:",
             f"        {p}_b = int(({a}[{p}_i] - {lo_s}) * {bins} / ({hi_s} - {lo_s}))",
             f"        if {p}_b < 0: {p}_b = 0", f"        if {p}_b > {bins} - 1: {p}_b = {bins} - 1",
+            f"        if {a}[{p}_i] < {edges}[{p}_b]: {p}_b = {p}_b - 1",
+            f"        if {p}_b < {bins} - 1 and {a}[{p}_i] >= {edges}[{p}_b + 1]: {p}_b = {p}_b + 1",
             f"        {temp}[{p}_b] += {add}"
         ]
         self.pre.extend(ast.parse("\n".join(lines)).body)

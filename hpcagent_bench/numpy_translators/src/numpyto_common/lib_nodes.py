@@ -5797,14 +5797,18 @@ def expand_cholesky(target: ast.expr,
 def expand_histogram(target: ast.expr,
                      args: List[ast.expr],
                      shape_table: Dict[str, Tuple[str, ...]],
-                     kwargs=None) -> List[ast.stmt]:
+                     kwargs=None,
+                     local_dtypes: Optional[Dict[str, str]] = None,
+                     fresh_local_allocs: Optional[Dict[str, Tuple[str, ...]]] = None) -> List[ast.stmt]:
     """``hist = np.histogram(a, bins[, range=(lo, hi)][, weights=w])[0]``.
     Implements the numpy histogram contract: if ``range`` is None, lo/hi come
     from an inline min/max pass; if ``weights=w`` is given, each element
     contributes ``w[i]`` instead of 1.0. Bin index: ``min(bins - 1, max(0, (a[i]
     - lo) * bins // (hi - lo)))`` -- the clamp is required because numpy's last
     bin is closed (``[edges[-2], edges[-1]]`` includes the right endpoint,
-    unlike every other half-open bin).
+    unlike every other half-open bin) -- then WALKED ONE STEP against the
+    materialised bin edges, which is what makes it equal to numpy's answer
+    rather than merely close to it (see the edge block below).
 
     Supported call shapes (positional + keyword): ``np.histogram(a, bins)``,
     ``np.histogram(a, bins, weights=w)``, ``np.histogram(a, bins, lo, hi)``,
@@ -5876,6 +5880,53 @@ def expand_histogram(target: ast.expr,
                 iter=ast.Call(func=_name("range"), args=[bins], keywords=[]),
                 body=zero_body,
                 orelse=[]))
+    # numpy's bin is defined by its EDGE ARRAY, not by the closed form below: it truncates the
+    # same index and then walks it one step against linspace's edges. The two round apart --
+    # probing every edge and one ulp either side, the closed form alone puts 248 of 3005 probes
+    # one bin over at bins=1000. The edges are therefore rebuilt with linspace's own arithmetic
+    # and, crucially, in the SAMPLE dtype, one rounding per statement -- which is why ``step``
+    # is parked in the buffer rather than left in a scalar a backend may evaluate wider. Only
+    # edges 0..bins-1 are read (the walk up stops at bins-1), hence no top edge.
+    #
+    # Named after the histogram it belongs to rather than from a running counter: a counter is
+    # process-global, so the name would depend on how many kernels the interpreter emitted first
+    # and two emitter runs would not agree byte for byte.
+    edges_name = f"__hedge_{target.id}"
+    step_name = f"__hstep_{target.id}"
+    bins_dim = ast.unparse(bins)
+    shape_table[edges_name] = (bins_dim, )
+    if local_dtypes is not None:
+        a_dt = local_dtypes.get(a.id)
+        if a_dt is not None:
+            local_dtypes[edges_name] = a_dt
+            local_dtypes[step_name] = a_dt
+    if fresh_local_allocs is not None:
+        fresh_local_allocs[edges_name] = (bins_dim, )
+
+    def edge_at(idx: ast.expr, ctx) -> ast.Subscript:
+        """``<edges>[idx]`` -- a FRESH Subscript per call; a shared node is renamed in place by
+        the Fortran emitter's loop-variable uniquifier (see expand_linalg_inv)."""
+        return ast.Subscript(value=_name(edges_name), slice=idx, ctx=ctx)
+
+    out.append(_alloc_marker(edges_name))
+    out.append(
+        ast.Assign(targets=[edge_at(_const(0), ast.Store())],
+                   value=ast.BinOp(left=ast.BinOp(left=copy.deepcopy(hi), op=ast.Sub(), right=copy.deepcopy(lo)),
+                                   op=ast.Div(),
+                                   right=copy.deepcopy(bins))))
+    out.append(ast.Assign(targets=[_store(step_name)], value=edge_at(_const(0), ast.Load())))
+    out.append(
+        ast.For(target=_store("__hj"),
+                iter=ast.Call(func=_name("range"), args=[copy.deepcopy(bins)], keywords=[]),
+                body=[
+                    ast.Assign(targets=[edge_at(_name("__hj"), ast.Store())],
+                               value=ast.BinOp(left=_name("__hj"), op=ast.Mult(), right=_name(step_name))),
+                    ast.Assign(targets=[edge_at(_name("__hj"), ast.Store())],
+                               value=ast.BinOp(left=edge_at(_name("__hj"), ast.Load()),
+                                               op=ast.Add(),
+                                               right=copy.deepcopy(lo))),
+                ],
+                orelse=[]))
     # Per-element binning. Bin index (truncated via ``int()``):
     #   bidx = min(bins - 1, max(0, int((a[i] - lo) * bins / (hi - lo))))
     # FloorDiv is wrong here since numerator/denominator are real-valued; numpy
@@ -5915,8 +5966,36 @@ def expand_histogram(target: ast.expr,
                               ast.Compare(left=copy.deepcopy(lo), ops=[ast.LtE()], comparators=[copy.deepcopy(a_i)]),
                               ast.Compare(left=copy.deepcopy(a_i), ops=[ast.LtE()], comparators=[copy.deepcopy(hi)]),
                           ])
+    # numpy's own two corrections, in its order: step down when the sample falls below its own
+    # bin's lower edge, then up when it reaches the next edge (never off the last bin).
+    walk_down = ast.If(test=ast.Compare(left=copy.deepcopy(a_i),
+                                        ops=[ast.Lt()],
+                                        comparators=[edge_at(_name("__bidx"), ast.Load())]),
+                       body=[
+                           ast.Assign(targets=[_store("__bidx")],
+                                      value=ast.BinOp(left=_name("__bidx"), op=ast.Sub(), right=_const(1)))
+                       ],
+                       orelse=[])
+    walk_up = ast.If(test=ast.BoolOp(
+        op=ast.And(),
+        values=[
+            ast.Compare(left=_name("__bidx"),
+                        ops=[ast.Lt()],
+                        comparators=[ast.BinOp(left=copy.deepcopy(bins), op=ast.Sub(), right=_const(1))]),
+            ast.Compare(
+                left=copy.deepcopy(a_i),
+                ops=[ast.GtE()],
+                comparators=[edge_at(ast.BinOp(left=_name("__bidx"), op=ast.Add(), right=_const(1)), ast.Load())]),
+        ]),
+                     body=[
+                         ast.Assign(targets=[_store("__bidx")],
+                                    value=ast.BinOp(left=_name("__bidx"), op=ast.Add(), right=_const(1)))
+                     ],
+                     orelse=[])
     bin_body = [
         ast.Assign(targets=[_store("__bidx")], value=clamp),
+        walk_down,
+        walk_up,
         ast.If(test=in_range,
                body=[
                    ast.AugAssign(target=ast.Subscript(value=_name(target.id), slice=_name("__bidx"), ctx=ast.Store()),
@@ -6269,35 +6348,37 @@ def expand_linalg_inv(target: ast.expr,
         value=_name(target.id), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Load())
     tgt_store = lambda r, c: ast.Subscript(
         value=_name(target.id), slice=ast.Tuple(elts=[r, c], ctx=ast.Load()), ctx=ast.Store())
-    K = _name("__inv_k")
-    P = _name("__inv_p")
-    R = _name("__inv_r")
-    C = _name("__inv_c")
-    F = _name("__inv_factor")
-    T = _name("__inv_tmp")
+    # Every use below is a FRESH node from this factory, never a shared one: the Fortran
+    # emitter's loop-variable uniquifier mutates Name nodes in place, and __inv_r / __inv_c each
+    # bind THREE separate sibling/nested loops here (pivot_scan+elim_outer; swap_loop+pivot_div+
+    # elim_inner_loop). A shared node's rename from the first loop stuck on every later occurrence,
+    # so elim_outer's body kept reading pivot_scan's row and swap_loop's column -- silently wrong
+    # data (not a crash) that only showed up as a numeric mismatch, and one build compiled from
+    # freed-then-realloc'd memory besides. See _FortranRenameTemps.visit_Name.
+    nm = lambda tag: _name(f"__inv_{tag}")
     # Pivot search.
-    pivot_init = ast.Assign(targets=[_store("__inv_p")], value=K)
+    pivot_init = ast.Assign(targets=[_store("__inv_p")], value=nm("k"))
     pivot_scan = ast.For(target=_store("__inv_r"),
                          iter=ast.Call(func=_name("range"),
-                                       args=[ast.BinOp(left=K, op=ast.Add(), right=_const(1)), n_ast],
+                                       args=[ast.BinOp(left=nm("k"), op=ast.Add(), right=_const(1)), n_ast],
                                        keywords=[]),
                          body=[
                              ast.If(test=ast.Compare(
-                                 left=ast.Call(func=_name("abs"), args=[aw(R, K)], keywords=[]),
+                                 left=ast.Call(func=_name("abs"), args=[aw(nm("r"), nm("k"))], keywords=[]),
                                  ops=[ast.Gt()],
-                                 comparators=[ast.Call(func=_name("abs"), args=[aw(P, K)], keywords=[])]),
-                                    body=[ast.Assign(targets=[_store("__inv_p")], value=R)],
+                                 comparators=[ast.Call(func=_name("abs"), args=[aw(nm("p"), nm("k"))], keywords=[])]),
+                                    body=[ast.Assign(targets=[_store("__inv_p")], value=nm("r"))],
                                     orelse=[])
                          ],
                          orelse=[])
     # Swap row p and row k in both aw and target.
     swap_body = [
-        ast.Assign(targets=[_store("__inv_tmp")], value=aw(K, C)),
-        ast.Assign(targets=[aw_store(K, C)], value=aw(P, C)),
-        ast.Assign(targets=[aw_store(P, C)], value=T),
-        ast.Assign(targets=[_store("__inv_tmp")], value=tgt(K, C)),
-        ast.Assign(targets=[tgt_store(K, C)], value=tgt(P, C)),
-        ast.Assign(targets=[tgt_store(P, C)], value=T),
+        ast.Assign(targets=[_store("__inv_tmp")], value=aw(nm("k"), nm("c"))),
+        ast.Assign(targets=[aw_store(nm("k"), nm("c"))], value=aw(nm("p"), nm("c"))),
+        ast.Assign(targets=[aw_store(nm("p"), nm("c"))], value=nm("tmp")),
+        ast.Assign(targets=[_store("__inv_tmp")], value=tgt(nm("k"), nm("c"))),
+        ast.Assign(targets=[tgt_store(nm("k"), nm("c"))], value=tgt(nm("p"), nm("c"))),
+        ast.Assign(targets=[tgt_store(nm("p"), nm("c"))], value=nm("tmp")),
     ]
     swap_loop = ast.For(target=_store("__inv_c"),
                         iter=ast.Call(func=_name("range"), args=[n_ast], keywords=[]),
@@ -6305,10 +6386,12 @@ def expand_linalg_inv(target: ast.expr,
                         orelse=[])
     # Divide pivot row by aw[k, k] -- stash it first since the loop overwrites
     # aw[k, k] itself before every use.
-    pivot_div_stash = ast.Assign(targets=[_store("__inv_factor")], value=aw(K, K))
+    pivot_div_stash = ast.Assign(targets=[_store("__inv_factor")], value=aw(nm("k"), nm("k")))
     pivot_div_body_safe = [
-        ast.Assign(targets=[tgt_store(K, C)], value=ast.BinOp(left=tgt(K, C), op=ast.Div(), right=F)),
-        ast.Assign(targets=[aw_store(K, C)], value=ast.BinOp(left=aw(K, C), op=ast.Div(), right=F)),
+        ast.Assign(targets=[tgt_store(nm("k"), nm("c"))],
+                   value=ast.BinOp(left=tgt(nm("k"), nm("c")), op=ast.Div(), right=nm("factor"))),
+        ast.Assign(targets=[aw_store(nm("k"), nm("c"))],
+                   value=ast.BinOp(left=aw(nm("k"), nm("c")), op=ast.Div(), right=nm("factor"))),
     ]
     pivot_div = [
         pivot_div_stash,
@@ -6318,15 +6401,16 @@ def expand_linalg_inv(target: ast.expr,
                 orelse=[]),
     ]
     # Eliminate other rows.
-    elim_factor = ast.Assign(targets=[_store("__inv_factor")], value=aw(R, K))
+    elim_factor = ast.Assign(targets=[_store("__inv_factor")], value=aw(nm("r"), nm("k")))
     elim_body_inner = [
-        ast.Assign(targets=[tgt_store(R, C)],
-                   value=ast.BinOp(left=tgt(R, C),
+        ast.Assign(targets=[tgt_store(nm("r"), nm("c"))],
+                   value=ast.BinOp(left=tgt(nm("r"), nm("c")),
                                    op=ast.Sub(),
-                                   right=ast.BinOp(left=F, op=ast.Mult(), right=tgt(K, C)))),
-        ast.Assign(targets=[aw_store(R, C)],
-                   value=ast.BinOp(left=aw(R, C), op=ast.Sub(), right=ast.BinOp(left=F, op=ast.Mult(), right=aw(K,
-                                                                                                                C)))),
+                                   right=ast.BinOp(left=nm("factor"), op=ast.Mult(), right=tgt(nm("k"), nm("c"))))),
+        ast.Assign(targets=[aw_store(nm("r"), nm("c"))],
+                   value=ast.BinOp(left=aw(nm("r"), nm("c")),
+                                   op=ast.Sub(),
+                                   right=ast.BinOp(left=nm("factor"), op=ast.Mult(), right=aw(nm("k"), nm("c"))))),
     ]
     elim_inner_loop = ast.For(target=_store("__inv_c"),
                               iter=ast.Call(func=_name("range"), args=[n_ast], keywords=[]),
@@ -6335,7 +6419,7 @@ def expand_linalg_inv(target: ast.expr,
     elim_outer = ast.For(target=_store("__inv_r"),
                          iter=ast.Call(func=_name("range"), args=[n_ast], keywords=[]),
                          body=[
-                             ast.If(test=ast.Compare(left=R, ops=[ast.NotEq()], comparators=[K]),
+                             ast.If(test=ast.Compare(left=nm("r"), ops=[ast.NotEq()], comparators=[nm("k")]),
                                     body=[elim_factor, elim_inner_loop],
                                     orelse=[])
                          ],
