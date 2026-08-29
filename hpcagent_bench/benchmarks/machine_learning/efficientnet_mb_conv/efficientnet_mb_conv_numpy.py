@@ -16,11 +16,10 @@ def im2col_conv(x, weight, stride, padding, oh, ow):
     """NCHW convolution as a single GEMM over the gathered kernel taps."""
     n, c_in, h, w = x.shape
     c_out, kh, kw = weight.shape[0], weight.shape[2], weight.shape[3]
-    if padding == 0:
-        padded = x
-    else:
-        padded = np.zeros((n, c_in, h + 2 * padding, w + 2 * padding), x.dtype)
-        padded[:, :, padding:padding + h, padding:padding + w] = x
+    # One shape either way: at padding == 0 the allocated extent IS the input's, so the
+    # copy-avoiding alias bound a second SPELLING of it and every read got one of the two.
+    padded = np.zeros((n, c_in, h + 2 * padding, w + 2 * padding), x.dtype)
+    padded[:, :, padding:padding + h, padding:padding + w] = x
     nhwc = np.transpose(padded, (0, 2, 3, 1))
     rows = n * oh * ow
     col = np.empty((rows, kh * kw * c_in), x.dtype)
@@ -37,11 +36,10 @@ def depthwise_core(x, weight, stride, padding, oh, ow):
     """groups == channels: a tap is a per-channel scale, so one reused scratch per tap."""
     n, c, h, w = x.shape
     kh, kw = weight.shape[2], weight.shape[3]
-    if padding == 0:
-        padded = x
-    else:
-        padded = np.zeros((n, c, h + 2 * padding, w + 2 * padding), x.dtype)
-        padded[:, :, padding:padding + h, padding:padding + w] = x
+    # One shape either way: at padding == 0 the allocated extent IS the input's, so the
+    # copy-avoiding alias bound a second SPELLING of it and every read got one of the two.
+    padded = np.zeros((n, c, h + 2 * padding, w + 2 * padding), x.dtype)
+    padded[:, :, padding:padding + h, padding:padding + w] = x
     acc = np.empty((n, c, oh, ow), x.dtype)
     scratch = np.empty((n, c, oh, ow), x.dtype)
     first = True

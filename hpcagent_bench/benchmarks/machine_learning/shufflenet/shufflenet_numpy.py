@@ -16,11 +16,10 @@ def im2col_conv(x, weight, stride, padding, oh, ow):
     """NCHW convolution as a single GEMM over the gathered kernel taps."""
     n, c_in, h, w = x.shape
     c_out, kh, kw = weight.shape[0], weight.shape[2], weight.shape[3]
-    if padding == 0:
-        padded = x
-    else:
-        padded = np.zeros((n, c_in, h + 2 * padding, w + 2 * padding), x.dtype)
-        padded[:, :, padding:padding + h, padding:padding + w] = x
+    # One shape either way: at padding == 0 the allocated extent IS the input's, so the
+    # copy-avoiding alias bound a second SPELLING of it and every read got one of the two.
+    padded = np.zeros((n, c_in, h + 2 * padding, w + 2 * padding), x.dtype)
+    padded[:, :, padding:padding + h, padding:padding + w] = x
     nhwc = np.transpose(padded, (0, 2, 3, 1))
     rows = n * oh * ow
     col = np.empty((rows, kh * kw * c_in), x.dtype)
@@ -37,11 +36,10 @@ def depthwise_core(x, weight, stride, padding, oh, ow):
     """groups == channels: a tap is a per-channel scale, so one reused scratch per tap."""
     n, c, h, w = x.shape
     kh, kw = weight.shape[2], weight.shape[3]
-    if padding == 0:
-        padded = x
-    else:
-        padded = np.zeros((n, c, h + 2 * padding, w + 2 * padding), x.dtype)
-        padded[:, :, padding:padding + h, padding:padding + w] = x
+    # One shape either way: at padding == 0 the allocated extent IS the input's, so the
+    # copy-avoiding alias bound a second SPELLING of it and every read got one of the two.
+    padded = np.zeros((n, c, h + 2 * padding, w + 2 * padding), x.dtype)
+    padded[:, :, padding:padding + h, padding:padding + w] = x
     acc = np.empty((n, c, oh, ow), x.dtype)
     scratch = np.empty((n, c, oh, ow), x.dtype)
     first = True
@@ -69,20 +67,17 @@ def bn_core(x, weight, bias, running_mean, running_var, eps):
 
 def maxpool_core(x, kernel, stride, padding, oh, ow):
     n, c, h, w = x.shape
-    if padding == 0:
-        padded = x
-    else:
-        # MaxPool2d pads with -inf, not zero: a zero pad would win over negative activations.
-        padded = np.full((n, c, h + 2 * padding, w + 2 * padding), -np.inf, x.dtype)
-        padded[:, :, padding:padding + h, padding:padding + w] = x
-    out = None
+    # One shape either way: at padding == 0 the allocated extent IS the input's, so the
+    # copy-avoiding alias bound a second SPELLING of it and every read got one of the two.
+    padded = np.full((n, c, h + 2 * padding, w + 2 * padding), -np.inf, x.dtype)
+    padded[:, :, padding:padding + h, padding:padding + w] = x
+    # Seeded at the identity rather than on the first tap: a None-seeded accumulator has no shape
+    # until that tap runs, so the name carried one shape at the top and another inside the loop.
+    out = np.full((n, c, oh, ow), -np.inf, x.dtype)
     for ky in range(kernel):
         for kx in range(kernel):
             patch = padded[:, :, ky:ky + (oh - 1) * stride + 1:stride, kx:kx + (ow - 1) * stride + 1:stride]
-            if out is None:
-                out = patch.copy()
-            else:
-                out[:] = np.maximum(out, patch)
+            out[:] = np.maximum(out, patch)
     return out
 
 
