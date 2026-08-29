@@ -2103,7 +2103,31 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # to a module-level symbol and drop it from the scalar params below (the caller binds it as a symbol).
     # Ordered: the loop below appends into ``symbol_names``, which IS the emitted dc.symbol
     # declaration block, so these have to keep the parameter order ``scalars`` came in.
-    shape_scalars = OrderedSet(s for s in scalars if s in shape_idents)
+    # A scalar used ONLY as a body extent -- lenet's ``C_before_fc1`` in
+    # ``np.reshape(x, (N, C_before_fc1))`` -- appears in no declared array shape, so the scan above
+    # never sees it and it stays a runtime scalar. DaCe cannot take a data descriptor as an extent:
+    # the frontend tries to mint a symbol of that name and collides with the descriptor already
+    # bound to it. Normalized on a COPY so both reshape spellings reach ``shape_argument`` in the
+    # one form it reads. A rebound name is excluded -- a dc.symbol is immutable, and a name cannot
+    # be both symbol and data.
+    body_probe = NormalizeReshape().visit(copy.deepcopy(kir.tree))
+    rebound = {n.id for n in ast.walk(body_probe) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    rebound |= {
+        n.value.id
+        for n in ast.walk(body_probe)
+        if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name)
+    }
+    body_shape_idents: set = set()
+    for node in ast.walk(body_probe):
+        shape_arg = shape_argument(node)
+        if shape_arg is None:
+            continue
+        elements = shape_arg.elts if isinstance(shape_arg, (ast.Tuple, ast.List)) else [shape_arg]
+        for element in elements:
+            for sub in ast.walk(element):
+                if isinstance(sub, ast.Name) and sub.id not in rebound:
+                    body_shape_idents.add(sub.id)
+    shape_scalars = OrderedSet(s for s in scalars if s in shape_idents or s in body_shape_idents)
     for s in shape_scalars:
         if s not in symbol_names:
             symbol_names.append(s)
