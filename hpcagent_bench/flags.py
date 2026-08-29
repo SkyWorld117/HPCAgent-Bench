@@ -49,16 +49,53 @@ class Mode(enum.Enum):
 # every framework that references it.
 # ---------------------------------------------------------------------------
 
-# Two deliberate defaults live here. (1) -ffast-math is OFF: its reassociation /
-# finite-math / reciprocal rewrites diverge from the NumPy reference and make
-# correctness grading flaky, so we do not pass it by default. The milder FP-relax
-# knobs below (no errno, no FP traps, no signed-zero preservation) are kept -- they let
-# the vectorizer reorder within IEEE value semantics without the unsafe fast-math
-# rewrites. (2) -fopenmp is ON: OpenMP is always available to the kernel; single-core
+# Two deliberate defaults live here. (1) -ffast-math is OFF, but its REASSOCIATION half is on
+# (see _FP_ASSOC): finite-math, reciprocal and approx-func rewrites change what a kernel computes
+# and stay refused, while reassociating a reduction is what the NumPy oracle itself does. The
+# FP-relax knobs below (no errno, no FP traps, no signed-zero preservation) are kept alongside it --
+# GCC requires the last two before it will honour -fassociative-math at all. (2) -fopenmp is ON: OpenMP is always available to the kernel; single-core
 # timing stays fair because flags.cpu_env pins OMP_NUM_THREADS=1 (parallelism only when
 # the mode is MULTI_CORE). clang pins the GNU runtime (-fopenmp=libgomp) to avoid its
 # often-absent default libomp; gcc/icpx/flang keep plain -fopenmp (own runtime present).
 _FP_RELAX = "-fno-math-errno -fno-trapping-math -fno-signed-zeros"
+
+#: Reassociation, pinned rather than left to each front end. This is a SCICOMP licence, not a
+#: fast-math one: it permits reordering a floating-point reduction and nothing else -- no
+#: finite-math assumption, no reciprocal substitution, no approximate intrinsics, all of which
+#: change the value a kernel computes and all of which stay refused.
+#:
+#: It is pinned because the front ends disagree about who already has it, and the disagreement was
+#: measured, not assumed (2026-08-29, gcc 16.1 / llvm 22.1.7, a float64 dot product):
+#:
+#:     gfortran  reassociates ALREADY at _FP_RELAX -- it reads -fno-signed-zeros plus
+#:               -fno-trapping-math as authorising it (its own Code Gen Options say so)
+#:     gcc (C)   does NOT: same two flags, same vendor, unroll 4 against gfortran's 16
+#:     clang     does NOT
+#:     flang     does NOT, and wants -fno-signed-zeros SPELLED OUT beside this flag --
+#:               -fassociative-math alone is silently insufficient (LLVM needs reassoc AND nsz
+#:               on the reduction), which is why FLANG_BASELINE names both
+#:
+#: Left unstated, that made the BASELINES unequal rather than the submissions: the same dot
+#: product, same compiler vendor, same flags, ran 3.72 ms in C and 1.20 ms in Fortran -- a 3.1x
+#: handicap on the C-vs-Fortran comparison that lived entirely in the flag list.
+#:
+#: The NumPy reference is the reason this is the right direction to equalise in. ``np.sum`` is
+#: PAIRWISE, not sequential: on 2^20 normals it differs from a strict left-to-right sum and lands
+#: 75x closer to the extended-precision answer (2.4e-07 vs 1.8e-05 absolute error). A baseline
+#: forced to sum sequentially is the one that diverges from the oracle.
+#:
+#: GCC refuses this flag unless -fno-signed-zeros and -fno-trapping-math are already in effect
+#: ("'-fassociative-math' disabled; other options take precedence"), so it must never appear
+#: without _FP_RELAX beside it.
+#:
+#: ``$HPCAGENT_BENCH_FP_ASSOCIATIVE=0`` takes it back out of every baseline. That exists for ONE
+#: reason: a campaign already part-run under the old matrix cannot pool with rows graded under this
+#: one, because the licence moves the BASELINE and every speedup is a ratio against it. An
+#: llr-focus40 arm resubmitted to complete an earlier wave must therefore set it, or its
+#: completions are measured against a faster reference than the rows they are completing. Read
+#: from the environment rather than config.get(): these are module-level constants built at import,
+#: which is before any config override a caller could install.
+_FP_ASSOC = "" if os.environ.get("HPCAGENT_BENCH_FP_ASSOCIATIVE", "1") == "0" else "-fassociative-math"
 
 #: FP contraction, pinned rather than inherited from each driver's default.
 #:
@@ -75,8 +112,8 @@ _FP_RELAX = "-fno-math-errno -fno-trapping-math -fno-signed-zeros"
 #: which is exactly the axis ``on`` is sensitive to and ``fast`` is not.
 #:
 #: This is not ``-ffast-math`` and does not imply it: contraction is the one relaxation IEEE
-#: itself sanctions (fma is a single correctly-rounded operation). Associative math stays
-#: rejected -- see the fast-math note above.
+#: itself sanctions (fma is a single correctly-rounded operation). Reassociation is granted
+#: separately and just as narrowly -- see :data:`_FP_ASSOC`.
 _FP_CONTRACT = "-ffp-contract=fast"
 
 #: nvc's spelling of the same thing. NVHPC has no ``-ffp-contract=``; ``-Mfma`` is the documented
@@ -124,14 +161,14 @@ OPT_LEVEL = "-O3"
 #: OpenMP is pinned to GNU ``libgomp`` (like POLLY_PAR/PLUTO_PAR -- clang's default
 #: ``libomp`` is a separate, frequently-absent package) and glibc's ``libmvec`` is added;
 #: on macOS both are dropped (neither exists there -- see the OS-aware pieces above).
-CPU_BASELINE_CLANG = (f"-O3 {ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} {_FP_CONTRACT} "
+CPU_BASELINE_CLANG = (f"-O3 {ARCH_NATIVE} {_OPENMP_CLANG} {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} "
                       f"-fstrict-aliasing -fPIC{_VECLIB_CLANG}")
 
 #: GCC baseline for C / C++: -O3 + native arch + OpenMP + vectorized libm (no fast-math).
 #: The libmvec half arrives as a decl header, not a flag -- gcc has no -fveclib. This line
 #: previously claimed "libmvec implicit on glibc"; it is not, and was not: glibc's decls
 #: need __FAST_MATH__, so gcc built every libm call scalar while clang vectorized it.
-CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_CONTRACT} "
+CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} "
                     f"-fstrict-aliasing -fPIC{_VECLIB_GCC}")
 
 #: GCC baseline for Fortran -- CPU_BASELINE_GCC minus the C decl header. gfortran cannot
@@ -142,12 +179,14 @@ CPU_BASELINE_GCC = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_CONTRACT} "
 #: pre-include is a distro spec, not upstream gcc, so it is a host property rather than
 #: something we can assert from here: tests/test_vecmath.py checks gfortran really does
 #: vectorize libm, and fails loudly on a host whose spec omits it.
-CPU_BASELINE_GFORTRAN = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_CONTRACT} "
+CPU_BASELINE_GFORTRAN = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} "
                          f"-fstrict-aliasing -fPIC")
 
-#: NVHPC baseline for C / C++ / Fortran. ``_FP_RELAX`` has no nvc spelling and needs none: nvc
-#: relaxes errno, trapping and signed zeros by default, and ``-Kieee`` is the flag that would turn
-#: that OFF. ``-tp=native`` is its ``-march=native``, ``-mp`` its host ``-fopenmp``.
+#: NVHPC baseline for C / C++ / Fortran. ``_FP_RELAX`` and ``_FP_ASSOC`` have no nvc spelling and
+#: need none: nvc relaxes errno, trapping and signed zeros AND reassociates by default, and
+#: ``-Kieee`` is the single flag that would turn all of that OFF -- so this line states the same
+#: licence the other baselines spell out, by not disabling it. ``-tp=native`` is its
+#: ``-march=native``, ``-mp`` its host ``-fopenmp``.
 CPU_BASELINE_NVHPC = f"-O3 -tp=native -mp {_FP_CONTRACT_NVHPC} -fPIC"
 
 #: nvc++ implements ``<execution>`` itself -- ``-stdpar=multicore`` is what makes ``par`` parallel,
@@ -172,7 +211,7 @@ NVHPC_OPT_REPORT = "-Minfo=all"
 #: (see ``_FP_CONTRACT``: every vendor contracts, or the columns are not comparable), so the notice
 #: is silenced here rather than printed once per translation unit. Nothing else about ``precise``
 #: is relaxed.
-CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -qopenmp {_FP_RELAX} {_FP_CONTRACT} "
+CPU_BASELINE_ICPX = (f"-O3 -xHost -fp-model=precise -qopenmp {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} "
                      f"-Wno-overriding-option -fPIC -qopt-zmm-usage=high")
 
 #: Appended to a PROFILED build (``Sandbox.build(debug=True)``, the /profile endpoint) so perf can
@@ -183,20 +222,33 @@ DEBUG_SYMBOLS: List[str] = ["-g"]
 
 #: Pythran transpiles Python to C++ then invokes the backend compiler,
 #: forwarding these flags to it. ``-DUSE_XSIMD`` selects pythran's xsimd
-#: vector backend; ``-march``/OpenMP/FP-relax match the CPU baseline -- and, like it,
-#: NO ``-ffast-math`` (its reassociation/finite-math rewrites diverge from NumPy).
+#: vector backend; ``-march``/OpenMP/FP-relax/reassociation/contraction match the CPU baseline --
+#: and, like it, NO ``-ffast-math``: its finite-math and reciprocal rewrites change the value,
+#: which reassociation alone does not.
 #: Kept here in the matrix so no framework string-literals the optimization
 #: flags itself (the no-literal invariant this module documents).
 #: ``_VECLIB_GCC`` rather than ``_VECLIB_CLANG``: pythran forwards these to whichever backend it
 #: was configured with, and the decl header is accepted by gcc AND clang while ``-fveclib`` is
 #: clang-only. Without it pythran was the one CPU column building libm scalar.
-PYTHRAN_BASELINE = f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX}{_VECLIB_GCC}"
+PYTHRAN_BASELINE = (f"-DUSE_XSIMD -fopenmp {ARCH_NATIVE} {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} "
+                    f"-fPIC{_VECLIB_GCC}")
 
 #: LLVM Fortran (``flang`` / ``flang-new``) baseline -- LLVM's Fortran front end,
 #: the Fortran companion to the clang C/C++ baseline (``CPU_BASELINE_CLANG``).
-#: Mirrors the clang intent (O3 + native arch + OpenMP + PIC; no fast-math -- see the
-#: CPU baseline note); flang does not accept every gcc FP-relax spelling.
-FLANG_BASELINE = f"-O3 {ARCH_NATIVE} -fopenmp {_FP_CONTRACT} -fPIC"
+#: Mirrors the clang intent (O3 + native arch + OpenMP + PIC; no fast-math -- see the CPU baseline
+#: note). The gcc FP-relax spellings mostly do not exist here, and the two that are absent are
+#: absent for a reason rather than an oversight (probed, flang 22.1.7): ``-fno-math-errno`` is
+#: rejected AND a no-op in Fortran -- gfortran's assembly is byte-identical with and without it,
+#: because Fortran intrinsics do not set errno -- and ``-fno-trapping-math`` has no accepted flang
+#: spelling at all (``-ffp-exception-behavior=`` is rejected too). ``-fno-signed-zeros`` IS accepted
+#: and is named here, not for its own sake but because LLVM will not vectorize a floating-point
+#: reduction on ``reassoc`` alone: without ``nsz`` beside it ``-fassociative-math`` is silently
+#: ignored and the loop stays scalar.
+#: ``-fno-signed-zeros`` rides WITH the licence, not beside it: it is here only to make
+#: ``-fassociative-math`` effective, so switching the licence off must take it out too or the
+#: opt-out does not reproduce the old matrix.
+_FP_ASSOC_FLANG = f"{_FP_ASSOC} -fno-signed-zeros" if _FP_ASSOC else ""
+FLANG_BASELINE = (f"-O3 {ARCH_NATIVE} -fopenmp {_FP_ASSOC_FLANG} {_FP_CONTRACT} -fPIC")
 
 #: flang's route to glibc's vector libm. Unlike gfortran -- which gets libmvec from the distro
 #: driver spec pre-including glibc's Fortran directives -- flang has no such spec, so the flag is
@@ -708,13 +760,13 @@ VECT_COST_NVHPC_OFF = "-Mnovect"
 #: submission's arithmetic differ from the NumPy oracle it is graded against -- and from the CPU
 #: baseline it is compared against -- while the prompt promised agents that fast-math is never
 #: passed. ``_FP_RELAX`` is the whole of the licence, on either side of the PCIe bus.
-CUDA_BASELINE = (f"-O3 -Xcompiler='-O3 -march=native {_FP_RELAX} -fPIC'")
+CUDA_BASELINE = (f"-O3 -Xcompiler='-O3 -march=native {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} -fPIC'")
 
 #: HIP (AMD) baseline -- hipcc is clang-based and takes the relax flags natively (no
 #: ``-Xcompiler``), so one spelling covers its host and device passes. ``--offload-arch=<gfx>``
 #: is appended per-host by :func:`compose_hip` after :func:`detect_gfx`. No ``-ffast-math``, for
 #: the reason on :data:`CUDA_BASELINE`.
-HIP_BASELINE = (f"-O3 -march=native {_FP_RELAX} -fPIC")
+HIP_BASELINE = (f"-O3 -march=native {_FP_RELAX} {_FP_ASSOC} {_FP_CONTRACT} -fPIC")
 
 # Directive-offload flag sets; ``{arch}`` filled by :func:`languages.offload_flags` from the arch
 # :func:`languages.offload_arch` PROBED, never from a constant. One toolchain owns each model:
