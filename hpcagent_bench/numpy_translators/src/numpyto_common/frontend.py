@@ -43,7 +43,8 @@ from numpyto_common.numpy_desugar import (_ComplexAccessorToFunc, _DecomposeRoll
                                           _EighCallHoister, _EighLoopRewriter, _ElementalUfuncToPrimitive, _is_newaxis,
                                           _FillDiagonalInline, _SpliceErrstate, _UfuncOutInline, _UfuncReduceToReducer,
                                           REDUCE_FNS, _eigh_alias_names, _kind_of_dtype_str, expr_rank, fold_finfo_eps,
-                                          rank_table, rewrite_curve_fit)
+                                          extent_tokens, name_value_pairs, rank_table, rewrite_curve_fit,
+                                          shape_table)
 from numpyto_common.tuple_desugar import desugar_tuples
 
 
@@ -806,6 +807,33 @@ def emit_with_inline_fallback(run):
         return run()
 
 
+#: Identifiers inside a manifest shape expression (``(out_channels, in_channels // groups, k)``).
+SHAPE_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def pinned_config_in_use(pinned: Dict[str, Any], fn: ast.FunctionDef, arrays: List[ArrayDesc],
+                         input_args: List[str]) -> Dict[str, Any]:
+    """The pinned config knobs this kernel names, anywhere -- signature, body, or a declared shape.
+
+    A knob reached ONLY through a declared shape is the case that matters. conv_standard_1d's
+    ``conv1d_weight`` is ``(out_channels, in_channels // groups, kernel_size)``, so ``groups`` is
+    absent from the signature at parse time; matching against ``input_args`` alone dropped it from
+    :attr:`KernelIR.pinned_consts`, lowering's shape-symbol promotion then made it a runtime symbol,
+    and it entered the emitted ABI. :func:`bindings.contract` reads the whole of
+    ``BenchSpec.pinned_config`` and never passes it, so every positional argument after it shifted.
+    40 kernels, the conv family and both seissol ports.
+
+    Still a filter and not the whole dict: a knob nothing names must not become a file-scope
+    ``constexpr`` no translation unit reads.
+    """
+    used = set(input_args)
+    used.update(node.id for node in ast.walk(fn) if isinstance(node, ast.Name))
+    for arr in arrays:
+        for tok in arr.shape:
+            used.update(SHAPE_IDENT.findall(str(tok)))
+    return {n: v for n, v in pinned.items() if n in used}
+
+
 def build_kernel_ir(numpy_py: pathlib.Path,
                     bench_info: pathlib.Path,
                     config: Optional[str] = None,
@@ -1105,6 +1133,19 @@ def build_kernel_ir(numpy_py: pathlib.Path,
             _s = legacy_shapes.get(_a)
         if _s is not None:
             _input_array_shapes[_a] = _s if isinstance(_s, str) else str(_s)
+
+    # Every ``x.shape[k]`` becomes the extent the manifest declares. The emitted kernel has no
+    # descriptor beside its buffers to read a shape out of, and one that survives here forks the
+    # spelling of an extent the ABI already carries by name -- see :func:`resolve_shape_reads`.
+    # Runs after the tuple fold, so a whole ``x.shape`` is already per-axis subscripts. The dtype
+    # is a placeholder: only the shape half of the resolver's answer is read.
+    _shape_env = {
+        n: ArrayDesc(name=n, dtype="float64", shape=_parse_shape_expression(s), is_output=n in output_args)
+        for n, s in _input_array_shapes.items()
+    }
+    # The reads it could not resolve come back for the caller to report; nothing consumes
+    # them yet, so an unresolved read still reaches the pass that owns its refusal.
+    resolve_shape_reads(fn, _shape_env)
     # Synthesise temps for computed (non-Name) returns -- ``return A @ x``
     # -> ``__out0 = A @ x; return __out0`` -- so they promote like
     # ``return X``. ``_revert_return`` undoes this if a shape can't be
@@ -1282,10 +1323,7 @@ def build_kernel_ir(numpy_py: pathlib.Path,
         # Pinned config knobs stay in ``symbols``/``scalars`` (the body reads them by name and
         # lowering has to resolve them) but leave the ABI: they are compile-time constants the
         # native emitters declare (see :attr:`KernelIR.pinned_consts`).
-        pinned_consts={
-            n: v
-            for n, v in (info.get("pinned_config") or {}).items() if n in input_args
-        },
+        pinned_consts=pinned_config_in_use(info.get("pinned_config") or {}, fn, arrays, input_args),
     )
     # Helpers that survived the inlining fixpoint as CALLS (an early ``return`` /
     # recursion blocks inlining) become their own native functions -- the early
@@ -2330,8 +2368,13 @@ class _FoldTupleLocals(ast.NodeTransformer):
     local into its uses and fold ``(a, b) + (c,)`` concatenation to a single
     literal ``(a, b, c)`` so ``reshape`` sees an ordinary shape tuple.
 
-    Conservative: only a top-level ``name = <Tuple>`` bound exactly once and not
-    a parameter is inlined.
+    Conservative: only a ``name = <Tuple>`` bound exactly once and not a parameter is inlined, and
+    only when the tuple is built from values that do not change under a loop. A binding NESTED in a
+    loop counts: ls3df_scf's ``shp = Y.shape`` sits in the per-fragment loop, and a top-level-only
+    scan left ``reshape(shp)`` reading a name that both the rank table and the extent oracle then
+    sized as a single dimension. What makes that safe to lift out of the loop is the second half of
+    the rule -- an element naming a loop VARIABLE has a different value each iteration, so the
+    definition and its uses are not interchangeable and the local stays.
     """
 
     def __init__(self, params) -> None:
@@ -2339,15 +2382,23 @@ class _FoldTupleLocals(ast.NodeTransformer):
         self.subst: Dict[str, ast.Tuple] = {}
 
     def collect(self, fn: ast.FunctionDef) -> None:
+        loop_vars = {
+            n.id
+            for node in ast.walk(fn) if isinstance(node, (ast.For, ast.comprehension))
+            for n in ast.walk(node.target) if isinstance(n, ast.Name)
+        }
         binds: Dict[str, int] = {}
-        for s in fn.body:
+        for s in ast.walk(fn):
             if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
                 binds[s.targets[0].id] = binds.get(s.targets[0].id, 0) + 1
-        for s in fn.body:
-            if (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
+        for s in ast.walk(fn):
+            if not (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
                     and isinstance(s.value, ast.Tuple) and s.targets[0].id not in self.params
                     and binds.get(s.targets[0].id) == 1):
-                self.subst[s.targets[0].id] = s.value
+                continue
+            if any(n.id in loop_vars for n in ast.walk(s.value) if isinstance(n, ast.Name)):
+                continue
+            self.subst[s.targets[0].id] = s.value
 
     def visit_Assign(self, node: ast.Assign):
         if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in self.subst
@@ -2367,6 +2418,21 @@ class _FoldTupleLocals(ast.NodeTransformer):
         if isinstance(node.op, ast.Add) and isinstance(node.left, ast.Tuple) and isinstance(node.right, ast.Tuple):
             return ast.copy_location(ast.Tuple(elts=[*node.left.elts, *node.right.elts], ctx=ast.Load()), node)
         return node
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        """``shp[-1]`` on a literal the substitution just produced -> that element.
+
+        Inlining ``shp`` is what creates the pattern: ``k = shp[-1]`` becomes ``k = (a, b, c, d)[-1]``,
+        and nothing downstream reads a tuple, so the index has to be taken here or the substitution
+        trades a tuple-valued name for a tuple-valued expression.
+        """
+        self.generic_visit(node)
+        if not isinstance(node.value, ast.Tuple):
+            return node
+        axis = _literal_axis(node.slice)
+        if axis is None or axis >= len(node.value.elts) or axis < -len(node.value.elts):
+            return node
+        return ast.copy_location(copy.deepcopy(node.value.elts[axis]), node)
 
 
 def _resolve_call_args(call: ast.Call, helper: ast.FunctionDef) -> Optional[List[ast.expr]]:
@@ -3043,8 +3109,16 @@ def _apply_subscript_axes(dims: List, sub_slice: ast.AST) -> List:
     """Result shape of subscripting a ``dims``-shaped array with ``sub_slice``:
     a full-``Slice`` axis keeps its dimension, an integer/scalar index drops it,
     and any trailing un-indexed axes are kept. ``dims`` may be shape-strings or
-    AST exprs -- they are passed through untouched, only selected/dropped."""
+    AST exprs -- they are passed through untouched, only selected/dropped.
+
+    ``...`` stands for as many whole axes as are left unindexed, so it is expanded to them first.
+    Read positionally it lands on the wrong end of the array: ls3df_scf's ``psi_frag[f][..., 0]``
+    selects the first state of every point and came back as the first two axes instead, which is a
+    wrong rank AND a wrong extent, reported by nothing downstream."""
     axes = sub_slice.elts if isinstance(sub_slice, ast.Tuple) else [sub_slice]
+    ell = [i for i, ax in enumerate(axes) if isinstance(ax, ast.Constant) and ax.value is Ellipsis]
+    if ell:
+        axes = axes[:ell[0]] + [ast.Slice()] * max(0, len(dims) - (len(axes) - 1)) + axes[ell[0] + 1:]
     kept = [dim for ax, dim in zip(axes, dims) if isinstance(ax, ast.Slice)]
     kept.extend(dims[len(axes):])
     return kept
@@ -3165,7 +3239,11 @@ def _resolve_array_ref(fn: ast.FunctionDef,
     ``__inl1_out = np.zeros(...)`` is itself the inlined callee's renamed return buffer), so a
     single-hop check stops one alias short and mistypes the arg/target as a scalar.
     """
-    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+    if isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Subscript)):
+        # A CHAIN of subscripts is one too: ls3df_scf's ``psi_frag[f][..., 0]`` picks a fragment
+        # and then its first state. Stopping at a Name base left the whole chain unresolved, and
+        # every extent read off the local it binds was then spelled ``local.shape[k]`` instead of
+        # the declared symbol.
         base = _resolve_array_ref(fn, node.value, arr_by, seen)
         if base is None:
             return None
@@ -3190,6 +3268,230 @@ def _resolve_array_ref(fn: ast.FunctionDef,
         if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                 and stmt.targets[0].id == name):
             return _resolve_array_ref(fn, stmt.value, arr_by, seen)
+    return None
+
+
+def resolve_shape_reads(fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> List[str]:
+    """Rewrite every ``x.shape[k]`` in ``fn`` to the extent the manifest already declares for it.
+
+    A shape read is not a value the emitted kernel can compute: the extents live in the ABI as
+    symbols, not in a descriptor beside the buffer. Every backend therefore needs the read gone
+    before it emits, and the extent is always available -- the manifest declares a shape for every
+    array (646 manifests, 6118 arrays, none without one), and :func:`_resolve_array_ref` carries
+    that shape through allocations, aliases and slices to the local doing the reading.
+
+    Left in place the read does not fail, it forks the SPELLING. ls3df_scf's ``v`` is ``(Lb, Lb,
+    Lb)`` on the way in and ``(__inl2_vcol.shape[0], __inl2_nb1, __inl2_nb2)`` after a round trip
+    through ``hpsi``; the two are the same three extents, so lowering's rebind check reads one name
+    bound to two shapes and refuses a kernel that has only ever had one.
+
+    Runs to a fixpoint -- a local's own shape can be spelled with a shape read of its own -- and
+    returns the reads that did not resolve, for the caller to report. Nothing is guessed: an
+    unresolved read stays as it is.
+    """
+
+    seed = {n: tuple(str(s) for s in a.shape) for n, a in arr_by.items()}
+    # Store context, not "an Assign whose target is a Name": the CheFSI swap
+    # ``X, Y, sigma = Y, Ynew, sigma_new`` rebinds all three through a TUPLE target, and counting
+    # only Name targets reported every one of them as bound exactly once.
+    binds: Dict[str, int] = {}
+    for stmt in ast.walk(fn):
+        if isinstance(stmt, ast.Name) and isinstance(stmt.ctx, (ast.Store, ast.Del)):
+            binds[stmt.id] = binds.get(stmt.id, 0) + 1
+    rebound = frozenset(n for n, c in binds.items() if c > 1)
+    tuple_locals = frozenset(n for n, v in name_value_pairs(fn) if isinstance(v, (ast.Tuple, ast.List)))
+
+    class Rewriter(ast.NodeTransformer):
+
+        def __init__(self, shapes: Dict[str, Tuple[str, ...]]) -> None:
+            self.shapes = shapes
+            self.changed = False
+            self.unresolved: List[str] = []
+
+        def extent(self, node: ast.expr) -> Optional[Tuple[str, ...]]:
+            try:
+                return resolve_extent_of(fn, node, arr_by, self.shapes, rebound, tuple_locals)
+            except NotImplementedError:
+                # The resolver refuses a construct it cannot type (an unresolvable ``dtype=``
+                # expression). This pass only reads the shape half of its answer and must not
+                # decide which kernels are refused: leave the read alone and let the refusal fire
+                # at the site that owns it.
+                return None
+
+        def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+            base = node.value
+            if not (isinstance(base, ast.Attribute) and base.attr == "shape"):
+                self.generic_visit(node)
+                return node
+            # Resolved BEFORE descending, and left whole when it does not resolve: ``visit_Attribute``
+            # would otherwise expand the ``.shape`` underneath into a tuple literal, and a
+            # non-literal axis would be left indexing that tuple at run time -- which is the runtime
+            # tuple this whole pass exists to remove.
+            axis = _literal_axis(node.slice)
+            shape = self.extent(base.value) if axis is not None else None
+            if shape is None or axis >= len(shape) or axis < -len(shape):
+                self.unresolved.append(ast.unparse(node))
+                return node
+            self.changed = True
+            return ast.copy_location(ast.parse(str(shape[axis]), mode="eval").body, node)
+
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            """A WHOLE ``x.shape`` becomes the tuple of its declared extents.
+
+            Reaching only ``x.shape[k]`` leaves the bare read standing as a name with no rank, and
+            ls3df_scf's ``shp = Y.shape; ... .reshape(shp)`` is what that costs: both the rank table
+            and the extent oracle read the tuple-valued local as ONE dimension, so the reshaped
+            block came back rank 1 and every extent derived from it was built on that.
+            """
+            self.generic_visit(node)
+            if node.attr != "shape":
+                return node
+            shape = self.extent(node.value)
+            if shape is None:
+                self.unresolved.append(ast.unparse(node))
+                return node
+            self.changed = True
+            elts = [ast.parse(str(tok), mode="eval").body for tok in shape]
+            return ast.copy_location(ast.Tuple(elts=elts, ctx=ast.Load()), node)
+
+    # The table and the rewrite are one fixpoint, not two passes: a local's own extent can be
+    # spelled through a shape read, so the table cannot be built until that read is rewritten, and
+    # the read cannot be rewritten until the table knows the local. Each round rebuilds the table
+    # from a body whose reads are one level more resolved than the last.
+    #
+    # The tuple fold belongs INSIDE the loop for the same reason. ls3df_scf binds ``shp = Y.shape``
+    # and reshapes with it; until that tuple is inlined the extent oracle sees ``reshape(shp)`` and
+    # reads the tuple-valued name as a SINGLE dimension, so the block came back rank 1 and the wrong
+    # rank was then substituted into every shape read that resolved against it.
+    params = {a.arg for a in fn.args.args}
+    for _ in range(8):
+        rw = Rewriter(shape_table(fn, seed))
+        rw.visit(fn)
+        ast.fix_missing_locations(fn)
+        folder = _FoldTupleLocals(params)
+        folder.collect(fn)
+        folder.visit(fn)
+        ast.fix_missing_locations(fn)
+        fold_extent_locals(fn, arr_by)
+        if not rw.changed:
+            break
+    return rw.unresolved
+
+
+def resolve_extent_of(fn: ast.FunctionDef,
+                      node: ast.expr,
+                      arr_by: Dict[str, ArrayDesc],
+                      shapes: Dict[str, Tuple[str, ...]],
+                      rebound: FrozenSet[str] = frozenset(),
+                      tuple_locals: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, ...]]:
+    """Shape tokens of an array-valued expression, forward table first, or ``None``.
+
+    Shape only. :func:`_resolve_array_ref` answers with a dtype as well and stays the fallback for
+    what the table cannot hold, but the forward table has no dtype to give and no caller here needs
+    one -- inventing a placeholder to fit that signature would put a wrong dtype within reach of
+    every other caller of it.
+
+    A NAME is the table's to answer or nobody's. The fallback walks BACKWARD to the first
+    definition it reaches, which is not a second opinion about a name with several -- it is one
+    binding's answer given for all of them. ls3df_scf's ``X`` is bound by two Rayleigh-Ritz calls;
+    answering from the first wrote that shape into the second, and once written the fixpoint cannot
+    take it back. Everything the walk knew about a name -- allocations, aliases, chains -- the
+    forward table derives anyway, and derives it from every binding rather than one.
+    """
+
+    def usable(shape: Optional[Tuple[str, ...]]) -> Optional[Tuple[str, ...]]:
+        # Same two rejects as the table's own: a token still spelled as a shape read is the extent
+        # under another name, and a token naming a tuple-valued local is a whole rank collapsed
+        # into one dimension.
+        if shape is None:
+            return None
+        toks = tuple(str(t) for t in shape)
+        return None if any(".shape" in t or t in tuple_locals for t in toks) else toks
+
+    if isinstance(node, ast.Name):
+        if node.id in arr_by:
+            return tuple(str(s) for s in arr_by[node.id].shape)
+        got = shapes.get(node.id)
+        return tuple(got) if got is not None else None
+    elif isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Subscript)):
+        base = resolve_extent_of(fn, node.value, arr_by, shapes, rebound, tuple_locals)
+        if base is not None:
+            kept = _apply_subscript_axes(list(base), node.slice)
+            if kept:
+                return tuple(kept)
+    else:
+        ext = extent_tokens(node, shapes, tuple_locals)
+        if ext is not None:
+            return ext
+    res = _resolve_array_ref(fn, node, arr_by)
+    return usable(None if res is None else res[0])
+
+
+def fold_extent_locals(fn: ast.FunctionDef, arr_by: Dict[str, ArrayDesc]) -> None:
+    """Substitute away a scalar local that is bound once to a declared extent.
+
+    Resolving the reads is only half of it. ls3df_scf's ``nb0, nb1, nb2 = v.shape`` becomes three
+    locals, and once each is ``Lb`` the local is a second NAME for an extent the ABI already
+    carries -- so the buffer allocated from them keeps being described as ``(nb0, nb1, nb2)`` while
+    the same buffer coming the other way is ``(Lb, Lb, Lb)``, and the rebind check sees two shapes.
+
+    The substitution is safe exactly when the local is bound once, to an expression built only from
+    the symbols the manifest declares. Those are free ABI symbols, constant for the whole call, so
+    the name and its definition are interchangeable at every use. Anything rebound, augmented, or
+    bound by a loop or a comprehension is left alone -- it is not that.
+    """
+    symbols = {ident for a in arr_by.values() for tok in a.shape for ident in SHAPE_IDENT.findall(str(tok))}
+    if not symbols:
+        return
+    # Store context, not "a name somewhere in a target": ``row[i % nb0] += w`` writes ``row`` and
+    # only READS ``nb0``, so counting the whole target subtree makes an index look rebound.
+    bound: Dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound[node.id] = bound.get(node.id, 0) + 1
+    params = {a.arg for a in fn.args.args}
+    defs: Dict[str, ast.expr] = {}
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+            continue
+        name = node.targets[0].id
+        if name in params or name in arr_by or bound.get(name, 0) != 1:
+            continue
+        # A single declared SYMBOL, not any expression built out of declared symbols. This pass
+        # exists to collapse a second NAME for one extent (``nb0`` after ``nb0 = v.shape[0]``
+        # resolved to ``Lb``); an expression is a derived quantity that was never a shape read, and
+        # folding it rewrites arithmetic the kernel spelled deliberately -- ``H_out = H - K + 1``
+        # passed the old gate because ``H`` and ``K`` are both shape identifiers.
+        if isinstance(node.value, ast.Name) and node.value.id in symbols:
+            defs[name] = node.value
+    if not defs:
+        return
+
+    class Folder(ast.NodeTransformer):
+
+        def visit_Assign(self, node: ast.Assign) -> ast.AST:
+            # The defining store itself keeps its name; a dead scalar store costs nothing and
+            # removing it here would race the passes that still read the definition.
+            node.value = self.visit(node.value)
+            return node
+
+        def visit_Name(self, node: ast.Name) -> ast.AST:
+            src = defs.get(node.id)
+            if src is None or not isinstance(node.ctx, ast.Load):
+                return node
+            return ast.copy_location(ast.parse(ast.unparse(src), mode="eval").body, node)
+
+    Folder().visit(fn)
+    ast.fix_missing_locations(fn)
+
+
+def _literal_axis(sl: ast.expr) -> Optional[int]:
+    """The integer axis of a ``.shape[k]`` read, or ``None`` when it is not a literal one."""
+    if isinstance(sl, ast.Constant) and isinstance(sl.value, int) and not isinstance(sl.value, bool):
+        return sl.value
+    if (isinstance(sl, ast.UnaryOp) and isinstance(sl.op, ast.USub) and isinstance(sl.operand, ast.Constant)
+            and isinstance(sl.operand.value, int)):
+        return -sl.operand.value
     return None
 
 
@@ -3273,6 +3575,16 @@ def _infer_param_desc(arg: ast.AST, pname: str, arr_by, sca_by, sym_by, fn=None)
         if isinstance(arg.value, int):
             return ("scalar", ScalarDesc(name=pname, dtype="int"))
         return ("scalar", ScalarDesc(name=pname, dtype="float64"))
+    if fn is not None:
+        # An array-valued EXPRESSION argument (mlp's ``relu(x @ w2 + b2)``). Only Name and
+        # Subscript reached the resolver above, so every other node fell to the scalar default
+        # below and the helper declared a by-value double where the call passes a buffer --
+        # ``Rank mismatch in argument 'v' (scalar and rank-2)``, and in C a pointer added to a
+        # double. :func:`_shape_from_expression` behind the resolver already derives this.
+        res = _resolve_array_ref(fn, arg, arr_by)
+        if res is not None:
+            shape, dtype = res
+            return ("array", ArrayDesc(name=pname, dtype=dtype, shape=shape, is_output=False))
     # A negated / arithmetic scalar expression -- default to double.
     return ("scalar", ScalarDesc(name=pname, dtype="float64"))
 
@@ -3575,7 +3887,8 @@ def _build_callsite_stmts(lhs,
                           hret_shape,
                           hret_dtype,
                           hidx,
-                          inout=False):
+                          inout=False,
+                          live_buffers=frozenset()):
     """Replacement statements for an array-returning helper call.
 
     Slice / non-bare array args are first materialised into contiguous temps (a
@@ -3588,6 +3901,15 @@ def _build_callsite_stmts(lhs,
     writes one parameter, so it holds ONE ABI slot and the call passes the pointer once.
     Appending it a second time is what emitted ``_maxpool2d(h, h, n)`` -- two ``restrict``
     pointers to the same buffer, which is undefined behaviour, not a redundant argument.
+
+    ``live_buffers`` names the parent's declared arrays. A bare target that is NOT one of them is a
+    fresh local -- mlp's ``x = relu(input @ w1 + b1)``, squeezenet's ``__hcall1`` -- and passing it
+    as the out-param without allocating it left the name bound to nothing: no Store anywhere, so
+    ``_promote_free_names_to_params`` rescued it as a scalar int PARAMETER. It then entered the
+    emitted ABI the binding never passes, and the C call handed an integer to a pointer dummy
+    (``passing argument 1 of 'build_up_b' makes pointer from integer without a cast``). Allocate it
+    here instead, AFTER ``pre`` -- the argument temps read the target's previous value on a rebind
+    (``x = relu(x @ w2 + b2)``), so an allocation ahead of them would clobber what they read.
     """
     pre: List[str] = []
     call_srcs: List[str] = []
@@ -3609,7 +3931,13 @@ def _build_callsite_stmts(lhs,
     # stores it.
     if isinstance(lhs, ast.Name):
         if not inout:
+            # A target the call still READS is a rebinding of a buffer that already exists
+            # (``x = relu(x @ w2 + b2)``); allocating it here would clear what the call is about to
+            # read. Only a target nothing reads is a first binding that needs the buffer.
+            reads = {ident for src in call_srcs for ident in SHAPE_IDENT.findall(src)}
             call_srcs.append(lhs.id)
+            if lhs.id not in live_buffers and lhs.id not in reads:
+                pre.append(f"{lhs.id} = np.empty(({', '.join(hret_shape)},), dtype=np.{hret_dtype})")
         return ast.parse("\n".join(pre + [f"{name}({', '.join(call_srcs)})"])).body
     tmp = f"__hret_tmp_{hidx}"
     call_srcs.append(tmp)
@@ -4183,7 +4511,8 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
                                                                     hret_shape,
                                                                     hret_dtype,
                                                                     f"{hidx}_{sidx}" if sidx else hidx,
-                                                                    inout=inout_param is not None)
+                                                                    inout=inout_param is not None,
+                                                                    live_buffers=frozenset(arr_by))
     if callsite_rewrites:
         _ReplaceStmts(callsite_rewrites).visit(kernel_fn)
         ast.fix_missing_locations(kernel_fn)

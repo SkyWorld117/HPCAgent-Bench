@@ -14,13 +14,14 @@ parsed :class:`KernelIR` (declared arrays) plus a light local-allocation walk
 rank > 2) from an ordinary 2-D one (which numba / pythran handle).
 """
 import ast
+import re
 import copy
 import math
 from collections.abc import Sequence
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from numpyto_common import dtypes
-from numpyto_common.lib_nodes import _parse_einsum_subscripts
+from numpyto_common.lib_nodes import _iter_extent_of, _parse_einsum_subscripts, extent_is_scalar
 from numpyto_common.ordered import OrderedSet
 
 
@@ -344,6 +345,117 @@ def _call_return_rank(value: ast.AST, call_returns: Dict[str, int]) -> Optional[
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
         return call_returns.get(value.func.id)
     return None
+
+
+#: An identifier inside a shape token, so a declared extent can be told from an array name.
+IDENT_RE = r"[A-Za-z_][A-Za-z0-9_]*"
+
+
+def name_value_pairs(tree: ast.AST) -> Iterator[Tuple[str, ast.expr]]:
+    """Every ``name = <expr>`` binding, including the elements of a parallel tuple assignment.
+
+    ``X, Y, sigma = Y, Ynew, sigma_new`` is three bindings, not none. Skipping it left ls3df_scf's
+    CheFSI recurrence with no forward edge from ``Y`` back to ``X``, so the loop-carried block never
+    took an extent and every shape read against it fell through to a backward walk that answers a
+    rebound name from whichever definition it reaches first.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            yield target.id, node.value
+        elif (isinstance(target, ast.Tuple) and isinstance(node.value, ast.Tuple)
+              and len(target.elts) == len(node.value.elts)):
+            for t, v in zip(target.elts, node.value.elts):
+                if isinstance(t, ast.Name):
+                    yield t.id, v
+
+
+def extent_tokens(value: ast.AST,
+                  table: Dict[str, Tuple[str, ...]],
+                  tuple_locals: FrozenSet[str] = frozenset(),
+                  arrays: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, ...]]:
+    """``value``'s shape as unparsed tokens, or ``None`` when this round cannot say.
+
+    An extent still spelled through a ``.shape`` read is reported as unknown rather than recorded:
+    it is the SAME extent as the declared one under a different name, and recording it would make
+    the two bindings of one local look like a disagreement and drop the local entirely. The joint
+    fixpoint in :func:`resolve_shape_reads` re-reads it once the read has been rewritten.
+
+    ``tuple_locals`` names the locals bound to a tuple. A shape argument spelled as a bare name --
+    ``x.reshape(shp)`` -- is read as a single dimension, which is right for a scalar and a whole
+    rank off for a tuple, and a rank-1 answer here is worse than no answer: it propagates. The
+    fold inlines those tuples, so this only catches one that could not be.
+    """
+    # An operand this round cannot size makes the whole expression unsized. The oracle does not say
+    # so: a broadcast with one unknown side reports the KNOWN side's extent, which is right for
+    # ``x * 2.0`` and a whole wrong shape for ``vloc[..., None] * X`` while ``X`` is still unknown.
+    # Only ARRAY operands count -- a scalar contributes no axis and is unknown to the table by
+    # nature, so requiring it here would refuse every array-scalar expression in the corpus.
+    if any(n.id in arrays and n.id not in table for n in ast.walk(value) if isinstance(n, ast.Name)):
+        return None
+    ext = _iter_extent_of(value, table)
+    if ext is None or extent_is_scalar(ext):
+        return None
+    toks = tuple(ast.unparse(e) for e in ext)
+    if any(".shape" in t for t in toks):
+        return None
+    return None if any(t in tuple_locals for t in toks) else toks
+
+
+def shape_table(tree: ast.AST, seed: Dict[str, Tuple[str, ...]]) -> Dict[str, Tuple[str, ...]]:
+    """Propagate full shapes across straight-line assignments to a fixpoint.
+
+    The rank table's twin, and the reason it exists: resolving a shape by walking BACKWARD from the
+    read to the definition cannot answer a name that is rebound, and cannot answer a cycle at all.
+    ls3df_scf's CheFSI loop carries ``X, Y, sigma = Y, Ynew, sigma_new``, so ``X`` is defined in
+    terms of ``Y`` and ``Y`` in terms of ``X``; a backward walk hits its own visit guard and reports
+    nothing, while a forward pass takes the extent in from the call site and closes the cycle on the
+    next round.
+
+    A name whose bindings do not AGREE is dropped, the same discipline as
+    :func:`_drop_rank_conflicts` -- the table is flow-insensitive, so keeping the last writer would
+    hand every consumer one shape at every program point. A declared array keeps its declared shape
+    whatever a rebinding makes it.
+    """
+    tuple_locals = frozenset(node.targets[0].id for node in ast.walk(tree)
+                             if isinstance(node, ast.Assign) and len(node.targets) == 1
+                             and isinstance(node.targets[0], ast.Name) and isinstance(node.value, (ast.Tuple, ast.List)))
+    pairs = list(name_value_pairs(tree))
+    # Which names are ARRAYS, from the rank table -- the only question asked of it here, and the one
+    # it answers without needing an extent. A name it cannot rank counts as an array: refusing to
+    # size an expression that reads it costs a resolution, reporting the other operand's shape for
+    # it costs a wrong one.
+    ranks = rank_table(tree, {k: len(v) for k, v in seed.items()})
+    # A name the rank table cannot rank counts as an array -- refusing to size an expression that
+    # reads it costs a resolution, reporting the other operand's shape for it costs a wrong one, and
+    # the names that matter here are exactly the ones the rank table DROPPED for disagreeing.
+    # Manifest symbols are the exception: ``Lb`` is a declared extent, never an array, and treating
+    # it as one refused every allocation spelled with it.
+    symbols = {ident for shape in seed.values() for tok in shape for ident in re.findall(IDENT_RE, str(tok))}
+    arrays = (frozenset(n for n, _ in pairs if ranks.get(n, 1) >= 1) | frozenset(seed)) - symbols
+    table: Dict[str, Tuple[str, ...]] = {k: tuple(v) for k, v in seed.items()}
+    for _ in range(8):
+        changed = False
+        for name, value in pairs:
+            if name in seed:
+                continue
+            ext = extent_tokens(value, table, tuple_locals, arrays)
+            if ext is not None and table.get(name) != ext:
+                table[name] = ext
+                changed = True
+        if not changed:
+            break
+    per_name: Dict[str, OrderedSet] = {}
+    for name, value in pairs:
+        ext = extent_tokens(value, table, tuple_locals, arrays)
+        if ext is not None:
+            per_name.setdefault(name, OrderedSet()).add(ext)
+    for name, seen in per_name.items():
+        if len(seen) > 1 and name not in seed:
+            table.pop(name, None)
+    return table
 
 
 def rank_table(tree: ast.AST, seed: Dict[str, int], call_returns: Optional[Dict[str, int]] = None) -> Dict[str, int]:

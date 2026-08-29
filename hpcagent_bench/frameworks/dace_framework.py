@@ -426,8 +426,13 @@ class SdfgPipeline:
 
 
 def pipeline_strict(sdfg: Any, ctx: Dict[str, Any]) -> None:
-    """Phase 1 -- baseline strict transformations."""
-    sdfg.apply_strict_transformations()
+    """Phase 1 -- ``simplify`` and nothing else.
+
+    ``apply_strict_transformations`` was the old spelling and forwards to ``simplify`` with a
+    DeprecationWarning; call the real name. A wrong number from THIS pipeline is in the emitted
+    DaCe program or in simplify, since no optimizer has run.
+    """
+    sdfg.simplify()
 
 
 def pipeline_fusion(sdfg: Any, ctx: Dict[str, Any]) -> None:

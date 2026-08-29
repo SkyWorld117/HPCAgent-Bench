@@ -366,3 +366,73 @@ def test_helper_specialised_on_a_rebound_shape_is_refused():
            " out[0:4] = t\n")
     with pytest.raises(NotImplementedError, match="rebound to both"):
         _helper_kir(src)
+
+
+def test_a_fresh_local_bound_by_a_helper_call_gets_its_buffer():
+    """``y = pick(x, thr)`` binds a local nothing allocated.
+
+    The bare-Name target is passed as the helper's out-param, so it is never a Store anywhere in
+    the tree. ``_promote_free_names_to_params`` then rescued the name as a scalar int PARAMETER: it
+    entered the emitted ABI the binding never passes, and the C call handed an integer to a pointer
+    dummy (``passing argument 1 of 'build_up_b' makes pointer from integer without a cast``). mlp,
+    vision_transformer, squeezenet_fire_module, mamba2, channel_flow and cp2k_density_matrix_trs4
+    all sat on it.
+    """
+    src = ("import numpy as np\n"
+           "def pick(v, lo):\n"
+           " if lo > 0.0:\n"
+           "  return np.maximum(v, lo)\n"
+           " return -v\n"
+           "def f(x, thr, out):\n"
+           " y = pick(x, thr)\n"
+           " out[:] = y * 3.0\n")
+    x = np.linspace(-2.0, 2.0, 20).reshape(4, 5).astype(np.float64)
+    ok, res = _all_ok(
+        run_op(src,
+               "f", {
+                   "x": x,
+                   "thr": 0.5
+               }, {"out": (4, 5)}, {
+                   "M": 4,
+                   "n": 5
+               },
+               shapes={
+                   "x": "(M, n)",
+                   "out": "(M, n)"
+               },
+               backends=_ALL))
+    assert ok, res
+
+
+def test_an_array_valued_expression_argument_is_passed_as_a_buffer():
+    """mlp's shape: ``y = step(x * 2.0 + 1.0, thr)``, a helper called on an EXPRESSION.
+
+    ``_infer_param_desc`` reached the resolver for a Name and a Subscript only, so every other node
+    fell through to the by-value scalar default: the helper declared a ``double`` where the call
+    passes a buffer (``Rank mismatch in argument 'v' (scalar and rank-2)``; in C a pointer added to
+    a double). Numbers here, not a signature, because the by-value form also loses the argument.
+    """
+    src = ("import numpy as np\n"
+           "def step(v, lo):\n"
+           " if lo > 0.0:\n"
+           "  return np.maximum(v, lo)\n"
+           " return -v\n"
+           "def f(x, thr, out):\n"
+           " y = step(x * 2.0 + 1.0, thr)\n"
+           " out[:] = y * 3.0\n")
+    x = np.linspace(-2.0, 2.0, 20).reshape(4, 5).astype(np.float64)
+    ok, res = _all_ok(
+        run_op(src,
+               "f", {
+                   "x": x,
+                   "thr": 0.5
+               }, {"out": (4, 5)}, {
+                   "M": 4,
+                   "n": 5
+               },
+               shapes={
+                   "x": "(M, n)",
+                   "out": "(M, n)"
+               },
+               backends=_ALL))
+    assert ok, res

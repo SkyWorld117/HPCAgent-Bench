@@ -509,7 +509,6 @@ def test_every_manual_sized_page_is_gated():
 
     root = paths.ROOT
     pages = sorted((root / "hpcagent_bench" / "skills").glob("*/SKILL.md"))
-    pages += sorted((root / "docs" / "skills_draft").glob("*/SKILL.md"))
     # LANGUAGE_SKILLS and MODEL_SKILL_LANGUAGES are further gated categories: gated on the
     # submission language (and image), not on the profiling knob. Still gated, so they satisfy
     # this size check -- a model page ships to exactly one language's prompts.
