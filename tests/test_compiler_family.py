@@ -1,6 +1,7 @@
 # Copyright 2021 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Toolchain family resolution (Task F) and offload flag selection (Task G)."""
+import importlib
 import os
 import pathlib
 from unittest import mock
@@ -587,8 +588,34 @@ def test_no_baseline_carries_a_value_changing_flag(name, forbidden):
     assert forbidden not in getattr(flags, name)
 
 
+@pytest.fixture(name="licensed_flags")
+def licensed_flags_fixture(monkeypatch):
+    """``flags`` re-imported with the reassociation licence ON.
+
+    The baselines are module-level constants built at import, so the licence cannot be switched by
+    an override after the fact -- the env var has to be set BEFORE the module body runs. Asserting
+    against the imported module instead would make every check below vacuous the moment the default
+    is off, since the licence is then the empty string and ``"" in anything`` is true.
+    """
+    monkeypatch.setenv("HPCAGENT_BENCH_FLAGS_FP_ASSOCIATIVE", "1")
+    licensed = importlib.reload(flags)
+    yield licensed
+    monkeypatch.delenv("HPCAGENT_BENCH_FLAGS_FP_ASSOCIATIVE")
+    importlib.reload(flags)
+
+
+def test_the_licence_is_off_by_default():
+    """Off is the shipped default: turning it on moves the baseline every speedup is a ratio
+    against, so a campaign half-run under each cannot pool its rows."""
+    assert flags._FP_ASSOC == ""
+    assert "-fassociative-math" not in flags.CPU_BASELINE_GCC
+    # flang's -fno-signed-zeros rides WITH the licence -- it is there only to make reassociation
+    # effective -- so off must take it back out, or "off" does not reproduce the matrix it claims to.
+    assert "-fno-signed-zeros" not in flags.FLANG_BASELINE
+
+
 @pytest.mark.parametrize("name", _GRADED_BASELINES)
-def test_every_graded_baseline_carries_the_reassociation_licence(name):
+def test_every_graded_baseline_carries_the_licence_when_it_is_on(name, licensed_flags):
     """One licence for every column, or the BASELINES differ rather than the submissions.
 
     gfortran reads ``-fno-signed-zeros`` plus ``-fno-trapping-math`` as permission to reassociate
@@ -597,15 +624,18 @@ def test_every_graded_baseline_carries_the_reassociation_licence(name):
     with nothing in the flag list saying so -- a handicap on the C-vs-Fortran comparison that no
     amount of agent effort could show through.
     """
-    assert flags._FP_ASSOC in getattr(flags, name)
+    assert "-fassociative-math" in getattr(licensed_flags, name)
 
 
-def test_the_flang_baseline_spells_nsz_beside_reassociation():
+def test_the_flang_baseline_spells_nsz_beside_reassociation(licensed_flags):
     """LLVM will not vectorize an FP reduction on ``reassoc`` alone -- it wants ``nsz`` too, and
     silently leaves the loop scalar otherwise. flang takes no ``-fno-trapping-math``, so the flag
-    cannot arrive via ``_FP_RELAX`` the way it does for gcc and clang; it has to be named."""
-    assert flags._FP_ASSOC in flags.FLANG_BASELINE
-    assert "-fno-signed-zeros" in flags.FLANG_BASELINE
+    cannot arrive via ``_FP_RELAX`` the way it does for gcc and clang; it has to be named.
+
+    ``reload`` rebinds the module in place, so ``flags`` and ``licensed_flags`` are the same object
+    here; the off-state half of this pair lives in the default test above."""
+    assert "-fassociative-math" in licensed_flags.FLANG_BASELINE
+    assert "-fno-signed-zeros" in licensed_flags.FLANG_BASELINE
 
 
 def test_every_baseline_relaxes_the_same_way_on_host_and_device():

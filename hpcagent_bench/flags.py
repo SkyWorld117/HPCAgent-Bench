@@ -32,7 +32,7 @@ import tempfile
 from functools import lru_cache
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
-from hpcagent_bench import osinfo, paths
+from hpcagent_bench import config, osinfo, paths
 
 
 class Mode(enum.Enum):
@@ -88,14 +88,17 @@ _FP_RELAX = "-fno-math-errno -fno-trapping-math -fno-signed-zeros"
 #: ("'-fassociative-math' disabled; other options take precedence"), so it must never appear
 #: without _FP_RELAX beside it.
 #:
-#: ``$HPCAGENT_BENCH_FP_ASSOCIATIVE=0`` takes it back out of every baseline. That exists for ONE
-#: reason: a campaign already part-run under the old matrix cannot pool with rows graded under this
-#: one, because the licence moves the BASELINE and every speedup is a ratio against it. An
-#: llr-focus40 arm resubmitted to complete an earlier wave must therefore set it, or its
-#: completions are measured against a faster reference than the rows they are completing. Read
-#: from the environment rather than config.get(): these are module-level constants built at import,
-#: which is before any config override a caller could install.
-_FP_ASSOC = "" if os.environ.get("HPCAGENT_BENCH_FP_ASSOCIATIVE", "1") == "0" else "-fassociative-math"
+#: OFF by default (``flags.fp_associative``), and off is the conservative choice for the same
+#: reason the licence is worth having: it moves the BASELINE every speedup is a ratio against, so
+#: rows graded with it cannot pool with rows graded without it. A campaign turns it on for ALL of
+#: its waves or none of them -- an llr-focus40 arm resubmitted to complete an earlier wave under
+#: the licence would be measured against a faster reference than the rows it is completing.
+#:
+#: Read through :func:`config.get`, so it takes the config file, and
+#: ``$HPCAGENT_BENCH_FLAGS_FP_ASSOCIATIVE=1`` per arm on top of it. These are module-level
+#: constants built at import, which is before any programmatic override a caller could install --
+#: so set it in the config or the environment, never with ``config.set_override``.
+_FP_ASSOC = "-fassociative-math" if config.get("flags.fp_associative", False) else ""
 
 #: FP contraction, pinned rather than inherited from each driver's default.
 #:
