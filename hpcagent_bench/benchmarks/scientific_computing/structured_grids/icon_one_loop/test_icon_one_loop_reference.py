@@ -48,10 +48,10 @@ def _reference(tmp_path):
     return fn
 
 
-@pytest.mark.parametrize("NB,NLEV,NPROMA", [(4, 16, 64), (2, 90, 37), (1, 1, 8)])
+@pytest.mark.parametrize("NB,NLEV,NPROMA", [(4, 90, 1024), (2, 90, 37), (1, 1, 8)])
 def test_numpy_matches_upstream_reference(tmp_path, NB, NLEV, NPROMA) -> None:
-    """The manifest's S preset, an operational-depth column whose width no vector width
-    divides, and the single-level case where the nest writes nothing at all."""
+    """The manifest's S preset, a block whose width no vector width divides, and the
+    single-level case where the nest writes nothing at all."""
     initialize = _load("icon_one_loop").initialize
     kernel = _load("icon_one_loop_numpy").icon_one_loop
     reference = _reference(tmp_path)

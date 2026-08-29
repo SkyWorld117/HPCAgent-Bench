@@ -50,10 +50,10 @@ def _reference(tmp_path):
     return fn
 
 
-@pytest.mark.parametrize("NB,NLEV,NPROMA", [(4, 6, 8), (12, 90, 37), (1, 3, 5)])
+@pytest.mark.parametrize("NB,NLEV,NPROMA", [(4, 90, 256), (12, 90, 37), (1, 3, 5)])
 def test_numpy_matches_upstream_reference(tmp_path, NB, NLEV, NPROMA) -> None:
-    """The manifest's S preset, an operational-depth grid whose width no vector width
-    divides, and a single block where every collision is within one table."""
+    """The manifest's S preset, a grid whose width no vector width divides, and a single
+    block where every collision is within one table."""
     initialize = _load("zekin_scatter").initialize
     kernel = _load("zekin_scatter_numpy").zekin_scatter
     reference = _reference(tmp_path)
