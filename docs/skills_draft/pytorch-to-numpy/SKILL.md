@@ -43,7 +43,41 @@ Each file is read IN ISOLATION by the translator, so it must be standalone:
 - Static shapes. Shapes come from the manifest's symbols, not from data.
 - No classes, no closures over module state, no `*args`/`**kwargs`.
 - Control flow the pipeline handles: `for` over `range`, `if`, slicing, broadcasting, `np.dot`/`@`,
-  elementwise ufuncs, `axis=` reductions.
+  elementwise ufuncs.
+- **The kernel must compile under `numba.njit` as written.** It is the baseline, and it is also the
+  correctness oracle: an interpreted reference is run once, compared, and thrown away, so a kernel
+  that only numba refuses costs the whole campaign its wall clock. crc16 spent 25 minutes of one
+  4 h job producing a value nothing timed. Helper functions in the same file are compiled too, so
+  they carry the same restrictions -- but a helper numba cannot type blocks the kernel that calls it.
+
+### What numba refuses, and what to write instead
+
+Measured against numba 0.67, not guessed. The left column is REJECTED; the right is the same
+values -- every rewrite below was verified to reproduce the original output exactly.
+
+| Do not write | Write instead | Why |
+|---|---|---|
+| `np.mean(a, axis=0)` | `a.sum(axis=0) / a.shape[0]` | `sum` takes `axis=`; `mean` does not |
+| `np.std(a, axis=0)` | `np.sqrt(((a - m)**2).sum(axis=0) / a.shape[0])` | same; note `std` defaults to `ddof=0` |
+| `np.max(a, axis=0)` | `a.max()` per slice, or an explicit loop | `max` does not take `axis=` |
+| `np.minimum(a, b, out=c)` | `c[:, :] = np.minimum(a, b)` | ufuncs take no `out=` |
+| `np.tanh(x, dtype=np.float64)` | `np.tanh(x.astype(np.float64))` | ufuncs take no `dtype=` |
+| `np.linspace(0, 1, n, dtype=d)` | `np.linspace(0, 1, n).astype(d)` | no `dtype=` on linspace |
+| `np.array(existing)` | `existing.copy()` | `np.array` of an array is unsupported |
+| `x[:, 0].reshape(n, 1)` | `x[:, 0][:, None]` | reshape of a strided slice needs a copy |
+| `a[mask] = v` on a 2-D array | an explicit indexed loop | n-d boolean setitem is unsupported |
+| `with` blocks | plain statements | numba has no context-manager support |
+| `np.histogram(x, n, weights=w)` | `np.bincount`, or an explicit loop | `weights=` is unsupported |
+
+`axis=` is NOT banned wholesale -- `np.sum(a, axis=0)` and `a.sum(axis=0)` both compile. It is the
+reductions that lack an `axis=` overload (`mean`, `std`, `max`) that have to be spelled out.
+
+These all compile and are safe to use: `a.copy()`, `np.empty_like`, `np.transpose`, `np.hstack`,
+`np.triu`, `np.mean(a)` with no axis, `np.linspace` without `dtype=`, `np.ascontiguousarray`, and
+`[:, None]` newaxis indexing.
+
+Check a new kernel with `python3 tools/njit_survey.py --track scientific_computing`, which reports
+the blocking construct per kernel rather than a pass/fail.
 
 ## What to strip, and what to keep
 
