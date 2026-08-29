@@ -806,6 +806,33 @@ def emit_with_inline_fallback(run):
         return run()
 
 
+#: Identifiers inside a manifest shape expression (``(out_channels, in_channels // groups, k)``).
+SHAPE_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def pinned_config_in_use(pinned: Dict[str, Any], fn: ast.FunctionDef, arrays: List[ArrayDesc],
+                         input_args: List[str]) -> Dict[str, Any]:
+    """The pinned config knobs this kernel names, anywhere -- signature, body, or a declared shape.
+
+    A knob reached ONLY through a declared shape is the case that matters. conv_standard_1d's
+    ``conv1d_weight`` is ``(out_channels, in_channels // groups, kernel_size)``, so ``groups`` is
+    absent from the signature at parse time; matching against ``input_args`` alone dropped it from
+    :attr:`KernelIR.pinned_consts`, lowering's shape-symbol promotion then made it a runtime symbol,
+    and it entered the emitted ABI. :func:`bindings.contract` reads the whole of
+    ``BenchSpec.pinned_config`` and never passes it, so every positional argument after it shifted.
+    40 kernels, the conv family and both seissol ports.
+
+    Still a filter and not the whole dict: a knob nothing names must not become a file-scope
+    ``constexpr`` no translation unit reads.
+    """
+    used = set(input_args)
+    used.update(node.id for node in ast.walk(fn) if isinstance(node, ast.Name))
+    for arr in arrays:
+        for tok in arr.shape:
+            used.update(SHAPE_IDENT.findall(str(tok)))
+    return {n: v for n, v in pinned.items() if n in used}
+
+
 def build_kernel_ir(numpy_py: pathlib.Path,
                     bench_info: pathlib.Path,
                     config: Optional[str] = None,
@@ -1282,10 +1309,7 @@ def build_kernel_ir(numpy_py: pathlib.Path,
         # Pinned config knobs stay in ``symbols``/``scalars`` (the body reads them by name and
         # lowering has to resolve them) but leave the ABI: they are compile-time constants the
         # native emitters declare (see :attr:`KernelIR.pinned_consts`).
-        pinned_consts={
-            n: v
-            for n, v in (info.get("pinned_config") or {}).items() if n in input_args
-        },
+        pinned_consts=pinned_config_in_use(info.get("pinned_config") or {}, fn, arrays, input_args),
     )
     # Helpers that survived the inlining fixpoint as CALLS (an early ``return`` /
     # recursion blocks inlining) become their own native functions -- the early
@@ -3273,6 +3297,16 @@ def _infer_param_desc(arg: ast.AST, pname: str, arr_by, sca_by, sym_by, fn=None)
         if isinstance(arg.value, int):
             return ("scalar", ScalarDesc(name=pname, dtype="int"))
         return ("scalar", ScalarDesc(name=pname, dtype="float64"))
+    if fn is not None:
+        # An array-valued EXPRESSION argument (mlp's ``relu(x @ w2 + b2)``). Only Name and
+        # Subscript reached the resolver above, so every other node fell to the scalar default
+        # below and the helper declared a by-value double where the call passes a buffer --
+        # ``Rank mismatch in argument 'v' (scalar and rank-2)``, and in C a pointer added to a
+        # double. :func:`_shape_from_expression` behind the resolver already derives this.
+        res = _resolve_array_ref(fn, arg, arr_by)
+        if res is not None:
+            shape, dtype = res
+            return ("array", ArrayDesc(name=pname, dtype=dtype, shape=shape, is_output=False))
     # A negated / arithmetic scalar expression -- default to double.
     return ("scalar", ScalarDesc(name=pname, dtype="float64"))
 
@@ -3575,7 +3609,8 @@ def _build_callsite_stmts(lhs,
                           hret_shape,
                           hret_dtype,
                           hidx,
-                          inout=False):
+                          inout=False,
+                          live_buffers=frozenset()):
     """Replacement statements for an array-returning helper call.
 
     Slice / non-bare array args are first materialised into contiguous temps (a
@@ -3588,6 +3623,15 @@ def _build_callsite_stmts(lhs,
     writes one parameter, so it holds ONE ABI slot and the call passes the pointer once.
     Appending it a second time is what emitted ``_maxpool2d(h, h, n)`` -- two ``restrict``
     pointers to the same buffer, which is undefined behaviour, not a redundant argument.
+
+    ``live_buffers`` names the parent's declared arrays. A bare target that is NOT one of them is a
+    fresh local -- mlp's ``x = relu(input @ w1 + b1)``, squeezenet's ``__hcall1`` -- and passing it
+    as the out-param without allocating it left the name bound to nothing: no Store anywhere, so
+    ``_promote_free_names_to_params`` rescued it as a scalar int PARAMETER. It then entered the
+    emitted ABI the binding never passes, and the C call handed an integer to a pointer dummy
+    (``passing argument 1 of 'build_up_b' makes pointer from integer without a cast``). Allocate it
+    here instead, AFTER ``pre`` -- the argument temps read the target's previous value on a rebind
+    (``x = relu(x @ w2 + b2)``), so an allocation ahead of them would clobber what they read.
     """
     pre: List[str] = []
     call_srcs: List[str] = []
@@ -3609,7 +3653,13 @@ def _build_callsite_stmts(lhs,
     # stores it.
     if isinstance(lhs, ast.Name):
         if not inout:
+            # A target the call still READS is a rebinding of a buffer that already exists
+            # (``x = relu(x @ w2 + b2)``); allocating it here would clear what the call is about to
+            # read. Only a target nothing reads is a first binding that needs the buffer.
+            reads = {ident for src in call_srcs for ident in SHAPE_IDENT.findall(src)}
             call_srcs.append(lhs.id)
+            if lhs.id not in live_buffers and lhs.id not in reads:
+                pre.append(f"{lhs.id} = np.empty(({', '.join(hret_shape)},), dtype=np.{hret_dtype})")
         return ast.parse("\n".join(pre + [f"{name}({', '.join(call_srcs)})"])).body
     tmp = f"__hret_tmp_{hidx}"
     call_srcs.append(tmp)
@@ -4183,7 +4233,8 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
                                                                     hret_shape,
                                                                     hret_dtype,
                                                                     f"{hidx}_{sidx}" if sidx else hidx,
-                                                                    inout=inout_param is not None)
+                                                                    inout=inout_param is not None,
+                                                                    live_buffers=frozenset(arr_by))
     if callsite_rewrites:
         _ReplaceStmts(callsite_rewrites).visit(kernel_fn)
         ast.fix_missing_locations(kernel_fn)
