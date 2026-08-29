@@ -119,9 +119,14 @@ export UCX_VFS_ENABLE=n HWLOC_COMPONENTS=-opencl,-levelzero,-gl
 export PYTHONHASHSEED=0
 
 # DaCe builds one .so per SDFG variant per kernel. Keep that off the parallel FS, which turns
-# thousands of small compiler writes into the bottleneck, and off /tmp, which is tmpfs on many
-# nodes (the build would then compete with the run for RAM).
-export DACE_default_build_folder="${DACE_BUILD_ROOT:-${SCRATCH:-${REPO}}}/dacecache-${SLURM_JOB_ID:-local}"
+# thousands of small compiler writes into the bottleneck, and off /tmp and /dev/shm, which are
+# RAM-backed here -- a corpus of C++ builds would then compete with the run for memory. Only the
+# small precompiled-header cache belongs in RAM, and DaCe already puts it there.
+#
+# Under ONE parent directory, not beside it: DaCe appends `_rank<N>` to the folder NAME, so a job
+# with sixteen ranks drops sixteen `dacecache-<job>_rank<N>` directories wherever this points. A
+# job id subdirectory keeps all of them together and makes a whole job removable in one rm.
+export DACE_default_build_folder="${DACE_BUILD_ROOT:-${SCRATCH:-${REPO}}}/dacecache/${SLURM_JOB_ID:-local}"
 mkdir -p "${DACE_default_build_folder}"
 
 # Columns, dace pipeline and autopar capability -- all three checked in the LIBRARY
