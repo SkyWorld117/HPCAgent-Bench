@@ -10,7 +10,7 @@ import textwrap
 
 import pytest
 
-from numpyto_common.tuple_desugar import desugar_tuples
+from numpyto_common.tuple_desugar import desugar_tuples, fold_list_accumulators
 
 SCALARS = frozenset({"p", "s", "k"})
 ARRAYS = frozenset({"x", "out"})
@@ -273,3 +273,67 @@ def test_an_unpack_with_no_hazard_still_splits():
         """)
     assert "oh = p" in got and "ow = p + 1" in got
     assert "oh, ow = " not in got  # the tuple itself is gone, not just its uses
+
+
+def folded_lists(body: str) -> str:
+    fn = ast.parse(textwrap.dedent(body)).body[0]
+    fold_list_accumulators(fn)
+    return ast.unparse(fn)
+
+
+def test_a_list_grown_by_append_becomes_an_array_and_a_fill_loop():
+    # raman_fitting's initial centre guesses. Left as a list, lowering reads ``len(centre)`` as the
+    # ARRAY extent it later gives the local: the guard becomes ``npeaks < npeaks`` (never taken) and
+    # the truncation a self-copy, so the kernel emits and computes the wrong guesses.
+    out = folded_lists("""
+        def f(npeaks, out):
+            centre = [1580.0, 2670.0]
+            while len(centre) < npeaks:
+                centre.append(1200.0 + 200.0 * len(centre))
+            centre = centre[:npeaks]
+            out[:] = centre
+        """)
+    assert "centre = np.zeros(npeaks, dtype=np.float64)" in out
+    assert "for __la1 in range(npeaks):" in out
+    # Element i is the i-th literal inside the display and the growth step beyond it, with the
+    # loop index standing in for the ``len`` the step counted with.
+    assert "centre[__la1] = 1580.0 if __la1 == 0 else 2670.0 if __la1 == 1 else 1200.0 + 200.0 * __la1" in out
+    assert "while" not in out and "append" not in out
+
+
+def test_an_all_integer_display_folds_to_an_integer_array():
+    out = folded_lists("""
+        def f(n, out):
+            idx = [0, 1]
+            while len(idx) < n:
+                idx.append(len(idx) * 2)
+            out[:] = idx
+        """)
+    assert "np.zeros(n, dtype=np.int64)" in out
+
+
+def test_a_cut_to_a_different_length_is_left_alone():
+    # Grown to ``n`` and cut to ``m`` is not this idiom: the closed form above would be the wrong
+    # length. Nothing is guessed -- the list stays and the refusal that owns it still fires.
+    out = folded_lists("""
+        def f(n, m, out):
+            centre = [1.0]
+            while len(centre) < n:
+                centre.append(2.0)
+            centre = centre[:m]
+            out[:] = centre
+        """)
+    assert "centre = [1.0]" in out and "while len(centre) < n:" in out
+
+
+def test_a_list_mutated_anywhere_else_is_left_alone():
+    # A second append outside the growth loop is a mutation the closed form does not account for.
+    out = folded_lists("""
+        def f(n, out):
+            centre = [1.0]
+            while len(centre) < n:
+                centre.append(2.0)
+            centre.append(3.0)
+            out[:] = centre
+        """)
+    assert "while len(centre) < n:" in out
