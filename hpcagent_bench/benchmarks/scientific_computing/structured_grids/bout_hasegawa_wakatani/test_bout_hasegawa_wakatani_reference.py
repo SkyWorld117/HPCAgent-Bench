@@ -64,8 +64,8 @@ def test_numpy_matches_upstream_reference(tmp_path, NX, NY, NZ) -> None:
     ddt_n_ref = ddt_n.copy()
     ddt_vort_ref = ddt_vort.copy()
 
-    kernel(Dn, Dvort, G1, G3, J, alpha, d1_dx, ddt_n, ddt_vort, dx, dy, dz, g11, g13, g33, g_22, kappa, n, phi,
-           vort, NX, NY, NZ)
+    kernel(G1, G3, J, d1_dx, ddt_n, ddt_vort, dx, dy, dz, g11, g13, g33, g_22, n, phi, vort, Dn, Dvort, NX, NY,
+           NZ, alpha, kappa)
     reference(G1, G3, J, d1_dx, ddt_n_ref, ddt_vort_ref, dx, dy, dz, g11, g13, g33, g_22, n, phi, vort, Dn,
               Dvort, NX, NY, NZ, alpha, kappa)
 
