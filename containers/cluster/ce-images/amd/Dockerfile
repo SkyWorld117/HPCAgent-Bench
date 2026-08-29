@@ -215,6 +215,34 @@ RUN set -eux; \
 RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir \
       "litellm[proxy]==1.94.0" fastapi uvicorn httpx pydantic orjson tenacity rich typer
 
+# cupy is the GPU track's array module: every ``arch == "gpu"`` flavor stages its arrays through it,
+# so without cupy the GPU legs die at import in copy_func and no dace_gpu column can exist at all.
+#
+# Built from source, because there is no ROCm wheel -- the cupy-rocm-4-3/5-0 lines are dead and PyPI
+# carries only the sdist. cupy documents ROCm 7.x with these three variables, and the 13 ROCm
+# libraries it wants (hipblas hipsparse rocsparse rocrand hiprand rocthrust rocsolver rocfft hipfft
+# hipcub rocprim rccl roctracer) are all in the rocm/pytorch base, so no apt layer goes with this.
+#
+# numpy is CONSTRAINED to whatever is already installed, and the build fails if it moved. The sdist
+# would otherwise pull its own numpy, and numpy is what computes every CPU reference -- moving it
+# here would move the oracle the GPU results are graded against, silently.
+#
+# NOT verified at build time beyond the import: the first HIPRTC compile needs
+# ``repair_hiprtc_include_path`` (cupy flattens hipcc's include list and loses the -internal-isystem
+# kinds, so device code dies inside <initializer_list>). The harness applies that on the one path it
+# imports cupy through; a bare device op here would fail for that reason and prove nothing.
+ARG CUPY_VERSION=14.2.0
+RUN set -eux; \
+    NUMPY_BEFORE="$(python3 -c 'import numpy; print(numpy.__version__)')"; \
+    printf 'numpy==%s\n' "${NUMPY_BEFORE}" > /tmp/cupy-constraint.txt; \
+    CUPY_INSTALL_USE_HIP=1 ROCM_HOME=/opt/rocm HCC_AMDGPU_TARGET="${ROCM_ARCH}" \
+    CUPY_NUM_BUILD_JOBS=32 PIP_BREAK_SYSTEM_PACKAGES=1 PIP_CONSTRAINT=/tmp/cupy-constraint.txt \
+      python3 -m pip install --no-cache-dir "cupy==${CUPY_VERSION}"; \
+    rm -f /tmp/cupy-constraint.txt; \
+    test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "${NUMPY_BEFORE}" \
+      || { echo "cupy moved numpy off ${NUMPY_BEFORE}; the CPU reference oracle would change" >&2; exit 2; }; \
+    python3 -c 'import cupy; print("cupy", cupy.__version__)'
+
 COPY containers/judge/requirements.txt /opt/optarena-judge/requirements.txt
 RUN set -eux; \
     PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir \
