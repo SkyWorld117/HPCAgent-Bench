@@ -10,8 +10,10 @@ import ast
 from typing import Optional, Tuple
 
 #: Symbol-name fragments that mark a time-stepping loop bound (HPCAgent-Bench /
-#: polybench convention). Matched case-insensitively as a substring so
-#: ``TSTEPS`` / ``t_steps`` / ``NITER`` all count.
+#: polybench convention). Matched case-insensitively as a substring of the symbol
+#: name, so ``TSTEPS`` / ``tsteps`` / ``NITER`` / ``n_niter_outer`` all count. A
+#: separator inside the fragment breaks it: ``t_steps`` does NOT match, because no
+#: entry below is a substring of it.
 TIMESTEP_SYMBOLS: Tuple[str, ...] = (
     "TSTEPS",
     "TSTEP",
