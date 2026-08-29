@@ -1,11 +1,14 @@
 """Emit a Numba-compiled version of a numpy kernel.
 
 Numba supports a large subset of numpy plus pure-Python loops; the
-translation is simply wrapping the function in ``@numba.njit`` or
-``@numba.njit(parallel=True)`` and leaving the body alone.
+translation is simply wrapping the function in
+``@numba.njit(parallel=True)`` and leaving the body alone. There is ONE
+numba build and it is the parallel one -- it is also the
+``scientific_computing`` speedup denominator, and a serial denominator on a
+multi-core box measures the wrong thing.
 
-The ``parallel=True`` variant additionally rewrites the loop variable of
-ONE ``range`` for-loop to ``numba.prange`` -- but ONLY a loop a
+The emit additionally rewrites the loop variable of ONE ``range``
+for-loop to ``numba.prange`` -- but ONLY a loop a
 conservative dependency check can prove has no loop-carried dependency.
 A blind rewrite of the first ``range`` loop (the old behaviour) silently
 raced a scan / prefix-sum loop (``a[i] = a[i-1] + x[i]``) or a scalar /
@@ -17,51 +20,49 @@ independent is left serial (plain ``range``), never guessed parallel.
 
 import ast
 import re
-from typing import Literal
 
 from numpyto_common.parallelism import loop_is_parallel_safe
 
-Flavor = Literal["njit", "njit_parallel"]
-
-#: Per-flavor njit options (besides ``fastmath``, which is opt-in below).
-#: ``fastmath`` is OFF by default: it lets LLVM reassociate reductions and
-#: assume no-nan/no-inf, which diverges from numpy's exact semantics (so a
+#: The njit options every emit carries (besides ``fastmath``, which is opt-in
+#: below). ``fastmath`` is OFF by default: it lets LLVM reassociate reductions
+#: and assume no-nan/no-inf, which diverges from numpy's exact semantics (so a
 #: faithful translation must not enable it) and additionally miscompiles
 #: some gather/while-loop reductions into a SIGSEGV on numba 0.65 + LLVM.
-#: Pass ``fastmath=True`` to opt back into the perf-oriented flavor.
-_BASE_OPTS = {
-    "njit": [],
-    "njit_parallel": ["parallel=True"],
-}
+#: Pass ``fastmath=True`` to opt back into the perf-oriented build.
+BASE_OPTS = ["parallel=True"]
 
 
-def emit_numba(numpy_source: str, flavor: Flavor = "njit", fastmath: bool = False, kir=None) -> str:
+def emit_numba(numpy_source: str, fastmath: bool = False, kir=None) -> str:
     """Translate one numpy kernel source into its Numba sibling.
 
     :param numpy_source: contents of ``<short>_numpy.py``.
-    :param flavor: ``"njit"`` for serial, ``"njit_parallel"`` for the
-        parallel variant (rewrites bare ``range`` to ``nb.prange``).
     :param fastmath: opt into ``fastmath=True`` (off by default; see
-        ``_BASE_OPTS`` for why faithful translation leaves it off).
+        ``BASE_OPTS`` for why faithful translation leaves it off).
     :param kir: parsed :class:`KernelIR`; when supplied, ops numba cannot
         type verbatim (batched >=3-D ``@``) are desugared into plain loops.
     :returns: Python source code.
     """
-    if flavor not in _BASE_OPTS:
-        raise ValueError(f"unknown numba flavor: {flavor!r}")
     if kir is not None:
         from numpyto_common.numpy_desugar import desugar_for_python_backend
         numpy_source = desugar_for_python_backend(numpy_source, kir, backend="numba")
-    opts = list(_BASE_OPTS[flavor])
+    opts = list(BASE_OPTS)
     if fastmath:
         opts.append("fastmath=True")
     opts.append("cache=True")
     decorator = f"@nb.njit({', '.join(opts)})"
 
-    # 1. Make sure ``import numba as nb`` is present.
+    # 1. Make sure ``import numba as nb`` is present, and silence the one warning that
+    #    ALWAYS emitting parallel=True guarantees: numba raises NumbaPerformanceWarning on a
+    #    kernel where nothing could be parallelised (a scan, a scalar reduction). That is a
+    #    statement about the kernel, not a defect in the emit, and it would otherwise fire once
+    #    per such kernel across the whole corpus sweep. Scoped to the category, never a bare
+    #    ignore -- a typing or lowering warning must still be heard.
     out = numpy_source
     if "import numba" not in out:
-        out = "import numba as nb\n" + out
+        out = ("import warnings\n"
+               "import numba as nb\n"
+               "from numba.core.errors import NumbaPerformanceWarning\n"
+               "warnings.filterwarnings('ignore', category=NumbaPerformanceWarning)\n") + out
 
     # 2. Inject the decorator on EVERY top-level ``def`` (``(?m)^`` anchors to
     #    column 0, so indented / nested defs are skipped). Decorating only the
@@ -72,7 +73,7 @@ def emit_numba(numpy_source: str, flavor: Flavor = "njit", fastmath: bool = Fals
     #    nopython code, so decorating all top-level defs is both correct and free.
     out = re.sub(r"(?m)^(def\s+\w+\()", f"{decorator}\n\\1", out)
 
-    # 3. Parallel flavor rewrites ONE ``range`` loop to ``nb.prange`` -- the
+    # 3. Rewrite ONE ``range`` loop to ``nb.prange`` -- the
     #    first (in source order) that ``parallelism.loop_is_parallel_safe`` (the
     #    shared source-of-truth predicate the C / Fortran OpenMP emitters use too)
     #    proves carries no cross-iteration dependency. A loop that fails the check (scan,
@@ -81,11 +82,10 @@ def emit_numba(numpy_source: str, flavor: Flavor = "njit", fastmath: bool = Fals
     #    not-yet-written / already-overwritten cell -> silent miscompile.
     #    The rewrite splices only the ``range`` identifier of the chosen loop
     #    (located via the AST) so the body is otherwise preserved verbatim.
-    if flavor == "njit_parallel":
-        out = _parallelize_one_range_loop(out)
+    out = _parallelize_one_range_loop(out)
 
-    header = (f'"""Auto-generated by NumpyToNumba ({flavor}). Decorator added; '
-              f'body preserved verbatim."""\n')
+    header = ('"""Auto-generated by NumpyToNumba (njit parallel=True). Decorator added; '
+              'body preserved verbatim."""\n')
     return header + out
 
 

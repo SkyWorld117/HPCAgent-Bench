@@ -804,7 +804,7 @@ def run_kernel(short: str,
 
 #: Python/JIT backends: (emit CLI module, extra emit args, glob for the emitted module, import dep).
 PY_BACKENDS = {
-    "numba": ("numpyto_numba.cli", ["--suffix", "n"], "*_numba_n*.py", "numba"),
+    "numba": ("numpyto_numba.cli", [], "*_numba_np*.py", "numba"),
     "pythran": ("numpyto_pythran.cli", [], "*_pythran*.py", "pythran"),
     "cupy": ("numpyto_cupy.cli", [], "*_cupy*.py", "cupy"),
 }

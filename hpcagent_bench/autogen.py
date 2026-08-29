@@ -3,7 +3,7 @@
 """Auto-generate framework sibling files from the numpy reference.
 
 ONE canonical file per (kernel, framework): ``<module>_<fw>.py``
-``fw`` in :data:`TARGETS` (``dace`` / ``cupy`` / ``numba_n`` / ``numba_np`` /
+``fw`` in :data:`TARGETS` (``dace`` / ``cupy`` / ``numba_np`` /
 ``pythran`` / ``jax``). A file already present that does NOT carry the
 ``hpcagent_bench-autogen`` marker is a hand-written OVERRIDE and is never overwritten
 (so the committed microbench ``*_jax.py`` overrides win over autogen).
@@ -36,7 +36,7 @@ from hpcagent_bench.languages import LANG_TARGET
 #: Auto-generatable Python targets and the canonical filename each produces
 #: (``{m}`` = the kernel's module_name). dace and jax are generated in-process;
 #: the rest shell out to their per-package CLI (which writes the canonical name).
-TARGETS = ("dace", "cupy", "numba_n", "numba_np", "pythran", "jax")
+TARGETS = ("dace", "cupy", "numba_np", "pythran", "jax")
 
 
 def _file_for(module_name: str, target: str) -> str:
@@ -89,9 +89,8 @@ def _emit_target(target: str, numpy_py: pathlib.Path, kdir: pathlib.Path, bench_
         return _emit_jax(numpy_py, bench_info, kdir / _file_for(numpy_py.stem.removesuffix("_numpy"), "jax"))
     if target == "cupy":
         return _emit_cli("numpyto_cupy.cli", numpy_py, kdir, [])
-    if target in ("numba_n", "numba_np"):
-        suffix = target.split("_", 1)[1]
-        return _emit_cli("numpyto_numba.cli", numpy_py, kdir, ["--bench-info", str(bench_info), "--suffix", suffix])
+    if target == "numba_np":
+        return _emit_cli("numpyto_numba.cli", numpy_py, kdir, ["--bench-info", str(bench_info)])
     if target == "pythran":
         return _emit_cli("numpyto_pythran.cli", numpy_py, kdir, ["--bench-info", str(bench_info)])
     raise ValueError(f"unknown auto-gen target {target!r}; known: {TARGETS}")
