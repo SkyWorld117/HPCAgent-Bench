@@ -2,6 +2,7 @@
 
 import ast
 import copy
+import dataclasses
 import functools
 import re
 from typing import Dict, List, Optional
@@ -1818,6 +1819,91 @@ def shape_base_ids(node: ast.AST) -> set:
     }
 
 
+def shape_reaching_names(body: ast.AST, direct: set) -> set:
+    """Names whose VALUE reaches a shape, following assignments -- not only the names written in one.
+
+    conv2d_instance_norm_divide reads its stride, padding and dilation out of manifest scalars,
+    derives the convolution's output extents from them (``oh = (height + 2*ph - dh*(ks - 1) - 1) //
+    sh + 1``), and reshapes the im2col patch to ``(batch * oh * ow, in_per_group)``. Every name in
+    that shape is a local, so a syntactic scan of the shape finds nothing, the scalars stay runtime
+    data, and DaCe refuses the extent -- a data descriptor cannot be a shape.
+
+    The seed must NOT be filtered by the rebound names. A rebound name cannot become a dc.symbol,
+    which is a fact about what may be PROMOTED; as a HOP from a scalar to an extent it is perfectly
+    good, and dropping it cuts every chain at its first local.
+
+    A ``.shape`` receiver is skipped. It names a DIMENSION SOURCE rather than an integer value, so
+    following it drags whole arrays in and makes an array alias read as a size expression.
+    """
+    assigns: Dict[str, List[ast.expr]] = {}
+    for node in ast.walk(body):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            assigns.setdefault(node.targets[0].id, []).append(node.value)
+    reaching = set(direct)
+    frontier = list(direct)
+    while frontier:
+        for rhs in assigns.get(frontier.pop(), ()):
+            bases = shape_base_ids(rhs)
+            for sub in ast.walk(rhs):
+                if isinstance(sub, ast.Name) and id(sub) not in bases and sub.id not in reaching:
+                    reaching.add(sub.id)
+                    frontier.append(sub.id)
+    return reaching
+
+
+class SubstituteScalarValues(ast.NodeTransformer):
+    """Replace every READ of a named scalar with its literal value."""
+
+    def __init__(self, values: Dict[str, int]):
+        self.values = values
+
+    def visit_Name(self, node: ast.Name):
+        if isinstance(node.ctx, ast.Load) and node.id in self.values:
+            return ast.copy_location(ast.Constant(value=self.values[node.id]), node)
+        return node
+
+
+def freeze_pinned_extent_scalars(kir):
+    """Substitute the value of every manifest-pinned integer scalar that reaches an EXTENT.
+
+    A benchmark pins each scalar to ONE value across S/M/L/XL, so a scalar an extent depends on is a
+    compile-time constant however the reference spells it. Promoting it to a dc.symbol instead was
+    measured and does not work: the manifest declares conv2d_instance_norm_divide's output as
+    ``(batch, out_channels, height - kernel_size + 1, width - kernel_size + 1)``, which is the
+    convolution's general extent formula ALREADY EVALUATED at stride 1, padding 0, dilation 1. Left
+    symbolic, the body computes ``int_floor(2*conv_padding - conv_dilation*(kernel_size - 1) +
+    height - 1, conv_stride) + 1`` and nothing can prove the two equal -- the parse refuses the
+    write to ``out``. A symbol only agrees when the declared shapes name that same symbol, which is
+    the case the direct scan already handles.
+
+    The scalar stays a PARAMETER of the emitted program, so the binding and the ABI are unchanged;
+    it is simply no longer read. Floats are excluded: an extent is an integer, and a float scalar
+    reached through the chain is a tolerance or a scale, not a size.
+    """
+    scalars = {s.name: s for s in kir.scalars}
+    if not scalars:
+        return kir
+    probe = NormalizeReshape().visit(copy.deepcopy(kir.tree))
+    seeds: set = set()
+    for node in ast.walk(probe):
+        shape_arg = shape_argument(node)
+        if shape_arg is None:
+            continue
+        elements = shape_arg.elts if isinstance(shape_arg, (ast.Tuple, ast.List)) else [shape_arg]
+        for element in elements:
+            seeds.update(n.id for n in ast.walk(element) if isinstance(n, ast.Name))
+    frozen = {
+        name: scalars[name].value
+        for name in shape_reaching_names(probe, seeds)
+        if name in scalars and scalars[name].dtype.startswith(("int", "uint")) and type(scalars[name].value) is int
+    }
+    if not frozen:
+        return kir
+    tree = SubstituteScalarValues(frozen).visit(copy.deepcopy(kir.tree))
+    ast.fix_missing_locations(tree)
+    return dataclasses.replace(kir, tree=tree)
+
+
 def _shape_ident_candidates(fn_ast: ast.AST, known: set) -> set:
     """Identifiers in an np.zeros/empty/ones shape arg not already array/scalar/symbol -- promotion candidates."""
     names = set()
@@ -2179,6 +2265,7 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     """
     if names_logical_sparse(kir):
         kir = lower(kir)
+    kir = freeze_pinned_extent_scalars(kir)
     name = fn_name or kir.kernel_name
     arrays = {a.name: a for a in kir.arrays}
     scalars = {s.name: s for s in kir.scalars}

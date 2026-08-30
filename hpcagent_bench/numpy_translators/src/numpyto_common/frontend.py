@@ -1387,11 +1387,13 @@ def build_kernel_ir(numpy_py: pathlib.Path,
             if inferred_dt in {"float64", "double", "float32"} \
                     and (arg in int_names or is_array_dim):
                 inferred_dt = "int"
-            scalars.append(ScalarDesc(
-                name=arg,
-                dtype=inferred_dt,
-                is_output=arg in output_args,
-            ))
+            scalars.append(
+                ScalarDesc(
+                    name=arg,
+                    dtype=inferred_dt,
+                    is_output=arg in output_args,
+                    value=scalar_defaults.get(arg),
+                ))
 
     # Inject the physical sparse buffer arrays + expand the logical
     # sparse names in input_args to their ordered physical buffers so
@@ -5623,29 +5625,78 @@ def _fuse_guarded_returns(tree: ast.Module) -> None:
     for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
         flags = flags_by_helper.get(fn.name, frozenset())
         body = fn.body
-        while (len(body) >= 2 and isinstance(body[-1], ast.Return) and body[-1].value is not None
-               and isinstance(body[-2], ast.If) and not body[-2].orelse and len(body[-2].body) == 1
-               and isinstance(body[-2].body[0], ast.Return) and body[-2].body[0].value is not None
-               and _is_static_flag_test(body[-2].test, flags)):
+        while True:
+            _lift_pure_assignment_over_guard(body, flags)
+            if not (len(body) >= 2 and isinstance(body[-1], ast.Return) and body[-1].value is not None
+                    and isinstance(body[-2], ast.If) and not body[-2].orelse and len(body[-2].body) == 1
+                    and isinstance(body[-2].body[0], ast.Return) and body[-2].body[0].value is not None
+                    and _is_static_flag_test(body[-2].test, flags)):
+                break
             guard = body[-2]
             fused = ast.Return(value=ast.IfExp(test=guard.test, body=guard.body[0].value, orelse=body[-1].value))
             body[-2:] = [ast.copy_location(fused, guard)]
         ast.fix_missing_locations(fn)
 
 
+def _is_pure_expression(node: ast.expr) -> bool:
+    """``True`` when evaluating ``node`` cannot do anything but produce a value.
+
+    A call is the whole exclusion: it may write an argument array in place, and the corpus' helpers
+    do exactly that. A walrus binds a second name, which a move would rebind on a path that never
+    bound it. What is left is arithmetic over names, constants, shape attributes and subscripts,
+    which is what a shape or index expression is made of.
+    """
+    impure = (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)
+    return not any(isinstance(sub, impure) for sub in ast.walk(node))
+
+
+def _lift_pure_assignment_over_guard(body: List[ast.stmt], flags: FrozenSet[str]) -> None:
+    """Move a pure ``name = expr`` that sits BETWEEN a static-flag guard and the trailing return up
+    above the guard, in place, so the two returns become adjacent and :func:`_fuse_guarded_returns`
+    can see them.
+
+    ``_instance_norm``'s affine branch reads ``shape = (1, x.shape[1]) + (1,) * (x.ndim - 2)``, bound
+    after the ``if weight is None: return y`` guard. The fuse only ever looked at the last two
+    statements, so the guard stayed an early return, the helper inlined under no form, and
+    conv2d_instance_norm_divide emitted no DaCe program at all.
+
+    Lifting is only sound because the moved statement is pure and independent: it runs on a path
+    where it did not run before, so a call (which could write an argument in place) is refused, and
+    a binding the guard itself READS is refused because moving it would change which value the
+    guard sees.
+    """
+    while len(body) >= 3:
+        assign, guard = body[-2], body[-3]
+        if not (isinstance(body[-1], ast.Return) and isinstance(assign, ast.Assign) and len(assign.targets) == 1
+                and isinstance(assign.targets[0], ast.Name) and _is_pure_expression(assign.value)):
+            return
+        if not (isinstance(guard, ast.If) and not guard.orelse and len(guard.body) == 1
+                and isinstance(guard.body[0], ast.Return) and _is_static_flag_test(guard.test, flags)):
+            return
+        target = assign.targets[0].id
+        if any(isinstance(sub, ast.Name) and sub.id == target for sub in ast.walk(guard)):
+            return  # the guard reads it, so the value it sees would change
+        body[-3:] = [assign, guard, body[-1]]
+
+
 def _is_static_flag_test(test: ast.expr, flags: FrozenSet[str]) -> bool:
-    """``flag`` / ``not flag`` / ``flag == <literal>`` on a parameter that is a literal at every
-    call site.
+    """``flag`` / ``not flag`` / ``flag == <literal>`` / ``flag is <literal>`` on a parameter that is
+    a literal at every call site.
 
     The compare form is how a multi-way MODE selects, and it is decidable on exactly the same
     grounds as the bare flag: the call site's literal is substituted into the body, leaving two
     constants the inline fixpoint's own folding decides. kl_div_loss' ``_kl_div`` guards its three
     return paths with ``reduction == 'batchmean'`` / ``== 'sum'``, and without this it fused
     nothing, inlined under no form, and emitted no program at all.
+
+    ``is``/``is not`` is the same test spelled the way an OPTIONAL argument is checked -- torch's
+    affine-less norms pass ``weight=None``, and ``if weight is None: return y`` is how the helper
+    says so. Identity and equality agree here because the operands are a parameter and a literal.
     """
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return _is_static_flag_test(test.operand, flags)
-    if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Eq, ast.NotEq))):
+    ops = (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)
+    if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ops)):
         left, right = test.left, test.comparators[0]
         named = [side for side in (left, right) if isinstance(side, ast.Name) and side.id in flags]
         return bool(named) and any(isinstance(side, ast.Constant) for side in (left, right))
