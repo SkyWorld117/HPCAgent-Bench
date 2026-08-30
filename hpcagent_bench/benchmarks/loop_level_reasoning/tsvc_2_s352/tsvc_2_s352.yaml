@@ -11,6 +11,8 @@ parameters:
     LEN_1D: 228202710
   XL:
     LEN_1D: 260382390
+constraints:
+- LEN_1D % 5 == 0
 init:
   arrays:
     a: (LEN_1D,)

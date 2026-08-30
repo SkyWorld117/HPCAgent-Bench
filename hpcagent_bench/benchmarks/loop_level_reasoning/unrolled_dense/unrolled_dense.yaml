@@ -11,6 +11,8 @@ parameters:
     N: 180410084
   XL:
     N: 260382392
+constraints:
+- N % 4 == 0
 init:
   output_args:
   - alpha
