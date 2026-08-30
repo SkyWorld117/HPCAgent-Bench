@@ -5114,15 +5114,15 @@ class _SpliceNoneGuardedCalls:
             return None
         writes = [
             st for st in stmts
-            if isinstance(st, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == name for t in st.targets)
+            if isinstance(st, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in st.targets)
         ]
         if writes != [call_stmt]:
             return None
         unpacks = [
-            st for st in stmts if (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(
-                st.targets[0], (ast.Tuple, ast.List)) and all(isinstance(e, ast.Name) for e in st.targets[0].elts)
-                                   and isinstance(st.value, ast.Name) and st.value.id == name)
+            st for st in stmts
+            if (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], (ast.Tuple, ast.List))
+                and all(isinstance(e, ast.Name)
+                        for e in st.targets[0].elts) and isinstance(st.value, ast.Name) and st.value.id == name)
         ]
         if len(unpacks) != 1 or stmts.index(unpacks[0]) <= stmts.index(call_stmt):
             return None
@@ -5180,9 +5180,8 @@ class _SpliceNoneGuardedCalls:
             if _none_toggle_op(guard_stmt.test, target.id) is not True:
                 return None
             if (i + 2 < len(stmts) and isinstance(stmts[i + 2], ast.Assign) and len(stmts[i + 2].targets) == 1
-                    and isinstance(stmts[i + 2].targets[0],
-                                   (ast.Tuple, ast.List)) and isinstance(stmts[i + 2].value, ast.Name)
-                    and stmts[i + 2].value.id == target.id):
+                    and isinstance(stmts[i + 2].targets[0], (ast.Tuple, ast.List))
+                    and isinstance(stmts[i + 2].value, ast.Name) and stmts[i + 2].value.id == target.id):
                 return call_stmt, guard_stmt, stmts[i + 2].targets[0].elts, 3, None
             deferred = self._deferred_unpack(call_stmt, target.id)
             if deferred is not None:

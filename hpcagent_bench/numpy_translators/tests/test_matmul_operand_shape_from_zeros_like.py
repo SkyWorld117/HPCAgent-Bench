@@ -42,7 +42,6 @@ A = np.array([[4.0, 1.0, 0.5, 0.25], [1.0, 3.0, 0.75, 0.5], [0.5, 0.75, 2.0, 1.2
 
 
 def _lowered():
-    from _bench_yaml import REPO  # noqa: F401  -- keeps the tests' sys.path bootstrap in one place
     import json
     import pathlib
     import tempfile
@@ -63,9 +62,8 @@ def test_the_contraction_survives_lowering_as_a_loop_nest():
     tree = _lowered().tree
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.BinOp) and isinstance(n.op, ast.MatMult)]
     accums = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Add) and isinstance(n.target, ast.Subscript)
-        and isinstance(n.value, ast.BinOp) and isinstance(n.value.op, ast.Mult)
+        n for n in ast.walk(tree) if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Add)
+        and isinstance(n.target, ast.Subscript) and isinstance(n.value, ast.BinOp) and isinstance(n.value.op, ast.Mult)
     ]
     assert accums, ast.unparse(tree)
 

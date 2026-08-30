@@ -19,12 +19,21 @@ Two distinct failure modes, asserted separately because they need different fixe
   register sequences, so a scalar the emitter calls ``int64_t`` and the binding calls
   ``float64`` is read from a different register entirely.
 
-There is no waiver list for any of the three: every kernel in the registry lowers, and every
-one that lowers agrees exactly, so each category is asserted EMPTY outright. A name that
-shows up is a regression, not a backlog. The five ML kernels that used to be excused from
-lowering all declined at the matmul hoister, which now reconciles shape tokens across
-vocabularies and spills a call-valued operand -- so the contraction guard they tripped is
-never reached.
+There is no waiver list for any of the three: each category is asserted EMPTY outright, so a
+name that shows up is a regression, not a backlog -- and a kernel the translator still refuses
+fails HERE, with its own name, rather than being excused.
+
+Measured 2026-08-30, the refusals are not one cause: ``eigh_test`` declined at the matmul
+hoister (an operand allocated by ``np.zeros_like`` off an ``eigh`` output carried no extent) and
+``conv_transpose3d_scaling_avg_pool_bias_add_scaling`` at the None-sentinel splice (the helper's
+unpack sits two loops below its call). Both lower now. What is left is ONE cause, not five: a
+helper's parameter and return EXTENTS are read off its first call site, and every remaining
+kernel calls a helper on a local whose shape exists only as a previous helper's return -- which
+resolves to nothing (vgg16, resnet101, conv2d_gelu_global_avg_pool,
+conv_transpose3d_scale_batch_norm_global_avg_pool) or, worse, to the wrong operand's shape
+(convolutional_vision_transformer sizes ``layernorm``'s out-param from its ``bias`` argument and
+only trips a guard later). Silencing any of those emits an extent the helper's other call sites
+do not have; the fix is shape-GENERIC helpers, extents passed per call site.
 
 Marked ``integration``: it lowers the whole registry, far too slow for the default suite.
 """
