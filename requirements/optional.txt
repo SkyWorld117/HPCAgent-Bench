@@ -12,3 +12,10 @@
 --pre
 apache-tvm
 mpi4py
+
+# dace-fortran -- the source of truth for dace_framework.pipeline_strict_cpu's stage list (its
+# dace_fortran/pipelines.py::optimize is the pipeline CloudSC is driven with). NOT a hard dependency
+# and NOT in install_requires: it pins `dace @ git+https://github.com/spcl/dace.git@FaCe`, so a
+# plain install would replace the spcl/dace@extended editable that every other column runs on.
+# Install it alongside, without letting it resolve that pin:
+#   pip install --no-deps git+https://github.com/spcl/dace-fortran.git
