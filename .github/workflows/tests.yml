@@ -240,7 +240,8 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: e2e[numba, jax] (numerical sweep @ S)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Phase 5 (75) + setup, ~10 on a warm cache. Must exceed the sum of its steps.
+    timeout-minutes: 95
     env:
       PYTEST_ADDOPTS: "--cov=hpcagent_bench --cov-append --cov-report="
     steps:
@@ -270,7 +271,13 @@ jobs:
         # 26:01; it reached 93% before the runner killed it at 35:00. This is a budget correction
         # for work that was added on purpose, not headroom for a hang -- the per-test --timeout=600
         # is still what catches that.
-        timeout-minutes: 55
+        #
+        # 55 -> 75: runs 33283870554 and 33308713526 both filled the 55-minute cap, the second at
+        # 96% with no test failure of its own. A sweep dying nine tests from the end reports a step
+        # timeout and NO summary, so it also hides whatever those last tests would have said. The
+        # job budget moves with it (75 -> 95): a job budget under the sum of its steps turns a step
+        # timeout into a job cancellation, which reports nothing at all.
+        timeout-minutes: 75
         env:
           HPCAGENT_BENCH_E2E_BACKENDS: "numba,jax"
         run: |
