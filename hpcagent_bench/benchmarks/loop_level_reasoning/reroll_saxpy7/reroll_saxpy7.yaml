@@ -4,13 +4,13 @@ kind: microkernel
 level: 1
 parameters:
   S:
-    LEN_1D: 512
+    LEN_1D: 511
   M:
-    LEN_1D: 95000000
+    LEN_1D: 94999996
   L:
-    LEN_1D: 157277866
+    LEN_1D: 157277862
   XL:
-    LEN_1D: 260382392
+    LEN_1D: 260382388
 init:
   arrays:
     a: (LEN_1D,)

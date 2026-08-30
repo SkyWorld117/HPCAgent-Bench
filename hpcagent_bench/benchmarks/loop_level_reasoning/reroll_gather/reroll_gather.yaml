@@ -4,11 +4,11 @@ kind: microkernel
 level: 1
 parameters:
   S:
-    LEN_1D: 512
+    LEN_1D: 511
   M:
-    LEN_1D: 33000000
+    LEN_1D: 32999995
   L:
-    LEN_1D: 54574712
+    LEN_1D: 54574709
   XL:
     LEN_1D: 90254521
 init:
