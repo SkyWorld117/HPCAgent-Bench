@@ -1387,11 +1387,13 @@ def build_kernel_ir(numpy_py: pathlib.Path,
             if inferred_dt in {"float64", "double", "float32"} \
                     and (arg in int_names or is_array_dim):
                 inferred_dt = "int"
-            scalars.append(ScalarDesc(
-                name=arg,
-                dtype=inferred_dt,
-                is_output=arg in output_args,
-            ))
+            scalars.append(
+                ScalarDesc(
+                    name=arg,
+                    dtype=inferred_dt,
+                    is_output=arg in output_args,
+                    value=scalar_defaults.get(arg),
+                ))
 
     # Inject the physical sparse buffer arrays + expand the logical
     # sparse names in input_args to their ordered physical buffers so

@@ -9,7 +9,7 @@ NumpyToC consumes it for now.
 
 import ast
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from numpyto_common import dtypes
 
@@ -118,6 +118,13 @@ class ScalarDesc:
     name: str
     dtype: str
     is_output: bool = False
+    #: The manifest's value for this scalar, when it declares one. A benchmark pins every scalar to a
+    #: single value across all of S/M/L/XL, so a scalar reaching an EXTENT is a compile-time constant
+    #: however the reference spells it -- conv2d_instance_norm_divide derives its output extents from
+    #: stride, padding and dilation, and its declared ``out`` shape is that formula already evaluated
+    #: at the pinned values. Emitters that need static shapes read it; the rest ignore it and keep
+    #: taking the scalar as a runtime argument, so the ABI is the same either way.
+    value: Optional[Union[int, float]] = None
 
     def __post_init__(self) -> None:
         # Honour the storage contract :func:`dtypes.canonical` documents: the frontend records
