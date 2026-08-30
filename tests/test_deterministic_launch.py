@@ -44,6 +44,13 @@ def _job_env(work: pathlib.Path) -> dict:
     shim.write_text(SRUN_SHIM)
     shim.chmod(0o755)
 
+    # The script locates the repo by looking for hpcagent_bench/container_backends.txt.  Without the
+    # marker it falls back to BASH_SOURCE and writes results into the working tree instead of the
+    # test's isolated tmp_path.
+    marker = work / "hpcagent_bench" / "container_backends.txt"
+    marker.parent.mkdir()
+    shutil.copy(SCRIPT.parent.parent / "hpcagent_bench" / "container_backends.txt", marker)
+
     env.update(
         PATH=str(bindir) + os.pathsep + env["PATH"],
         # REPO is where the job cds and writes its results/ and dace cache; point it at the test's
