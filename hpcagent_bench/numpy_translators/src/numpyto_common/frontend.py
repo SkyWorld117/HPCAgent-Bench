@@ -1126,7 +1126,15 @@ def build_kernel_ir(numpy_py: pathlib.Path,
     # to _ceil_div), so the regular fixpoint gets one more pass afterward.
     for _ in range(8):
         none_guarded = _collect_none_guarded_helpers(tree, fn)
-        if not none_guarded or not _SpliceNoneGuardedCalls(none_guarded, inl_counter).apply(fn):
+        if not none_guarded:
+            break
+        # Every owner, not just the kernel: ``_tap_range`` is called from ``_conv_transpose3d`` and
+        # never from the kernel body, so splicing into ``fn`` alone left it a tuple-returning
+        # function with no C ABI. Same rule the tuple splice in ``_build_helper_kirs`` already
+        # follows -- a sentinel return has no ABI ANYWHERE.
+        owners = [fn] + [n for n in tree.body if isinstance(n, ast.FunctionDef) and n is not fn]
+        splicer = _SpliceNoneGuardedCalls(none_guarded, inl_counter)
+        if not any([splicer.apply(owner) for owner in owners if owner.name not in none_guarded]):
             break
         ast.fix_missing_locations(fn)
         _run_regular_inline_fixpoint()
@@ -4733,9 +4741,14 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
             # dangling one). The C emitter catches this at the return; refuse here instead, so
             # Fortran -- which has no such check and emitted a subroutine gfortran rejects with
             # "VALUE attribute conflicts with FUNCTION attribute" -- is covered by the same rule.
+            # The helper's OWN inferred params are the scope a local allocation resolves against:
+            # ``np.zeros(..., dtype=x.dtype)`` names a parameter, and an empty table made that a
+            # hard refusal ("the dtype expression does not resolve") from inside a guard whose
+            # only question is whether the return is a local allocation at all.
+            harr_by = {a.name: a for a in arrays}
             for n in ast.walk(hfn):
                 if (isinstance(n, ast.Return) and isinstance(n.value, ast.Name)
-                        and _local_array_def(hfn, n.value.id, {}) is not None):
+                        and _local_array_def(hfn, n.value.id, harr_by) is not None):
                     raise NotImplementedError(
                         f"helper {hdef.name!r} returns its own array {n.value.id!r} by value; the call site's "
                         f"target did not resolve to an array, so there is no out-param to write it into")
@@ -5067,7 +5080,61 @@ class _SpliceNoneGuardedCalls:
         self._counter = counter
 
     def apply(self, fn: ast.FunctionDef) -> bool:
+        self._fn = fn
         return self._rewrite_block(fn.body)
+
+    def _ordered_stmts(self) -> List[ast.stmt]:
+        """Every statement of the enclosing function in SOURCE order (a plain ``ast.walk`` is
+        breadth-first, which cannot answer "does the unpack run after the call")."""
+        out: List[ast.stmt] = []
+
+        def walk(block: List[ast.stmt]) -> None:
+            for st in block:
+                out.append(st)
+                for field in ("body", "orelse", "finalbody"):
+                    nested = vars(st).get(field)
+                    if isinstance(nested, list):
+                        walk(nested)
+
+        walk(self._fn.body)
+        return out
+
+    def _deferred_unpack(self, call_stmt: ast.Assign, name: str) -> Optional[ast.Assign]:
+        """The one ``a, b, c = <name>`` that consumes this call's result from DEEPER in the nest,
+        or ``None``.
+
+        ``_conv_transpose3d`` binds ``rz`` in the ``kz`` loop and unpacks it two loops down, once
+        every tap is known to be in range, so the adjacent-unpack spelling above never matches and
+        the helper stayed a tuple-returning function with no ABI. Splicing is sound here for the
+        same reason it is there -- the unpack is rewritten IN PLACE (nothing moves across the
+        loops), and the requirements below make ``name`` a single-assignment value whose only
+        readers are the guard and that unpack."""
+        stmts = self._ordered_stmts()
+        if call_stmt not in stmts:
+            return None
+        writes = [
+            st for st in stmts
+            if isinstance(st, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in st.targets)
+        ]
+        if writes != [call_stmt]:
+            return None
+        unpacks = [
+            st for st in stmts if (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(
+                st.targets[0], (ast.Tuple, ast.List)) and all(isinstance(e, ast.Name) for e in st.targets[0].elts)
+                                   and isinstance(st.value, ast.Name) and st.value.id == name)
+        ]
+        if len(unpacks) != 1 or stmts.index(unpacks[0]) <= stmts.index(call_stmt):
+            return None
+        # Every other read of ``name`` would survive the splice with nothing to bind it to.
+        readers = sum(1 for sub in ast.walk(self._fn)
+                      if isinstance(sub, ast.Name) and sub.id == name and isinstance(sub.ctx, ast.Load))
+        guard = stmts[stmts.index(call_stmt) + 1] if stmts.index(call_stmt) + 1 < len(stmts) else None
+        guard_reads = sum(1 for sub in ast.walk(guard.test)
+                          if isinstance(sub, ast.Name) and sub.id == name) if isinstance(guard, ast.If) else 0
+        if readers != guard_reads + 1:
+            return None
+        return unpacks[0]
 
     def _rewrite_block(self, stmts: List[ast.stmt]) -> bool:
         changed = False
@@ -5075,9 +5142,18 @@ class _SpliceNoneGuardedCalls:
         while i < len(stmts):
             spliced = self._try_splice(stmts, i)
             if spliced is not None:
-                stmts[i:i + len(spliced[1])] = spliced[0]
+                new_stmts, consumed, deferred, unpack = spliced
+                if deferred is not None:
+                    # Rewrite the far-away unpack where it stands; the splice site keeps only the
+                    # computation and the guard.
+                    deferred.value = unpack.value
+                    deferred.targets = unpack.targets
+                    ast.fix_missing_locations(deferred)
+                else:
+                    new_stmts = new_stmts + [unpack]
+                stmts[i:i + consumed] = new_stmts
                 changed = True
-                i += len(spliced[0])
+                i += len(new_stmts)
                 continue
             for field in ("body", "orelse"):
                 nested = vars(stmts[i]).get(field)
@@ -5087,9 +5163,10 @@ class _SpliceNoneGuardedCalls:
         return changed
 
     def _call_shape(self, stmts: List[ast.stmt], i: int):
-        """``(call_stmt, guard_stmt, final_targets, consumed)`` for a recognised call at ``stmts[i]``,
-        or ``None``. ``consumed`` is 2 for the direct-destructure spelling, 3 when a separate unpack
-        statement follows a bare-name call target."""
+        """``(call_stmt, guard_stmt, final_targets, consumed, deferred)`` for a recognised call at
+        ``stmts[i]``, or ``None``. ``consumed`` is 2 for the direct-destructure spelling, 3 when a
+        separate unpack statement follows a bare-name call target. ``deferred`` is the unpack
+        statement when it sits deeper in the nest instead (see :meth:`_deferred_unpack`)."""
         call_stmt = stmts[i]
         if not (isinstance(call_stmt, ast.Assign) and len(call_stmt.targets) == 1
                 and isinstance(call_stmt.value, ast.Call) and isinstance(call_stmt.value.func, ast.Name)
@@ -5100,23 +5177,28 @@ class _SpliceNoneGuardedCalls:
             return None
         guard_stmt = stmts[i + 1]
         if isinstance(target, ast.Name):
+            if _none_toggle_op(guard_stmt.test, target.id) is not True:
+                return None
             if (i + 2 < len(stmts) and isinstance(stmts[i + 2], ast.Assign) and len(stmts[i + 2].targets) == 1
                     and isinstance(stmts[i + 2].targets[0],
                                    (ast.Tuple, ast.List)) and isinstance(stmts[i + 2].value, ast.Name)
-                    and stmts[i + 2].value.id == target.id and _none_toggle_op(guard_stmt.test, target.id) is True):
-                return call_stmt, guard_stmt, stmts[i + 2].targets[0].elts, 3
+                    and stmts[i + 2].value.id == target.id):
+                return call_stmt, guard_stmt, stmts[i + 2].targets[0].elts, 3, None
+            deferred = self._deferred_unpack(call_stmt, target.id)
+            if deferred is not None:
+                return call_stmt, guard_stmt, deferred.targets[0].elts, 2, deferred
             return None
         if isinstance(target, (ast.Tuple, ast.List)) and all(isinstance(e, ast.Name) for e in target.elts):
             guard_name = next((e.id for e in target.elts if _none_toggle_op(guard_stmt.test, e.id) is True), None)
             if guard_name is not None:
-                return call_stmt, guard_stmt, target.elts, 2
+                return call_stmt, guard_stmt, target.elts, 2, None
         return None
 
     def _try_splice(self, stmts: List[ast.stmt], i: int):
         shape = self._call_shape(stmts, i)
         if shape is None:
             return None
-        call_stmt, guard_stmt, final_targets, consumed = shape
+        call_stmt, guard_stmt, final_targets, consumed, deferred = shape
         if not (len(guard_stmt.body) == 1 and not guard_stmt.orelse
                 and isinstance(guard_stmt.body[0], (ast.Continue, ast.Break, ast.Pass, ast.Return))):
             return None
@@ -5181,8 +5263,7 @@ class _SpliceNoneGuardedCalls:
             unpack = ast.Assign(targets=[ast.Tuple(elts=targets_copy, ctx=ast.Store())],
                                 value=ast.Tuple(elts=ret_elts_renamed, ctx=ast.Load()))
         ast.fix_missing_locations(unpack)
-        new_stmts.append(unpack)
-        return new_stmts, stmts[i:i + consumed]
+        return new_stmts, consumed, deferred, unpack
 
 
 #: Calls whose ``axis`` selects WHICH loop the lowering writes -- a structural choice, so an axis

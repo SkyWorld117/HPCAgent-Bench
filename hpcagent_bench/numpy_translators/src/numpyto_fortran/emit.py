@@ -2756,9 +2756,62 @@ def emit_fortran_omp(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     return emit_fortran(kir, fn_name, parallel=True)
 
 
+def _tuple_element(node: ast.AST, i: int, n: int) -> Optional[ast.expr]:
+    """Element ``i`` of an ``n``-wide tuple-valued expression, or None when it is not one.
+
+    A conditional over tuples is projected by pushing the index through it, so the guards survive
+    and the tuples disappear.
+    """
+    if isinstance(node, ast.Tuple):
+        return copy.deepcopy(node.elts[i]) if len(node.elts) == n else None
+    if isinstance(node, ast.IfExp):
+        body = _tuple_element(node.body, i, n)
+        orelse = _tuple_element(node.orelse, i, n)
+        if body is None or orelse is None:
+            return None
+        return ast.IfExp(test=copy.deepcopy(node.test), body=body, orelse=orelse)
+    return None
+
+
+class _TupleTargetSplitter(ast.NodeTransformer):
+    """Rewrite ``a, b, c = <tuple-valued expr>`` into one scalar assignment per element.
+
+    Fortran has no tuple, and nothing downstream of here does: the rename pass, the assigned-name
+    scan and :func:`_collect_implicit_locals` all read ``Assign`` targets that are plain Names, so
+    a tuple target reaches the emitter undeclared as well as unemittable. The frontend splices a
+    tuple-returning helper into its call site as a SINGLE expression -- a conditional selecting
+    between tuple literals -- which the lowering splitter (matching a bare tuple RHS) leaves alone.
+
+    Declines when a target name is read by the RHS: python binds every target from the OLD values,
+    and a sequential split would read one already updated.
+    """
+
+    def visit_Assign(self, node: ast.Assign) -> object:
+        self.generic_visit(node)
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Tuple):
+            return node
+        targets = node.targets[0].elts
+        if not all(isinstance(t, ast.Name) for t in targets):
+            return node
+        names = {t.id for t in targets}
+        if any(isinstance(sub, ast.Name) and sub.id in names for sub in ast.walk(node.value)):
+            return node
+        parts = [_tuple_element(node.value, i, len(targets)) for i in range(len(targets))]
+        if any(p is None for p in parts):
+            return node
+        out: List[ast.stmt] = []
+        for target, part in zip(targets, parts):
+            stmt = ast.Assign(targets=[copy.deepcopy(target)], value=part)
+            ast.copy_location(stmt, node)
+            ast.fix_missing_locations(stmt)
+            out.append(stmt)
+        return out
+
+
 def emit_fortran(kir: KernelIR, fn_name: Optional[str] = None, parallel: bool = False) -> str:
     """Emit a self-contained Fortran subroutine with timing wrapper."""
     name = fn_name or f"{kir.kernel_name}_d_auto"
+    _TupleTargetSplitter().visit(kir.tree)
     # ABI parameter order (what the binding JSON, and every caller, uses).
     # param_order() sorts alphabetically, so it must be captured on the
     # ORIGINAL names, before the Fortran identifier rename below can shift a

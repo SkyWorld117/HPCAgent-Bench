@@ -13,6 +13,7 @@ gamma branches carry un-lowerable tuples) reduces to its live path.
 from typing import Dict, Optional
 
 import numpy as np
+import pytest
 
 from _op_oracle import run_op
 
@@ -312,6 +313,22 @@ def test_an_unresolvable_buffer_dtype_refuses():
     src = _DTYPE_OF_SRC.replace("dtype=x.dtype", "dtype=SOME_DTYPE")
     with pytest.raises(NotImplementedError, match="does not resolve to a known dtype"):
         _helper_kir(src, "float32")
+
+
+def test_a_helper_local_resolves_its_dtype_against_the_helpers_own_params():
+    # ``np.zeros(..., dtype=v.dtype)`` inside a HELPER names that helper's parameter, so the
+    # parameter table is the scope it resolves against. ``_build_helper_kirs`` asked with an EMPTY
+    # one while classifying the return, which turned a perfectly resolvable dtype into a hard
+    # "does not resolve to a known dtype" refusal -- reported instead of the real reason the
+    # helper could not be emitted (conv_transpose3d_scale_batch_norm_global_avg_pool).
+    import ast
+    from numpyto_common.frontend import _local_array_def
+    from numpyto_common.ir import ArrayDesc
+    hfn = ast.parse("def widen(v, s):\n w = np.zeros(8, dtype=v.dtype)\n return w\n").body[0]
+    params = {"v": ArrayDesc(name="v", dtype="float32", shape=("n", ), is_output=False)}
+    assert _local_array_def(hfn, "w", params)[1] == "float32"
+    with pytest.raises(NotImplementedError, match="does not resolve to a known dtype"):
+        _local_array_def(hfn, "w", {})
 
 
 #: ``t = h(t, s)``: the target IS the first argument, so the helper reads and writes ONE buffer.
