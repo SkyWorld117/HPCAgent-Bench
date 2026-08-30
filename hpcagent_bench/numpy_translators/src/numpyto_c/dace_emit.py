@@ -988,7 +988,7 @@ def view_slice_binding(node: ast.stmt) -> Optional[str]:
     return target.id
 
 
-def bare_alias_binding(node: ast.stmt) -> Optional[str]:
+def bare_alias_binding(node: ast.stmt, symbols: frozenset = frozenset()) -> Optional[str]:
     """The bound name of ``name = other`` -- the whole-array spelling numpy answers with a view.
 
     ``arr[...]`` is not the only way to reach a View node: dace makes one for a bare rebinding too,
@@ -999,12 +999,16 @@ def bare_alias_binding(node: ast.stmt) -> Optional[str]:
     if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
         return None
     target, value = node.targets[0], node.value
-    return target.id if isinstance(target, ast.Name) and isinstance(value, ast.Name) else None
+    if not (isinstance(target, ast.Name) and isinstance(value, ast.Name)):
+        return None
+    # A dc.symbol is not storage: ``m_iter = m`` reads a scalar the caller bound, and copying it
+    # asks dace for an array of a symbol. gmres seeds its runtime count exactly this way.
+    return None if value.id in symbols else target.id
 
 
-def view_binding(node: ast.stmt) -> Optional[str]:
+def view_binding(node: ast.stmt, symbols: frozenset = frozenset()) -> Optional[str]:
     """Either spelling that leaves dace holding a View: a kept-dimension slice or a bare alias."""
-    return view_slice_binding(node) or bare_alias_binding(node)
+    return view_slice_binding(node) or bare_alias_binding(node, symbols)
 
 
 def statement_lists(root: ast.AST) -> List[List[ast.stmt]]:
@@ -1029,6 +1033,23 @@ def allocation_binding(node: ast.stmt) -> Optional[str]:
         return None
     call = node.value
     if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ALLOCATION_CALLS):
+        return None
+    return node.targets[0].id
+
+
+def value_binding(node: ast.stmt) -> Optional[str]:
+    """The bound name of any ``name = <expr>``, else ``None``.
+
+    The widest of the binding predicates, and the one that catches what the others miss: a name
+    bound to a COMPUTED value in two arms of a branch. dace gives it one descriptor and refuses the
+    second binding (``Cannot reassign value to variable``), whether or not the two are spelled the
+    same -- esirkepov's ``cum_x = np.cumsum(...)`` appears verbatim in three arms of a five-way
+    branch, and conv_pointwise_2d's ``padded`` is an allocation in one arm and a plain alias in the
+    other. Safe to be this wide only because :func:`version_rebound_names` versions nothing whose
+    bindings do not already have disjoint live ranges: anything needing a phi is declined, not
+    renamed.
+    """
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
         return None
     return node.targets[0].id
 
@@ -1065,7 +1086,7 @@ def written_through(fn: ast.FunctionDef) -> set:
     return names
 
 
-def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
+def copy_view_bindings(fn: ast.FunctionDef, names, symbols: frozenset = frozenset()) -> None:
     """Rewrite each view binding of ``names`` to ``np.copy(..)``, in place.
 
     The name stops being a View and becomes a plain array, which dace rebinds freely as long as the
@@ -1077,7 +1098,7 @@ def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
         return
     for block in statement_lists(fn):
         for stmt in block:
-            if view_binding(stmt) in names:
+            if view_binding(stmt, symbols) in names:
                 copied = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
                                                      attr="copy",
                                                      ctx=ast.Load()),
@@ -1086,7 +1107,7 @@ def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
                 stmt.value = ast.copy_location(copied, stmt.value)
 
 
-def mixed_view_names(fn: ast.FunctionDef) -> set:
+def mixed_view_names(fn: ast.FunctionDef, symbols: frozenset = frozenset()) -> set:
     """Names bound BOTH to a view and to a computed value.
 
     dace makes a View node for ``horiz = padded[:, 0:W]`` and then refuses the ``horiz =
@@ -1103,7 +1124,7 @@ def mixed_view_names(fn: ast.FunctionDef) -> set:
             for target in stmt.targets:
                 if not isinstance(target, ast.Name):
                     continue
-                (views if view_binding(stmt) == target.id else valued).add(target.id)
+                (views if view_binding(stmt, symbols) == target.id else valued).add(target.id)
     for node in ast.walk(fn):
         target = node.target if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For)) else None
         if isinstance(target, ast.Name):
@@ -1145,6 +1166,14 @@ def version_rebound_names(fn: ast.FunctionDef, binding_of, candidates=None) -> L
     loop and read after it; both show up as a read reachable from two regions, or from none.
     Renaming those would bind the read to whichever binding the parser saw last, so they are
     declined here for :func:`copy_view_bindings`, which pays for a buffer to say the same thing.
+
+    Regions are built per statement list, so a binding NESTED inside another's extent needs its own
+    decline: the outer region's owned statements include the whole loop or branch, and every read
+    the inner binding feeds is counted against the outer region alone. The read-ownership check
+    then passes while the inner region owns nothing, and versioning it produces a dead store --
+    gmres' ``m_iter``, seeded at top level and advanced by ``m_iter = k + 1`` two blocks down,
+    stopped advancing. Bindings in SIBLING blocks are unaffected, which is the common case this
+    function exists for: esirkepov binds ``cum_x`` in three arms of one branch, none inside another.
     """
     declined: List[str] = []
     blocks = statement_lists(fn)
@@ -1166,6 +1195,9 @@ def version_rebound_names(fn: ast.FunctionDef, binding_of, candidates=None) -> L
             declined.append(name)
             continue  # something else writes the name; its value is no longer just these bindings
         reached = [{id(node) for stmt in owned for node in ast.walk(stmt)} for _, owned in regions]
+        if any(id(binding) in nodes for binding, _ in regions for nodes in reached):
+            declined.append(name)
+            continue  # a binding NESTED in another's extent: the reads after it belong to both
         if any(sum(id(load) in nodes for nodes in reached) != 1 for load in loads.get(name, [])):
             declined.append(name)
             continue  # a read no region owns, or one two regions reach: neither is a rename
@@ -2332,9 +2364,14 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # A rebound view name gets a fresh name per binding where the live ranges are disjoint, and a
     # copy where they are not -- a merge or a loop needs a phi, which a rename is not. One
     # descriptor also cannot hold two shapes, so a re-allocation gets its own name too.
-    copy_view_bindings(fn_ast, mixed_view_names(fn_ast))
-    copy_view_bindings(fn_ast, version_rebound_views(fn_ast))
+    symbol_set = frozenset(symbol_names)
+    copy_view_bindings(fn_ast, mixed_view_names(fn_ast, symbol_set), symbol_set)
+    copy_view_bindings(fn_ast, version_rebound_views(fn_ast), symbol_set)
     version_reallocations(fn_ast)
+    # Widest last: a name bound to a computed value in two arms of a branch is one descriptor dace
+    # refuses to rebind, and the narrower predicates above see neither binding. Only the bindings
+    # with disjoint live ranges are renamed -- a phi is declined, not invented.
+    version_rebound_names(fn_ast, value_binding)
     ast.fix_missing_locations(fn_ast)
     body = list(fn_ast.body)
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
