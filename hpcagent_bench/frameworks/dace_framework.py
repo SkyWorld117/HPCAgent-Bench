@@ -435,13 +435,12 @@ class SdfgPipeline:
 def pipeline_parallel(sdfg: Any, ctx: Dict[str, Any]) -> None:
     """The parallelization pipeline, CPU or GPU.
 
-    The STAGE LIST IS dace_fortran.pipelines.optimize -- that function in the dace-fortran repo is
-    the source of truth and the pipeline CloudSC is actually driven with. What stood here before was
-    a strict subset of it that nonetheless claimed the same provenance: no ``UniqueLoopIterators``,
-    no scalar fission, no length-one-array conversion, plain vertical ``MapFusion`` instead of
-    ``FullMapFusion``, and ``simplify`` ahead of the unroll rather than after it. The column
-    therefore reported DaCe as WEAKER than dace-fortran drives it -- durbin fuses to 3 maps under
-    this list and reported 5 under the old one.
+    The stage list is the one CloudSC is driven with, which dace-fortran arrived at first. What
+    stood here before was a strict subset of it: no ``UniqueLoopIterators``, no scalar fission, no
+    length-one-array conversion, plain vertical ``MapFusion`` instead of ``FullMapFusion``, and
+    ``simplify`` ahead of the unroll rather than after it. The column therefore reported DaCe as
+    WEAKER than that pipeline actually drives it -- durbin fuses to 3 maps under this list and
+    reported 5 under the old one.
 
     ``UniqueLoopIterators`` is the one whose absence changes the answer rather than the speed:
     shared iterator names make ``LoopToMap`` refuse merged siblings, so loops that should have
@@ -450,14 +449,15 @@ def pipeline_parallel(sdfg: Any, ctx: Dict[str, Any]) -> None:
     On GPU the offload runs LAST, after every CPU-side optimization: the maps are formed, collapsed
     and fused on the host graph first, and only the finished map structure is moved to the device.
 
-    COPIED rather than imported, deliberately. dace-fortran pins ``dace @ git+...@FaCe`` while this
-    repo runs spcl/dace@extended, so depending on it would have pip replace the DaCe under every
-    other column. It is declared in requirements/optional.txt for anyone who wants to diff the two.
+    WRITTEN OUT HERE, with no dependency on dace-fortran. Sharing the code would mean taking its
+    ``dace @ git+...@FaCe`` pin, which would replace the spcl/dace@extended install every other
+    column runs on; and this list has to be free to follow THIS corpus anyway, which is a different
+    workload from CloudSC. Only the idea is borrowed.
 
-    Two stages of the original are absent by necessity: dace-fortran's ``fission_scalars`` wrapper
-    exists to spare its Fortran ABI-proxy transients, which a Python-frontend SDFG does not have, so
-    the bare ``ScalarFission`` pipeline is the whole content here; and ``MakeTransientsPersistent``
-    does not exist on extended at all.
+    Two stages of that pipeline are deliberately not here. Its scalar-fission wrapper exists to
+    spare Fortran ABI-proxy transients, which a Python-frontend SDFG does not have, so the bare
+    ``ScalarFission`` pipeline is the whole content; and ``MakeTransientsPersistent`` does not exist
+    on extended at all.
     """
     from dace.transformation.interstate.state_fusion_with_happens_before import StateFusionExtended
     from dace.transformation.pass_pipeline import Pipeline
