@@ -5563,9 +5563,21 @@ def _fuse_guarded_returns(tree: ast.Module) -> None:
 
 
 def _is_static_flag_test(test: ast.expr, flags: FrozenSet[str]) -> bool:
-    """``flag`` / ``not flag`` on a parameter that is a literal at every call site."""
+    """``flag`` / ``not flag`` / ``flag == <literal>`` on a parameter that is a literal at every
+    call site.
+
+    The compare form is how a multi-way MODE selects, and it is decidable on exactly the same
+    grounds as the bare flag: the call site's literal is substituted into the body, leaving two
+    constants the inline fixpoint's own folding decides. kl_div_loss' ``_kl_div`` guards its three
+    return paths with ``reduction == 'batchmean'`` / ``== 'sum'``, and without this it fused
+    nothing, inlined under no form, and emitted no program at all.
+    """
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return _is_static_flag_test(test.operand, flags)
+    if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Eq, ast.NotEq))):
+        left, right = test.left, test.comparators[0]
+        named = [side for side in (left, right) if isinstance(side, ast.Name) and side.id in flags]
+        return bool(named) and any(isinstance(side, ast.Constant) for side in (left, right))
     return isinstance(test, ast.Name) and test.id in flags
 
 
