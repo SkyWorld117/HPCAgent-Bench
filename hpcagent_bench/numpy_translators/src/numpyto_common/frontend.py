@@ -3476,8 +3476,10 @@ def _expr_array_dtype(node: ast.expr, arr_by: Dict[str, ArrayDesc]) -> Optional[
     return None
 
 
-def _shape_from_expression(fn: ast.FunctionDef, node: ast.expr,
-                           arr_by: Dict[str, ArrayDesc]) -> Optional[Tuple[Tuple[str, ...], str]]:
+def _shape_from_expression(fn: ast.FunctionDef,
+                           node: ast.expr,
+                           arr_by: Dict[str, ArrayDesc],
+                           seen: Optional[Set[str]] = None) -> Optional[Tuple[Tuple[str, ...], str]]:
     """``(shape, dtype)`` of an array-valued EXPRESSION, or ``None``.
 
     A local bound from a numpy expression rather than an allocation or an alias -- mamba2's
@@ -3495,6 +3497,17 @@ def _shape_from_expression(fn: ast.FunctionDef, node: ast.expr,
     # resolver back through the constructor dtype path, and a table built per unresolved
     # expression re-sweeps the whole body -- neither is worth what it adds here.
     declared = {n: _shape_tuple_string(tuple(str(s) for s in a.shape)) for n, a in arr_by.items()}
+    # A kernel LOCAL operand carries a shape too, and the broadcast join does not FAIL on a name it
+    # cannot resolve -- it drops that operand's axes. mlp's ``relu(x @ w2 + b2)`` then measured only
+    # b2, so the helper argument temp was allocated rank-1 (S1,) instead of (N, S1) and the copy loop
+    # that fills it read the matmul buffer BARE (``__mm2 + b2[i]``, a pointer plus a double).
+    # Resolved through the same chase the caller used, ``seen`` threaded so an operand naming the
+    # local being resolved terminates instead of recursing.
+    for operand in ast.walk(node):
+        if isinstance(operand, ast.Name) and operand.id not in declared:
+            local = _resolve_array_ref(fn, operand, arr_by, seen)
+            if local is not None:
+                declared[operand.id] = _shape_tuple_string(tuple(str(s) for s in local[0]))
     shape_str = _shape_from_iter_extent(node, declared, route_calls=True)
     if shape_str is None:
         return None
@@ -3528,7 +3541,7 @@ def _resolve_array_ref(fn: ast.FunctionDef,
         kept = _apply_subscript_axes(list(shape), node.slice)
         return (tuple(kept), dtype) if kept else None
     if not isinstance(node, ast.Name):
-        return _shape_from_expression(fn, node, arr_by)
+        return _shape_from_expression(fn, node, arr_by, seen)
     name = node.id
     if name in arr_by:
         a = arr_by[name]
@@ -4129,8 +4142,10 @@ def _mark_written_outputs(hfn: ast.FunctionDef, arrays: List[ArrayDesc]) -> None
             a.is_output = True
 
 
-def _substitute_names(node: ast.AST, consts: Dict[str, ast.expr]) -> None:
-    """Replace each ``Load`` use of a name in ``consts`` with its constant expr."""
+def _substitute_names(node: ast.AST, consts: Dict[str, ast.expr]) -> ast.AST:
+    """Replace each ``Load`` use of a name in ``consts`` with its constant expr.
+
+    Returns the (possibly replaced) root so a bare-Name ``node`` is not lost."""
 
     class _Sub(ast.NodeTransformer):
 
@@ -4139,7 +4154,7 @@ def _substitute_names(node: ast.AST, consts: Dict[str, ast.expr]) -> None:
                 return ast.copy_location(copy.deepcopy(consts[n.id]), n)
             return n
 
-    _Sub().visit(node)
+    return _Sub().visit(node)
 
 
 def _drop_unreachable_after_return(stmts: List[ast.stmt]) -> List[ast.stmt]:
@@ -4434,8 +4449,7 @@ def _folded_straight_line(body: List[ast.stmt]) -> Optional[List[ast.stmt]]:
             name = stmt.targets[0].id
             if name in folded:
                 return None
-            value = copy.deepcopy(stmt.value)
-            _substitute_names(value, folded)  # a later local may read an earlier one
+            value = _substitute_names(copy.deepcopy(stmt.value), folded)  # a later local may read an earlier one
             folded[name] = value
             continue
         if not isinstance(stmt, (ast.If, ast.Return)):
@@ -4542,8 +4556,7 @@ class _InlineTupleHelperCalls(ast.NodeTransformer):
         template = self.templates.get(id(node))
         if template is None:
             return node
-        substituted = copy.deepcopy(template)
-        _substitute_names(substituted, dict(zip(self.pnames, node.args)))
+        substituted = _substitute_names(copy.deepcopy(template), dict(zip(self.pnames, node.args)))
         return ast.copy_location(substituted, node)
 
 

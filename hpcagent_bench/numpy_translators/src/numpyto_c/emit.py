@@ -2900,17 +2900,24 @@ def pinned_const_block(kir: KernelIR) -> str:
     lines = []
     for name in sorted(kir.pinned_consts):
         value = kir.pinned_consts[name]
-        lines.append(f"constexpr {type_of.get(name, _c_type('float64'))} {name} = {c_literal(value)};")
+        ctype = type_of.get(name, _c_type("float64"))
+        lines.append(f"constexpr {ctype} {name} = {c_literal(value, ctype)};")
     return "\n".join(lines) + "\n\n"
 
 
-def c_literal(value) -> str:
-    """A pinned knob's value as a C literal of its own kind (``true`` / ``100`` / ``1e-06``)."""
+#: C literal suffix per narrower-than-double floating ctype. A C23 ``constexpr`` initializer must be
+#: EXACTLY representable in the declared type, and a bare ``1e-10`` is a double that is not a float,
+#: so the suffix is what makes the declaration legal rather than a rounding convenience.
+_FLOAT_LITERAL_SUFFIX = {"float": "f", "_Float16": "f16"}
+
+
+def c_literal(value, ctype: str = "double") -> str:
+    """A pinned knob's value as a C literal of its own kind (``true`` / ``100`` / ``1e-06f``)."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
-    return repr(float(value))
+    return repr(float(value)) + _FLOAT_LITERAL_SUFFIX.get(ctype, "")
 
 
 def emit_c(kir: KernelIR, fn_name: Optional[str] = None) -> str:
