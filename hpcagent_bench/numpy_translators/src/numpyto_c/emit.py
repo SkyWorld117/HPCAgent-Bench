@@ -2105,27 +2105,38 @@ def _alloc_marker_target(stmt: ast.stmt) -> Optional[str]:
 def _branch_scoped_locals(tree: ast.FunctionDef, candidates: Set[str]) -> Dict[str, int]:
     """``name -> id()`` of the ``if`` branch that OWNS each local, for the locals one branch owns.
 
-    A local qualifies when every reference to it in the function is inside that one branch AND the
-    branch carries its allocation marker -- then its declaration, its malloc and its free all fit
-    there, and the branches it does not belong to allocate nothing. A runtime-axis dispatch emits
-    one nest per axis and runs exactly one, so at function top it would allocate ``rank`` buffers
-    per call to use one; C99 onward allows the declaration at any point in a block.
+    A local qualifies when every reference to it in the function is inside that one branch AND every
+    allocation marker for it is a direct statement of that branch -- then its declaration, its malloc
+    and its free all fit there, and the branches it does not belong to allocate nothing. A runtime
+    axis dispatch emits one nest per axis and runs exactly one, so at function top it would allocate
+    ``rank`` buffers per call to use one of them; C99 onward allows the declaration at any point in a
+    block.
 
     Two exclusions, both about not trading memory for something worse:
 
     * a branch under a LOOP -- allocating per iteration puts a malloc in the hot path;
     * the ``orelse`` of an ``elif`` chain, which is emitted by recursing into the inner ``if``:
-      there is no statement list of its own to append the free to, so a local owned there would
-      leak.
+      there is no statement list of its own to append the free to, so a local owned there would leak.
     """
     total: Dict[str, int] = {}
-    markers_total: Dict[str, int] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id in candidates:
             total[node.id] = total.get(node.id, 0) + 1
-        marked = _alloc_marker_target(node) if isinstance(node, ast.stmt) else None
-        if marked is not None:
-            markers_total[marked] = markers_total.get(marked, 0) + 1
+
+    # Map each candidate's allocation markers to the id of the statement list that owns them.
+    marker_parent: Dict[str, List[int]] = {}
+
+    def collect_markers(stmts: List[ast.stmt], parent_id: int) -> None:
+        for stmt in stmts:
+            marker = _alloc_marker_target(stmt)
+            if marker is not None and marker in candidates:
+                marker_parent.setdefault(marker, []).append(parent_id)
+            if isinstance(stmt, (ast.If, ast.For, ast.While)):
+                collect_markers(stmt.body, id(stmt.body))
+                collect_markers(stmt.orelse, id(stmt.orelse))
+
+    collect_markers(tree.body, id(tree.body))
+
     branches: List[List[ast.stmt]] = []
 
     def collect(stmts: List[ast.stmt], in_loop: bool) -> None:
@@ -2146,6 +2157,7 @@ def _branch_scoped_locals(tree: ast.FunctionDef, candidates: Set[str]) -> Dict[s
 
     owner: Dict[str, Tuple[int, int]] = {}
     for stmts in branches:
+        branch_id = id(stmts)
         counts: Dict[str, int] = {}
         markers: Set[str] = set()
         size = 0
@@ -2158,15 +2170,18 @@ def _branch_scoped_locals(tree: ast.FunctionDef, candidates: Set[str]) -> Dict[s
                 if isinstance(sub, ast.Name) and sub.id in candidates:
                     counts[sub.id] = counts.get(sub.id, 0) + 1
         for name, seen in counts.items():
-            # ONE marker, and it is a statement of this branch: a second marker nested in a loop
-            # inside it would be reached first and put the declaration in a scope that ends before
-            # the free.
-            if seen != total.get(name) or name not in markers or markers_total.get(name) != 1:
+            # Every reference must live in this branch, and every allocation marker for the name must
+            # be a direct statement of this branch.  A marker nested in a loop or sub-branch is NOT
+            # direct: it would declare the pointer in a scope that ends before the appended free.
+            if seen != total.get(name) or name not in markers:
+                continue
+            parents = marker_parent.get(name, [])
+            if not parents or any(pid != branch_id for pid in parents):
                 continue
             # Innermost wins: an enclosing branch contains every use too, but the tighter scope
             # frees the buffer sooner.
             if name not in owner or size < owner[name][1]:
-                owner[name] = (id(stmts), size)
+                owner[name] = (branch_id, size)
     return {name: branch_id for name, (branch_id, _) in owner.items()}
 
 
@@ -2956,8 +2971,9 @@ def emit_cpp_isopar(kir: KernelIR, fn_name: Optional[str] = None) -> str:
     helpers = "".join(_emit_c_helper(h, cpp=True, isopar=True) for h in kir.helpers)
     signature = _emit_signature(kir, name).replace("*restrict ", "*__restrict__ ")
     body = _emit_body(kir, indent="        ", isopar=True)
-    return (f"{_CPP_ISOPAR_HEADER}{_fp8_prelude(kir)}\n{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
-            f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
+    return (
+        f"{_CPP_ISOPAR_HEADER}{_fp8_prelude(kir)}\n{pinned_const_block(kir)}{helpers}{signature} {{\n{_CPP_PRELUDE}{body}\n"
+        f"{_CPP_EPILOGUE}}}\n{_CPP_FOOTER}")
 
 
 def _require_parallelizable(kir: KernelIR) -> None:

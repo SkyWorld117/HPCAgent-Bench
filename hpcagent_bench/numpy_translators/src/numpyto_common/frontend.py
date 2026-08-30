@@ -660,6 +660,20 @@ def _rename_rebound_parameters(fn: ast.FunctionDef, inputs: frozenset) -> None:
     ast.fix_missing_locations(fn)
 
 
+def shape_subject(node: ast.expr) -> Optional[str]:
+    """The name a ``.shape`` read ultimately asks about, through any subscript chain.
+
+    Inlining substitutes a parameter with the ARGUMENT EXPRESSION, so a helper's own ``x.shape[2]``
+    arrives spelled ``y[:, 0:c].shape[2]`` whenever the caller passed a slice. Reading only a bare
+    Name there missed every one of those, and a name whose shape is asked for only through a slice
+    is exactly the one that most needs separating: densenet passes each dense block's running
+    buffer to its layers as ``y[:, 0:c]``.
+    """
+    while isinstance(node, ast.Subscript):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def version_rebound_locals(fn: ast.FunctionDef, skip: FrozenSet[str]) -> None:
     """Give each TOP-LEVEL rebinding of a local its own name, so one name never carries two shapes.
 
@@ -692,9 +706,23 @@ def version_rebound_locals(fn: ast.FunctionDef, skip: FrozenSet[str]) -> None:
     # target stop being the argument, so the helper gains a second descriptor and both sides carry
     # ``restrict`` over what the call itself aliases (vgg16's ``_maxpool2d(h, h, n)``).
     shape_read = {
-        node.value.id
+        base
         for node in ast.walk(fn)
-        if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name)
+        if isinstance(node, ast.Attribute) and node.attr == "shape" and (base := shape_subject(node.value))
+    }
+    # A name a local ALLOCATION is sized by needs separating for the same reason, one step further
+    # out. ``_resolve_array_ref`` answers a local array's shape with the SOURCE TEXT of its
+    # allocation, so an extent spelled ``c + 6 * g`` is re-resolved wherever that answer lands --
+    # against whichever binding of ``c`` is in scope there, not the one live at the allocation.
+    # densenet's running concatenation width is rebound once per layer, so chasing the block's
+    # buffer back through its allocation applied the block's own growth a second time and sized a
+    # 256-channel batchnorm at 448.
+    shape_read |= {
+        sub.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in (
+            "zeros", "empty", "ones", "full") and node.args for sub in ast.walk(node.args[0])
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
     }
     targets = {n for n, c in counts.items() if c > 1 and n not in nested and n not in skip and n in shape_read}
     if not targets:
@@ -4385,6 +4413,44 @@ def _bind_call_constants(hfn: ast.FunctionDef, consts: Dict[str, ast.expr]) -> N
         ast.fix_missing_locations(hfn)
 
 
+def _folded_straight_line(body: List[ast.stmt]) -> Optional[List[ast.stmt]]:
+    """``body`` with its leading single-assignment locals folded into the statements that read them.
+
+    A tuple-returning helper has no ABI to be called across, so it is spliced into each call site as
+    ONE expression -- which needs a body that only ever returns. The useful ones compute a few index
+    locals first: ``_tap_span`` binds ``offset``, ``rhs`` and its four bounds, then picks between
+    three 4-tuples on guards over them. :func:`_return_expression` saw an ``Assign`` at the head,
+    declined, and three conv_transpose kernels emitted no DaCe program at all.
+
+    Only a name bound ONCE is folded, and only across a run of such assignments. A rebinding needs
+    the value live at each read, which one substitution cannot express, so it declines instead.
+    """
+    folded: Dict[str, ast.expr] = {}
+    out: List[ast.stmt] = []
+    for stmt in _strip_docstrings(body):  # a helper's docstring is an Expr, and it is the FIRST statement
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            name = stmt.targets[0].id
+            if name in folded:
+                return None
+            value = copy.deepcopy(stmt.value)
+            _substitute_names(value, folded)  # a later local may read an earlier one
+            folded[name] = value
+            continue
+        if not isinstance(stmt, (ast.If, ast.Return)):
+            return None
+        # The locals are interleaved WITH the guards, not merely ahead of them: ``_tap_span``
+        # bails, computes ``iz_hi``, bails again, then computes the bounds it returns. A guard that
+        # rebound a folded name would make one substitution stand for two values, so decline.
+        if any(
+                isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store) and sub.id in folded
+                for sub in ast.walk(stmt)):
+            return None
+        kept = copy.deepcopy(stmt)
+        _substitute_names(kept, folded)
+        out.append(kept)
+    return out
+
+
 def _return_expression(body: List[ast.stmt]) -> Optional[ast.expr]:
     """A body that only ever returns, collapsed into ONE expression, or ``None``.
 
@@ -4441,7 +4507,8 @@ def _tuple_template_for_call(hdef: ast.FunctionDef, call: ast.Call, tree: ast.Mo
     _bind_call_constants(hfn, consts)
     arrays, _, _ = _infer_helper_params(pnames, call.args, arr_by, sca_by, sym_by, kernel_fn)
     _desugar_helper_tuples(hfn, arrays, [], [])
-    expr = _return_expression(hfn.body)
+    straight = _folded_straight_line(hfn.body)
+    expr = _return_expression(straight) if straight is not None else None
     if expr is None:
         return None
     leaves = _tuple_leaves(expr)
@@ -4605,27 +4672,31 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
             # (keeps the function) when some call site does not match this helper's arity /
             # keyword shape -- that call still needs a real function to reach, so nothing here
             # may delete it.
-            calls = [
-                n for n in ast.walk(kernel_fn)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == hdef.name
-            ]
-            # A SIBLING helper calling this one keeps its own ``ast.Call`` in a tree this splice
-            # never visits, so dropping the function below would leave that call with nothing to
-            # reach. Decline instead -- the helper stays a real function.
-            sibling_calls = any(
-                isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == hdef.name
-                for other in helper_defs if other is not hdef for n in ast.walk(other))
+            # Every tree that calls this helper, paired with the scope its arguments resolve
+            # against. A SIBLING helper's call is spliced like any other: a tuple return has no ABI
+            # ANYWHERE, so declining those left the helper a real function that nothing could reach
+            # and no program was emitted at all. ``_tap_span`` is called only from
+            # ``_conv_transpose3d``, never from the kernel body, which is the whole of why three
+            # conv_transpose kernels refused. The owner is the resolution scope and not
+            # ``kernel_fn``: at a sibling's call site the arguments are that sibling's own locals.
+            owners = [kernel_fn] + [h for h in helper_defs if h is not hdef]
+            calls = [(owner, n) for owner in owners for n in ast.walk(owner)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == hdef.name]
             templates: Dict[int, ast.expr] = {}
-            if calls and not sibling_calls and all(not c.keywords and len(c.args) == len(pnames) for c in calls):
-                for site in calls:
-                    template = _tuple_template_for_call(hdef, site, tree, parent, arr_by, sca_by, sym_by, kernel_fn)
+            if calls and all(not c.keywords and len(c.args) == len(pnames) for _, c in calls):
+                for owner, site in calls:
+                    template = _tuple_template_for_call(hdef, site, tree, parent, arr_by, sca_by, sym_by, owner)
                     if template is None:
                         templates.clear()
                         break
                     templates[id(site)] = template
             if templates:
-                _InlineTupleHelperCalls(pnames, templates).visit(kernel_fn)
-                ast.fix_missing_locations(kernel_fn)
+                # A sibling owner is spliced in place: it is the tree node ``helper_defs`` holds, and
+                # its own pass through this loop deep-copies it afterwards, so it desugars the
+                # spliced tuples against its OWN inferred tables rather than the kernel's.
+                for owner in {id(o): o for o, _ in calls}.values():
+                    _InlineTupleHelperCalls(pnames, templates).visit(owner)
+                    ast.fix_missing_locations(owner)
                 _desugar_helper_tuples(kernel_fn, parent.arrays, parent.scalars, parent.symbols)
                 _reject_symbolic_axis(kernel_fn)
                 _reject_unsupported_slices(kernel_fn)
