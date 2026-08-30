@@ -628,8 +628,15 @@ class DaceFramework(Framework):
 
     def copy_func(self) -> Callable:
         # Every GPU flavor needs the device copy, not just the one originally named ``dace_gpu``.
+        #
+        # Through import_device_array_module, never a bare ``import cupy``: on ROCm the first HIPRTC
+        # compile dies inside <initializer_list> until repair_hiprtc_include_path has run, and that
+        # repair is what this entry point exists to apply. Importing cupy directly here is what made
+        # every dace_gpu kernel a load_error while the two native device paths worked -- 242 of 242,
+        # twice, on an image whose cupy was fine.
         if self.info["arch"] == "gpu":
-            import cupy
+            from hpcagent_bench.harness.native_call import import_device_array_module
+            cupy = import_device_array_module()
 
             def cp_copy_func(arr):
                 darr = cupy.asarray(arr)
