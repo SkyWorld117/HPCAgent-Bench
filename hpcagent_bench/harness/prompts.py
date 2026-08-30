@@ -909,9 +909,17 @@ def build_context(task: Task,
     # ``lib<short>.so`` (hpcagent_bench.harness.sandbox). Read from the language registry rather
     # than spelled again here, so the prompt cannot name a file the sandbox does not write -- a GPU
     # language is TWO units (host entry, device kernels), every other language one.
-    units = languages.source_units(task.language, symbol)
-    source_filename = units[0][1]
-    device_source_filename = units[-1][1] if len(units) > 1 else ""
+    # python is delivered as SOURCE, not as a translation unit: the sandbox stashes it as
+    # ``<short>_submission.py`` and imports it (hpcagent_bench.harness.sandbox), so it has no entry
+    # in the language registry and none of the compile-and-link names apply. Asking the registry
+    # for one raised KeyError and took the whole multi-node python prompt down with it.
+    if task.language in languages.LANG_EXT:
+        units = languages.source_units(task.language, symbol)
+        source_filename = units[0][1]
+        device_source_filename = units[-1][1] if len(units) > 1 else ""
+    else:
+        source_filename = f"{spec.short_name}_submission.py"
+        device_source_filename = ""
     lib_name = f"lib{spec.short_name}.so"
     context = {
         "kernel": spec.short_name,

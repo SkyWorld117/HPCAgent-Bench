@@ -988,6 +988,29 @@ def view_slice_binding(node: ast.stmt) -> Optional[str]:
     return target.id
 
 
+def bare_alias_binding(node: ast.stmt, symbols: frozenset = frozenset()) -> Optional[str]:
+    """The bound name of ``name = other`` -- the whole-array spelling numpy answers with a view.
+
+    ``arr[...]`` is not the only way to reach a View node: dace makes one for a bare rebinding too,
+    and refuses the next one exactly the same way. esirkepov's ``idx`` is bound to ``j`` in two arms
+    of a five-way branch and to ``j - 1`` in the rest, which comes back as ``Variable __inl11_idx
+    has been already defined`` (or ``Cannot reassign View`` when both arms are bare).
+    """
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+        return None
+    target, value = node.targets[0], node.value
+    if not (isinstance(target, ast.Name) and isinstance(value, ast.Name)):
+        return None
+    # A dc.symbol is not storage: ``m_iter = m`` reads a scalar the caller bound, and copying it
+    # asks dace for an array of a symbol. gmres seeds its runtime count exactly this way.
+    return None if value.id in symbols else target.id
+
+
+def view_binding(node: ast.stmt, symbols: frozenset = frozenset()) -> Optional[str]:
+    """Either spelling that leaves dace holding a View: a kept-dimension slice or a bare alias."""
+    return view_slice_binding(node) or bare_alias_binding(node, symbols)
+
+
 def statement_lists(root: ast.AST) -> List[List[ast.stmt]]:
     """Every statement list in the subtree -- the blocks a name's live range can be confined to."""
     blocks = []
@@ -1010,6 +1033,23 @@ def allocation_binding(node: ast.stmt) -> Optional[str]:
         return None
     call = node.value
     if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ALLOCATION_CALLS):
+        return None
+    return node.targets[0].id
+
+
+def value_binding(node: ast.stmt) -> Optional[str]:
+    """The bound name of any ``name = <expr>``, else ``None``.
+
+    The widest of the binding predicates, and the one that catches what the others miss: a name
+    bound to a COMPUTED value in two arms of a branch. dace gives it one descriptor and refuses the
+    second binding (``Cannot reassign value to variable``), whether or not the two are spelled the
+    same -- esirkepov's ``cum_x = np.cumsum(...)`` appears verbatim in three arms of a five-way
+    branch, and conv_pointwise_2d's ``padded`` is an allocation in one arm and a plain alias in the
+    other. Safe to be this wide only because :func:`version_rebound_names` versions nothing whose
+    bindings do not already have disjoint live ranges: anything needing a phi is declined, not
+    renamed.
+    """
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
         return None
     return node.targets[0].id
 
@@ -1046,7 +1086,7 @@ def written_through(fn: ast.FunctionDef) -> set:
     return names
 
 
-def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
+def copy_view_bindings(fn: ast.FunctionDef, names, symbols: frozenset = frozenset()) -> None:
     """Rewrite each view binding of ``names`` to ``np.copy(..)``, in place.
 
     The name stops being a View and becomes a plain array, which dace rebinds freely as long as the
@@ -1058,7 +1098,7 @@ def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
         return
     for block in statement_lists(fn):
         for stmt in block:
-            if view_slice_binding(stmt) in names:
+            if view_binding(stmt, symbols) in names:
                 copied = ast.Call(func=ast.Attribute(value=ast.Name(id="np", ctx=ast.Load()),
                                                      attr="copy",
                                                      ctx=ast.Load()),
@@ -1067,7 +1107,7 @@ def copy_view_bindings(fn: ast.FunctionDef, names) -> None:
                 stmt.value = ast.copy_location(copied, stmt.value)
 
 
-def mixed_view_names(fn: ast.FunctionDef) -> set:
+def mixed_view_names(fn: ast.FunctionDef, symbols: frozenset = frozenset()) -> set:
     """Names bound BOTH to a view and to a computed value.
 
     dace makes a View node for ``horiz = padded[:, 0:W]`` and then refuses the ``horiz =
@@ -1084,7 +1124,7 @@ def mixed_view_names(fn: ast.FunctionDef) -> set:
             for target in stmt.targets:
                 if not isinstance(target, ast.Name):
                     continue
-                (views if view_slice_binding(stmt) == target.id else valued).add(target.id)
+                (views if view_binding(stmt, symbols) == target.id else valued).add(target.id)
     for node in ast.walk(fn):
         target = node.target if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For)) else None
         if isinstance(target, ast.Name):
@@ -1126,6 +1166,14 @@ def version_rebound_names(fn: ast.FunctionDef, binding_of, candidates=None) -> L
     loop and read after it; both show up as a read reachable from two regions, or from none.
     Renaming those would bind the read to whichever binding the parser saw last, so they are
     declined here for :func:`copy_view_bindings`, which pays for a buffer to say the same thing.
+
+    Regions are built per statement list, so a binding NESTED inside another's extent needs its own
+    decline: the outer region's owned statements include the whole loop or branch, and every read
+    the inner binding feeds is counted against the outer region alone. The read-ownership check
+    then passes while the inner region owns nothing, and versioning it produces a dead store --
+    gmres' ``m_iter``, seeded at top level and advanced by ``m_iter = k + 1`` two blocks down,
+    stopped advancing. Bindings in SIBLING blocks are unaffected, which is the common case this
+    function exists for: esirkepov binds ``cum_x`` in three arms of one branch, none inside another.
     """
     declined: List[str] = []
     blocks = statement_lists(fn)
@@ -1147,6 +1195,9 @@ def version_rebound_names(fn: ast.FunctionDef, binding_of, candidates=None) -> L
             declined.append(name)
             continue  # something else writes the name; its value is no longer just these bindings
         reached = [{id(node) for stmt in owned for node in ast.walk(stmt)} for _, owned in regions]
+        if any(id(binding) in nodes for binding, _ in regions for nodes in reached):
+            declined.append(name)
+            continue  # a binding NESTED in another's extent: the reads after it belong to both
         if any(sum(id(load) in nodes for nodes in reached) != 1 for load in loads.get(name, [])):
             declined.append(name)
             continue  # a read no region owns, or one two regions reach: neither is a rename
@@ -1833,6 +1884,50 @@ def mintable_int_locals(fn_ast: ast.AST, symbols: set, known: set) -> set:
         cand |= grown
 
 
+class StripIdentityIntCasts(ast.NodeTransformer):
+    """Drop ``int(...)`` where the operand is already an integer symbol expression.
+
+    Every dc.symbol is minted int64 and :func:`_is_symbol_expr` admits only integer-valued forms,
+    so the cast computes nothing -- but it hides an alias from the inliner, which is what costs the
+    kernel. warpx_field_gather's ``o = int(depos_order)`` stayed a body local; ``__inl1_o + 1`` then
+    reached one allocation as an expression over the minted ``__sym___inl1_o`` and another as the
+    whole-expression symbol ``__sym___inl1_o_plus_1``, and the frontend cannot prove one equals the
+    other. With the cast gone ``o`` folds to ``depos_order`` and both spellings become the same one.
+
+    Only that case: ``int()`` on a float is a truncation and its operand fails ``_is_symbol_expr``,
+    so it is left alone.
+    """
+
+    def __init__(self, symbols: set) -> None:
+        self.symbols = symbols
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if (isinstance(node.func, ast.Name) and node.func.id == "int" and len(node.args) == 1 and not node.keywords
+                and _is_symbol_expr(node.args[0], self.symbols)):
+            return node.args[0]
+        return node
+
+
+def loop_induction_symbols(fn_ast: ast.AST) -> OrderedSet:
+    """Names bound by ``for <name> in range(...)`` -- symbols to dace, not data.
+
+    An induction variable is an atom the alias inliner must count as symbolic, or a scalar derived
+    from one stays a body local and lands in a slice bound as DATA. dace then mints a fresh symbol
+    for the whole bound and has nothing left to relate it to the start: conv3d's
+    ``padded_g[:, icg, iz0:iz0 + span_d]`` came out as an extent
+    ``-__sym___inl1_iz0 + __sym___inl1_iz0_plus_depth_1_kernel_size_1_1_1_1_1``, which the frontend
+    cannot prove equal to the accumulator's ``depth - kernel_size + 1``. With ``iz0 = kz * 1``
+    folded to its induction variable the extent is the span expression itself, spelled once.
+    """
+    names: OrderedSet = OrderedSet()
+    for node in ast.walk(fn_ast):
+        if (isinstance(node, ast.For) and isinstance(node.target, ast.Name) and isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Name) and node.iter.func.id == "range"):
+            names.add(node.target.id)
+    return names
+
+
 #: Bound on alias-inliner rounds; each exposes names one definition deeper.
 _INLINE_ALIAS_ROUNDS = 25
 
@@ -2220,7 +2315,16 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     fn_ast = BroadcastScalarWhere(value_shapes).visit(fn_ast)
     ast.fix_missing_locations(fn_ast)
     # Inline a shape scalar that's a pure symbolic alias of an existing dc.symbol, rather than promoting a fresh one.
-    fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names), set(arrays) | set(scalars) | set(symbol_names))
+    # Induction variables count as symbols here and NOWHERE else: they are atoms the inliner may fold
+    # through, but promoting one to a dc.symbol the caller binds would fix it at one iteration.
+    loop_syms = set(loop_induction_symbols(fn_ast))
+    # Before the inliner runs, not after: an identity int() cast makes an alias unrecognisable, and
+    # the whole point of the inliner is that one quantity keeps one spelling.
+    fn_ast = StripIdentityIntCasts(set(symbol_names) | loop_syms).visit(fn_ast)
+    ast.fix_missing_locations(fn_ast)
+    fn_ast = _inline_symbol_aliases(fn_ast,
+                                    set(symbol_names) | loop_syms,
+                                    set(arrays) | set(scalars) | set(symbol_names))
     # Inline a transient's own .shape read used to size an accumulator (dace forbids name-as-both).
     fn_ast = _inline_transient_shape_scalars(fn_ast, set(arrays) | set(scalars) | set(symbol_names))
     # Name any compound shape expression first, so promotion has a single name to work on.
@@ -2235,7 +2339,7 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         if set(promotable) == previous:
             break  # nothing new was exposed: another round would substitute the same names again
         previous = set(promotable)
-        fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names) | set(promotable), known)
+        fn_ast = _inline_symbol_aliases(fn_ast, set(symbol_names) | set(promotable) | loop_syms, known)
     # dace forbids a data-dependent array shape; promote body-computed size scalars to dc.symbols the caller binds.
     promoted, symbol_defs, reassigned = _plan_size_promotion(fn_ast,
                                                              set(arrays) | set(scalars) | set(symbol_names),
@@ -2260,9 +2364,14 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
     # A rebound view name gets a fresh name per binding where the live ranges are disjoint, and a
     # copy where they are not -- a merge or a loop needs a phi, which a rename is not. One
     # descriptor also cannot hold two shapes, so a re-allocation gets its own name too.
-    copy_view_bindings(fn_ast, mixed_view_names(fn_ast))
-    copy_view_bindings(fn_ast, version_rebound_views(fn_ast))
+    symbol_set = frozenset(symbol_names)
+    copy_view_bindings(fn_ast, mixed_view_names(fn_ast, symbol_set), symbol_set)
+    copy_view_bindings(fn_ast, version_rebound_views(fn_ast), symbol_set)
     version_reallocations(fn_ast)
+    # Widest last: a name bound to a computed value in two arms of a branch is one descriptor dace
+    # refuses to rebind, and the narrower predicates above see neither binding. Only the bindings
+    # with disjoint live ranges are renamed -- a phi is declined, not invented.
+    version_rebound_names(fn_ast, value_binding)
     ast.fix_missing_locations(fn_ast)
     body = list(fn_ast.body)
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
@@ -2300,7 +2409,11 @@ def emit_dace(kir: KernelIR, fn_name: str | None = None) -> str:
         literals = {n: ast.Constant(value=v) for n, v in pinned.items()}
         symbol_defs = [(n, ast.unparse(SubstituteNames(literals).visit(ast.parse(e, mode="eval")).body))
                        for n, e in symbol_defs]
+        # The SIGNATURE counts as a use, not only the body: seissol's ``nb`` sizes ``Q[batch, nb, 9]``
+        # and appears nowhere else, so a body-only scan dropped both its symbol declaration and its
+        # constant, leaving the annotation reading a name the module never binds.
         named = {node.id for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Name)}
+        named |= {ident for param in params for ident in _IDENT_RE.findall(param)}
         pinned = {n: v for n, v in pinned.items() if n in named}
 
     out: List[str] = []

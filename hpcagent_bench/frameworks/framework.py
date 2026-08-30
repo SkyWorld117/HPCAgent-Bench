@@ -66,7 +66,13 @@ class CallPlan:
         self.f.after_setup()
 
     def _resolved(self) -> Dict[str, Any]:
-        return {a: (self._mutable[a] if a in self._mutable else self.bdata[a]) for a in self.input_args}
+        resolved = {a: (self._mutable[a] if a in self._mutable else self.bdata[a]) for a in self.input_args}
+        # An OUTPUT buffer is not an input_arg, so it never picked up the per-run copy made above --
+        # and on a GPU flavor that copy IS the device allocation. Without this the kernel is handed
+        # host memory for a container its own signature declares device-resident, which is where
+        # nbody's KE/PE landed once they stopped being staged back to the host.
+        resolved.update({a: self._mutable[a] for a in self.output_args if a in self._mutable})
+        return resolved
 
     def run(self) -> Any:
         """One kernel call, inside the timed bracket: resolve args, invoke the impl, apply post_call."""

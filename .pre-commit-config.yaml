@@ -31,9 +31,9 @@ repos:
         language: system
         require_serial: true
         files: '\.py$'
-      # Reject any staged file over 500 KiB (keep datasets / binaries / dumps out of git).
+      # Reject an oversized staged file: 500 KiB for a binary blob (datasets / dumps), 1 MiB for source.
       - id: hpcagent_bench-large-files
-        name: block files > 500 KiB
+        name: block oversized files (500 KiB binary / 1 MiB text)
         entry: python scripts/check_large_files.py
         language: system
       # A kernel may not write through numpy's out= keyword: numba rejects it, pythran accepts

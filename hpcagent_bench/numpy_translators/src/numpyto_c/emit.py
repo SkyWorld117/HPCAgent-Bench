@@ -1019,6 +1019,11 @@ class _CBodyEmitter(BaseEmitter):
             # Per-statement shape update: each marker for a reassigned local advances the FIFO of shapes.
             is_reassign = bool(node.value.args) and (isinstance(node.value.args[0], ast.Constant)
                                                      and node.value.args[0].value == "__reassign__")
+            # Second marker arg (see lowering._WholeArrayAssignRewriter._expand): the RHS reads the
+            # target's OWN old values, so the loop needs them still standing -- never force a fresh
+            # allocation for this one, symbolic size or not.
+            self_ref = (len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Constant)
+                        and bool(node.value.args[1].value))
             if isinstance(target, ast.Name):
                 t = target.id
                 fifo = self._reassign_shapes.get(t)
@@ -1031,11 +1036,13 @@ class _CBodyEmitter(BaseEmitter):
                     # Reallocate only when the buffer doesn't exist or its size changed; a same-size
                     # __reassign__ may reuse in place only when the size is a literal constant. When the
                     # size is symbolic (e.g. ``kdim * nbase`` and ``nbase`` grows in a loop), the textual
-                    # size stays the same while the runtime footprint changes, so force a fresh allocation.
+                    # size stays the same while the runtime footprint changes, so force a fresh allocation
+                    # -- UNLESS the reassign is self-referential (``U = U * sign(...)``): its loop reads
+                    # the OLD buffer at every index, which a free+malloc here hands back uninitialised.
                     sizes = vars(self).setdefault("_deferred_alloc_size", {})
                     prev = sizes.get(t)
                     symbolic_size = any(c.isalpha() for c in size)
-                    if prev == size and not (is_reassign and symbolic_size):
+                    if prev == size and not (is_reassign and symbolic_size and not self_ref):
                         # Reuse in place: a reassign reads its own old values (no refill); a genuine reset still refills.
                         if is_reassign or fill is None:
                             return ""

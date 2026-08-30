@@ -660,6 +660,67 @@ def _rename_rebound_parameters(fn: ast.FunctionDef, inputs: frozenset) -> None:
     ast.fix_missing_locations(fn)
 
 
+def version_rebound_locals(fn: ast.FunctionDef, skip: FrozenSet[str]) -> None:
+    """Give each TOP-LEVEL rebinding of a local its own name, so one name never carries two shapes.
+
+    This is what npbench's own DaCe port of resnet does by hand: the six ``x = ...`` lines are left
+    commented out and replaced by ``x, x1, x2, x3, x4, x5, x6``, because a shape table with one
+    entry per name cannot answer a name bound to several. Inferring it instead is what miscompiled
+    resnet here -- conv2 and conv3 both read ``x.shape[1]`` across two rebindings and both were
+    answered with the batchnorm binding's ``H + 2``, sizing conv3's output (N, H+2, W+2, C1) where
+    it must be (N, H, W, C1).
+
+    Same restriction as :func:`_rename_rebound_parameters`, for the same reason: only a rebinding at
+    function-body top level, and only for a name nothing inside a nested block binds. A loop-carried
+    rebinding (ls3df_scf's Lanczos ``v``) is ONE storage read from the previous iteration, and
+    versioning it would be a different program.
+    """
+    counts: Dict[str, int] = {}
+    for stmt in fn.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            counts[stmt.targets[0].id] = counts.get(stmt.targets[0].id, 0) + 1
+    nested: Set[str] = set()
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.For, ast.While, ast.If, ast.With, ast.Try)):
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                    nested.add(sub.id)
+    # Only a name whose SHAPE is asked for. One descriptor per name is a problem exactly when
+    # something reads the shape and gets the wrong binding's answer; where nothing does, a second
+    # name buys nothing and costs the in-out helper ABI. ``t = scale_in_place(t, thr)`` is one
+    # buffer read and written -- one parameter -- and renaming the target to ``t__s2`` makes the
+    # target stop being the argument, so the helper gains a second descriptor and both sides carry
+    # ``restrict`` over what the call itself aliases (vgg16's ``_maxpool2d(h, h, n)``).
+    shape_read = {
+        node.value.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name)
+    }
+    targets = {n for n, c in counts.items() if c > 1 and n not in nested and n not in skip and n in shape_read}
+    if not targets:
+        return
+    seen: Dict[str, int] = {}
+    live: Dict[str, str] = {}
+
+    def rewrite_loads(node: ast.AST) -> None:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id in live:
+                sub.id = live[sub.id]
+
+    for stmt in fn.body:
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id in targets):
+            name = stmt.targets[0].id
+            rewrite_loads(stmt.value)  # the RHS reads the PREVIOUS version
+            seen[name] = seen.get(name, 0) + 1
+            if seen[name] > 1:
+                live[name] = f"{name}__s{seen[name]}"
+                stmt.targets[0].id = live[name]
+            continue
+        rewrite_loads(stmt)
+    ast.fix_missing_locations(fn)
+
+
 def _declared_ranks(shapes_raw: Dict[str, Any]) -> Dict[str, int]:
     """``init.shapes`` -> ``{array: rank}``, counting top-level commas so ``(N, M * K)`` is rank 2."""
     ranks: Dict[str, int] = {}
@@ -1117,6 +1178,7 @@ def build_kernel_ir(numpy_py: pathlib.Path,
         _specialize_runtime_axis(fn, _dispatch[0], _dispatch[1], frozenset(input_args), _resolve_axes)
 
     _rename_rebound_parameters(fn, frozenset(array_args) - frozenset(output_args))
+    version_rebound_locals(fn, frozenset(input_args) | frozenset(output_args) | frozenset(array_args))
 
     # Inline tuple-valued shape locals and fold tuple concatenation AFTER
     # inlining so references inside inlined helper bodies (vexx's invfft/fwfft
@@ -2849,6 +2911,68 @@ def _exact_multiple_factor(numerator: ast.expr, denominator: ast.expr) -> Option
     return None
 
 
+def _divide_multiple_term(term: ast.expr, divisor: int) -> Optional[ast.expr]:
+    """``term / divisor`` iff ``term`` is literally a constant multiple of it, else ``None``."""
+    if not isinstance(term, ast.BinOp) or not isinstance(term.op, ast.Mult):
+        return None
+    for const_side, other in ((term.left, term.right), (term.right, term.left)):
+        factor = _const_int(const_side)
+        if factor is None or factor % divisor:
+            continue
+        quotient = factor // divisor
+        return other if quotient == 1 else ast.BinOp(left=ast.Constant(value=quotient), op=ast.Mult(), right=other)
+    return None
+
+
+def _exact_quotient_with_remainder(numerator: ast.expr, divisor: int) -> Optional[ast.expr]:
+    """``(d*A + c) // d`` -> ``A + c//d`` -- true for EVERY integer ``A`` and ``c``.
+
+    Not the distribution the folder refuses below: that one splits a numerator whose terms are not
+    multiples of the divisor, and is wrong exactly because the division is inexact. Here every
+    non-constant term is a LITERAL multiple, so ``floor((d*A + c)/d) == A + floor(c/d)`` regardless
+    of either sign -- the leftover constant carries whatever it contributes and nothing is rounded
+    away. raman_fitting's jacobian is allocated ``3 * ((3 * K + 2) // 3) + 1`` and its columns
+    written through slices of the same shape; unfolded, the frontend saw ``K`` on one side and
+    ``int_floor(3*K + 2, 3)`` on the other and could not prove the two equal.
+    """
+    if divisor <= 0:
+        return None
+    terms: List[Tuple[int, ast.expr]] = []
+    constant = 0
+
+    def walk(expr: ast.expr, sign: int) -> None:
+        nonlocal constant
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub)):
+            walk(expr.left, sign)
+            walk(expr.right, sign if isinstance(expr.op, ast.Add) else -sign)
+            return
+        value = _const_int(expr)
+        if value is None:
+            terms.append((sign, expr))
+        else:
+            constant += sign * value
+
+    walk(numerator, 1)
+    if not terms:
+        return None
+    quotients = [(sign, _divide_multiple_term(term, divisor)) for sign, term in terms]
+    if any(q is None for _sign, q in quotients):
+        return None
+    lead = next((i for i, (sign, _q) in enumerate(quotients) if sign > 0), None)
+    if lead is None:
+        return None  # the identity still holds; there is just no leading term to rebuild the sum from
+    out = quotients[lead][1]
+    for i, (sign, quotient) in enumerate(quotients):
+        if i != lead:
+            out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=quotient)
+    remainder = constant // divisor  # floor division, so a negative constant carries its own -1
+    if remainder:
+        out = ast.BinOp(left=out,
+                        op=ast.Add() if remainder > 0 else ast.Sub(),
+                        right=ast.Constant(value=abs(remainder)))
+    return out
+
+
 class _ShapeArithFolder(ast.NodeTransformer):
     """Simplify a shape expression using integer identities that hold for EVERY value.
 
@@ -2875,6 +2999,10 @@ class _ShapeArithFolder(ast.NodeTransformer):
             factor = _exact_multiple_factor(node.left, node.right)
             if factor is not None:
                 return ast.copy_location(ast.Constant(value=factor), node)
+        if isinstance(node.op, ast.FloorDiv) and right is not None:
+            quotient = _exact_quotient_with_remainder(node.left, right)
+            if quotient is not None:
+                return ast.copy_location(ast.fix_missing_locations(quotient), node)
         # Identities. Commutative ones match either side; ``x - 0`` and ``x // 1`` only the right,
         # since ``0 - x`` negates and ``1 // x`` does not simplify.
         if isinstance(node.op, (ast.Add, ast.Mult)):
@@ -2892,6 +3020,32 @@ class _ShapeArithFolder(ast.NodeTransformer):
         return node
 
 
+def _scaled_term(coefficient: int, term: ast.expr) -> ast.expr:
+    """``term`` for a coefficient of 1, else ``coefficient * term``."""
+    if coefficient == 1:
+        return term
+    return ast.BinOp(left=ast.Constant(value=coefficient), op=ast.Mult(), right=term)
+
+
+def _combine_like_terms(terms: List[Tuple[int, ast.expr]]) -> List[Tuple[int, ast.expr]]:
+    """Sum the signs of structurally identical terms, dropping any that cancel to zero.
+
+    ``span - (-span)`` is ``2 * span`` and ``a - a`` is nothing at all. Keyed on ``ast.dump``, so
+    only terms spelled the same combine -- this decides no equality the text does not already make
+    obvious. First-appearance order is kept, since the emitted extent is read by people.
+    """
+    order: List[str] = []
+    coefficients: Dict[str, int] = {}
+    nodes: Dict[str, ast.expr] = {}
+    for sign, term in terms:
+        key = ast.dump(term)
+        if key not in coefficients:
+            order.append(key)
+            nodes[key] = term
+        coefficients[key] = coefficients.get(key, 0) + sign
+    return [(coefficients[key], nodes[key]) for key in order if coefficients[key]]
+
+
 def _gather_add_chain(node: ast.BinOp) -> ast.expr:
     """``((h + 6) - 7) + 1`` -> ``h + 0`` -> ``h``: sum the literals in one ``+``/``-`` chain.
 
@@ -2899,6 +3053,12 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
     / ``- kernel`` / ``+ 1``, so the literals arrive interleaved with the symbol and no single
     rewrite sees ``x + 0``; folding the chain is what makes a five-deep conv output-size expression
     collapse instead of growing one parenthesised layer per helper.
+
+    A unary minus is part of the chain, and repeated terms COMBINE: ``(span + 1) - (-span)`` is
+    ``2 * span + 1``, which is how cp2k_grid_integrate spells one length twice -- once as
+    ``nrel = 2 * span + 1`` and once as the extent of ``np.arange(-span, span + 1)``. Left apart,
+    the two became separate minted symbols the frontend could not prove equal. Both rewrites are
+    ordinary integer identities, like everything else here.
     """
     terms: List[Tuple[int, ast.expr]] = []
     total = 0
@@ -2909,6 +3069,9 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
             walk(expr.left, sign)
             walk(expr.right, sign if isinstance(expr.op, ast.Add) else -sign)
             return
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.UAdd, ast.USub)):
+            walk(expr.operand, sign if isinstance(expr.op, ast.UAdd) else -sign)
+            return
         value = _const_int(expr)
         if value is None:
             terms.append((sign, expr))
@@ -2916,14 +3079,15 @@ def _gather_add_chain(node: ast.BinOp) -> ast.expr:
             total += sign * value
 
     walk(node, 1)
+    terms = _combine_like_terms(terms)
     if not terms or all(sign < 0 for sign, _ in terms):
         return node  # a bare literal, or a fully-negated chain -- rebuilding it gains nothing
     lead = next(i for i, (sign, _) in enumerate(terms) if sign > 0)
-    out = terms[lead][1]
+    out = _scaled_term(*terms[lead])
     for i, (sign, term) in enumerate(terms):
         if i == lead:
             continue
-        out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=term)
+        out = ast.BinOp(left=out, op=ast.Add() if sign > 0 else ast.Sub(), right=_scaled_term(abs(sign), term))
     if total:
         out = ast.BinOp(left=out, op=ast.Add() if total > 0 else ast.Sub(), right=ast.Constant(value=abs(total)))
     return ast.copy_location(ast.fix_missing_locations(out), node)
@@ -4673,6 +4837,16 @@ def _build_helper_kirs(tree: ast.Module, kernel_fn: ast.FunctionDef, parent: Ker
     return out
 
 
+#: Statements a helper body may hold and still be spliceable into its caller.
+#: ``Assert``/``Pass`` earn their place the same way they do downstream: a kernel runs on
+#: oracle-validated inputs, so an ``assert groups == 1`` never fires, and both the emitter and
+#: ``numpy_desugar`` already drop one. Excluding them here did not make the helper safer -- it made
+#: it UNINLINABLE, and a helper that is not inlined survives as a call into a ``@dc.program``,
+#: which binds no helper at all: conv_pointwise_2d and kl_div_loss emitted no DaCe program because
+#: of one precondition line apiece.
+INLINABLE_STMTS = (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While, ast.Assert, ast.Pass)
+
+
 def _collect_inlinable_helpers(tree: ast.Module, kernel_fn: ast.FunctionDef) -> Dict[str, ast.FunctionDef]:
     """Return a name -> FunctionDef map for every top-level helper
     eligible for inlining.
@@ -4706,13 +4880,12 @@ def _collect_inlinable_helpers(tree: ast.Module, kernel_fn: ast.FunctionDef) -> 
         # ``np.add.at(fx, nodelist, sfx)`` scatters then ``return determ``).
         if isinstance(body[-1], ast.Return) and body[-1].value is not None:
             mid = body[:-1]
-            if all(isinstance(s, (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While)) for s in mid):
+            if all(isinstance(s, INLINABLE_STMTS) for s in mid):
                 if not any(isinstance(sub, ast.Return) for s in mid for sub in ast.walk(s)):
                     return True
         # Form 4: void helper -- simple Assign / AugAssign / For / While / If / Expr
         # statements with NO Return (in-place writes to argument arrays).
-        _SIMPLE = (ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Expr, ast.While)
-        if all(isinstance(s, _SIMPLE) for s in body):
+        if all(isinstance(s, INLINABLE_STMTS) for s in body):
             if not any(isinstance(sub, ast.Return) for s in body for sub in ast.walk(s)):
                 return True
         return False
@@ -5390,9 +5563,21 @@ def _fuse_guarded_returns(tree: ast.Module) -> None:
 
 
 def _is_static_flag_test(test: ast.expr, flags: FrozenSet[str]) -> bool:
-    """``flag`` / ``not flag`` on a parameter that is a literal at every call site."""
+    """``flag`` / ``not flag`` / ``flag == <literal>`` on a parameter that is a literal at every
+    call site.
+
+    The compare form is how a multi-way MODE selects, and it is decidable on exactly the same
+    grounds as the bare flag: the call site's literal is substituted into the body, leaving two
+    constants the inline fixpoint's own folding decides. kl_div_loss' ``_kl_div`` guards its three
+    return paths with ``reduction == 'batchmean'`` / ``== 'sum'``, and without this it fused
+    nothing, inlined under no form, and emitted no program at all.
+    """
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return _is_static_flag_test(test.operand, flags)
+    if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Eq, ast.NotEq))):
+        left, right = test.left, test.comparators[0]
+        named = [side for side in (left, right) if isinstance(side, ast.Name) and side.id in flags]
+        return bool(named) and any(isinstance(side, ast.Constant) for side in (left, right))
     return isinstance(test, ast.Name) and test.id in flags
 
 
