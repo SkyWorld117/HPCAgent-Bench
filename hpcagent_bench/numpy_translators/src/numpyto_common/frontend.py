@@ -5078,6 +5078,8 @@ class _SpliceNoneGuardedCalls:
     def __init__(self, helpers: Dict[str, ast.FunctionDef], counter: List[int]) -> None:
         self.helpers = helpers
         self._counter = counter
+        #: The function :meth:`apply` is walking -- the scope a deferred unpack is searched in.
+        self._fn: Optional[ast.FunctionDef] = None
 
     def apply(self, fn: ast.FunctionDef) -> bool:
         self._fn = fn
