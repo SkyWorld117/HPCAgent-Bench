@@ -76,12 +76,16 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: unit (format + structure + agent-bench)
     runs-on: ubuntu-latest
-    # Phase 1 (60) + Phase 3 (25) + Phase 0/2/setup, which is ~15 on a warm cache. The e2e[numba,jax]
+    # Phase 1 (90) + Phase 3 (25) + Phase 0/2/setup, which is ~15 on a warm cache. The e2e[numba,jax]
     # sweep that used to be Phase 5 here is its own job now: at 40 + 25 + 55 the STEP budgets came to
     # 120 minutes inside a 90-minute JOB, so this job could not finish even with every test passing,
     # and the job cancellation that followed is not a step failure -- the run reported a timeout with
     # no summary and named nothing. A job budget must exceed the sum of its steps.
-    timeout-minutes: 110
+    # 110 -> 140: run 33283870554 hit the 60-minute Phase 1 cap with zero test failures; the suite
+    # is simply growing. Sharding was measured and abandoned (three runners, no wall-clock win), and
+    # the dominant costs are dace_port_lowering timeouts and a single slow determinism witness, so
+    # the honest fix is more budget rather than dropped coverage.
+    timeout-minutes: 140
     env:
       # Job-level so every pytest here collects; --cov-report= suppresses the per-job
       # render (the combine job owns the only report).
@@ -158,11 +162,11 @@ jobs:
         # cancellation is not a step failure the FIVE phases below never ran at all. A step timeout
         # is a failure, so `!cancelled()` keeps them running and the job reports what it knows.
         #
-        # 40 -> 60: the sweep reached 69% in 40 minutes on run 33261681823 and died on the step
-        # timeout. --durations names what it spends the time on, and no -q, because a step timeout
-        # prints no summary: under -q the eight failures this sweep carried had no test names at
-        # all, so the log said only that 40 minutes had passed.
-        timeout-minutes: 60
+        # 40 -> 60 -> 90: the sweep reached 69% in 40 minutes on run 33261681823 and died on the
+        # step timeout; run 33283870554 then filled the 60-minute cap. --durations names what it
+        # spends the time on, and no -q, because a step timeout prints no summary: under -q the
+        # failures had no test names at all, so the log said only that the budget had passed.
+        timeout-minutes: 90
         run: |
           excl=$(mktemp)
           grep -vE '^\s*(#|$)' .github/dedicated_tests.txt > "$excl"
@@ -497,9 +501,12 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
     name: translators (numpyto op suite)
     runs-on: ubuntu-latest
-    # Phase 2a (85) + setup/ccache, ~10 warm. A job budget under the sum of its steps turns a step
+    # Phase 2a (110) + setup/ccache, ~10 warm. A job budget under the sum of its steps turns a step
     # failure into a job cancellation, which reports nothing.
-    timeout-minutes: 105
+    # 105 -> 130: Phase 2a hit its 85-minute cap in run 33283870554 with every inner test passing.
+    # The dominant cost is the corpus-wide ABI agreement test (~20 min) plus per-kernel emit/compile
+    # growth; raising the budget is the honest fix rather than dropping ABI coverage or sharding.
+    timeout-minutes: 130
     # ONE runner. It was three, cost-sharded, until run 30480407159 measured the result: 4m + 8m +
     # 9m. Three runners and a splitting mechanism to move a 21m job off a critical path set by
     # e2e[pythran] at 31m -- so the sharding bought no wall clock at all and cost two runners.
@@ -556,14 +563,14 @@ jobs:
         # the files across the runner's cores at runtime, which no static split can beat on a set
         # whose per-file cost spans three orders of magnitude.
         #
-        # 60 -> 85: run 33261681823 reached 85% in 60 minutes and died on the step timeout. Two
-        # single tests ate 20 minutes each there (measured from the progress line timestamps), which
-        # is what --timeout=1500 costs when a test wedges -- the budget has to clear two of those
-        # plus the 1294 s ABI test, or a wedge anywhere reports as "the suite is too slow". No -q,
-        # so the 43 failures this run carried arrive with names instead of as bare F characters, and
-        # --durations names the two.
+        # 60 -> 85 -> 110: run 33261681823 reached 85% in 60 minutes and died on the step timeout;
+        # run 33283870554 then filled the 85-minute cap with every test green. Two single tests ate
+        # 20 minutes each there (measured from the progress line timestamps), which is what
+        # --timeout=1500 costs when a test wedges -- the budget has to clear two of those plus the
+        # 1294 s ABI test, or a wedge anywhere reports as "the suite is too slow". No -q, so the
+        # failures arrive with names instead of as bare F characters, and --durations names them.
         if: ${{ !cancelled() }}
-        timeout-minutes: 85
+        timeout-minutes: 110
         run: |
           python -m pytest -p no:cacheprovider -rfsxX -n auto --durations=25 --timeout=1500 \
             hpcagent_bench/numpy_translators/tests/
